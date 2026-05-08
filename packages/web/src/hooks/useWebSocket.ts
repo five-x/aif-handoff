@@ -1,8 +1,10 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { WsEvent, Task, TaskStatus } from "@aif/shared/browser";
+import { TASK_STATUSES, type WsEvent, type Task, type TaskStatus } from "@aif/shared/browser";
 import { useNotificationSettings } from "./useNotificationSettings";
 import { playStatusChangeBeep, showTaskMovedNotification } from "@/lib/notifications";
+
+type TaskCachePatch = Pick<Task, "id"> & Partial<Pick<Task, "title" | "status">>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -14,6 +16,16 @@ function isTaskPayload(value: unknown): value is Task {
     typeof value.id === "string" &&
     typeof value.title === "string" &&
     typeof value.status === "string"
+  );
+}
+
+function isTaskCachePatchPayload(value: unknown): value is TaskCachePatch {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    (typeof value.title === "undefined" || typeof value.title === "string") &&
+    (typeof value.status === "undefined" ||
+      (typeof value.status === "string" && TASK_STATUSES.includes(value.status as TaskStatus)))
   );
 }
 
@@ -76,6 +88,22 @@ function invalidateProjectQueries(queryClient: QueryClient, projectId?: string |
     queryClient.invalidateQueries({ queryKey: ["projectDefaults", projectId] });
     queryClient.invalidateQueries({ queryKey: ["projectWarmup", projectId] });
     queryClient.invalidateQueries({ queryKey: ["effectiveChatRuntime", projectId] });
+  }
+}
+
+function patchTaskInCache(queryClient: QueryClient, patch: TaskCachePatch): void {
+  const taskQueries = queryClient.getQueriesData<Task[]>({ queryKey: ["tasks"] });
+  for (const [queryKey, tasks] of taskQueries) {
+    if (!tasks?.some((task) => task.id === patch.id)) continue;
+    queryClient.setQueryData<Task[]>(
+      queryKey,
+      tasks.map((task) => (task.id === patch.id ? { ...task, ...patch } : task)),
+    );
+  }
+
+  const detailedTask = queryClient.getQueryData<Task>(["task", patch.id]);
+  if (detailedTask) {
+    queryClient.setQueryData<Task>(["task", patch.id], { ...detailedTask, ...patch });
   }
 }
 
@@ -233,6 +261,15 @@ export function useWebSocket() {
             });
           }
         }
+      }
+
+      if (
+        (data.type === "task:created" ||
+          data.type === "task:updated" ||
+          data.type === "task:moved") &&
+        isTaskCachePatchPayload(data.payload)
+      ) {
+        patchTaskInCache(queryClient, data.payload);
       }
 
       // Activity-only update: refresh task detail without touching the board list

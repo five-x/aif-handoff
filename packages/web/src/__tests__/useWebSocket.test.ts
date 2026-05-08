@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type ReactNode } from "react";
+import type { Task } from "@aif/shared/browser";
 
 vi.mock("@/hooks/useNotificationSettings", () => ({
   useNotificationSettings: () => ({ settings: { desktop: false, sound: false } }),
@@ -40,6 +41,57 @@ class MockWebSocket {
 function createWrapper(queryClient: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
     return createElement(QueryClientProvider, { client: queryClient }, children);
+  };
+}
+
+function createTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: "task-1",
+    projectId: "project-1",
+    title: "Task 1",
+    description: "",
+    attachments: [],
+    autoMode: true,
+    isFix: false,
+    plannerMode: "fast",
+    planPath: ".ai-factory/PLAN.md",
+    planDocs: false,
+    planTests: false,
+    skipReview: false,
+    useSubagents: false,
+    status: "backlog",
+    priority: 0,
+    position: 0,
+    plan: null,
+    implementationLog: null,
+    reviewComments: null,
+    agentActivityLog: null,
+    blockedReason: null,
+    blockedFromStatus: null,
+    retryAfter: null,
+    retryCount: 0,
+    roadmapAlias: null,
+    tags: [],
+    reworkRequested: false,
+    reviewIterationCount: 0,
+    maxReviewIterations: 3,
+    manualReviewRequired: false,
+    autoReviewState: null,
+    paused: false,
+    lastHeartbeatAt: null,
+    lastSyncedAt: null,
+    runtimeProfileId: null,
+    modelOverride: null,
+    runtimeOptions: null,
+    sessionId: null,
+    runtimeLimitSnapshot: null,
+    runtimeLimitUpdatedAt: null,
+    scheduledAt: null,
+    branchName: null,
+    worktreePath: null,
+    createdAt: "2026-05-08T00:00:00.000Z",
+    updatedAt: "2026-05-08T00:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -140,6 +192,30 @@ describe("useWebSocket", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["projectDefaults", "project-1"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task-comments", "task-1"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task", "task-1"] });
+
+    unmount();
+  });
+
+  it("patches cached task status immediately for task movement broadcasts", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData<Task[]>(["tasks", "project-1"], [createTask()]);
+    queryClient.setQueryData<Task>(["task", "task-1"], createTask());
+
+    const { unmount } = renderHook(() => useWebSocket(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    act(() => {
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "task:moved",
+          payload: { id: "task-1", title: "Task 1", status: "planning" },
+        }),
+      });
+    });
+
+    expect(queryClient.getQueryData<Task[]>(["tasks", "project-1"])?.[0]?.status).toBe("planning");
+    expect(queryClient.getQueryData<Task>(["task", "task-1"])?.status).toBe("planning");
 
     unmount();
   });
