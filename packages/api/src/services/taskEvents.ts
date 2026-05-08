@@ -4,6 +4,8 @@ import {
   applyHumanTaskEvent,
   assertCurrentBranch,
   ensureFeatureBranch,
+  evaluateTaskCompletionEvidence,
+  formatTaskCompletionBlockedReason,
   isBranchIsolationError,
   looksLikeFullPlanUpdate,
   getProjectConfig,
@@ -14,6 +16,7 @@ import {
   findProjectById,
   findTaskById,
   getLatestHumanComment,
+  appendTaskActivityLog,
   persistTaskPlanForTask,
   setTaskFields,
   type TaskRow,
@@ -71,6 +74,35 @@ function assertTaskBranchPostRun(task: TaskRow, projectRoot: string): EventHandl
         : String(err);
     return { ok: false, status: 409, error };
   }
+}
+
+function blockTaskForCompletionEvidence(
+  task: TaskRow,
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>,
+  options: { blockedFromStatus?: TaskRow["status"]; action?: string } = {},
+): EventHandlerResult {
+  const blockedReason = formatTaskCompletionBlockedReason(result);
+  const nowIso = new Date().toISOString();
+  setTaskFields(task.id, {
+    status: "blocked_external",
+    blockedReason,
+    blockedFromStatus: options.blockedFromStatus ?? "done",
+    retryAfter: null,
+    retryCount: task.retryCount ?? 0,
+    manualReviewRequired: result.issues.some((entry) => entry.code === "manual_review_required"),
+    lastHeartbeatAt: nowIso,
+    updatedAt: nowIso,
+  });
+  appendTaskActivityLog(
+    task.id,
+    `[${nowIso}] Completion evidence guard blocked ${options.action ?? "approve_done"}: ${blockedReason}`,
+  );
+
+  const updated = findTaskById(task.id);
+  if (!updated) {
+    return { ok: false, status: 404, error: "Task not found after completion guard block" };
+  }
+  return { ok: true, task: updated, broadcastType: "task:moved" };
 }
 
 async function handleFastFix(input: EventHandlerInput): Promise<EventHandlerResult> {
@@ -194,6 +226,61 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
   const transition = applyHumanTaskEvent(task, event);
   if (!transition.ok) {
     return { ok: false, status: 409, error: transition.error };
+  }
+
+  if (event === "start_implementation") {
+    const project = findProjectById(task.projectId);
+    if (!project) {
+      return { ok: false, status: 404, error: "Project not found for task" };
+    }
+    const executionRoot = task.worktreePath ?? project.rootPath;
+    const branchError = restoreTaskBranchForMutation(task, executionRoot);
+    if (branchError && !branchError.ok) {
+      const result = evaluateTaskCompletionEvidence({
+        task,
+        projectRoot: executionRoot,
+        branchIsolationReason: branchError.error,
+        phase: "pre_implementation",
+      });
+      return blockTaskForCompletionEvidence(task, result, {
+        blockedFromStatus: task.status,
+        action: "start_implementation",
+      });
+    }
+
+    const result = evaluateTaskCompletionEvidence({
+      task,
+      projectRoot: executionRoot,
+      phase: "pre_implementation",
+    });
+    if (!result.ok) {
+      return blockTaskForCompletionEvidence(task, result, {
+        blockedFromStatus: task.status,
+        action: "start_implementation",
+      });
+    }
+  }
+
+  if (event === "approve_done") {
+    const project = findProjectById(task.projectId);
+    if (!project) {
+      return { ok: false, status: 404, error: "Project not found for task" };
+    }
+    const executionRoot = task.worktreePath ?? project.rootPath;
+    const branchError = restoreTaskBranchForMutation(task, executionRoot);
+    if (branchError && !branchError.ok) {
+      const result = evaluateTaskCompletionEvidence({
+        task,
+        projectRoot: executionRoot,
+        branchIsolationReason: branchError.error,
+      });
+      return blockTaskForCompletionEvidence(task, result);
+    }
+
+    const result = evaluateTaskCompletionEvidence({ task, projectRoot: executionRoot });
+    if (!result.ok) {
+      return blockTaskForCompletionEvidence(task, result);
+    }
   }
 
   if ((input.event === "approve_done" || input.event === "start_ai") && input.deletePlanFile) {

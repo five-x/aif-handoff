@@ -21,6 +21,32 @@ interface SessionStreamState {
 const WS_CLIENT_ID_WAIT_TIMEOUT_MS = 500;
 const WS_CLIENT_ID_POLL_INTERVAL_MS = 50;
 
+function uuidFromRandomBytes(bytes: Uint8Array): string {
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join(""),
+  ].join("-");
+}
+
+function createConversationId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === "function") {
+    return cryptoApi.randomUUID();
+  }
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    return uuidFromRandomBytes(bytes);
+  }
+  return `conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 async function waitForWsClientId(
   timeoutMs = WS_CLIENT_ID_WAIT_TIMEOUT_MS,
   pollIntervalMs = WS_CLIENT_ID_POLL_INTERVAL_MS,
@@ -129,6 +155,30 @@ export function useChat(
           setIsLoadingMessages(false);
         });
       }
+      return;
+    }
+
+    const pendingConversationId = conversationIdForNoSession.current;
+    const pendingStreamKey = pendingConversationId
+      ? activeStreamsRef.current.get(pendingConversationId)
+      : null;
+    const pendingStreamState = pendingStreamKey
+      ? sessionStreamsRef.current.get(pendingStreamKey)
+      : null;
+    if (pendingConversationId && pendingStreamKey && pendingStreamState) {
+      if (pendingStreamKey !== sessionId) {
+        sessionStreamsRef.current.delete(pendingStreamKey);
+        sessionStreamsRef.current.set(sessionId, pendingStreamState);
+        activeStreamsRef.current.set(pendingConversationId, sessionId);
+      }
+      conversationIdForNoSession.current = null;
+      currentSessionIdRef.current = sessionId;
+      console.debug("[useChat] Promoted pending new-chat stream to session %s", sessionId);
+      setMessages(pendingStreamState.messages);
+      setIsStreaming(true);
+      setChatErrorCode(null);
+      setChatRuntimeLimitSnapshot(null);
+      setIsLoadingMessages(false);
       return;
     }
 
@@ -297,7 +347,7 @@ export function useChat(
         currentSessionIdRef.current = null;
       }
 
-      const newConversationId = crypto.randomUUID();
+      const newConversationId = createConversationId();
       const effectiveSessionId = forceNewSession
         ? null
         : (sessionId ?? currentSessionIdRef.current);
@@ -380,6 +430,9 @@ export function useChat(
           window.dispatchEvent(
             new CustomEvent("chat:session_created", { detail: { id: resolvedId } }),
           );
+          if (conversationIdForNoSession.current === newConversationId) {
+            conversationIdForNoSession.current = null;
+          }
         }
 
         // Update user message attachments with server-resolved paths (for download links)
@@ -441,6 +494,9 @@ export function useChat(
               setMessages(state.messages);
               setIsStreaming(false);
             }
+            if (conversationIdForNoSession.current === newConversationId) {
+              conversationIdForNoSession.current = null;
+            }
           }, 100);
           fallbackTimersRef.current.set(newConversationId, fallbackTimer);
         }
@@ -464,6 +520,9 @@ export function useChat(
           sessionStreamsRef.current.delete(activeStreamKey);
           if (isCurrentStream(activeStreamKey)) {
             setIsStreaming(false);
+          }
+          if (conversationIdForNoSession.current === newConversationId) {
+            conversationIdForNoSession.current = null;
           }
         }, 500);
         forcedStopTimersRef.current.set(newConversationId, forcedStopTimer);
@@ -604,6 +663,9 @@ export function useChat(
             setChatErrorCode(null);
             setMessages((prev) => [...prev, { role: "assistant", content: message }]);
           }
+        }
+        if (conversationIdForNoSession.current === newConversationId) {
+          conversationIdForNoSession.current = null;
         }
         handledErrorConversationsRef.current.delete(newConversationId);
       }

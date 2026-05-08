@@ -1,0 +1,22 @@
+{
+  "lane": "personal",
+  "updated": "2026-05-08",
+  "tasks": [
+    {
+      "taskId": "personal-20260507-botintevra-aif-transfer",
+      "title": "Prepare botIntevra Transfer Into AIF",
+      "status": "canceled",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/personal/personal-20260507-botintevra-aif-transfer"
+    },
+    {
+      "taskId": "personal-20260508-botintevra-remote-migration",
+      "title": "Migrate botIntevra To Remote Host",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/personal/personal-20260508-botintevra-remote-migration"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "lane": "work",
+  "updated": "2026-05-08",
+  "tasks": [
+    {
+      "taskId": "work-20260508-prevent-hallucinated-zero-delta-verification",
+      "title": "Prevent Hallucinated Zero-Delta Task Verification",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260508-prevent-hallucinated-zero-delta-verification"
+    }
+  ]
+}

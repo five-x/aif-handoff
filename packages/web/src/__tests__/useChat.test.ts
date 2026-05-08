@@ -74,6 +74,38 @@ describe("useChat", () => {
     );
   });
 
+  it("sends on HTTP origins where crypto.randomUUID is unavailable", async () => {
+    const originalCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.forEach((_value, index) => {
+          bytes[index] = index;
+        });
+        return bytes;
+      },
+    });
+
+    try {
+      const { result } = renderHook(() => useChat("p-1"));
+
+      await act(async () => {
+        await result.current.sendMessage("Hello");
+      });
+
+      expect(mockSendChatMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "p-1",
+          message: "Hello",
+        }),
+      );
+      expect(mockSendChatMessage.mock.calls[0][0].conversationId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      vi.stubGlobal("crypto", originalCrypto);
+    }
+  });
+
   it("does not send empty messages", async () => {
     const { result } = renderHook(() => useChat("p-1"));
 
@@ -305,6 +337,58 @@ describe("useChat", () => {
     });
 
     expect(handleSessionResolved).toHaveBeenCalledWith("sess-2");
+  });
+
+  it("keeps first-turn messages when session creation auto-selects before HTTP resolves", async () => {
+    let resolveSend:
+      | ((value: { conversationId: string; sessionId: string; assistantMessage?: string }) => void)
+      | null = null;
+    mockSendChatMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string | null }) => useChat("p-1", sid),
+      { initialProps: { sid: null as string | null } },
+    );
+
+    let sendPromise: Promise<void>;
+    act(() => {
+      sendPromise = result.current.sendMessage("Hello");
+    });
+    await waitFor(() => expect(mockSendChatMessage).toHaveBeenCalledTimes(1));
+
+    const conversationId = mockSendChatMessage.mock.calls[0][0].conversationId as string;
+
+    await act(async () => {
+      rerender({ sid: "sess-1" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(mockGetChatSessionMessages).not.toHaveBeenCalled();
+    expect(result.current.messages).toEqual([{ role: "user", content: "Hello" }]);
+    expect(result.current.isStreaming).toBe(true);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("chat:token", {
+          detail: { conversationId, token: "OK" },
+        }),
+      );
+    });
+
+    expect(result.current.messages).toEqual([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "OK" },
+    ]);
+
+    await act(async () => {
+      resolveSend?.({ conversationId, sessionId: "sess-1" });
+      await sendPromise;
+    });
   });
 
   it("does not duplicate error message when ws chat:error and http failure happen together", async () => {

@@ -143,6 +143,17 @@ export {
 export type { GeneratePlanPathOptions } from "./planFile.js";
 export { persistTaskPlan } from "./taskPlan.js";
 
+// Task completion evidence guard (Node-only)
+export {
+  evaluateTaskCompletionEvidence,
+  formatTaskCompletionBlockedReason,
+  type TaskCompletionEvidenceInput,
+  type TaskCompletionEvidenceIssue,
+  type TaskCompletionEvidenceResult,
+  type TaskCompletionEvidenceTask,
+  type TaskCompletionIssueCode,
+} from "./taskCompletionEvidence.js";
+
 // Path validation
 export { validateProjectRootPath } from "./pathValidation.js";
 

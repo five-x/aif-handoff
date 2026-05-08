@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -84,6 +85,21 @@ function createAppWithSettings() {
 
 function insertTestProject(db: ReturnType<typeof createTestDb>, rootPath = "/tmp/test-project") {
   db.insert(projects).values({ id: "test-project", name: "Test Project", rootPath }).run();
+}
+
+function initGitProject(rootPath: string) {
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.local"], {
+    cwd: rootPath,
+    stdio: "ignore",
+  });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: rootPath, stdio: "ignore" });
+  writeFileSync(join(rootPath, "README.md"), "# test\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+    cwd: rootPath,
+    stdio: "ignore",
+  });
 }
 
 describe("tasks API", () => {
@@ -1573,6 +1589,7 @@ describe("tasks API", () => {
 
     it("should start implementation from plan_ready when autoMode=false", async () => {
       const db = testDb.current;
+      insertTestProject(db);
       db.insert(tasks)
         .values({
           id: "ev-plan-1",
@@ -1584,6 +1601,58 @@ describe("tasks API", () => {
         .run();
 
       const res = await app.request("/tasks/ev-plan-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_implementation" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+    });
+
+    it("should block start_implementation when the plan is generic placeholder output", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "ev-plan-generic-block",
+          projectId: "test-project",
+          title: "Generic plan",
+          status: "plan_ready",
+          autoMode: false,
+          plan: 'Short task\n<aif-plan mode="fast" docs:false tests:false>',
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-generic-block/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_implementation" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("plan_ready");
+      expect(body.blockedReason).toContain("generic_plan");
+    });
+
+    it("should start implementation for short concrete plans without markdown structure", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "ev-plan-short-concrete",
+          projectId: "test-project",
+          title: "Fix form validation error",
+          status: "plan_ready",
+          autoMode: false,
+          plan: "Update validation handling in the form submit path",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-short-concrete/events", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event: "start_implementation" }),
@@ -1617,6 +1686,7 @@ describe("tasks API", () => {
 
     it("should approve done task to verified", async () => {
       const db = testDb.current;
+      insertTestProject(db);
       db.insert(tasks)
         .values({ id: "ev-1", projectId: "test-project", title: "Done task", status: "done" })
         .run();
@@ -1630,6 +1700,100 @@ describe("tasks API", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.status).toBe("verified");
+    });
+
+    it("should block approve_done for risky generic no-delta audit tasks", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-block-"));
+      mkdirSync(join(rootPath, ".ai-factory"), { recursive: true });
+      db.insert(projects)
+        .values({ id: "project-audit-block", name: "Audit Block", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-audit-block-1",
+          projectId: "project-audit-block",
+          title: "Initial audit",
+          status: "done",
+          plan: 'Short task\n<aif-plan mode="fast" docs:false tests:false>',
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-audit-block-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("done");
+      expect(body.blockedReason).toContain("generic_plan");
+      expect(body.blockedReason).toContain("missing_report_artifact");
+    });
+
+    it("should block approve_done when audit report references missing files only", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-refs-"));
+      initGitProject(rootPath);
+      mkdirSync(join(rootPath, "reports"), { recursive: true });
+      writeFileSync(
+        join(rootPath, "reports", "audit.md"),
+        "Finding references `src/ghost.ts` and `packages/missing/file.ts`.\n",
+        "utf8",
+      );
+      db.insert(projects).values({ id: "project-audit-refs", name: "Audit Refs", rootPath }).run();
+      db.insert(tasks)
+        .values({
+          id: "ev-audit-refs-1",
+          projectId: "project-audit-refs",
+          title: "Audit generated findings",
+          status: "done",
+          plan: "## Plan\n- Validate references\n- Write report",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-audit-refs-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedReason).toContain("invalid_or_missing_file_references");
+    });
+
+    it("should block approve_done with branch isolation reason when persisted branch is missing", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-branch-block-"));
+      initGitProject(rootPath);
+      db.insert(projects)
+        .values({ id: "project-branch-block", name: "Branch Block", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-branch-block-1",
+          projectId: "project-branch-block",
+          title: "Done branch-bound task",
+          status: "done",
+          branchName: "feature/missing-branch",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-branch-block-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("done");
+      expect(body.blockedReason).toContain("branch_isolation");
     });
 
     it("should delete PLAN.md on approve_done when deletePlanFile=true", async () => {

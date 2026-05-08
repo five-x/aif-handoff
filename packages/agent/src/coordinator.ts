@@ -4,6 +4,7 @@ import {
   evaluateRuntimeLimitGate,
   findCoordinatorTaskCandidates,
   findProjectById,
+  findTaskById,
   hasActiveLockedTaskForProject,
   claimTask,
   releaseTaskClaim,
@@ -23,7 +24,15 @@ import {
   type TaskRow,
 } from "@aif/data";
 import { initProject, type RuntimeRegistry } from "@aif/runtime";
-import { logger, getEnv, CLEAN_STATE_RESET, withTimeout, type TaskStatus } from "@aif/shared";
+import {
+  logger,
+  getEnv,
+  CLEAN_STATE_RESET,
+  evaluateTaskCompletionEvidence,
+  formatTaskCompletionBlockedReason,
+  withTimeout,
+  type TaskStatus,
+} from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
 import { runPlanChecker } from "./subagents/planChecker.js";
 import { runImplementer } from "./subagents/implementer.js";
@@ -322,6 +331,56 @@ function proactivelyBlockTaskForRuntimeGate(
   );
 }
 
+function blockTaskForCompletionEvidenceIfNeeded(input: {
+  task: TaskRow;
+  projectRoot: string;
+  fromStatus: TaskStatus;
+  title: string;
+  requireManualReview?: boolean;
+  phase?: "pre_implementation" | "completion";
+  extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
+}): boolean {
+  const result = evaluateTaskCompletionEvidence({
+    task: input.task,
+    projectRoot: input.projectRoot,
+    requireManualReview: input.requireManualReview,
+    phase: input.phase,
+  });
+  if (result.ok) return false;
+
+  const blockedReason = formatTaskCompletionBlockedReason(result);
+  const nowIso = new Date().toISOString();
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: input.fromStatus,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      ...input.extra,
+      manualReviewRequired: result.issues.some((entry) => entry.code === "manual_review_required"),
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] Completion evidence guard blocked terminal transition: ${blockedReason}`,
+  );
+  log.warn(
+    {
+      taskId: input.task.id,
+      fromStatus: input.fromStatus,
+      issues: result.issues.map((entry) => entry.code),
+      changedFiles: result.evidence.changedFiles,
+      reportArtifactFiles: result.evidence.reportArtifactFiles,
+    },
+    "Completion evidence guard blocked terminal transition",
+  );
+  return true;
+}
+
 // ── Single task processing ───────────────────────────────────
 
 /** Returns true on success, false on failure. */
@@ -336,9 +395,11 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     return false;
   }
 
+  const executionRoot = task.worktreePath ?? project.rootPath;
+
   if (_runtimeRegistry) {
     const initResult = initProject({
-      projectRoot: task.worktreePath ?? project.rootPath,
+      projectRoot: executionRoot,
       registry: _runtimeRegistry,
     });
     if (!initResult.ok) {
@@ -363,6 +424,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
   const sourceStatus = task.status;
   const taskTitle = task.title;
 
+  if (
+    stage.label === "implementer" &&
+    blockTaskForCompletionEvidenceIfNeeded({
+      task,
+      projectRoot: executionRoot,
+      fromStatus: sourceStatus,
+      title: taskTitle,
+      phase: "pre_implementation",
+    })
+  ) {
+    return false;
+  }
+
   updateTaskStatus(task.id, stage.inProgress, {}, { title: taskTitle, fromStatus: sourceStatus });
 
   log.debug(
@@ -371,12 +445,22 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
   );
 
   try {
-    const executionRoot = task.worktreePath ?? project.rootPath;
     await runStageWithTimeout(stage.runner, task.id, executionRoot, stage.label);
 
     flushActivityQueue(task.id);
+    let latestTask = findTaskById(task.id) ?? task;
 
-    if (stage.label === "implementer" && task.skipReview) {
+    if (stage.label === "implementer" && latestTask.skipReview) {
+      if (
+        blockTaskForCompletionEvidenceIfNeeded({
+          task: latestTask,
+          projectRoot: executionRoot,
+          fromStatus: stage.inProgress,
+          title: taskTitle,
+        })
+      ) {
+        return false;
+      }
       clearTaskRuntimeLimitSnapshot(task.id);
       updateTaskStatus(task.id, "done", CLEAN_STATE_RESET, {
         title: taskTitle,
@@ -396,6 +480,23 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       });
 
       if (outcome?.status === "manual_review_required") {
+        latestTask = findTaskById(task.id) ?? latestTask;
+        if (
+          blockTaskForCompletionEvidenceIfNeeded({
+            task: latestTask,
+            projectRoot: executionRoot,
+            fromStatus: stage.inProgress,
+            title: taskTitle,
+            requireManualReview: true,
+            extra: {
+              reworkRequested: false,
+              reviewIterationCount: outcome.currentIteration,
+              autoReviewState: outcome.autoReviewState,
+            },
+          })
+        ) {
+          return false;
+        }
         clearTaskRuntimeLimitSnapshot(task.id);
         updateTaskStatus(
           task.id,
@@ -458,6 +559,17 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       }
 
       if (outcome?.status === "accepted") {
+        latestTask = findTaskById(task.id) ?? latestTask;
+        if (
+          blockTaskForCompletionEvidenceIfNeeded({
+            task: latestTask,
+            projectRoot: executionRoot,
+            fromStatus: stage.inProgress,
+            title: taskTitle,
+          })
+        ) {
+          return false;
+        }
         clearTaskRuntimeLimitSnapshot(task.id);
         updateTaskStatus(task.id, "done", CLEAN_STATE_RESET, {
           title: taskTitle,
@@ -468,6 +580,20 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           "Auto review gate accepted review, moving to done",
         );
         return true;
+      }
+    }
+
+    if (stage.onSuccess === "done") {
+      latestTask = findTaskById(task.id) ?? latestTask;
+      if (
+        blockTaskForCompletionEvidenceIfNeeded({
+          task: latestTask,
+          projectRoot: executionRoot,
+          fromStatus: stage.inProgress,
+          title: taskTitle,
+        })
+      ) {
+        return false;
       }
     }
 

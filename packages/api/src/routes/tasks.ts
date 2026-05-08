@@ -488,7 +488,7 @@ tasksRouter.post("/:id/events", jsonValidator(taskEventSchema), async (c) => {
     // Fire-and-forget: run /aif-commit when approved with commit checkbox.
     // Broadcast lifecycle over WS so the UI can show a spinner/toast and the
     // approve modal does not close without feedback.
-    if (event === "approve_done" && commitOnApprove) {
+    if (event === "approve_done" && commitOnApprove && handled.task.status === "verified") {
       const taskId = handled.task.id;
       const projectId = handled.task.projectId;
       log.info({ taskId, projectId }, "Approve-done commit flow started");

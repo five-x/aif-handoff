@@ -227,6 +227,30 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
+  it("should block generic plan_ready plans before implementer dispatch", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-generic-plan-ready",
+        projectId: "test-project",
+        title: "Generic plan",
+        status: "plan_ready",
+        autoMode: true,
+        plan: 'Short task\n<aif-plan mode="fast" docs:false tests:false>',
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runPlanChecker).toHaveBeenCalledWith("task-generic-plan-ready", "/tmp/test");
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-generic-plan-ready")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.blockedReason).toContain("generic_plan");
+  });
+
   it("should not auto-implement plan_ready tasks when autoMode=false", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -953,6 +977,31 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
+  it("should block skipReview audit tasks with generic plan and no evidence delta", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-skip-review-audit",
+        projectId: "test-project",
+        title: "Initial audit",
+        status: "implementing",
+        skipReview: true,
+        plan: 'Short task\n<aif-plan mode="fast" docs:false tests:false>',
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-skip-review-audit")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toContain("Completion evidence guard");
+    expect(task!.blockedReason).toContain("generic_plan");
+    expect(task!.blockedReason).not.toContain("missing_report_artifact");
+  });
+
   it("should skip review when skipReview=true in full pipeline from planning", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -1066,7 +1115,9 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     task = db.select().from(tasks).where(eq(tasks.id, "task-rework-iter")).get();
-    expect(task!.status).toBe("done");
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("manual_review_required");
     expect(task!.manualReviewRequired).toBe(true);
     expect(task!.reviewIterationCount).toBe(3);
     expect(task!.autoReviewStateJson).toContain("fix-a");
