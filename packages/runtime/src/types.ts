@@ -103,6 +103,8 @@ export interface RuntimeCapabilities {
   supportsSessionList: boolean;
   /** Adapter supports .claude/agents/ definitions (agentDefinitionName in execution intent). */
   supportsAgentDefinitions: boolean;
+  /** Adapter can execute AIF slash/skill commands such as /aif-plan directly. */
+  supportsAifSkillCommands?: boolean;
   /** Adapter emits streaming events during run(). */
   supportsStreaming: boolean;
   /** Adapter can enumerate available models via listModels(). */
@@ -131,6 +133,7 @@ export const DEFAULT_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   supportsSessionFork: false,
   supportsSessionList: false,
   supportsAgentDefinitions: false,
+  supportsAifSkillCommands: false,
   supportsStreaming: false,
   supportsModelDiscovery: false,
   supportsApprovals: false,

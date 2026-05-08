@@ -1,5 +1,10 @@
 import { findProjectById, findTaskById, persistTaskPlanForTask } from "@aif/data";
-import { logger, looksLikeFullPlanUpdate } from "@aif/shared";
+import {
+  TaskPlanQualityError,
+  evaluateTaskPlanQuality,
+  logger,
+  looksLikeFullPlanUpdate,
+} from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
 import { logActivity } from "../hooks.js";
@@ -43,6 +48,16 @@ export function isPlanAlreadyChecklist(text: string): boolean {
   return hasChecklistItems(text) && convertible === 0;
 }
 
+function assertTaskPlanQuality(
+  task: NonNullable<ReturnType<typeof findTaskById>>,
+  planText: string | null | undefined,
+): void {
+  const result = evaluateTaskPlanQuality({ task, plan: planText });
+  if (!result.ok) {
+    throw new TaskPlanQualityError(result);
+  }
+}
+
 export async function runPlanChecker(taskId: string, projectRoot: string): Promise<void> {
   const task = findTaskById(taskId);
 
@@ -63,12 +78,14 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
   }
 
   if (!task.plan || task.plan.trim().length === 0) {
-    log.warn({ taskId }, "Skipping plan checklist verification: task has no plan");
+    log.warn({ taskId }, "Plan checklist verification failed: task has no plan");
+    assertTaskPlanQuality(task, task.plan);
     return;
   }
 
   // Fast path: skip LLM call if plan already has proper checklist format
   if (isPlanAlreadyChecklist(task.plan)) {
+    assertTaskPlanQuality(task, task.plan);
     log.info({ taskId }, "Plan already in checklist format — skipping plan-checker agent");
     return;
   }
@@ -78,6 +95,7 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
   if (convertible > 0 && hasChecklistItems(task.plan)) {
     const locallyConverted = convertBulletsToCheckboxes(task.plan);
     if (isPlanAlreadyChecklist(locallyConverted)) {
+      assertTaskPlanQuality(task, locallyConverted);
       log.info(
         { taskId, convertedItems: convertible },
         "Converted plain bullets to checkboxes locally — skipping plan-checker agent",
@@ -152,6 +170,7 @@ Requirements:
     // Fallback: try local conversion of the ORIGINAL plan
     const fallback = convertBulletsToCheckboxes(task.plan);
     if (hasChecklistItems(fallback)) {
+      assertTaskPlanQuality(task, fallback);
       log.info({ taskId }, "Local fallback conversion succeeded — saving converted plan");
       persistTaskPlanForTask({
         taskId,
@@ -164,9 +183,12 @@ Requirements:
       return;
     }
 
-    log.warn({ taskId }, "Local fallback also failed; keeping existing task plan");
+    log.warn({ taskId }, "Local fallback also failed; rejecting existing task plan");
+    assertTaskPlanQuality(task, task.plan);
     return;
   }
+
+  assertTaskPlanQuality(task, normalizedPlan);
 
   persistTaskPlanForTask({
     taskId,

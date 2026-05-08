@@ -141,6 +141,29 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toBe("## New Plan\n- [ ] Step");
   });
 
+  it("uses narrowed diagnostic-only prompt wording", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-diagnostic-wording",
+        projectId: "project-1",
+        title: "Fix validation error display",
+        description: "Implementation task that should not be treated as diagnostic.",
+        status: "planning",
+        useSubagents: true,
+      })
+      .run();
+
+    await runPlanner("task-diagnostic-wording", "/tmp/planner-test");
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("Diagnostic-only planning applies only to explicit audit");
+    expect(call.prompt).toContain("security-review");
+    expect(call.prompt).toContain("validation-report");
+    expect(call.prompt).toContain("verification-findings");
+    expect(call.prompt).not.toContain("audit, review, discovery, validation, verification");
+  });
+
   it("uses /aif-fix --plan-first when task is marked as fix", async () => {
     const db = testDb.current;
     db.insert(tasks)

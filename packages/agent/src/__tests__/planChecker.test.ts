@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { projects, tasks } from "@aif/shared";
+import { TaskPlanQualityError, projects, tasks } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -185,6 +185,33 @@ describe("runPlanChecker", () => {
     expect(row?.plan).toContain("- [ ] Implement feature A");
   });
 
+  it("rejects local fallback conversion when the converted checklist is generic", async () => {
+    queryMock.mockReturnValue(streamSuccess("I cannot help with that request."));
+
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-generic-fallback",
+        projectId: "project-1",
+        title: "Planner quality",
+        description: "Desc",
+        status: "plan_ready",
+        plan: "- Do task",
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-generic-fallback", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-generic-fallback"))
+      .get();
+    expect(row?.plan).toBe("- Do task");
+  });
+
   it("runs without explicit agent override", async () => {
     queryMock.mockReturnValue(streamSuccess("## Plan\n- [ ] Keep this"));
 
@@ -208,7 +235,7 @@ describe("runPlanChecker", () => {
     expect(call.options?.extraArgs).toBeUndefined();
   });
 
-  it("keeps existing plan when checker returns non-checklist junk and local fallback also fails", async () => {
+  it("rejects existing plan when checker returns non-checklist junk and local fallback also fails", async () => {
     queryMock.mockReturnValue(
       streamSuccess(`/
 ├── index.html
@@ -229,12 +256,33 @@ describe("runPlanChecker", () => {
       })
       .run();
 
-    await runPlanChecker("task-2", "/tmp/plan-checker-test");
+    await expect(runPlanChecker("task-2", "/tmp/plan-checker-test")).rejects.toBeInstanceOf(
+      TaskPlanQualityError,
+    );
 
     const row = testDb.current.select().from(tasks).where(eq(tasks.id, "task-2")).get();
     expect(row?.plan).toBe(
       "Implement the feature by editing main.ts and adding the handler.\nThen write tests.",
     );
+  });
+
+  it("rejects slash fallback echo before implementation", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-slash-echo",
+        projectId: "project-1",
+        title: "Planner quality",
+        description: "Desc",
+        status: "plan_ready",
+        plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-slash-echo", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+    expect(queryMock).not.toHaveBeenCalled();
   });
 
   it("accepts fenced markdown and persists valid checklist plan", async () => {

@@ -30,6 +30,7 @@ import {
   CLEAN_STATE_RESET,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
+  TaskPlanQualityError,
   withTimeout,
   type TaskStatus,
 } from "@aif/shared";
@@ -63,6 +64,7 @@ const log = logger("coordinator");
 const env = getEnv();
 const STAGE_RUN_TIMEOUT_MS = Math.max(env.AGENT_STAGE_RUN_TIMEOUT_MS, 60_000);
 const CLAIM_LOCK_DURATION_MS = STAGE_RUN_TIMEOUT_MS + 5 * 60 * 1000; // stage timeout + 5 min buffer
+const PLAN_QUALITY_MAX_RETRIES = 2;
 export const COORDINATOR_ID = crypto.randomUUID();
 
 let _runtimeRegistry: RuntimeRegistry | null = null;
@@ -381,6 +383,90 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   return true;
 }
 
+function findTaskPlanQualityError(error: unknown): TaskPlanQualityError | null {
+  if (error instanceof TaskPlanQualityError) return error;
+  if (error instanceof Error && "cause" in error && error.cause) {
+    return findTaskPlanQualityError(error.cause);
+  }
+  return null;
+}
+
+function isPlanQualityRetryState(task: TaskRow): boolean {
+  return (
+    task.blockedFromStatus === "plan_ready" &&
+    Boolean(task.blockedReason?.startsWith("Plan quality guard"))
+  );
+}
+
+function handlePlanQualityFailure(input: {
+  task: TaskRow;
+  stageInProgress: TaskStatus;
+  taskTitle: string;
+  error: TaskPlanQualityError;
+}): void {
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const nextRetryCount = (latestTask.retryCount ?? 0) + 1;
+  const categories = input.error.result.categories.join(", ");
+  const nowIso = new Date().toISOString();
+
+  if (nextRetryCount <= PLAN_QUALITY_MAX_RETRIES) {
+    const feedback = `${input.error.message} Replan with concrete task-specific steps, required artifact paths, and diagnostic-only constraints where applicable.`;
+    clearTaskRuntimeLimitSnapshot(input.task.id);
+    updateTaskStatus(
+      input.task.id,
+      "planning",
+      {
+        blockedReason: `Plan quality guard replan ${nextRetryCount}/${PLAN_QUALITY_MAX_RETRIES}: ${feedback}`,
+        blockedFromStatus: input.stageInProgress,
+        retryAfter: null,
+        retryCount: nextRetryCount,
+      },
+      { title: input.taskTitle, fromStatus: input.stageInProgress },
+    );
+    appendTaskActivityLog(
+      input.task.id,
+      `[${nowIso}] Plan quality guard requested replan ${nextRetryCount}/${PLAN_QUALITY_MAX_RETRIES}: ${categories}`,
+    );
+    log.warn(
+      {
+        taskId: input.task.id,
+        retryCount: nextRetryCount,
+        maxRetries: PLAN_QUALITY_MAX_RETRIES,
+        categories: input.error.result.categories,
+      },
+      "Plan quality guard requeued task for replanning",
+    );
+    return;
+  }
+
+  const blockedReason = `${input.error.message} Retry limit reached (${PLAN_QUALITY_MAX_RETRIES}). Operator next step: edit the task prompt or plan constraints, then retry from blocked.`;
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: input.stageInProgress,
+      retryAfter: null,
+      retryCount: nextRetryCount,
+    },
+    { title: input.taskTitle, fromStatus: input.stageInProgress },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] Plan quality guard blocked task after retry limit: ${categories}`,
+  );
+  log.error(
+    {
+      taskId: input.task.id,
+      retryCount: nextRetryCount,
+      maxRetries: PLAN_QUALITY_MAX_RETRIES,
+      categories: input.error.result.categories,
+    },
+    "Plan quality guard blocked task after retry limit",
+  );
+}
+
 // ── Single task processing ───────────────────────────────────
 
 /** Returns true on success, false on failure. */
@@ -597,16 +683,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       }
     }
 
+    const successReset: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt"> = {
+      ...CLEAN_STATE_RESET,
+      reviewIterationCount: stage.label === "implementer" ? (task.reviewIterationCount ?? 0) : 0,
+    };
+    if (stage.label === "planner" && isPlanQualityRetryState(latestTask)) {
+      successReset.retryCount = latestTask.retryCount ?? 0;
+    }
+
     clearTaskRuntimeLimitSnapshot(task.id);
-    updateTaskStatus(
-      task.id,
-      stage.onSuccess,
-      {
-        ...CLEAN_STATE_RESET,
-        reviewIterationCount: stage.label === "implementer" ? (task.reviewIterationCount ?? 0) : 0,
-      },
-      { title: taskTitle, fromStatus: stage.inProgress },
-    );
+    updateTaskStatus(task.id, stage.onSuccess, successReset, {
+      title: taskTitle,
+      fromStatus: stage.inProgress,
+    });
 
     log.info(
       { taskId: task.id, from: stage.inProgress, to: stage.onSuccess },
@@ -614,6 +703,18 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     );
     return true;
   } catch (err) {
+    const planQualityError = stage.label === "plan-checker" ? findTaskPlanQualityError(err) : null;
+    if (planQualityError) {
+      handlePlanQualityFailure({
+        task,
+        stageInProgress: stage.inProgress,
+        taskTitle,
+        error: planQualityError,
+      });
+      flushActivityQueue(task.id);
+      return false;
+    }
+
     const recovery = classifyStageError({
       taskId: task.id,
       stageLabel: stage.label,

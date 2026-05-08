@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { tasks, projects, runtimeProfiles, resetEnvCache } from "@aif/shared";
+import {
+  TaskPlanQualityError,
+  evaluateTaskPlanQuality,
+  tasks,
+  projects,
+  runtimeProfiles,
+  resetEnvCache,
+} from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 import { RuntimeExecutionError } from "@aif/runtime";
 import { eq } from "drizzle-orm";
@@ -86,6 +93,15 @@ const { runPlanChecker } = await import("../subagents/planChecker.js");
 const { runImplementer } = await import("../subagents/implementer.js");
 const { runReviewer } = await import("../subagents/reviewer.js");
 const { handleAutoReviewGate } = await import("../autoReviewHandler.js");
+
+function createPlanQualityError(): TaskPlanQualityError {
+  return new TaskPlanQualityError(
+    evaluateTaskPlanQuality({
+      task: { title: "Planner quality task" },
+      plan: "Short task\n/aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+    }),
+  );
+}
 
 describe("coordinator", () => {
   beforeEach(() => {
@@ -954,6 +970,88 @@ describe("coordinator", () => {
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-checker-fail")).get();
     expect(task!.status).toBe("plan_ready");
+    expect(runImplementer).not.toHaveBeenCalled();
+  });
+
+  it("should requeue invalid plan quality to planning with feedback", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-plan-quality-retry",
+        projectId: "test-project",
+        title: "Retry weak plan",
+        status: "plan_ready",
+        autoMode: true,
+        plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+      })
+      .run();
+
+    vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-plan-quality-retry")).get();
+    expect(task!.status).toBe("planning");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(1);
+    expect(task!.blockedReason).toContain("Plan quality guard replan 1/2");
+    expect(task!.blockedReason).toContain("slash_fallback_echo");
+    expect(runImplementer).not.toHaveBeenCalled();
+  });
+
+  it("should preserve plan quality retry count across successful planner before rechecking", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-plan-quality-preserve",
+        projectId: "test-project",
+        title: "Preserve retry count",
+        status: "planning",
+        autoMode: true,
+        retryCount: 1,
+        blockedFromStatus: "plan_ready",
+        blockedReason: "Plan quality guard replan 1/2: previous feedback",
+        plan: "## Plan\n- [ ] Try again",
+      })
+      .run();
+
+    vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-plan-quality-preserve")).get();
+    expect(runPlanner).toHaveBeenCalledWith("task-plan-quality-preserve", "/tmp/test");
+    expect(task!.status).toBe("planning");
+    expect(task!.retryCount).toBe(2);
+    expect(task!.blockedReason).toContain("Plan quality guard replan 2/2");
+  });
+
+  it("should block invalid plan quality after retry limit", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-plan-quality-limit",
+        projectId: "test-project",
+        title: "Weak plan limit",
+        status: "plan_ready",
+        autoMode: true,
+        retryCount: 2,
+        plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+      })
+      .run();
+
+    vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-plan-quality-limit")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(3);
+    expect(task!.blockedReason).toContain("Retry limit reached");
+    expect(task!.blockedReason).toContain("Operator next step");
     expect(runImplementer).not.toHaveBeenCalled();
   });
 

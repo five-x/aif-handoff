@@ -154,6 +154,19 @@ export {
   type TaskCompletionIssueCode,
 } from "./taskCompletionEvidence.js";
 
+// Task plan quality guard
+export {
+  TASK_PLAN_QUALITY_ISSUE_CODES,
+  TaskPlanQualityError,
+  evaluateTaskPlanQuality,
+  formatTaskPlanQualityBlockedReason,
+  type TaskPlanQualityInput,
+  type TaskPlanQualityIssue,
+  type TaskPlanQualityIssueCode,
+  type TaskPlanQualityResult,
+  type TaskPlanQualityTask,
+} from "./planQuality.js";
+
 // Path validation
 export { validateProjectRootPath } from "./pathValidation.js";
 

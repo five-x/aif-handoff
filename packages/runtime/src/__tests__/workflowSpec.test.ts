@@ -32,7 +32,7 @@ const CLAUDE_CAPABILITIES: RuntimeCapabilities = {
 };
 
 describe("runtime workflow spec + prompt policy", () => {
-  it("falls back to slash command when agent definitions are unavailable", () => {
+  it("does not fall back to slash command when AIF skill commands are unavailable", () => {
     const workflow = createRuntimeWorkflowSpec({
       workflowKind: "planner",
       prompt: "Plan this feature",
@@ -45,6 +45,27 @@ describe("runtime workflow spec + prompt policy", () => {
     const resolved = resolveRuntimePromptPolicy({
       runtimeId: "codex",
       capabilities: CODEX_CAPABILITIES,
+      workflow,
+    });
+
+    expect(resolved.usedFallbackSlashCommand).toBe(false);
+    expect(resolved.agentDefinitionName).toBeUndefined();
+    expect(resolved.prompt).toBe("Plan this feature");
+  });
+
+  it("falls back to slash command when the runtime explicitly supports AIF skill commands", () => {
+    const workflow = createRuntimeWorkflowSpec({
+      workflowKind: "planner",
+      prompt: "Plan this feature",
+      agentDefinitionName: "plan-coordinator",
+      fallbackSlashCommand: "/aif-plan fast",
+      fallbackStrategy: "slash_command",
+      requiredCapabilities: ["supportsAgentDefinitions"],
+    });
+
+    const resolved = resolveRuntimePromptPolicy({
+      runtimeId: "claude-cli",
+      capabilities: { ...CODEX_CAPABILITIES, supportsAifSkillCommands: true },
       workflow,
     });
 
@@ -72,6 +93,24 @@ describe("runtime workflow spec + prompt policy", () => {
     expect(resolved.usedFallbackSlashCommand).toBe(false);
     expect(resolved.agentDefinitionName).toBe("implement-coordinator");
     expect(resolved.prompt).toBe("Implement this feature");
+  });
+
+  it("adds final-answer no-think instructions for structured planning workflows", () => {
+    const workflow = createRuntimeWorkflowSpec({
+      workflowKind: "plan-checker",
+      prompt: "Fix checklist format",
+      systemPromptAppend: "Existing scope rule.",
+    });
+
+    const resolved = resolveRuntimePromptPolicy({
+      runtimeId: "openrouter",
+      capabilities: CODEX_CAPABILITIES,
+      workflow,
+    });
+
+    expect(resolved.systemPromptAppend).toContain("Existing scope rule.");
+    expect(resolved.systemPromptAppend).toContain("NO-THINK / FINAL-ANSWER");
+    expect(resolved.systemPromptAppend).toContain("Do not include <think> blocks");
   });
 
   it("defaults fallbackStrategy to slash_command when slash command is provided", () => {

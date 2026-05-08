@@ -151,6 +151,12 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
   const planPath = normalizePlanPath(task.planPath, executionRoot);
   const planDocs = task.planDocs ? "true" : "false";
   const planTests = task.planTests ? "true" : "false";
+  const planningFeedback =
+    task.blockedFromStatus === "plan_ready" && task.blockedReason
+      ? `Previous plan-quality feedback that must be addressed:\n${task.blockedReason}`
+      : "No prior plan-quality feedback was recorded.";
+  const diagnosticPlanningConstraint =
+    "Diagnostic-only planning applies only to explicit audit, discovery, inventory, gap-analysis, findings, security-review, code-review, review-findings, validation-report, validation-task, validation-audit, validation-findings, verification-report, verification-task, verification-audit, or verification-findings work. For those tasks, keep the plan diagnostic-only: write an inspectable report artifact path, cite repository paths that the report must validate, do not implement fixes in this same run, and do not create or execute child implementation tasks.";
 
   // Deterministic branch handling. Two contracts, applied in order:
   //
@@ -247,7 +253,13 @@ Description: ${task.description}
 Task attachments:
 ${taskAttachmentsForPrompt}
 User comments and replanning feedback:
-${commentsForPrompt}`;
+${commentsForPrompt}
+
+Planning feedback:
+${planningFeedback}
+
+Diagnostic task constraint:
+${diagnosticPlanningConstraint}`;
   let prompt: string;
   let workflowSpec: ReturnType<typeof createRuntimeWorkflowSpec>;
   // HANDOFF_BRANCH_PREPARED=1 tells the aif-plan / plan-polisher skill that
