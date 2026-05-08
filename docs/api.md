@@ -113,6 +113,8 @@ Rules:
 - `plan` / `review` fall back to the app task default when unset
 - invalid scope combinations fail with `400` and `fieldErrors`
 
+**WebSocket event:** `settings:runtime_defaults_updated` with the frontend-visible app settings object.
+
 ## Projects
 
 ### List Projects
@@ -168,6 +170,8 @@ PUT /projects/:id
 ```
 
 **Body:** Same as Create Project.
+
+**WebSocket event:** `project:updated` with the updated project object.
 
 **Response:** `200 OK` — the updated project object.
 
@@ -247,6 +251,8 @@ DELETE /projects/:id
 ```json
 { "success": true }
 ```
+
+**WebSocket event:** `project:deleted` with `{ id }`.
 
 ### Get Auto-Queue Mode
 
@@ -511,6 +517,8 @@ Used by API/agent services to trigger project-scoped WebSocket broadcasts withou
 
 Runtime profiles carry non-secret transport/model config plus the latest persisted runtime-limit snapshot used by API, agent, and UI surfaces.
 For local Codex runtimes (`runtimeId=codex` with `sdk`/`cli` transport), `/runtime-profiles` and `/runtime-profiles/effective/*` now read limit overlays from the SQLite Codex index (`codex_limit_heads`) maintained by the background API indexer. Request handlers do not perform direct `~/.codex/sessions` scans.
+
+Create, update, and delete operations broadcast `runtime_profile:created`, `runtime_profile:updated`, and `runtime_profile:deleted` so connected clients can refresh runtime selections and effective defaults.
 
 ### List Runtime Profiles
 
@@ -820,6 +828,8 @@ POST /tasks/:id/comments
 | `message` | string | yes | Comment text (1-20,000 chars) |
 | `attachments` | array | no | File attachments (max 10) |
 
+**WebSocket event:** `task:comment_created` with `{ id, taskId, projectId }` on successful creation.
+
 **Response:** `201 Created` — the created comment object.
 
 ---
@@ -844,6 +854,8 @@ GET /runtime-profiles
 `scope=project` requires `projectId`. `scope=global` returns only reusable profiles (`projectId = null`).
 `scope=visible` is the default when omitted.
 For local Codex profiles, this endpoint overlays the response from indexed Codex limit heads in SQLite instead of scanning `~/.codex/sessions` during request handling.
+
+Create, update, and delete operations broadcast `runtime_profile:created`, `runtime_profile:updated`, and `runtime_profile:deleted` so connected clients can refresh runtime selections and effective defaults.
 
 ### Effective Runtime Resolution
 
@@ -1030,6 +1042,8 @@ Chat responses stream via WebSocket events to the `clientId` specified in the re
 | `chat:done`  | `{ conversationId, usage?, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }`        | Stream completed                      |
 | `chat:error` | `{ conversationId, message, code, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }` | Error occurred during streaming       |
 
+Streaming events are addressed only to the initiating WebSocket client.
+
 ### Multi-turn Conversations
 
 To continue a conversation, pass the `conversationId` returned from the first message in subsequent requests. The server tracks runtime session IDs internally and uses `resume` to maintain context (for runtimes that support it).
@@ -1049,6 +1063,8 @@ Chat sessions persist the runtime profile chosen when the session starts. This k
 For local Codex runtimes, session discovery uses the indexed `codex_sessions` read-model. Session detail/message reads resolve `sessionId -> filePath` from the same index before compatibility fallback to runtime-adapter lookups.
 
 `POST` and `PUT` accept `runtimeProfileId` as an optional field. The value must be either a global profile or one owned by the same project.
+
+Session create, update, delete, and persisted-message changes broadcast metadata-only events (`chat:session_created`, `chat:session_updated`, `chat:session_deleted`, `chat:session_messages_updated`) with `{ id, projectId }`. Transcript content, attachments, and runtime output are not broadcast on these metadata events.
 
 ### Permissions
 
@@ -1117,25 +1133,37 @@ All events are JSON with this structure:
 }
 ```
 
-| Event                             | Payload                                                                                            | Triggered By                                                                         |
-| --------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `project:created`                 | Full project object                                                                                | `POST /projects`                                                                     |
-| `task:created`                    | Full task object                                                                                   | `POST /tasks`, `POST /projects/:id/roadmap/import`                                   |
-| `task:updated`                    | Full task object                                                                                   | `PUT /tasks/:id`, `PATCH /tasks/:id/position`, `POST /tasks/:id/events` (`fast_fix`) |
-| `task:moved`                      | Full task object                                                                                   | `POST /tasks/:id/events`                                                             |
-| `task:deleted`                    | `{ id: string }`                                                                                   | `DELETE /tasks/:id`                                                                  |
-| `sync:task_created`               | Full task object                                                                                   | MCP `handoff_create_task`                                                            |
-| `sync:task_updated`               | Full task object                                                                                   | MCP `handoff_update_task`, `handoff_push_plan`                                       |
-| `sync:status_changed`             | Full task object                                                                                   | MCP `handoff_sync_status`                                                            |
-| `sync:plan_pushed`                | Full task object                                                                                   | MCP `handoff_push_plan`                                                              |
-| `chat:token`                      | `{ conversationId, token }`                                                                        | `POST /chat` — streaming response tokens                                             |
-| `chat:done`                       | `{ conversationId, usage?, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }`        | `POST /chat` — stream completed                                                      |
-| `chat:error`                      | `{ conversationId, message, code, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }` | `POST /chat` — error during streaming                                                |
-| `task:scheduled_fired`            | Full task object                                                                                   | Coordinator fires a backlog task whose `scheduledAt` is due                          |
-| `project:auto_queue_mode_changed` | Full project object                                                                                | `PATCH /projects/:id/auto-queue-mode`                                                |
-| `project:auto_queue_advanced`     | `{ id: string }` (task id)                                                                         | Coordinator auto-advances the next backlog task in an auto-queue project             |
-| `project:runtime_limit_updated`   | `{ projectId, runtimeProfileId, taskId? }`                                                         | Persisted runtime-profile limit state or last usage changed                          |
-| `project:warmup_updated`          | `{ projectId, status }`                                                                            | Warmup create/delete/failure changed project warmup state                            |
+| Event                               | Payload                                                                                            | Triggered By                                                                         |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `project:created`                   | Full project object                                                                                | `POST /projects`                                                                     |
+| `project:updated`                   | Full project object                                                                                | `PUT /projects/:id`                                                                  |
+| `project:deleted`                   | `{ id: string }`                                                                                   | `DELETE /projects/:id`                                                               |
+| `runtime_profile:created`           | Full runtime profile object                                                                        | `POST /runtime-profiles`                                                             |
+| `runtime_profile:updated`           | Full runtime profile object                                                                        | `PUT /runtime-profiles/:id`                                                          |
+| `runtime_profile:deleted`           | `{ id: string, projectId: string                                                                   | null }`                                                                              | `DELETE /runtime-profiles/:id`                            |
+| `settings:runtime_defaults_updated` | Full app settings object                                                                           | `PUT /settings/runtime-defaults`                                                     |
+| `settings:config_updated`           | `{ projectId: string }`                                                                            | `PUT /settings/config`                                                               |
+| `task:created`                      | Full task object                                                                                   | `POST /tasks`, `POST /projects/:id/roadmap/import`                                   |
+| `task:updated`                      | Full task object                                                                                   | `PUT /tasks/:id`, `PATCH /tasks/:id/position`, `POST /tasks/:id/events` (`fast_fix`) |
+| `task:moved`                        | Full task object                                                                                   | `POST /tasks/:id/events`                                                             |
+| `task:deleted`                      | `{ id: string }`                                                                                   | `DELETE /tasks/:id`                                                                  |
+| `task:comment_created`              | `{ id: string, taskId: string, projectId: string }`                                                | `POST /tasks/:id/comments`                                                           |
+| `sync:task_created`                 | Full task object                                                                                   | MCP `handoff_create_task`                                                            |
+| `sync:task_updated`                 | Full task object                                                                                   | MCP `handoff_update_task`, `handoff_push_plan`                                       |
+| `sync:status_changed`               | Full task object                                                                                   | MCP `handoff_sync_status`                                                            |
+| `sync:plan_pushed`                  | Full task object                                                                                   | MCP `handoff_push_plan`                                                              |
+| `chat:token`                        | `{ conversationId, token }`                                                                        | `POST /chat` — streaming response tokens                                             |
+| `chat:done`                         | `{ conversationId, usage?, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }`        | `POST /chat` — stream completed                                                      |
+| `chat:error`                        | `{ conversationId, message, code, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }` | `POST /chat` — error during streaming                                                |
+| `chat:session_created`              | `{ id: string, projectId: string                                                                   | null }`                                                                              | `POST /chat/sessions`, `POST /chat` auto-session creation |
+| `chat:session_updated`              | `{ id: string, projectId: string                                                                   | null }`                                                                              | `PUT /chat/sessions/:id`, runtime session link updates    |
+| `chat:session_deleted`              | `{ id: string, projectId: string                                                                   | null }`                                                                              | `DELETE /chat/sessions/:id`                               |
+| `chat:session_messages_updated`     | `{ id: string, projectId: string                                                                   | null }`                                                                              | `POST /chat` persists user or assistant messages          |
+| `task:scheduled_fired`              | Full task object                                                                                   | Coordinator fires a backlog task whose `scheduledAt` is due                          |
+| `project:auto_queue_mode_changed`   | Full project object                                                                                | `PATCH /projects/:id/auto-queue-mode`                                                |
+| `project:auto_queue_advanced`       | `{ id: string }` (task id)                                                                         | Coordinator auto-advances the next backlog task in an auto-queue project             |
+| `project:runtime_limit_updated`     | `{ projectId, runtimeProfileId, taskId? }`                                                         | Persisted runtime-profile limit state or last usage changed                          |
+| `project:warmup_updated`            | `{ projectId, status }`                                                                            | Warmup create/delete/failure changed project warmup state                            |
 
 ### Connection
 

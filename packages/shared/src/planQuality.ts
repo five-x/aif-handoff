@@ -36,6 +36,11 @@ export interface TaskPlanQualityInput {
   plan: string | null | undefined;
 }
 
+export interface DeterministicDiagnosticPlanInput {
+  task: TaskPlanQualityTask;
+  extraText?: Array<string | null | undefined>;
+}
+
 const CHECKLIST_PATTERN = /^\s*[-*]\s+\[(?: |x|X)\]\s+\S/m;
 const CHECKLIST_ITEM_PATTERN = /^\s*[-*]\s+\[(?: |x|X)\]\s+(.+)$/gm;
 const THINKING_ARTIFACT_PATTERN = /<\/?think\b[^>]*>/i;
@@ -102,6 +107,56 @@ function extractReportArtifactPaths(text: string): string[] {
     if (raw) paths.add(normalizePath(raw));
   }
   return [...paths].sort();
+}
+
+function formatInlinePaths(paths: string[]): string {
+  return paths.map((path) => `\`${path}\``).join(", ");
+}
+
+function combinedDiagnosticSourceText(input: DeterministicDiagnosticPlanInput): string {
+  const taskText = combinedTaskText(input.task);
+  const extraText = (input.extraText ?? [])
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+  return [taskText, extraText].filter(Boolean).join("\n");
+}
+
+export function findDeterministicDiagnosticReportPath(
+  input: DeterministicDiagnosticPlanInput,
+): string | null {
+  const sourceText = combinedDiagnosticSourceText(input);
+  if (!DIAGNOSTIC_TASK_PATTERN.test(sourceText)) return null;
+  return extractReportArtifactPaths(sourceText)[0] ?? null;
+}
+
+export function buildDeterministicDiagnosticPlan(
+  input: DeterministicDiagnosticPlanInput,
+): string | null {
+  const taskText = combinedTaskText(input.task);
+  const reportPath = findDeterministicDiagnosticReportPath(input);
+  if (!reportPath) return null;
+
+  const taskPaths = [...new Set([...extractRepoPaths(taskText), reportPath])].sort();
+  const taskPathText = formatInlinePaths(taskPaths);
+  const evidenceStep =
+    taskPaths.length > 1
+      ? `- [ ] Inspect the task-specific repository paths ${taskPathText} and cite exact existing file paths for every finding.`
+      : `- [ ] Inspect the repository evidence needed for \`${reportPath}\` and cite exact existing file paths for every finding.`;
+
+  const plan = [
+    "## Diagnostic-only plan",
+    "",
+    `Report artifact: \`${reportPath}\``,
+    "",
+    "- [ ] Keep the run diagnostic-only: do not implement fixes; do not patch code; do not modify source files; do not create child implementation tasks.",
+    evidenceStep,
+    `- [ ] Create or update \`${reportPath}\` with finding id, severity, evidence, risk, proposed fix, confidence, and verification command or manual check.`,
+    `- [ ] If no issue is found, state that explicitly in \`${reportPath}\` with the evidence checked.`,
+    `- [ ] Verify every repository path referenced in \`${reportPath}\` exists under the project root before closing the audit.`,
+  ].join("\n");
+
+  const quality = evaluateTaskPlanQuality({ task: input.task, plan });
+  return quality.ok ? plan : null;
 }
 
 function normalizedGenericCandidate(plan: string): string {

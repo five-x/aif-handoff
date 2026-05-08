@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { TaskPlanQualityError, projects, tasks } from "@aif/shared";
+import { TaskPlanQualityError, evaluateTaskPlanQuality, projects, tasks } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -283,6 +283,48 @@ describe("runPlanChecker", () => {
       runPlanChecker("task-slash-echo", "/tmp/plan-checker-test"),
     ).rejects.toBeInstanceOf(TaskPlanQualityError);
     expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("replaces invalid diagnostic audit plans with a deterministic fallback", async () => {
+    const description =
+      "Diagnostic only. Do not implement fixes. Do not create follow-up tasks. Produce a committed report at: audit/2026-05-08-initial-audit.md.";
+
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-diagnostic-fallback",
+        projectId: "project-1",
+        title: "Audit",
+        description,
+        status: "plan_ready",
+        plan: [
+          "</think>",
+          "",
+          "Here is the plan for the Short task.",
+          "",
+          "<aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+        ].join("\n"),
+      })
+      .run();
+
+    await runPlanChecker("task-diagnostic-fallback", "/tmp/plan-checker-test");
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-diagnostic-fallback"))
+      .get();
+    expect(row?.plan).toContain("## Diagnostic-only plan");
+    expect(row?.plan).toContain("audit/2026-05-08-initial-audit.md");
+    expect(row?.plan).toContain("do not implement fixes");
+    expect(row?.plan).not.toContain("<aif-plan");
+    expect(
+      evaluateTaskPlanQuality({
+        task: { title: "Audit", description },
+        plan: row?.plan,
+      }).ok,
+    ).toBe(true);
   });
 
   it("accepts fenced markdown and persists valid checklist plan", async () => {

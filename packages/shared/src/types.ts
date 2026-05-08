@@ -260,10 +260,18 @@ export interface ReorderTaskInput {
 /** WebSocket event types */
 export type WsEventType =
   | "project:created"
+  | "project:updated"
+  | "project:deleted"
+  | "runtime_profile:created"
+  | "runtime_profile:updated"
+  | "runtime_profile:deleted"
+  | "settings:runtime_defaults_updated"
+  | "settings:config_updated"
   | "task:created"
   | "task:updated"
   | "task:deleted"
   | "task:moved"
+  | "task:comment_created"
   | "agent:wake"
   | "roadmap:complete"
   | "roadmap:error"
@@ -271,7 +279,9 @@ export type WsEventType =
   | "chat:done"
   | "chat:error"
   | "chat:session_created"
+  | "chat:session_updated"
   | "chat:session_deleted"
+  | "chat:session_messages_updated"
   | "sync:task_created"
   | "sync:task_updated"
   | "sync:status_changed"
@@ -325,12 +335,36 @@ export interface WarmupBroadcastPayload {
   status: "ready" | "failed" | "partial" | "cleared" | "expired";
 }
 
+export interface IdPayload {
+  id: string;
+}
+
+export interface ProjectScopedIdPayload {
+  id: string;
+  projectId: string | null;
+}
+
+export interface SettingsConfigUpdatedPayload {
+  projectId: string;
+}
+
+export interface TaskCommentCreatedPayload {
+  id: string;
+  taskId: string;
+  projectId: string;
+}
+
 export interface WsEvent {
   type: WsEventType;
   payload:
     | Task
     | Project
-    | { id: string }
+    | RuntimeProfile
+    | AppSettings
+    | IdPayload
+    | ProjectScopedIdPayload
+    | SettingsConfigUpdatedPayload
+    | TaskCommentCreatedPayload
     | RoadmapCompletePayload
     | RoadmapErrorPayload
     | ChatStreamTokenPayload

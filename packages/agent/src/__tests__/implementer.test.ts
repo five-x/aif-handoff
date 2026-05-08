@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projects, taskComments, tasks } from "@aif/shared";
@@ -78,6 +78,47 @@ describe("runImplementer rework behavior", () => {
     expect(queryMock).not.toHaveBeenCalled();
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-1")).get();
     expect(updatedTask?.implementationLog).toContain("No pending tasks detected in plan");
+  });
+
+  it("writes a deterministic report for diagnostic-only fallback plans", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
+    writeFileSync(join(projectRoot, "pyproject.toml"), '[project]\nname = "test"\n');
+    const description =
+      "Diagnostic only. Do not implement fixes. Produce a committed report at: audit/2026-05-08-initial-audit.md.";
+
+    db.insert(tasks)
+      .values({
+        id: "task-diagnostic-report",
+        projectId: "project-1",
+        title: "Audit",
+        description,
+        status: "implementing",
+        plan: [
+          "## Diagnostic-only plan",
+          "",
+          "Report artifact: `audit/2026-05-08-initial-audit.md`",
+          "",
+          "- [ ] Keep the run diagnostic-only: do not implement fixes; do not patch code; do not modify source files; do not create child implementation tasks.",
+          "- [ ] Inspect the repository evidence needed for `audit/2026-05-08-initial-audit.md` and cite exact existing file paths for every finding.",
+          "- [ ] Create or update `audit/2026-05-08-initial-audit.md` with finding id, severity, evidence, risk, proposed fix, confidence, and verification command or manual check.",
+        ].join("\n"),
+      })
+      .run();
+
+    await runImplementer("task-diagnostic-report", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const reportPath = join(projectRoot, "audit/2026-05-08-initial-audit.md");
+    expect(existsSync(reportPath)).toBe(true);
+    const report = readFileSync(reportPath, "utf8");
+    expect(report).toContain("Diagnostic Report");
+    expect(report).toContain("`README.md`");
+    expect(report).toContain("No fixes were implemented");
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-diagnostic-report")).get();
+    expect(updatedTask?.implementationLog).toContain("Deterministic diagnostic report generated");
+    expect(updatedTask?.plan).toContain("- [x] Keep the run diagnostic-only");
   });
 
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {

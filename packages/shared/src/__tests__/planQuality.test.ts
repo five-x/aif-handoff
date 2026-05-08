@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TaskPlanQualityError,
+  buildDeterministicDiagnosticPlan,
   evaluateTaskPlanQuality,
   formatTaskPlanQualityBlockedReason,
 } from "../planQuality.js";
@@ -104,6 +105,24 @@ describe("evaluateTaskPlanQuality", () => {
 
     expect(result.ok).toBe(false);
     expect(result.categories).toContain("diagnostic_scope_violation");
+  });
+
+  it("builds a valid deterministic fallback for diagnostic tasks with report paths", () => {
+    const task = {
+      title: "Audit",
+      description:
+        "Diagnostic only. Do not implement fixes. Write the report to audit/2026-05-08-initial-audit.md.",
+    };
+    const plan = buildDeterministicDiagnosticPlan({
+      task,
+      extraText: ["</think>\n<aif-plan fast @.ai-factory/PLAN.md docs:false tests:false"],
+    });
+
+    expect(plan).toContain("Diagnostic-only plan");
+    expect(plan).toContain("audit/2026-05-08-initial-audit.md");
+    expect(plan).toContain("- [ ] Keep the run diagnostic-only");
+    expect(plan).not.toContain("<aif-plan");
+    expect(evaluateTaskPlanQuality({ task, plan }).ok).toBe(true);
   });
 
   it("formats typed errors with categories", () => {

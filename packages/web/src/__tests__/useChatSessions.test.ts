@@ -166,4 +166,40 @@ describe("useChatSessions", () => {
     });
     expect(result.current.activeSessionId).toBe("s2");
   });
+
+  it("invalidates sessions for matching project websocket events only", async () => {
+    mockListChatSessions.mockResolvedValue([
+      { id: "s1", projectId: "proj-1", title: "Chat 1", updatedAt: "2026-01-01" },
+    ]);
+
+    renderHook(() => useChatSessions("proj-1"), {
+      wrapper: createWrapper(),
+    });
+
+    await waitFor(() => {
+      expect(mockListChatSessions).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("chat:session_updated", {
+          detail: { id: "other-session", projectId: "proj-2" },
+        }),
+      );
+    });
+
+    expect(mockListChatSessions).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("chat:session_messages_updated", {
+          detail: { id: "s1", projectId: "proj-1" },
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(mockListChatSessions).toHaveBeenCalledTimes(2);
+    });
+  });
 });

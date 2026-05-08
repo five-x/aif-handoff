@@ -258,8 +258,10 @@ projectsRouter.put("/:id", jsonValidator(createProjectSchema), async (c) => {
 
   const { project: updated, pathError } = updateProject(id, body);
   if (pathError) return c.json({ error: pathError }, 400);
+  if (!updated) return c.json({ error: "Project not found after update" }, 500);
 
   log.debug({ projectId: id }, "Project updated");
+  broadcast({ type: "project:updated", payload: updated });
   return c.json(updated);
 });
 
@@ -712,6 +714,7 @@ projectsRouter.delete("/:id", (c) => {
 
   deleteProject(id);
   log.debug({ projectId: id }, "Project deleted");
+  broadcast({ type: "project:deleted", payload: { id } });
   return c.json({ success: true });
 });
 

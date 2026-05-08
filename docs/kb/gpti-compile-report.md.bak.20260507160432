@@ -1,0 +1,68 @@
+<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
+
+# GPTI Compile Report
+
+- Repo: `C:\Users\apron\source\aif-handoff`
+- Global home: `C:\Users\apron\.codex`
+- Mode: `write`
+
+## Sources
+
+- `C:\Users\apron\.codex\gpti\global\00-core.md`
+- `C:\Users\apron\.codex\gpti\global\10-memory.md`
+- `C:\Users\apron\.codex\gpti\global\20-rdpi.md`
+- `C:\Users\apron\.codex\gpti\global\30-safety.md`
+- `C:\Users\apron\.codex\gpti\roles\coder.md`
+- `C:\Users\apron\.codex\gpti\roles\explorer.md`
+- `C:\Users\apron\.codex\gpti\roles\lead.md`
+- `C:\Users\apron\.codex\gpti\roles\librarian.md`
+- `C:\Users\apron\.codex\gpti\roles\reviewer.md`
+- `C:\Users\apron\.codex\gpti\roles\scoper.md`
+- `C:\Users\apron\.codex\gpti\roles\sre.md`
+- `C:\Users\apron\.codex\gpti\roles\tester.md`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\entities\README.md`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+
+## Generated Files
+
+- `C:\Users\apron\.codex\AGENTS.md`: `skipped`
+  Reason: unmanaged file exists
+- `C:\Users\apron\source\aif-handoff\AGENTS.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\lead.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\explorer.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\reviewer.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\coder.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\tester.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\scoper.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\librarian.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\sre.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\rdpi\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\intake\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\runtask\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\runtasklist\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\askdoc\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\srelogs\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\memsync\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\contextrecall\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\manifest.json`: `unchanged`
+
+## Duplicates
+
+- `- description: node.js or typescript repository.`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+- `- build: npm run build`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+- `- lint: npm run lint`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+
+## Potential Conflicts
+
+- none
+
+## Diff Preview
+
+- no content changes

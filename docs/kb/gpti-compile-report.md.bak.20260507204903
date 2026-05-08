@@ -1,0 +1,212 @@
+<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
+
+# GPTI Compile Report
+
+- Repo: `C:\Users\apron\source\aif-handoff`
+- Global home: `C:\Users\apron\.codex`
+- Mode: `write`
+
+## Sources
+
+- `C:\Users\apron\.codex\gpti\global\00-core.md`
+- `C:\Users\apron\.codex\gpti\global\10-memory.md`
+- `C:\Users\apron\.codex\gpti\global\20-rdpi.md`
+- `C:\Users\apron\.codex\gpti\global\30-safety.md`
+- `C:\Users\apron\.codex\gpti\roles\coder.md`
+- `C:\Users\apron\.codex\gpti\roles\explorer.md`
+- `C:\Users\apron\.codex\gpti\roles\lead.md`
+- `C:\Users\apron\.codex\gpti\roles\librarian.md`
+- `C:\Users\apron\.codex\gpti\roles\reviewer.md`
+- `C:\Users\apron\.codex\gpti\roles\scoper.md`
+- `C:\Users\apron\.codex\gpti\roles\sre.md`
+- `C:\Users\apron\.codex\gpti\roles\tester.md`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\entities\README.md`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+
+## Generated Files
+
+- `C:\Users\apron\.codex\AGENTS.md`: `skipped`
+  Reason: unmanaged file exists
+- `C:\Users\apron\source\aif-handoff\AGENTS.md`: `updated`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\lead.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\explorer.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\reviewer.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\coder.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\tester.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\scoper.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\librarian.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\agents\sre.toml`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\rdpi\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\intake\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\runtask\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\runtasklist\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\askdoc\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\srelogs\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\memsync\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.agents\skills\contextrecall\SKILL.md`: `unchanged`
+- `C:\Users\apron\source\aif-handoff\.codex\gpti\manifest.json`: `updated`
+
+## Duplicates
+
+- `- description: node.js or typescript repository.`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+- `- build: npm.cmd run build`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+- `- test: npm.cmd test`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+- `- lint: npm.cmd run lint`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+- `- run: npm.cmd run dev`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\profiles\node.md`
+  - `C:\Users\apron\source\aif-handoff\.codex\gpti\project.md`
+
+## Potential Conflicts
+
+- none
+
+## Diff Preview
+
+### `C:\Users\apron\source\aif-handoff\AGENTS.md`
+
+```diff
+--- C:\Users\apron\source\aif-handoff\AGENTS.md
++++ C:\Users\apron\source\aif-handoff\AGENTS.md
+@@ -32,9 +32,6 @@
+ - Lint: npm.cmd run lint
+ - Run: npm.cmd run dev
+
+-Use `npm.cmd` from PowerShell in this workspace. Plain `npm` resolves to
+-`npm.ps1`, which can be blocked by Windows execution policy.
+-
+ # Rollout and Migrations
+
+ - Record rollout notes and migration procedures in `docs/ops/runbook.md`.
+@@ -45,60 +42,6 @@
+ - `docs/rdpi/` is the task history source of truth.
+ - `docs/kb/` stores validated project knowledge.
+ - `docs/intake/` stores intake decomposition artifacts.
+-
+-# Project Overview
+-
+-AIF Handoff is an autonomous task-management system with a Kanban UI and
+-runtime-routed AI workflows. Tasks move through Backlog, Planning, Plan Ready,
+-Implementing, Review, Done, and Verified. The product coordinates planning,
+-implementation, review, security review, runtime profile selection, chat, MCP
+-sync, and optional automatic review/rework loops.
+-
+-# Tech Stack
+-
+-- Language: TypeScript with ES modules.
+-- Monorepo: npm workspaces plus Turborepo.
+-- API: Hono, Node server, WebSocket.
+-- Frontend: React, Vite, Tailwind CSS, TanStack Query, dnd-kit.
+-- Database: SQLite with better-sqlite3 and drizzle-orm.
+-- Runtime layer: `@aif/runtime` with Claude, Codex, OpenRouter, OpenCode, and external modules.
+-- Agent process: runtime-neutral coordinator with polling and WebSocket wake channel.
+-- Tests: Vitest and Testing Library; Playwright is used for web performance/e2e flows.
+-
+-# Package Map
+-
+-- `packages/shared`: shared contracts, schema, state machine, env, constants, logger, browser exports.
+-- `packages/data`: centralized data-access API for all SQLite reads and writes.
+-- `packages/runtime`: provider/runtime contracts, registry, capabilities, profile resolution, adapters.
+-- `packages/api`: REST, WebSocket, settings, projects, tasks, chat, runtime profile routes.
+-- `packages/web`: React app, Kanban/list UI, task detail, chat, project/runtime settings, UI primitives.
+-- `packages/agent`: coordinator, planner, implementer, reviewer, watchdogs, wake channel, runtime execution.
+-- `packages/mcp`: MCP task sync server and tools.
+-
+-# Key Entry Points
+-
+-- API server: `packages/api/src/index.ts`.
+-- Web app: `packages/web/src/main.tsx` and `packages/web/src/App.tsx`.
+-- Agent coordinator: `packages/agent/src/index.ts` and `packages/agent/src/coordinator.ts`.
+-- Runtime execution: `packages/agent/src/subagentQuery.ts` and `packages/runtime/src/index.ts`.
+-- Data access: `packages/data/src/index.ts`.
+-- Schema and migrations: `packages/shared/src/schema.ts` and `packages/shared/src/db.ts`.
+-- State machine: `packages/shared/src/stateMachine.ts`.
+-
+-# Repository Rules
+-
+-- DB boundary is mandatory: `api`, `agent`, and `runtime` must access SQLite only through `@aif/data`.
+-- Before creating a new UI primitive, check `packages/web/src/components/ui/` and compose existing components.
+-- New visual UI components require a corresponding Pencil design-system update when Pencil tooling is available.
+-- Avoid expensive CSS properties in UI code: no `box-shadow`, `backdrop-filter`, `filter: blur()`, or `text-shadow`.
+-- Read `docs/ui-theme-colors.md` before changing theme-sensitive colors. Add a dated learning entry after fixing a theme readability bug.
+-- When adding a package or changing inter-package dependencies, update Docker config and verify `docker compose build`.
+-- Runtime adapter changes must update `docs/providers.md`, `packages/runtime/src/adapters/TEMPLATE.ts`, registration in `bootstrap.ts`, and Docker dependencies when needed.
+-- Migration versions in `packages/shared/src/db.ts` are append-only. Never renumber or edit an already merged migration.
+-- Do not cast away nullable parser returns with `as T`; keep `T | null` and guard before property access.
+-- Branch logic on structured runtime error fields such as `category`, `adapterCode`, or `httpStatus`; do not parse `error.message`.
+-- Every package should maintain
+```
+
+### `C:\Users\apron\source\aif-handoff\.codex\gpti\manifest.json`
+
+```diff
+--- C:\Users\apron\source\aif-handoff\.codex\gpti\manifest.json
++++ C:\Users\apron\source\aif-handoff\.codex\gpti\manifest.json
+@@ -70,12 +70,12 @@
+     {
+       "path": "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\profiles\\node.md",
+       "scope": "project",
+-      "sha256": "249b22eee96f84fe3053b3a5aef6b30af4585a569cb596a2f8222e846256004d"
++      "sha256": "c75446472a78ac4d2847798ed4059623f860b6f98b6791c9cea18062ea04f3e4"
+     },
+     {
+       "path": "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\project.md",
+       "scope": "project",
+-      "sha256": "21fe4ea34eecfa8d7df4f61aeba348a847494cfbf0ab6e3cfabadf574c6c8905"
++      "sha256": "31c00d9393d43e6decd44c7c7d4f96341fdcfa7400255edb0d58b242a097dbf7"
+     }
+   ],
+   "generated": [
+@@ -87,7 +87,7 @@
+     {
+       "path": "C:\\Users\\apron\\source\\aif-handoff\\AGENTS.md",
+       "reason": null,
+-      "sha256": "34328c787481a0f5cb1947f25df942e7607507bbb393b19a258eb7eb86a1e9c5"
++      "sha256": "a764e421cc7632ee78434d86084af0d913a839b3a15b46c0c68ef0e7a1065a48"
+     },
+     {
+       "path": "C:\\Users\\apron\\source\\aif-handoff\\.codex\\agents\\lead.toml",
+@@ -177,6 +177,34 @@
+         "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\profiles\\node.md",
+         "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\project.md"
+       ]
++    },
++    {
++      "text": "- build: npm.cmd run build",
++      "locations": [
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\profiles\\node.md",
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\project.md"
++      ]
++    },
++    {
++      "text": "- test: npm.cmd test",
++      "locations": [
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\profiles\\node.md",
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\project.md"
++      ]
++    },
++    {
++      "text": "- lint: npm.cmd run lint",
++      "locations": [
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\profiles\\node.md",
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\project.md"
++      ]
++    },
++    {
++      "text": "- run: npm.cmd run dev",
++      "locations": [
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\profiles\\node.md",
++        "C:\\Users\\apron\\source\\aif-handoff\\.codex\\gpti\\project.md"
++      ]
+     }
+   ],
+   "conflicts": []
+```

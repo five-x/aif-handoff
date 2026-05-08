@@ -32,6 +32,7 @@ let appSettingsState: RuntimeDefaultsState = {
   updatedAt: "2026-04-20T00:00:00.000Z",
 };
 let eligibleAppDefaultProfileIds = new Set<string>();
+const mockBroadcast = vi.fn();
 
 function resolveMockAppDefaultRuntimeProfileId(
   mode: "task" | "plan" | "review" | "chat",
@@ -109,6 +110,10 @@ vi.mock("@aif/data", () => ({
   createDbUsageSink: () => ({ record: vi.fn() }),
 }));
 
+vi.mock("../ws.js", () => ({
+  broadcast: (...args: unknown[]) => mockBroadcast(...args),
+}));
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return {
@@ -141,6 +146,7 @@ describe("settings API — config routes", () => {
       updatedAt: "2026-04-20T00:00:00.000Z",
     };
     eligibleAppDefaultProfileIds = new Set(["global-task", "global-chat"]);
+    mockBroadcast.mockReset();
     // Clean up config file between tests
     try {
       rmSync(configPath);
@@ -214,6 +220,10 @@ describe("settings API — config routes", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.success).toBe(true);
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "settings:config_updated",
+        payload: { projectId: TEST_PROJECT_ID },
+      });
 
       // Verify file was actually written by reading back
       const readRes = await app.request(`/settings/config?projectId=${TEST_PROJECT_ID}`);
@@ -300,6 +310,14 @@ describe("settings API — config routes", () => {
         resolvedDefaultPlanRuntimeProfileId: "global-task",
         resolvedDefaultReviewRuntimeProfileId: "global-task",
         resolvedDefaultChatRuntimeProfileId: "global-chat",
+      });
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "settings:runtime_defaults_updated",
+        payload: expect.objectContaining({
+          defaultTaskRuntimeProfileId: "global-task",
+          defaultReviewRuntimeProfileId: "global-task",
+          defaultChatRuntimeProfileId: "global-chat",
+        }),
       });
     });
 

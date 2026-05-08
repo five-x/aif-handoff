@@ -22,6 +22,7 @@ import { updateAppRuntimeDefaultsSchema } from "../schemas.js";
 import { jsonValidator } from "../middleware/zodValidator.js";
 import { getApiRuntimeRegistry } from "../services/runtime.js";
 import { validateAppRuntimeDefaultSelections } from "../services/runtimeProfileScope.js";
+import { broadcast } from "../ws.js";
 
 const log = logger("api:settings");
 
@@ -148,6 +149,7 @@ settingsRoutes.put("/runtime-defaults", jsonValidator(updateAppRuntimeDefaultsSc
   updateAppSettings(body);
   const response = buildAppRuntimeDefaultsResponse();
   log.info({ runtimeDefaults: response }, "Updated app runtime defaults");
+  broadcast({ type: "settings:runtime_defaults_updated", payload: getAppSettings() });
   return c.json(response);
 });
 
@@ -283,6 +285,7 @@ settingsRoutes.put("/config", async (c) => {
     const project = findProjectById(projectId!);
     if (project) clearProjectConfigCache(project.rootPath);
     log.info({ projectId }, "config.yaml updated");
+    broadcast({ type: "settings:config_updated", payload: { projectId: projectId! } });
     return c.json({ success: true });
   } catch (error) {
     log.error(

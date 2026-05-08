@@ -1,0 +1,155 @@
+<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
+
+# Repository Guidelines
+
+This file is compiled from global and project GPTI sources.
+
+## Layering
+
+- Global source root: `C:\Users\apron\.codex\gpti`
+- Project source root: `C:\Users\apron\source\aif-handoff\.codex\gpti`
+
+## Project Summary
+
+<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
+
+# Project Identity
+
+- Project: aif-handoff
+- Preset: node
+- Description: Node.js or TypeScript repository.
+
+# Working Agreements
+
+- Keep repository-specific runtime guidance in this file and in `.codex/gpti/profiles/`.
+- Keep long-lived operational knowledge in `docs/kb/` and `docs/ops/`.
+- Keep reusable memory artifacts in `docs/memory/`.
+
+# Commands
+
+- Build: npm.cmd run build
+- Test: npm.cmd test
+- Lint: npm.cmd run lint
+- Run: npm.cmd run dev
+
+Use `npm.cmd` from PowerShell in this workspace. Plain `npm` resolves to
+`npm.ps1`, which can be blocked by Windows execution policy.
+
+# Rollout and Migrations
+
+- Record rollout notes and migration procedures in `docs/ops/runbook.md`.
+- Keep environment-specific secrets outside the repository and outside shared memory.
+
+# Documentation
+
+- `docs/rdpi/` is the task history source of truth.
+- `docs/kb/` stores validated project knowledge.
+- `docs/intake/` stores intake decomposition artifacts.
+
+# Project Overview
+
+AIF Handoff is an autonomous task-management system with a Kanban UI and
+runtime-routed AI workflows. Tasks move through Backlog, Planning, Plan Ready,
+Implementing, Review, Done, and Verified. The product coordinates planning,
+implementation, review, security review, runtime profile selection, chat, MCP
+sync, and optional automatic review/rework loops.
+
+# Tech Stack
+
+- Language: TypeScript with ES modules.
+- Monorepo: npm workspaces plus Turborepo.
+- API: Hono, Node server, WebSocket.
+- Frontend: React, Vite, Tailwind CSS, TanStack Query, dnd-kit.
+- Database: SQLite with better-sqlite3 and drizzle-orm.
+- Runtime layer: `@aif/runtime` with Claude, Codex, OpenRouter, OpenCode, and external modules.
+- Agent process: runtime-neutral coordinator with polling and WebSocket wake channel.
+- Tests: Vitest and Testing Library; Playwright is used for web performance/e2e flows.
+
+# Package Map
+
+- `packages/shared`: shared contracts, schema, state machine, env, constants, logger, browser exports.
+- `packages/data`: centralized data-access API for all SQLite reads and writes.
+- `packages/runtime`: provider/runtime contracts, registry, capabilities, profile resolution, adapters.
+- `packages/api`: REST, WebSocket, settings, projects, tasks, chat, runtime profile routes.
+- `packages/web`: React app, Kanban/list UI, task detail, chat, project/runtime settings, UI primitives.
+- `packages/agent`: coordinator, planner, implementer, reviewer, watchdogs, wake channel, runtime execution.
+- `packages/mcp`: MCP task sync server and tools.
+
+# Key Entry Points
+
+- API server: `packages/api/src/index.ts`.
+- Web app: `packages/web/src/main.tsx` and `packages/web/src/App.tsx`.
+- Agent coordinator: `packages/agent/src/index.ts` and `packages/agent/src/coordinator.ts`.
+- Runtime execution: `packages/agent/src/subagentQuery.ts` and `packages/runtime/src/index.ts`.
+- Data access: `packages/data/src/index.ts`.
+- Schema and migrations: `packages/shared/src/schema.ts` and `packages/shared/src/db.ts`.
+- State machine: `packages/shared/src/stateMachine.ts`.
+
+# Repository Rules
+
+- DB boundary is mandatory: `api`, `agent`, and `runtime` must access SQLite only through `@aif/data`.
+- Before creating a new UI primitive, check `packages/web/src/components/ui/` and compose existing components.
+- New visual UI components require a corresponding Pencil design-system update when Pencil tooling is available.
+- Avoid expensive CSS properties in UI code: no `box-shadow`, `backdrop-filter`, `filter: blur()`, or `text-shadow`.
+- Read `docs/ui-theme-colors.md` before changing theme-sensitive colors. Add a dated learning entry after fixing a theme readability bug.
+- When adding a package or changing inter-package dependencies, update Docker config and verify `docker compose build`.
+- Runtime adapter changes must update `docs/providers.md`, `packages/runtime/src/adapters/TEMPLATE.ts`, registration in `bootstrap.ts`, and Docker dependencies when needed.
+- Migration versions in `packages/shared/src/db.ts` are append-only. Never renumber or edit an already merged migration.
+- Do not cast away nullable parser returns with `as T`; keep `T | null` and guard before property access.
+- Branch logic on structured runtime error fields such as `category`, `adapterCode`, or `httpStatus`; do not parse `error.message`.
+- Every package should maintain at least 70 percent test coverage.
+- After implementation, run `npm.cmd run ai:validate` when feasible.
+
+## Preset Profiles
+
+### Node
+
+<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
+
+# Preset Profile
+
+- Preset: node
+- Description: Node.js or TypeScript repository.
+
+# Known Pitfalls
+
+- Keep package manager choice explicit in AGENTS.md and docs/ops/runbook.md.
+
+# Command Overrides
+
+- Build: npm run build
+- Test: npm test
+- Lint: npm run lint
+- Run: npm run dev
+
+## Real Commands
+
+- Build: `npm.cmd run build`
+- Test: `npm.cmd test`
+- Lint: `npm.cmd run lint`
+- Run: `npm.cmd run dev`
+
+## Memory And Secrets
+
+- Local repo facts outrank memory recall.
+- Same-project curated memory outranks cross-project reusable memory.
+- Shared-memory-first is not the default for repo/task-specific questions.
+- For repo/task-specific work, establish the current task, local repo state, and local docs first.
+- For explicit historical, prior-decision, or past-solution questions, use same-project curated memory first, then cross-project reusable memory, and fall back to local docs only if memory is insufficient.
+- If memory is empty, stale, or conflicting, say that explicitly and do not let it override local facts.
+- Publish only curated non-secret knowledge into shared memory.
+- Keep raw secrets in the separate secret layer.
+
+## Documentation
+
+- `docs/rdpi/` is the task history source of truth.
+- `docs/intake/` stores intake artifacts.
+- `docs/ops/` stores rollout and runbook material.
+- `docs/kb/` stores validated project knowledge.
+- `docs/memory/` stores curated memory candidates and capsules.
+
+## Git And Approvals
+
+- Keep changes diffable and auditable.
+- Prefer controlled patching over manual drift.
+- Do not publish memory artifacts before review.

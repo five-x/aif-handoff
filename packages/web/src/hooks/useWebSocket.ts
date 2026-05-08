@@ -21,6 +21,16 @@ function hasIdPayload(value: unknown): value is { id: string } {
   return isRecord(value) && typeof value.id === "string";
 }
 
+function hasProjectIdPayload(value: unknown): value is { projectId: string } {
+  return isRecord(value) && typeof value.projectId === "string";
+}
+
+function hasProjectScopedIdPayload(
+  value: unknown,
+): value is { id: string; projectId?: string | null } {
+  return isRecord(value) && typeof value.id === "string";
+}
+
 function hasRuntimeLimitPayload(
   value: unknown,
 ): value is { projectId: string; runtimeProfileId?: string | null; taskId?: string | null } {
@@ -42,6 +52,30 @@ function invalidateRuntimeLimitQueries(
   if (typeof payload.taskId === "string" && payload.taskId.length > 0) {
     queryClient.invalidateQueries({ queryKey: ["task", payload.taskId] });
     queryClient.invalidateQueries({ queryKey: ["effectiveTaskRuntime", payload.taskId] });
+  }
+}
+
+function invalidateRuntimeQueries(queryClient: QueryClient, projectId?: string | null): void {
+  queryClient.invalidateQueries({ queryKey: ["runtimeProfiles"] });
+  queryClient.invalidateQueries({ queryKey: ["appRuntimeDefaults"] });
+  queryClient.invalidateQueries({ queryKey: ["settings"] });
+  queryClient.invalidateQueries({ queryKey: ["effectiveChatRuntime"] });
+  queryClient.invalidateQueries({ queryKey: ["effectiveTaskRuntime"] });
+  queryClient.invalidateQueries({ queryKey: ["projectWarmup"] });
+  if (projectId) {
+    queryClient.invalidateQueries({ queryKey: ["effectiveChatRuntime", projectId] });
+    queryClient.invalidateQueries({ queryKey: ["projectWarmup", projectId] });
+  }
+}
+
+function invalidateProjectQueries(queryClient: QueryClient, projectId?: string | null): void {
+  queryClient.invalidateQueries({ queryKey: ["projects"] });
+  queryClient.invalidateQueries({ queryKey: ["effectiveChatRuntime"] });
+  queryClient.invalidateQueries({ queryKey: ["effectiveTaskRuntime"] });
+  if (projectId) {
+    queryClient.invalidateQueries({ queryKey: ["projectDefaults", projectId] });
+    queryClient.invalidateQueries({ queryKey: ["projectWarmup", projectId] });
+    queryClient.invalidateQueries({ queryKey: ["effectiveChatRuntime", projectId] });
   }
 }
 
@@ -130,20 +164,32 @@ export function useWebSocket() {
         return;
       }
 
-      // Dispatch chat events as custom DOM events for the useChat hook
-      if (
-        raw.type === "chat:token" ||
-        raw.type === "chat:done" ||
-        raw.type === "chat:error" ||
-        raw.type === "chat:session_created" ||
-        raw.type === "chat:session_deleted"
-      ) {
+      // Dispatch chat stream events as custom DOM events for the useChat hook.
+      if (raw.type === "chat:token" || raw.type === "chat:done" || raw.type === "chat:error") {
         window.dispatchEvent(new CustomEvent(raw.type, { detail: raw.payload }));
         if (
           (raw.type === "chat:done" || raw.type === "chat:error") &&
           hasRuntimeLimitPayload(raw.payload)
         ) {
           invalidateRuntimeLimitQueries(queryClient, raw.payload);
+        }
+        return;
+      }
+
+      if (
+        raw.type === "chat:session_created" ||
+        raw.type === "chat:session_updated" ||
+        raw.type === "chat:session_deleted" ||
+        raw.type === "chat:session_messages_updated"
+      ) {
+        window.dispatchEvent(new CustomEvent(raw.type, { detail: raw.payload }));
+        if (hasProjectScopedIdPayload(raw.payload)) {
+          queryClient.invalidateQueries({ queryKey: ["chatSessions", raw.payload.projectId] });
+          if (raw.type === "chat:session_messages_updated") {
+            queryClient.invalidateQueries({ queryKey: ["chatSessionMessages", raw.payload.id] });
+          }
+        } else {
+          queryClient.invalidateQueries({ queryKey: ["chatSessions"] });
         }
         return;
       }
@@ -205,6 +251,47 @@ export function useWebSocket() {
         return;
       }
 
+      if (data.type === "project:created") {
+        invalidateProjectQueries(queryClient);
+        return;
+      }
+
+      if (data.type === "project:updated" && hasIdPayload(data.payload)) {
+        invalidateProjectQueries(queryClient, data.payload.id);
+        return;
+      }
+
+      if (data.type === "project:deleted" && hasIdPayload(data.payload)) {
+        queryClient.removeQueries({ queryKey: ["projectDefaults", data.payload.id] });
+        queryClient.removeQueries({ queryKey: ["projectWarmup", data.payload.id] });
+        queryClient.invalidateQueries({ queryKey: ["projects"] });
+        queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        queryClient.invalidateQueries({ queryKey: ["chatSessions"] });
+        return;
+      }
+
+      if (
+        data.type === "runtime_profile:created" ||
+        data.type === "runtime_profile:updated" ||
+        data.type === "runtime_profile:deleted"
+      ) {
+        const projectId = hasProjectScopedIdPayload(data.payload) ? data.payload.projectId : null;
+        invalidateRuntimeQueries(queryClient, projectId);
+        return;
+      }
+
+      if (data.type === "settings:runtime_defaults_updated") {
+        invalidateRuntimeQueries(queryClient);
+        return;
+      }
+
+      if (data.type === "settings:config_updated" && hasProjectIdPayload(data.payload)) {
+        queryClient.invalidateQueries({ queryKey: ["settings"] });
+        queryClient.invalidateQueries({ queryKey: ["projectDefaults", data.payload.projectId] });
+        invalidateProjectQueries(queryClient, data.payload.projectId);
+        return;
+      }
+
       if (data.type === "project:runtime_limit_updated" && hasRuntimeLimitPayload(data.payload)) {
         invalidateRuntimeLimitQueries(queryClient, data.payload);
         if (typeof data.payload.taskId === "string" && data.payload.taskId.length > 0) {
@@ -227,6 +314,15 @@ export function useWebSocket() {
           queryKey: ["task", data.payload.id],
         });
         queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        return;
+      }
+
+      if (data.type === "task:comment_created" && isRecord(data.payload)) {
+        const taskId = typeof data.payload.taskId === "string" ? data.payload.taskId : null;
+        if (taskId) {
+          queryClient.invalidateQueries({ queryKey: ["task-comments", taskId] });
+          queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+        }
         return;
       }
 

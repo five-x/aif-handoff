@@ -1,6 +1,7 @@
 import { findProjectById, findTaskById, persistTaskPlanForTask } from "@aif/data";
 import {
   TaskPlanQualityError,
+  buildDeterministicDiagnosticPlan,
   evaluateTaskPlanQuality,
   logger,
   looksLikeFullPlanUpdate,
@@ -11,6 +12,7 @@ import { logActivity } from "../hooks.js";
 
 const log = logger("plan-checker");
 const AGENT_NAME = "plan-checker";
+type PlanCheckerTask = NonNullable<ReturnType<typeof findTaskById>>;
 
 export function normalizeMarkdownFence(text: string): string {
   const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
@@ -48,14 +50,40 @@ export function isPlanAlreadyChecklist(text: string): boolean {
   return hasChecklistItems(text) && convertible === 0;
 }
 
-function assertTaskPlanQuality(
-  task: NonNullable<ReturnType<typeof findTaskById>>,
-  planText: string | null | undefined,
-): void {
+function assertTaskPlanQuality(task: PlanCheckerTask, planText: string | null | undefined): void {
   const result = evaluateTaskPlanQuality({ task, plan: planText });
   if (!result.ok) {
     throw new TaskPlanQualityError(result);
   }
+}
+
+function persistDeterministicDiagnosticPlanIfAvailable(
+  task: PlanCheckerTask,
+  projectRoot: string,
+): boolean {
+  const currentQuality = evaluateTaskPlanQuality({ task, plan: task.plan });
+  if (currentQuality.ok) return false;
+
+  const fallbackPlan = buildDeterministicDiagnosticPlan({
+    task,
+    extraText: [task.plan],
+  });
+  if (!fallbackPlan) return false;
+
+  persistTaskPlanForTask({
+    taskId: task.id,
+    planText: fallbackPlan,
+    projectRoot,
+    isFix: task.isFix,
+    planPath: task.planPath ?? undefined,
+    updatedAt: new Date().toISOString(),
+  });
+
+  log.info(
+    { taskId: task.id, categories: currentQuality.categories },
+    "Saved deterministic diagnostic plan fallback",
+  );
+  return true;
 }
 
 export async function runPlanChecker(taskId: string, projectRoot: string): Promise<void> {
@@ -75,6 +103,10 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
       persistedBranchName: task.branchName,
     });
     logActivity(taskId, "Agent", `Restored feature branch: ${task.branchName}`);
+  }
+
+  if (persistDeterministicDiagnosticPlanIfAvailable(task, projectRoot)) {
+    return;
   }
 
   if (!task.plan || task.plan.trim().length === 0) {

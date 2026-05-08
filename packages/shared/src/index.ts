@@ -158,8 +158,11 @@ export {
 export {
   TASK_PLAN_QUALITY_ISSUE_CODES,
   TaskPlanQualityError,
+  buildDeterministicDiagnosticPlan,
   evaluateTaskPlanQuality,
+  findDeterministicDiagnosticReportPath,
   formatTaskPlanQualityBlockedReason,
+  type DeterministicDiagnosticPlanInput,
   type TaskPlanQualityInput,
   type TaskPlanQualityIssue,
   type TaskPlanQualityIssueCode,

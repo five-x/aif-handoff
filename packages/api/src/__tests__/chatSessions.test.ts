@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
-import type { RuntimeAdapter } from "@aif/runtime";
+import type { RuntimeAdapter, RuntimeEvent, RuntimeRunInput } from "@aif/runtime";
 
 const mockCreateChatSession = vi.fn();
 const mockFindChatSessionById = vi.fn();
@@ -10,6 +10,7 @@ const mockFindCodexSessionFilePathBySessionId = vi.fn();
 const mockUpdateChatSession = vi.fn();
 const mockDeleteChatSession = vi.fn();
 const mockListChatMessages = vi.fn();
+const mockCreateChatMessage = vi.fn();
 const mockToChatSessionResponse = vi.fn((row: Record<string, unknown>) => row);
 const mockToChatMessageResponse = vi.fn((row: Record<string, unknown>) => row);
 const mockFindProjectById = vi.fn();
@@ -71,7 +72,7 @@ vi.mock("@aif/data", () => ({
   findProjectById: (id: string) => mockFindProjectById(id),
   findTaskById: vi.fn(),
   toTaskResponse: vi.fn(),
-  createChatMessage: vi.fn(),
+  createChatMessage: (...args: unknown[]) => mockCreateChatMessage(...args),
   updateChatSessionTimestamp: vi.fn(),
   findRuntimeProfileById: (id: string) => mockFindRuntimeProfileById(id),
   toRuntimeProfileResponse: (row: Record<string, unknown>) => mockToRuntimeProfileResponse(row),
@@ -90,7 +91,11 @@ vi.mock("@aif/runtime", async (importOriginal) => {
 vi.mock("../services/runtime.js", () => ({
   resolveApiRuntimeContext: (input: unknown) => mockResolveApiRuntimeContext(input),
   assertApiRuntimeCapabilities: vi.fn(),
+  extractLatestRuntimeLimitSnapshot: vi.fn(() => null),
+  extractRuntimeLimitSnapshotFromError: vi.fn(() => null),
   getApiRuntimeRegistry: () => mockGetApiRuntimeRegistry(),
+  observeRuntimeLimitEvent: vi.fn((_event, latest) => latest),
+  refreshRuntimeProfileLimitState: vi.fn(),
 }));
 
 vi.mock("../ws.js", () => ({
@@ -137,6 +142,21 @@ const SESSION_ROW = {
   createdAt: "2026-04-01T00:00:00Z",
   updatedAt: "2026-04-01T00:00:00Z",
 };
+
+function chatMessageBroadcasts() {
+  return mockBroadcast.mock.calls
+    .map(([event]) => event as { type: string; payload: Record<string, unknown> })
+    .filter((event) => event.type === "chat:session_messages_updated");
+}
+
+function expectMetadataOnlyChatMessageBroadcasts(count: number) {
+  const events = chatMessageBroadcasts();
+  expect(events).toHaveLength(count);
+  for (const event of events) {
+    expect(event.payload).toEqual({ id: "session-1", projectId: "proj-1" });
+    expect(Object.keys(event.payload).sort()).toEqual(["id", "projectId"]);
+  }
+}
 
 describe("chat session API", () => {
   let app: ReturnType<typeof createApp>;
@@ -338,6 +358,104 @@ describe("chat session API", () => {
     });
   });
 
+  describe("POST /chat", () => {
+    it("rejects an existing session from a different project before persistence or broadcast", async () => {
+      mockFindProjectById.mockImplementation((id: string) =>
+        id === "proj-2" ? { id, rootPath: "/tmp/proj-2", name: "Other" } : null,
+      );
+      mockFindChatSessionById.mockReturnValue({ ...SESSION_ROW, projectId: "proj-1" });
+
+      const res = await app.request("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: "proj-2",
+          sessionId: "session-1",
+          message: "hello from another project",
+          clientId: "client-1",
+        }),
+      });
+
+      expect(res.status).toBe(404);
+      expect(mockResolveApiRuntimeContext).not.toHaveBeenCalled();
+      expect(runtimeAdapter.run).not.toHaveBeenCalled();
+      expect(mockCreateChatMessage).not.toHaveBeenCalled();
+      expect(mockBroadcast).not.toHaveBeenCalled();
+    });
+
+    it("broadcasts metadata-only message updates for normal persisted chat turns", async () => {
+      mockFindChatSessionById.mockReturnValue(SESSION_ROW);
+      vi.mocked(runtimeAdapter.run).mockImplementationOnce(async (input: RuntimeRunInput) => {
+        input.execution?.onEvent?.({
+          type: "stream:text",
+          message: "assistant reply",
+        } as RuntimeEvent);
+        return { outputText: "assistant reply", usage: null, events: [] };
+      });
+
+      const res = await app.request("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: "proj-1",
+          sessionId: "session-1",
+          message: "hello",
+          clientId: "client-1",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockCreateChatMessage).toHaveBeenCalledWith({
+        sessionId: "session-1",
+        role: "user",
+        content: "hello",
+      });
+      expect(mockCreateChatMessage).toHaveBeenCalledWith({
+        sessionId: "session-1",
+        role: "assistant",
+        content: "assistant reply",
+      });
+      expectMetadataOnlyChatMessageBroadcasts(2);
+    });
+
+    it("broadcasts metadata-only message updates for aborted partial persistence", async () => {
+      mockFindChatSessionById.mockReturnValue(SESSION_ROW);
+      vi.mocked(runtimeAdapter.run).mockImplementationOnce(async (input: RuntimeRunInput) => {
+        input.execution?.onEvent?.({
+          type: "stream:text",
+          message: "partial assistant reply",
+        } as RuntimeEvent);
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        throw err;
+      });
+
+      const res = await app.request("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: "proj-1",
+          sessionId: "session-1",
+          message: "stop soon",
+          clientId: "client-1",
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(mockCreateChatMessage).toHaveBeenCalledWith({
+        sessionId: "session-1",
+        role: "user",
+        content: "stop soon",
+      });
+      expect(mockCreateChatMessage).toHaveBeenCalledWith({
+        sessionId: "session-1",
+        role: "assistant",
+        content: "partial assistant reply",
+      });
+      expectMetadataOnlyChatMessageBroadcasts(2);
+    });
+  });
+
   describe("POST /chat/sessions", () => {
     it("creates session and returns 201", async () => {
       mockCreateChatSession.mockReturnValue(SESSION_ROW);
@@ -361,8 +479,12 @@ describe("chat session API", () => {
         runtimeSessionId: "runtime-session-1",
       });
       expect(mockBroadcast).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "chat:session_created" }),
+        expect.objectContaining({
+          type: "chat:session_created",
+          payload: { id: "session-1", projectId: "proj-1" },
+        }),
       );
+      expect(mockBroadcast.mock.calls[0]?.[0].payload).not.toHaveProperty("title");
     });
 
     it("rejects runtime profiles owned by a different project", async () => {
@@ -822,6 +944,10 @@ describe("chat session API", () => {
         runtimeProfileId: "profile-1",
         runtimeSessionId: "runtime-session-2",
       });
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "chat:session_updated",
+        payload: { id: "session-1", projectId: "proj-1" },
+      });
       const body = await res.json();
       expect(body.title).toBe("Renamed");
     });
@@ -874,7 +1000,10 @@ describe("chat session API", () => {
       expect(res.status).toBe(204);
       expect(mockDeleteChatSession).toHaveBeenCalledWith("session-1");
       expect(mockBroadcast).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "chat:session_deleted" }),
+        expect.objectContaining({
+          type: "chat:session_deleted",
+          payload: { id: "session-1", projectId: "proj-1" },
+        }),
       );
     });
   });

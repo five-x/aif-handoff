@@ -179,6 +179,17 @@ interface VirtualRuntimeSessionRef {
   sessionId: string;
 }
 
+function toChatSessionBroadcastPayload(session: Pick<ChatSession, "id" | "projectId">) {
+  return { id: session.id, projectId: session.projectId };
+}
+
+function broadcastChatSessionMessagesUpdated(sessionId: string, projectId: string): void {
+  broadcast({
+    type: "chat:session_messages_updated",
+    payload: { id: sessionId, projectId },
+  });
+}
+
 function redactTaskContextForRuntimePrompt(text: string): string {
   return text
     .split(/\r?\n/)
@@ -941,7 +952,7 @@ chatRouter.post("/sessions", jsonValidator(createChatSessionSchema), async (c) =
     return c.json({ error: "Failed to create chat session" }, 500);
   }
   const session = toChatSessionResponse(row);
-  broadcast({ type: "chat:session_created", payload: session });
+  broadcast({ type: "chat:session_created", payload: toChatSessionBroadcastPayload(session) });
   return c.json(session, 201);
 });
 
@@ -1207,7 +1218,10 @@ chatRouter.put("/sessions/:id", jsonValidator(updateChatSessionSchema), async (c
     runtimeProfileId: body.runtimeProfileId,
     runtimeSessionId: body.runtimeSessionId,
   });
-  return c.json(row ? toChatSessionResponse(row) : null);
+  if (!row) return c.json(null);
+  const session = toChatSessionResponse(row);
+  broadcast({ type: "chat:session_updated", payload: toChatSessionBroadcastPayload(session) });
+  return c.json(session);
 });
 
 // DELETE /chat/sessions/:id
@@ -1219,7 +1233,7 @@ chatRouter.delete("/sessions/:id", async (c) => {
     return c.json({ error: "Chat session not found" }, 404);
   }
   deleteChatSession(id);
-  broadcast({ type: "chat:session_deleted", payload: { id } });
+  broadcast({ type: "chat:session_deleted", payload: toChatSessionBroadcastPayload(existing) });
   return c.body(null, 204);
 });
 
@@ -1322,6 +1336,17 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
     const incomingVirtual = chatSessionId ? parseVirtualRuntimeSessionId(chatSessionId) : null;
     let existingSession =
       chatSessionId && !incomingVirtual ? (findChatSessionById(chatSessionId) ?? null) : null;
+    if (existingSession && existingSession.projectId !== projectId) {
+      log.warn(
+        {
+          projectId,
+          sessionId: chatSessionId,
+          sessionProjectId: existingSession.projectId,
+        },
+        "Rejected cross-project chat session reuse",
+      );
+      return c.json({ error: "Chat session not found" }, 404);
+    }
     if (chatSessionId && !incomingVirtual && !existingSession) {
       log.debug("Provided sessionId=%s not found, will auto-create", chatSessionId);
       chatSessionId = null;
@@ -1367,7 +1392,11 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
           runtimeProfileId,
           runtimeSessionId: incomingVirtual.sessionId,
         });
-        broadcast({ type: "chat:session_created", payload: toChatSessionResponse(session) });
+        const response = toChatSessionResponse(session);
+        broadcast({
+          type: "chat:session_created",
+          payload: toChatSessionBroadcastPayload(response),
+        });
       } else {
         chatSessionId = null;
       }
@@ -1382,7 +1411,11 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
       });
       chatSessionId = session?.id ?? null;
       if (session) {
-        broadcast({ type: "chat:session_created", payload: toChatSessionResponse(session) });
+        const response = toChatSessionResponse(session);
+        broadcast({
+          type: "chat:session_created",
+          payload: toChatSessionBroadcastPayload(response),
+        });
       }
     }
 
@@ -1410,6 +1443,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
 
     if (chatSessionId && !attachments?.length) {
       createChatMessage({ sessionId: chatSessionId, role: "user", content: message });
+      broadcastChatSessionMessagesUpdated(chatSessionId, projectId);
     }
     if (chatSessionId) {
       updateChatSessionTimestamp(chatSessionId);
@@ -1441,6 +1475,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
         content: message,
         attachments: savedAttachments,
       });
+      broadcastChatSessionMessagesUpdated(chatSessionId, projectId);
     }
 
     const bypassPermissions = env.AGENT_BYPASS_PERMISSIONS;
@@ -1643,6 +1678,10 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
         runtimeProfileId,
         runtimeSessionId,
       });
+      broadcast({
+        type: "chat:session_updated",
+        payload: { id: chatSessionId, projectId },
+      });
       invalidateCache(sessionCacheKey(runtimeId, runtimeProfileId, project.rootPath));
       log.debug(
         {
@@ -1706,6 +1745,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
     // Persist each ordered assistant segment separately. Keeping the same
     // split shape as runtime replay makes mergeRuntimeAndDbMessages stable.
     if (chatSessionId) {
+      let createdAssistantMessage = false;
       for (const segment of assistantSegments) {
         const trimmed = segment.content.trim();
         if (!trimmed) continue;
@@ -1714,6 +1754,10 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
           role: "assistant",
           content: trimmed,
         });
+        createdAssistantMessage = true;
+      }
+      if (createdAssistantMessage) {
+        broadcastChatSessionMessagesUpdated(chatSessionId, projectId);
       }
     }
     if (chatSessionId) {
@@ -1766,6 +1810,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
       if (chatSessionId && partial) {
         createChatMessage({ sessionId: chatSessionId, role: "assistant", content: partial });
         updateChatSessionTimestamp(chatSessionId);
+        broadcastChatSessionMessagesUpdated(chatSessionId, projectId);
       }
       // Link the DB chat session to the runtime session the adapter started
       // before we aborted, so the next turn can resume instead of starting
@@ -1774,6 +1819,10 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
         updateChatSession(chatSessionId, {
           runtimeProfileId: runtimeProfileId ?? null,
           runtimeSessionId: runtimeSessionIdFromEvents,
+        });
+        broadcast({
+          type: "chat:session_updated",
+          payload: { id: chatSessionId, projectId },
         });
       }
       refreshRuntimeProfileLimitState({

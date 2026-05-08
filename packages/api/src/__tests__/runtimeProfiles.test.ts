@@ -21,6 +21,7 @@ const mockGetCodexAuthIdentity = vi.fn();
 const mockBuildCodexAuthFingerprint = vi.fn();
 const mockResolveClaudeProviderIdentity = vi.fn();
 const mockListCodexLimitHeadsForOverlayCall = vi.fn();
+const mockBroadcast = vi.fn();
 
 vi.mock("@aif/shared/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@aif/shared/server")>();
@@ -64,6 +65,10 @@ vi.mock("../services/runtime.js", () => ({
       validateConnection: (...args: unknown[]) => mockValidateConnection(...args),
       listModels: (...args: unknown[]) => mockListModels(...args),
     }),
+}));
+
+vi.mock("../ws.js", () => ({
+  broadcast: (...args: unknown[]) => mockBroadcast(...args),
 }));
 
 const { runtimeProfilesRouter } = await import("../routes/runtimeProfiles.js");
@@ -142,6 +147,7 @@ describe("runtimeProfiles API", () => {
     mockBuildCodexAuthFingerprint.mockReset();
     mockResolveClaudeProviderIdentity.mockReset();
     mockListCodexLimitHeadsForOverlayCall.mockReset();
+    mockBroadcast.mockReset();
     clearCodexOverlayCache();
     mockGetCodexAuthIdentity.mockResolvedValue(null);
     mockBuildCodexAuthFingerprint.mockReturnValue("codex-fp-default");
@@ -214,6 +220,10 @@ describe("runtimeProfiles API", () => {
     expect(createRes.status).toBe(201);
     const created = await createRes.json();
     expect(created.name).toBe("Team Claude");
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "runtime_profile:created",
+      payload: expect.objectContaining({ id: created.id, name: "Team Claude" }),
+    });
 
     const getRes = await app.request(`/runtime-profiles/${created.id}`);
     expect(getRes.status).toBe(200);
@@ -230,11 +240,19 @@ describe("runtimeProfiles API", () => {
     expect(updateRes.status).toBe(200);
     const updated = await updateRes.json();
     expect(updated.defaultModel).toBe("claude-sonnet-4-5");
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "runtime_profile:updated",
+      payload: expect.objectContaining({ id: created.id, defaultModel: "claude-sonnet-4-5" }),
+    });
 
     const deleteRes = await app.request(`/runtime-profiles/${created.id}`, {
       method: "DELETE",
     });
     expect(deleteRes.status).toBe(200);
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "runtime_profile:deleted",
+      payload: { id: created.id, projectId: null },
+    });
 
     const missingRes = await app.request(`/runtime-profiles/${created.id}`);
     expect(missingRes.status).toBe(404);

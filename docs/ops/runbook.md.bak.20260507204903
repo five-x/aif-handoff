@@ -13,10 +13,10 @@ Operational notes, rollout procedures, migration steps, and validation commands 
 
 ## Local Validation
 
-- Build: npm.cmd run build
-- Test: npm.cmd test
-- Lint: npm.cmd run lint
-- Run: npm.cmd run dev
+- Build: npm run build
+- Test: npm test
+- Lint: npm run lint
+- Run: npm run dev
 
 ## Secrets Boundary
 

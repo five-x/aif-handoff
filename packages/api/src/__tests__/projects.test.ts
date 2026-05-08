@@ -487,6 +487,32 @@ describe("projects API", () => {
     expect(body.rootPath).toBe("/tmp/demo-project");
   });
 
+  it("broadcasts project updates and deletions", async () => {
+    const db = testDb.current;
+    db.insert(projects)
+      .values({ id: "project-broadcast", name: "Broadcast", rootPath: "/tmp/broadcast" })
+      .run();
+
+    const updateRes = await app.request("/projects/project-broadcast", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Broadcast Updated", rootPath: "/tmp/broadcast" }),
+    });
+    expect(updateRes.status).toBe(200);
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "project:updated",
+      payload: expect.objectContaining({ id: "project-broadcast", name: "Broadcast Updated" }),
+    });
+
+    mockBroadcast.mockClear();
+    const deleteRes = await app.request("/projects/project-broadcast", { method: "DELETE" });
+    expect(deleteRes.status).toBe(200);
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "project:deleted",
+      payload: { id: "project-broadcast" },
+    });
+  });
+
   it("rejects foreign project-owned runtime profile defaults on create", async () => {
     testDb.current
       .insert(runtimeProfiles)

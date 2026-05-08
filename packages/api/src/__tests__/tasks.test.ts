@@ -2389,6 +2389,10 @@ describe("tasks API", () => {
       const created = await createRes.json();
       expect(created.message).toBe("Please update the API section in the plan");
       expect(created.attachments).toHaveLength(1);
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:comment_created",
+        payload: { id: created.id, taskId: "c-1", projectId: "test-project" },
+      });
 
       const listRes = await app.request("/tasks/c-1/comments");
       expect(listRes.status).toBe(200);

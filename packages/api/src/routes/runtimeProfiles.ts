@@ -40,6 +40,7 @@ import { getApiRuntimeModelDiscoveryService, getApiRuntimeRegistry } from "../se
 import { resolveCachedCodexOverlaySnapshot } from "../services/codexOverlayCache.js";
 import { createRateLimiter } from "../middleware/rateLimit.js";
 import { jsonValidator, queryValidator } from "../middleware/zodValidator.js";
+import { broadcast } from "../ws.js";
 
 const log = logger("runtime-profile-route");
 
@@ -602,7 +603,9 @@ runtimeProfilesRouter.post(
       { profileId: created.id, runtimeId: created.runtimeId, providerId: created.providerId },
       "[runtime-profile-route] Created runtime profile",
     );
-    return c.json(toRuntimeProfileResponse(created), 201);
+    const response = toRuntimeProfileResponse(created);
+    broadcast({ type: "runtime_profile:created", payload: response });
+    return c.json(response, 201);
   },
 );
 
@@ -634,7 +637,9 @@ runtimeProfilesRouter.put(
     }
     const updated = updateRuntimeProfile(id, body);
     if (!updated) return c.json({ error: "Failed to update runtime profile" }, 500);
-    return c.json(toRuntimeProfileResponse(updated));
+    const response = toRuntimeProfileResponse(updated);
+    broadcast({ type: "runtime_profile:updated", payload: response });
+    return c.json(response);
   },
 );
 
@@ -644,6 +649,10 @@ runtimeProfilesRouter.delete("/:id", mutationRateLimit, async (c) => {
   const existing = findRuntimeProfileById(id);
   if (!existing) return c.json({ error: "Runtime profile not found" }, 404);
   deleteRuntimeProfile(id);
+  broadcast({
+    type: "runtime_profile:deleted",
+    payload: { id, projectId: existing.projectId ?? null },
+  });
   return c.json({ success: true });
 });
 

@@ -3,6 +3,20 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ChatSession, ChatSessionMessage } from "@aif/shared/browser";
 import { api } from "@/lib/api";
 
+function isProjectScopedChatEvent(
+  event: Event,
+  projectId: string | null,
+): event is CustomEvent<{ id: string; projectId: string | null }> {
+  if (!projectId) return false;
+  const detail = (event as CustomEvent<unknown>).detail;
+  return (
+    detail !== null &&
+    typeof detail === "object" &&
+    "projectId" in detail &&
+    (detail as { projectId?: unknown }).projectId === projectId
+  );
+}
+
 export function useChatSessions(projectId: string | null) {
   const queryClient = useQueryClient();
   const [activeSessionScope, setActiveSessionScope] = useState<{
@@ -37,18 +51,23 @@ export function useChatSessions(projectId: string | null) {
     }
   }, [activeSessionId, projectId, resolvedSessionId]);
 
-  // Listen for WS events to invalidate sessions
+  // Listen for project-scoped WS events to invalidate sessions.
   useEffect(() => {
-    const invalidate = () => {
+    const invalidate = (event: Event) => {
+      if (!isProjectScopedChatEvent(event, projectId)) return;
       console.debug("[useChatSessions] Invalidating sessions on WS event");
       queryClient.invalidateQueries({ queryKey: ["chatSessions", projectId] });
     };
 
     window.addEventListener("chat:session_created", invalidate);
+    window.addEventListener("chat:session_updated", invalidate);
     window.addEventListener("chat:session_deleted", invalidate);
+    window.addEventListener("chat:session_messages_updated", invalidate);
     return () => {
       window.removeEventListener("chat:session_created", invalidate);
+      window.removeEventListener("chat:session_updated", invalidate);
       window.removeEventListener("chat:session_deleted", invalidate);
+      window.removeEventListener("chat:session_messages_updated", invalidate);
     };
   }, [projectId, queryClient]);
 

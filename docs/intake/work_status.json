@@ -3,6 +3,14 @@
   "updated": "2026-05-08",
   "tasks": [
     {
+      "taskId": "work-20260508-fix-realtime-ui-updates",
+      "title": "Fix Realtime UI Update Coverage",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260508-fix-realtime-ui-updates"
+    },
+    {
       "taskId": "work-20260508-harden-planner-replan-loop",
       "title": "Harden Planner Replan Loop For Local Runtime Output",
       "status": "done",

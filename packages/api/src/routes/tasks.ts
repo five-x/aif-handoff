@@ -333,10 +333,19 @@ tasksRouter.post("/:id/comments", jsonValidator(createTaskCommentSchema), async 
         commentId: created.id,
       });
       const updated = updateComment(created.id, { attachments: persisted });
-      return c.json(toCommentResponse(updated ?? created), 201);
+      const comment = updated ?? created;
+      broadcast({
+        type: "task:comment_created",
+        payload: { id: comment.id, taskId: id, projectId: task.projectId },
+      });
+      return c.json(toCommentResponse(comment), 201);
     }
   }
 
+  broadcast({
+    type: "task:comment_created",
+    payload: { id: created.id, taskId: id, projectId: task.projectId },
+  });
   return c.json(toCommentResponse(created), 201);
 });
 
