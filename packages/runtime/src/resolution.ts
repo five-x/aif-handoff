@@ -27,6 +27,9 @@ export interface RuntimeResolutionEnv {
   OPENROUTER_API_KEY?: string;
   OPENROUTER_BASE_URL?: string;
   OPENROUTER_MODEL?: string;
+  QWEN_API_KEY?: string;
+  QWEN_BASE_URL?: string;
+  QWEN_MODEL?: string;
   CODEX_CLI_PATH?: string;
   [key: string]: string | undefined;
 }
@@ -99,6 +102,9 @@ function inferDefaultApiKeyEnvVar(
   if (runtime === "openrouter" || provider === "openrouter") {
     return "OPENROUTER_API_KEY";
   }
+  if (runtime === "qwen-local-agent" || provider === "qwen") {
+    return "QWEN_API_KEY";
+  }
   return "OPENAI_API_KEY";
 }
 
@@ -117,6 +123,9 @@ function inferDefaultBaseUrl(
   if (runtime === "openrouter" || provider === "openrouter") {
     return normalizeString(env.OPENROUTER_BASE_URL) ?? "https://openrouter.ai/api/v1";
   }
+  if (runtime === "qwen-local-agent" || provider === "qwen") {
+    return normalizeString(env.QWEN_BASE_URL);
+  }
 
   return normalizeString(env.OPENAI_BASE_URL);
 }
@@ -124,6 +133,7 @@ function inferDefaultBaseUrl(
 function inferDefaultTransport(runtimeId: string): RuntimeTransport {
   if (runtimeId.toLowerCase() === "codex") return RuntimeTransport.CLI;
   if (runtimeId.toLowerCase() === "openrouter") return RuntimeTransport.API;
+  if (runtimeId.toLowerCase() === "qwen-local-agent") return RuntimeTransport.API;
   return RuntimeTransport.SDK;
 }
 
@@ -200,6 +210,9 @@ function inferDefaultModel(
 
   if (runtime === "openrouter" || provider === "openrouter") {
     return normalizeString(env.OPENROUTER_MODEL);
+  }
+  if (runtime === "qwen-local-agent" || provider === "qwen") {
+    return normalizeString(env.QWEN_MODEL);
   }
 
   return null;
@@ -359,7 +372,7 @@ export function validateResolvedRuntimeProfile(
 
   // API transport requires both key and base URL
   if (resolved.transport === RuntimeTransport.API) {
-    if (!resolved.apiKey) {
+    if (!resolved.apiKey && resolved.runtimeId.toLowerCase() !== "qwen-local-agent") {
       warnings.push(
         `Missing API key env var ${resolved.apiKeyEnvVar ?? "unknown"} for runtime "${resolved.runtimeId}" (API transport)`,
       );

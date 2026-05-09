@@ -59,13 +59,14 @@ The API exposes effective selection endpoints:
 
 ## Supported Runtimes
 
-| Runtime      | Provider     | Transports                | Resume                   | Session Fork     | Sessions             | Agent Defs    | Usage Reporting                          | Light Model         | Status                    |
-| ------------ | ------------ | ------------------------- | ------------------------ | ---------------- | -------------------- | ------------- | ---------------------------------------- | ------------------- | ------------------------- |
-| `claude`     | `anthropic`  | SDK, CLI, API             | Yes (SDK/CLI)            | Yes (SDK/CLI)    | Yes (SDK/CLI)        | Yes (SDK/CLI) | `FULL` (all transports)                  | `claude-haiku-3-5`  | Built-in                  |
-| `codex`      | `openai`     | SDK, CLI, App Server, API | Yes (SDK/CLI/App Server) | Yes (App Server) | Yes (SDK/App Server) | No            | `FULL` SDK/API, `PARTIAL` CLI/App Server | default             | Built-in                  |
-| `opencode`   | `opencode`   | API                       | Yes                      | No               | Yes                  | No            | `NONE`                                   | null (configurable) | Built-in                  |
-| `openrouter` | `openrouter` | API                       | No                       | No               | No                   | No            | `FULL`                                   | null (configurable) | Built-in                  |
-| Custom       | Any          | Any                       | Configurable             | Configurable     | Configurable         | Configurable  | Must declare                             | Configurable        | Via `AIF_RUNTIME_MODULES` |
+| Runtime            | Provider     | Transports                | Resume                   | Session Fork     | Sessions             | Agent Defs    | Usage Reporting                          | Light Model         | Status                          |
+| ------------------ | ------------ | ------------------------- | ------------------------ | ---------------- | -------------------- | ------------- | ---------------------------------------- | ------------------- | ------------------------------- |
+| `claude`           | `anthropic`  | SDK, CLI, API             | Yes (SDK/CLI)            | Yes (SDK/CLI)    | Yes (SDK/CLI)        | Yes (SDK/CLI) | `FULL` (all transports)                  | `claude-haiku-3-5`  | Built-in                        |
+| `codex`            | `openai`     | SDK, CLI, App Server, API | Yes (SDK/CLI/App Server) | Yes (App Server) | Yes (SDK/App Server) | No            | `FULL` SDK/API, `PARTIAL` CLI/App Server | default             | Built-in                        |
+| `opencode`         | `opencode`   | API                       | Yes                      | No               | Yes                  | No            | `NONE`                                   | null (configurable) | Built-in                        |
+| `openrouter`       | `openrouter` | API                       | No                       | No               | No                   | No            | `FULL`                                   | null (configurable) | Built-in                        |
+| `qwen-local-agent` | `qwen`       | API                       | No                       | No               | No                   | No            | `PARTIAL`                                | null (configurable) | Built-in, explicit profile only |
+| Custom             | Any          | Any                       | Configurable             | Configurable     | Configurable         | Configurable  | Must declare                             | Configurable        | Via `AIF_RUNTIME_MODULES`       |
 
 Capabilities are **transport-aware**: the same adapter may expose different capabilities depending on the selected transport. For example, Codex supports resume on SDK/CLI/App Server, session fork only on App Server, and session discovery on SDK/App Server. Use `resolveAdapterCapabilities(adapter, transport)` to get the effective set.
 
@@ -81,6 +82,7 @@ Runtime-limit auto-pause depends on what each provider/transport can actually su
 | Codex SDK / CLI / App Server | Codex session `token_count.rate_limits` | `exact`     | API background indexing tails persisted Codex session logs into SQLite (`codex_limit_heads`/`codex_limit_history`); `/runtime-profiles` overlays read from that index instead of per-request filesystem scans |
 | OpenRouter API               | OpenAI-compatible rate-limit headers    | `exact`     | Uses `x-ratelimit-*` / `retry-after` when the upstream provides them                                                                                                                                          |
 | OpenCode API                 | structured error metadata               | `heuristic` | Preserves `resetAt` / retry hints on rate-limit errors, but no proactive normalized snapshot is emitted today                                                                                                 |
+| Qwen Local Agent API         | none                                    | none        | The first implementation records token usage only when the llama.cpp-compatible response includes usage fields                                                                                                |
 
 Auto-pause semantics follow the precision:
 
@@ -405,6 +407,59 @@ Environment variables:
 - `OPENROUTER_APP_TITLE` — recommended app title header for rankings
 
 Model IDs use the `provider/model` format (e.g. `anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.0-flash-001`). Some models are available for free (suffixed with `:free`).
+
+### Qwen Local Agent (API)
+
+`qwen-local-agent` is a dedicated AIF-controlled tool loop for local Qwen llama.cpp endpoints that accept OpenAI-compatible chat completions with function-style tools. Use it when a local endpoint rejects Codex App Server's Responses tool schema with errors such as `'type' of tool must be 'function'`.
+
+```json
+{
+  "projectId": "PROJECT_UUID",
+  "name": "Qwen Local Agent Canary",
+  "runtimeId": "qwen-local-agent",
+  "providerId": "qwen",
+  "transport": "api",
+  "baseUrl": "http://protected-qwen-endpoint:8003/v1",
+  "apiKeyEnvVar": "QWEN_API_KEY",
+  "defaultModel": "Qwen3-32B-Q4_K_M.gguf",
+  "options": {
+    "toolTimeoutMs": 30000,
+    "maxToolTurns": 12,
+    "maxOutputChars": 12000
+  },
+  "enabled": true
+}
+```
+
+Operational notes:
+
+- Keep first profiles explicit and project-scoped. Do not make this runtime a system or project default until a canary proves real file, shell, git, and commit execution in the target project.
+- `transport` should be set to `api` in profiles for readability. Runtime resolution also defaults `qwen-local-agent` to API.
+- `baseUrl` may come from the profile or `QWEN_BASE_URL`.
+- `defaultModel` may come from the profile or `QWEN_MODEL`.
+- `QWEN_API_KEY` is optional for protected local deployments that authenticate at the network layer. If it is present, the adapter sends it as a bearer token.
+- The adapter owns the repository tool loop. It does not start Codex App Server, does not use Codex Responses tools, and does not modify raw inference endpoints.
+
+Safety model:
+
+- All file paths are resolved inside `projectRoot`; absolute paths and `..` escapes are rejected.
+- Secret-like paths such as `.env`, private keys, credential/token files, and common secret directories are denied for file and shell tools.
+- VCS control paths such as `.git/**` are denied for file, patch, shell, and git staging tools.
+- `run_shell` is a structured command tool, not an arbitrary shell string. It uses `spawn` with `shell: false`, a small command allowlist, cwd enforcement, timeout handling, sanitized child-process environment, and output redaction.
+- Shell working directories are validated with the same no-symlink/no-junction real-path checks as file tools. `ls` accepts only safe flags; path arguments are intentionally rejected in favor of `list_files` or `cwd`.
+- Generic interpreters and file-content commands are intentionally not exposed through `run_shell` in the first implementation. Use `read_file` for bounded file reads and `git_status` / `git_commit` for git actions.
+- Package-manager script execution is intentionally not exposed through `run_shell`; editable project scripts can invoke interpreters and shell snippets, so local validation should use a separate trusted runtime path.
+- File, patch, and git path handling rejects symlink/junction components and validates real paths under the real project root before reading, writing, patching, or staging files.
+- `apply_patch` rejects Git-quoted patch paths, unquoted whitespace in patch paths, symlink file modes, and executable file modes.
+- `git_commit` stages explicit validated files only and disables Git hooks for the commit operation.
+- Tool calls, sanitized arguments, exit codes, touched files, and final results are emitted as runtime events and flow through existing task activity logging. Unknown tool arguments are dropped from event input, and retained argument values are recursively redacted before logging.
+
+Canary guidance:
+
+1. Create a project-scoped non-default profile for the target project.
+2. Run an explicit canary task that asks Qwen local agent to create `audit/test-agent-runtime.md`, inspect workspace state, run git status, and commit only that file.
+3. Verify the resulting commit in the project workspace.
+4. Verify existing raw inference services remain unchanged.
 
 ### OpenCode (API)
 

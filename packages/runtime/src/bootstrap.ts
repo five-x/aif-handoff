@@ -2,6 +2,7 @@ import { createClaudeRuntimeAdapter } from "./adapters/claude/index.js";
 import { createCodexRuntimeAdapter } from "./adapters/codex/index.js";
 import { createOpenCodeRuntimeAdapter } from "./adapters/opencode/index.js";
 import { createOpenRouterRuntimeAdapter } from "./adapters/openrouter/index.js";
+import { createQwenLocalAgentRuntimeAdapter } from "./adapters/qwenLocalAgent/index.js";
 import {
   createRuntimeRegistry,
   type RuntimeRegistry,
@@ -36,6 +37,7 @@ export async function bootstrapRuntimeRegistry(
       createCodexRuntimeAdapter(),
       createOpenCodeRuntimeAdapter(),
       createOpenRouterRuntimeAdapter(),
+      createQwenLocalAgentRuntimeAdapter(),
     ],
     logger: options.logger,
     usageSink: options.usageSink,

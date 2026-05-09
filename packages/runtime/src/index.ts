@@ -240,3 +240,8 @@ export type {
   CreateOpenRouterRuntimeAdapterOptions,
   OpenRouterAdapterLogger,
 } from "./adapters/openrouter/index.js";
+
+export type {
+  CreateQwenLocalAgentRuntimeAdapterOptions,
+  QwenLocalAgentAdapterLogger,
+} from "./adapters/qwenLocalAgent/index.js";

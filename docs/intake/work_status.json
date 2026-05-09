@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-08",
+  "updated": "2026-05-09",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -25,6 +25,14 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260508-prevent-hallucinated-zero-delta-verification"
+    },
+    {
+      "taskId": "work-20260509-implement-qwen-local-agent-runtime",
+      "title": "Implement Qwen Local Agent Runtime",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260509-implement-qwen-local-agent-runtime"
     }
   ]
 }
