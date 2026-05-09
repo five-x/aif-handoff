@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { RuntimeExecutionError, type RuntimeLimitSnapshot } from "@aif/runtime";
+import {
+  RuntimeCapabilityError,
+  RuntimeExecutionError,
+  type RuntimeLimitSnapshot,
+} from "@aif/runtime";
 import { resetEnvCache } from "@aif/shared";
 
 // Flag defaults to false (opt-in). These tests assert on limitSnapshot
@@ -84,6 +88,25 @@ describe("classifyStageError", () => {
   });
 
   // --- blocked_external ---
+
+  it("returns blocked_external without retry for runtime capability failures", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeCapabilityError("Runtime capability check failed: supportsRepositoryTools"),
+        retryCount: 4,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(4);
+      expect(result.blockedReason).toBe(
+        "Runtime capability check failed. Check the configured runtime profile for this stage.",
+      );
+    }
+  });
 
   it("returns blocked_external for rate limit errors", () => {
     const result = classifyStageError(

@@ -43,6 +43,7 @@ const API_CAPABILITIES: RuntimeCapabilities = {
   supportsSessionFork: false,
   supportsSessionList: false,
   supportsAgentDefinitions: false,
+  supportsRepositoryTools: false,
   supportsStreaming: true,
   supportsModelDiscovery: true,
   supportsApprovals: false,

@@ -29,6 +29,7 @@ const API_CAPABILITIES = {
   supportsSessionList: false,
   supportsAgentDefinitions: false,
   supportsAifSkillCommands: false,
+  supportsRepositoryTools: true,
   supportsStreaming: false,
   supportsModelDiscovery: true,
   supportsApprovals: false,

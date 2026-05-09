@@ -318,6 +318,49 @@ describe("executeSubagentQuery attribution", () => {
       }),
     );
   });
+
+  it("rejects text-only codex API profiles when repository tools are required", async () => {
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-codex-api-qwen",
+        runtimeId: "codex",
+        providerId: "openai",
+        transport: "api",
+        defaultModel: "Qwen3-32B-Q4_K_M.gguf",
+      } as never,
+      taskRuntimeProfileId: "profile-codex-api-qwen",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+    queryMock.mockImplementation(async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        result: "should not run",
+        usage: {},
+        total_cost_usd: 0,
+      };
+    });
+
+    await expect(
+      executeSubagentQuery({
+        taskId: "task-codex-api-qwen",
+        projectRoot: "/tmp/project",
+        agentName: "implement-coordinator",
+        prompt: "run",
+        workflowSpec: {
+          workflowKind: "implementer",
+          promptInput: { prompt: "run" },
+          requiredCapabilities: ["supportsRepositoryTools"],
+          fallbackStrategy: "none",
+          sessionReusePolicy: "resume_if_available",
+        },
+      }),
+    ).rejects.toThrow(/Runtime capability check failed/);
+
+    expect(queryMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("subagent app-default runtime resolution", () => {

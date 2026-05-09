@@ -26,6 +26,13 @@ function codes(result: ReturnType<typeof evaluateTaskCompletionEvidence>): strin
   return result.issues.map((issue) => issue.code);
 }
 
+const IMPLEMENTATION_TOOL_ACTIVITY = [
+  "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started (runtime=qwen-local-agent, transport=api, model=Qwen3)",
+  "[2026-05-09T00:00:01.000Z] Tool: read_file README.md",
+  "[2026-05-09T00:00:02.000Z] Tool: write_file reports/audit.md",
+  "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator complete (runtime=qwen-local-agent, transport=api, model=Qwen3)",
+].join("\n");
+
 describe("taskCompletionEvidence", () => {
   it("blocks generic audit plans with no repository delta", () => {
     const root = initRepo();
@@ -226,12 +233,21 @@ describe("taskCompletionEvidence", () => {
       cwd: root,
       stdio: "ignore",
     });
+    execFileSync("git", ["checkout", "-b", "feature/root-ref-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
     mkdirSync(join(root, "reports"), { recursive: true });
     writeFileSync(
       join(root, "reports", "audit.md"),
       "Findings cite `README.md` and package.json.\n",
       "utf8",
     );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
 
     const result = evaluateTaskCompletionEvidence({
       projectRoot: root,
@@ -239,6 +255,7 @@ describe("taskCompletionEvidence", () => {
         id: "audit-root-level-refs",
         title: "Audit generated findings",
         plan: "## Plan\n- Validate root files\n- Write report",
+        agentActivityLog: IMPLEMENTATION_TOOL_ACTIVITY,
       },
     });
 
@@ -353,6 +370,7 @@ describe("taskCompletionEvidence", () => {
         title: "Full project audit",
         description: "Done only when the report is committed.",
         plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: IMPLEMENTATION_TOOL_ACTIVITY,
       },
     });
 
@@ -362,6 +380,79 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.committedChangedFiles).toContain("reports/audit.md");
     expect(result.evidence.uncommittedReportArtifactFiles).toEqual([]);
     expect(result.issues).toEqual([]);
+  });
+
+  it("blocks risky committed reports without latest implementation-stage tool activity", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-no-tool"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-committed-report-no-tool",
+        title: "Full project audit",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: [
+          "[2026-05-09T00:00:00.000Z] Agent: plan-coordinator started",
+          "[2026-05-09T00:00:01.000Z] Tool: read_file README.md",
+          "[2026-05-09T00:00:02.000Z] Agent: plan-coordinator complete",
+          "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator started (runtime=qwen-local-agent)",
+          "[2026-05-09T00:00:04.000Z] Agent: implement-coordinator complete (runtime=qwen-local-agent)",
+        ].join("\n"),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.implementationToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_implementation_tool_activity");
+  });
+
+  it("ignores stale implementation tool activity before the latest implementer retry", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-stale-tool"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-stale-tool",
+        title: "Full project audit",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: [
+          "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started (runtime=qwen-local-agent)",
+          "[2026-05-09T00:00:01.000Z] Tool: read_file README.md",
+          "[2026-05-09T00:00:02.000Z] Agent: implement-coordinator failed (runtime=qwen-local-agent)",
+          "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator started (runtime=qwen-local-agent)",
+          "[2026-05-09T00:00:04.000Z] Agent: implement-checklist-sync started (runtime=qwen-local-agent)",
+          "[2026-05-09T00:00:05.000Z] Tool: read_file .ai-factory/PLAN.md",
+          "[2026-05-09T00:00:06.000Z] Agent: implement-checklist-sync complete (runtime=qwen-local-agent)",
+          "[2026-05-09T00:00:07.000Z] Agent: implement-coordinator complete (runtime=qwen-local-agent)",
+        ].join("\n"),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.implementationToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_implementation_tool_activity");
   });
 
   it("blocks unrelated dirty report artifacts alongside a valid committed report", () => {

@@ -15,6 +15,7 @@ import {
 import { logActivity } from "./hooks.js";
 import {
   findBranchIsolationError,
+  isRuntimeCapabilityFailure,
   findRuntimeExecutionError,
   isExternalFailure,
   isFastRetryableFailure,
@@ -151,6 +152,38 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
         projectRoot: branchErr.projectRoot,
       },
       "Subagent stage aborted due to branch isolation failure",
+    );
+    return {
+      kind: "blocked_external",
+      blockedReason,
+      retryAfter: null,
+      retryAfterSource: "none",
+      retryCount: input.retryCount ?? 0,
+      limitSnapshot: null,
+    };
+  }
+
+  if (isRuntimeCapabilityFailure(err)) {
+    const blockedReason =
+      "Runtime capability check failed. Check the configured runtime profile for this stage.";
+    logActivity(
+      taskId,
+      "Agent",
+      `coordinator moved to blocked_external from ${sourceStatus} at ${stageLabel}; retryAfter=manual; source=none; reason=${truncateReason(blockedReason)}`,
+    );
+    log.error(
+      {
+        taskId,
+        stage: stageLabel,
+        retryAfter: null,
+        retryAfterSource: "none",
+        errorName: err instanceof Error ? err.name : typeof err,
+        errorMessage:
+          err instanceof Error
+            ? redactProviderTextForLogs(err.message)
+            : redactProviderTextForLogs(String(err)),
+      },
+      "Subagent failed runtime capability check, task requires manual action",
     );
     return {
       kind: "blocked_external",

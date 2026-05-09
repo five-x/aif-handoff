@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projects, taskComments, tasks } from "@aif/shared";
@@ -80,8 +80,9 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain("No pending tasks detected in plan");
   });
 
-  it("writes a deterministic report for diagnostic-only fallback plans", async () => {
+  it("runs the runtime for diagnostic-only fallback plans instead of writing a local report", async () => {
     const db = testDb.current;
+    queryMock.mockReturnValueOnce(streamSuccess("Implementation done"));
     writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
     writeFileSync(join(projectRoot, "pyproject.toml"), '[project]\nname = "test"\n');
     const description =
@@ -108,17 +109,19 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-diagnostic-report", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain("/aif-implement @.ai-factory/PLAN.md");
+    expect(implementCall.prompt).toContain("Plan path:\n@.ai-factory/PLAN.md");
     const reportPath = join(projectRoot, "audit/2026-05-08-initial-audit.md");
-    expect(existsSync(reportPath)).toBe(true);
-    const report = readFileSync(reportPath, "utf8");
-    expect(report).toContain("Diagnostic Report");
-    expect(report).toContain("`README.md`");
-    expect(report).toContain("No fixes were implemented");
+    expect(existsSync(reportPath)).toBe(false);
 
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-diagnostic-report")).get();
-    expect(updatedTask?.implementationLog).toContain("Deterministic diagnostic report generated");
-    expect(updatedTask?.plan).toContain("- [x] Keep the run diagnostic-only");
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain(
+      "Deterministic diagnostic report generated",
+    );
+    expect(updatedTask?.plan).toContain("- [ ] Keep the run diagnostic-only");
   });
 
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {

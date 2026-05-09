@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260509-implement-qwen-local-agent-runtime::entity-capsule
+memory_id: task::aif-handoff::work::work-20260509-make-audit-pipeline-toolful::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260509-implement-qwen-local-agent-runtime
-source_path: docs/rdpi/work/work-20260509-implement-qwen-local-agent-runtime
+task_id: work-20260509-make-audit-pipeline-toolful
+source_path: docs/rdpi/work/work-20260509-make-audit-pipeline-toolful
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -25,10 +25,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260509-implement-qwen-local-agent-runtime/research.md
-- docs/rdpi/work/work-20260509-implement-qwen-local-agent-runtime/design.md
-- docs/rdpi/work/work-20260509-implement-qwen-local-agent-runtime/plan.md
-- docs/rdpi/work/work-20260509-implement-qwen-local-agent-runtime/result.md
+- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/research.md
+- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/design.md
+- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/plan.md
+- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/result.md
   created_at: 2026-05-09
   last_verified_at: 2026-05-09
 
@@ -36,7 +36,7 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260509-implement-qwen-local-agent-runtime.
+Current capsule for entity aif-handoff, refreshed by task work-20260509-make-audit-pipeline-toolful.
 
 # Why it matters
 

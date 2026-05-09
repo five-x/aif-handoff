@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, relative, resolve, sep } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   findProjectById,
   findTaskById,
@@ -11,7 +11,6 @@ import {
 import {
   logger,
   formatAttachmentsForPrompt,
-  findDeterministicDiagnosticReportPath,
   looksLikeFullPlanUpdate,
   getProjectConfig,
 } from "@aif/shared";
@@ -96,183 +95,6 @@ function readCanonicalPlan(
   }
 
   return null;
-}
-
-function normalizeRelativeReportPath(path: string): string {
-  return path
-    .replaceAll("\\", "/")
-    .replace(/^\.\/+/, "")
-    .replace(/^\/+/, "")
-    .replace(/[),.;\]]+$/g, "");
-}
-
-function resolveInsideProject(projectRoot: string, relativePath: string): string | null {
-  const normalized = normalizeRelativeReportPath(relativePath);
-  if (!normalized || normalized.includes("\0") || /^[A-Za-z]:/.test(normalized)) return null;
-  const absPath = resolve(projectRoot, normalized);
-  const rel = relative(projectRoot, absPath);
-  if (rel === "" || rel.startsWith("..") || rel.includes(`..${sep}`)) return null;
-  return absPath;
-}
-
-function collectProjectInventory(projectRoot: string, maxFiles = 24): string[] {
-  const ignoredDirectories = new Set([
-    ".git",
-    ".pytest_cache",
-    ".venv",
-    "coverage",
-    "dist",
-    "node_modules",
-  ]);
-  const discovered: string[] = [];
-  const queue: Array<{ dir: string; depth: number }> = [{ dir: projectRoot, depth: 0 }];
-
-  while (queue.length > 0 && discovered.length < maxFiles * 3) {
-    const current = queue.shift();
-    if (!current) break;
-
-    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
-    try {
-      entries = readdirSync(current.dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      const absPath = resolve(current.dir, entry.name);
-      const relPath = normalizeRelativeReportPath(relative(projectRoot, absPath));
-      if (!relPath || ignoredDirectories.has(entry.name)) continue;
-      if (entry.isDirectory()) {
-        if (current.depth < 2) queue.push({ dir: absPath, depth: current.depth + 1 });
-        continue;
-      }
-      if (entry.isFile()) discovered.push(relPath);
-    }
-  }
-
-  const priority = [
-    "AGENTS.md",
-    "README.md",
-    "package.json",
-    "pyproject.toml",
-    ".ai-factory/config.yaml",
-    ".ai-factory/ROADMAP.md",
-  ];
-  const discoveredSet = new Set(discovered);
-  return [
-    ...priority.filter((path) => discoveredSet.has(path)),
-    ...discovered.filter((path) => !priority.includes(path)),
-  ].slice(0, maxFiles);
-}
-
-function markChecklistComplete(planText: string): string {
-  return planText.replace(/^(\s*[-*]\s+)\[ \]/gm, "$1[x]");
-}
-
-function isDeterministicDiagnosticPlan(planText: string | null | undefined): boolean {
-  const plan = planText?.trim() ?? "";
-  return (
-    /^## Diagnostic-only plan\b/m.test(plan) &&
-    /\bReport artifact:\s*`[^`]+`/i.test(plan) &&
-    /\bdo not implement fixes\b/i.test(plan)
-  );
-}
-
-function buildDeterministicDiagnosticReport(input: {
-  task: TaskRow;
-  projectRoot: string;
-  reportPath: string;
-  evidencePaths: string[];
-}): string {
-  const nowIso = new Date().toISOString();
-  const primaryEvidencePath = input.evidencePaths[0] ?? input.reportPath;
-  const evidenceLines =
-    input.evidencePaths.length > 0
-      ? input.evidencePaths.map((path) => {
-          let sizeText = "";
-          try {
-            sizeText = ` (${statSync(resolve(input.projectRoot, path)).size} bytes)`;
-          } catch {
-            sizeText = "";
-          }
-          return `- \`${path}\` exists${sizeText}.`;
-        })
-      : [`- \`${input.reportPath}\` exists as the generated report artifact.`];
-
-  return [
-    "# Diagnostic Report",
-    "",
-    `Task: ${input.task.title}`,
-    `Task ID: ${input.task.id}`,
-    `Report artifact: \`${input.reportPath}\``,
-    `Generated at: ${nowIso}`,
-    "",
-    "## Scope",
-    "- Diagnostic-only repository inventory report.",
-    "- No fixes were implemented, no source files were patched, and no child implementation tasks were created.",
-    "",
-    "## Evidence Checked",
-    ...evidenceLines,
-    "",
-    "## Findings",
-    "",
-    "### AUDIT-001: No blocking issue found by deterministic inventory check",
-    "- Severity: informational",
-    `- Exact existing file path: \`${primaryEvidencePath}\``,
-    "- Line/function/symbol: N/A",
-    `- Evidence: Repository inventory confirmed the evidence path \`${primaryEvidencePath}\` exists. Additional checked paths are listed above.`,
-    "- Risk: No immediate blocking risk was identified by this inventory-only diagnostic pass.",
-    "- Proposed fix: No code change. Use a targeted follow-up audit if deeper semantic review is required.",
-    "- Confidence: medium",
-    "- Verification command or manual check: `find . -maxdepth 2 -type f | sort` from the project root.",
-    "",
-    "## Diagnostic Constraint",
-    "This report records evidence only. It does not implement fixes or create follow-up implementation tasks.",
-  ].join("\n");
-}
-
-function writeDeterministicDiagnosticReportIfAvailable(input: {
-  task: TaskRow;
-  projectRoot: string;
-  planText: string | null;
-}): { implementationLog: string; planText: string } | null {
-  if (!isDeterministicDiagnosticPlan(input.planText)) return null;
-
-  const reportPath = findDeterministicDiagnosticReportPath({
-    task: input.task,
-    extraText: [input.planText],
-  });
-  if (!reportPath) return null;
-
-  const normalizedReportPath = normalizeRelativeReportPath(reportPath);
-  const reportAbsPath = resolveInsideProject(input.projectRoot, normalizedReportPath);
-  if (!reportAbsPath) return null;
-
-  const evidencePaths = collectProjectInventory(input.projectRoot).filter(
-    (path) => path !== normalizedReportPath,
-  );
-  const reportText = buildDeterministicDiagnosticReport({
-    task: input.task,
-    projectRoot: input.projectRoot,
-    reportPath: normalizedReportPath,
-    evidencePaths,
-  });
-
-  mkdirSync(dirname(reportAbsPath), { recursive: true });
-  writeFileSync(reportAbsPath, `${reportText}\n`, "utf8");
-
-  const implementationLog = [
-    "Deterministic diagnostic report generated.",
-    `Report artifact: ${normalizedReportPath}`,
-    "",
-    "Evidence paths:",
-    ...(evidencePaths.length > 0 ? evidencePaths.map((path) => `- ${path}`) : ["- none"]),
-  ].join("\n");
-
-  return {
-    implementationLog,
-    planText: markChecklistComplete(input.planText ?? ""),
-  };
 }
 
 function getChecklistProgress(planText: string | null): {
@@ -396,32 +218,6 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     ? formatAutoReviewStateForPrompt(task.autoReviewState)
     : "No persisted blocking findings snapshot.";
 
-  const deterministicDiagnosticReport = writeDeterministicDiagnosticReportIfAvailable({
-    task,
-    projectRoot,
-    planText: selectedPlan,
-  });
-  if (deterministicDiagnosticReport) {
-    const nowIso = new Date().toISOString();
-    persistTaskPlanForTask({
-      taskId,
-      planText: deterministicDiagnosticReport.planText,
-      projectRoot,
-      isFix: task.isFix,
-      planPath: task.planPath,
-      updatedAt: nowIso,
-    });
-    setTaskFields(taskId, {
-      implementationLog: deterministicDiagnosticReport.implementationLog,
-      reworkRequested: false,
-      lastHeartbeatAt: nowIso,
-      updatedAt: nowIso,
-    });
-    logActivity(taskId, "Agent", "Deterministic diagnostic report generated");
-    log.info({ taskId }, "Implementer used deterministic diagnostic report fallback");
-    return;
-  }
-
   if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
     const nowIso = new Date().toISOString();
     const noOpResult =
@@ -525,7 +321,9 @@ Execution rules:
   const workflowSpec = createRuntimeWorkflowSpec({
     workflowKind: "implementer",
     prompt,
-    requiredCapabilities: useSubagents ? ["supportsAgentDefinitions"] : [],
+    requiredCapabilities: useSubagents
+      ? ["supportsAgentDefinitions", "supportsRepositoryTools"]
+      : ["supportsRepositoryTools"],
     agentDefinitionName: useSubagents ? AGENT_NAME : undefined,
     fallbackSlashCommand: implementSlashCommand,
     fallbackStrategy: useSubagents ? "slash_command" : "none",

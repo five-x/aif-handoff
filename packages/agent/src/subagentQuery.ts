@@ -31,6 +31,7 @@ import {
   resolveAdapterCapabilities,
   resolveRuntimeProfile,
   resolveRuntimePromptPolicy,
+  RuntimeCapabilityError,
   RuntimeExecutionError,
   RUNTIME_TRUST_TOKEN,
   UsageSource,
@@ -84,12 +85,27 @@ function findRuntimeExecutionError(error: unknown): RuntimeExecutionError | null
   return null;
 }
 
+function findRuntimeCapabilityError(error: unknown): RuntimeCapabilityError | null {
+  if (error instanceof RuntimeCapabilityError) {
+    return error;
+  }
+  if (error instanceof Error && "cause" in error && error.cause) {
+    return findRuntimeCapabilityError(error.cause);
+  }
+  return null;
+}
+
 function buildSanitizedSubagentError(
   error: unknown,
   safeReason: ReturnType<typeof mapSafeRuntimeErrorReason>,
   providerId?: string | null,
 ): Error {
   const runtimeError = findRuntimeExecutionError(error);
+  if (!runtimeError && findRuntimeCapabilityError(error)) {
+    return new RuntimeCapabilityError(
+      "Runtime capability check failed. Check the configured runtime profile for this stage.",
+    );
+  }
   if (!runtimeError) {
     return new Error(safeReason.reason);
   }

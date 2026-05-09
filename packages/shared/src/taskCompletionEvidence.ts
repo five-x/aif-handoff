@@ -9,6 +9,7 @@ export type TaskCompletionIssueCode =
   | "missing_report_artifact"
   | "uncommitted_report_artifact"
   | "deterministic_fallback_report"
+  | "missing_implementation_tool_activity"
   | "invalid_or_missing_file_references"
   | "branch_isolation"
   | "manual_review_required";
@@ -47,6 +48,7 @@ export interface TaskCompletionEvidenceResult {
     committedReportRequired: boolean;
     uncommittedReportArtifactFiles: string[];
     deterministicFallbackReport: boolean;
+    implementationToolActivityCount: number;
     referencedPaths: string[];
     missingReferencedPaths: string[];
     existingReferencedPaths: string[];
@@ -289,6 +291,35 @@ function hasDeterministicFallbackReport(
   );
 }
 
+function countLatestImplementationToolActivity(
+  agentActivityLog: string | null | undefined,
+): number {
+  if (!agentActivityLog) return 0;
+  const lines = agentActivityLog.split(/\r?\n/);
+  const mainImplementerStart = /\]\s+Agent:\s+(?:implement-coordinator|aif-implement)\s+started\b/i;
+  const anyAgentStart = /\]\s+Agent:\s+.+\s+started\b/i;
+  const mainImplementerEnd =
+    /\]\s+Agent:\s+(?:implement-coordinator|aif-implement)\s+(?:complete|failed)\b/i;
+
+  let latestStart = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (mainImplementerStart.test(lines[index])) {
+      latestStart = index;
+    }
+  }
+  if (latestStart < 0) return 0;
+
+  let end = lines.length;
+  for (let index = latestStart + 1; index < lines.length; index += 1) {
+    if (mainImplementerEnd.test(lines[index]) || anyAgentStart.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+
+  return lines.slice(latestStart + 1, end).filter((line) => /\]\s+Tool:\s+\S+/.test(line)).length;
+}
+
 function collectReportText(projectRoot: string, reportFiles: string[]): string {
   const chunks: string[] = [];
   for (const file of reportFiles) {
@@ -398,7 +429,7 @@ export function evaluateTaskCompletionEvidence(
   );
   const reportArtifactFiles = gitEvidence.files.filter((file) => isReportArtifactPath(file, task));
   const reportText = collectReportText(projectRoot, reportArtifactFiles);
-  const committedReportRequired = requiresCommittedReport(task);
+  const committedReportRequired = riskyTask || requiresCommittedReport(task);
   const committedFileSet = new Set(gitEvidence.committedFiles);
   const dirtyFileSet = new Set(gitEvidence.dirtyFiles);
   const uncommittedReportArtifactFiles = committedReportRequired
@@ -409,6 +440,9 @@ export function evaluateTaskCompletionEvidence(
     riskyTask &&
     reportArtifactFiles.length > 0 &&
     hasDeterministicFallbackReport(task, reportText);
+  const implementationToolActivityCount = countLatestImplementationToolActivity(
+    task.agentActivityLog,
+  );
   const taskReferencedPaths = extractReferencedPaths(combinedTaskText(task), projectRoot);
   const reportReferencedPaths = extractReferencedPaths(reportText, projectRoot, {
     includeUndelimitedMissingRootFiles: true,
@@ -463,6 +497,14 @@ export function evaluateTaskCompletionEvidence(
         ),
       );
     }
+    if (riskyTask && implementationToolActivityCount === 0) {
+      issues.push(
+        issue(
+          "missing_implementation_tool_activity",
+          "Audit/review/discovery tasks require repository tool activity during the latest implementation stage.",
+        ),
+      );
+    }
 
     let invalidEvidenceMessage: string | null = null;
     if (reportMissing.length > 0) {
@@ -508,6 +550,7 @@ export function evaluateTaskCompletionEvidence(
       committedReportRequired,
       uncommittedReportArtifactFiles,
       deterministicFallbackReport,
+      implementationToolActivityCount,
       referencedPaths,
       missingReferencedPaths: missing,
       existingReferencedPaths: existing,

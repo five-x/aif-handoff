@@ -75,6 +75,10 @@ describe("qwen-local-agent adapter", () => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
+  it("advertises repository tools for capability-gated workflows", () => {
+    const adapter = createQwenLocalAgentRuntimeAdapter();
+    expect(adapter.descriptor.capabilities.supportsRepositoryTools).toBe(true);
+  });
   it("declares OpenAI function-style tools", async () => {
     expect(QWEN_LOCAL_AGENT_TOOLS.length).toBeGreaterThan(0);
     expect(QWEN_LOCAL_AGENT_TOOLS.every((tool) => tool.type === "function")).toBe(true);

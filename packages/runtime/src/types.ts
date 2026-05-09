@@ -105,6 +105,11 @@ export interface RuntimeCapabilities {
   supportsAgentDefinitions: boolean;
   /** Adapter can execute AIF slash/skill commands such as /aif-plan directly. */
   supportsAifSkillCommands?: boolean;
+  /**
+   * Adapter/transport exposes controlled repository tools and emits tool-use
+   * events for those tools. Text-only API runtimes must leave this false.
+   */
+  supportsRepositoryTools?: boolean;
   /** Adapter emits streaming events during run(). */
   supportsStreaming: boolean;
   /** Adapter can enumerate available models via listModels(). */
@@ -134,6 +139,7 @@ export const DEFAULT_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   supportsSessionList: false,
   supportsAgentDefinitions: false,
   supportsAifSkillCommands: false,
+  supportsRepositoryTools: false,
   supportsStreaming: false,
   supportsModelDiscovery: false,
   supportsApprovals: false,

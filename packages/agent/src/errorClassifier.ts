@@ -6,7 +6,11 @@
  * for non-RuntimeExecutionError errors (e.g., RuntimeCapabilityError).
  */
 
-import { RuntimeExecutionError, isExternalFailureCategory } from "@aif/runtime";
+import {
+  RuntimeCapabilityError,
+  RuntimeExecutionError,
+  isExternalFailureCategory,
+} from "@aif/runtime";
 import { BranchIsolationError } from "./gitBranch.js";
 
 export function findBranchIsolationError(err: unknown): BranchIsolationError | null {
@@ -43,6 +47,22 @@ export function findRuntimeExecutionError(err: unknown): RuntimeExecutionError |
   return null;
 }
 
+export function findRuntimeCapabilityError(err: unknown): RuntimeCapabilityError | null {
+  if (err instanceof RuntimeCapabilityError) {
+    return err;
+  }
+  if (err instanceof Error && "cause" in err && err.cause) {
+    return findRuntimeCapabilityError(err.cause);
+  }
+  return null;
+}
+
+export function isRuntimeCapabilityFailure(err: unknown): boolean {
+  if (findRuntimeCapabilityError(err)) return true;
+  const lower = errorText(err);
+  return CAPABILITY_FAILURE_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
 export function isExternalFailure(err: unknown): boolean {
   // Primary: structured category from runtime adapter classification
   const runtimeError = findRuntimeExecutionError(err);
@@ -51,8 +71,7 @@ export function isExternalFailure(err: unknown): boolean {
   }
 
   // Secondary: capability errors (RuntimeCapabilityError, not RuntimeExecutionError)
-  const lower = errorText(err);
-  return CAPABILITY_FAILURE_PATTERNS.some((pattern) => lower.includes(pattern));
+  return isRuntimeCapabilityFailure(err);
 }
 
 export function isFastRetryableFailure(err: unknown): boolean {

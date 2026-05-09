@@ -155,7 +155,9 @@ ${reviewOutputContract}`;
   const reviewWorkflow = createRuntimeWorkflowSpec({
     workflowKind: "reviewer",
     prompt: reviewPrompt,
-    requiredCapabilities: useSubagents ? ["supportsAgentDefinitions"] : [],
+    requiredCapabilities: useSubagents
+      ? ["supportsAgentDefinitions", "supportsRepositoryTools"]
+      : ["supportsRepositoryTools"],
     agentDefinitionName: useSubagents ? reviewAgentName : undefined,
     fallbackSlashCommand: "/aif-review",
     fallbackStrategy: useSubagents ? "slash_command" : "none",
@@ -165,7 +167,9 @@ ${reviewOutputContract}`;
   const securityWorkflow = createRuntimeWorkflowSpec({
     workflowKind: "review-security",
     prompt: securityPrompt,
-    requiredCapabilities: useSubagents ? ["supportsAgentDefinitions"] : [],
+    requiredCapabilities: useSubagents
+      ? ["supportsAgentDefinitions", "supportsRepositoryTools"]
+      : ["supportsRepositoryTools"],
     agentDefinitionName: useSubagents ? securityAgentName : undefined,
     fallbackSlashCommand: "/aif-security-checklist",
     fallbackStrategy: useSubagents ? "slash_command" : "none",
