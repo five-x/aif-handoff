@@ -7,6 +7,8 @@ export type TaskCompletionIssueCode =
   | "zero_delta"
   | "generic_plan"
   | "missing_report_artifact"
+  | "uncommitted_report_artifact"
+  | "deterministic_fallback_report"
   | "invalid_or_missing_file_references"
   | "branch_isolation"
   | "manual_review_required";
@@ -38,8 +40,13 @@ export interface TaskCompletionEvidenceResult {
     genericPlan: boolean;
     gitAvailable: boolean;
     changedFiles: string[];
+    dirtyChangedFiles: string[];
+    committedChangedFiles: string[];
     meaningfulChangedFiles: string[];
     reportArtifactFiles: string[];
+    committedReportRequired: boolean;
+    uncommittedReportArtifactFiles: string[];
+    deterministicFallbackReport: boolean;
     referencedPaths: string[];
     missingReferencedPaths: string[];
     existingReferencedPaths: string[];
@@ -74,6 +81,12 @@ const GENERIC_PLAN_PATTERNS = [
   /\bno implementation needed\b/i,
   /\btask is already complete\b/i,
 ];
+
+const COMMITTED_REPORT_PATTERN =
+  /\bcommitted\s+(?:report|artifact)\b|\b(?:report|report artifact|artifact)\b[^\n.]{0,120}\bcommitted\b/i;
+
+const DETERMINISTIC_FALLBACK_REPORT_PATTERN =
+  /\bDeterministic diagnostic report generated\b|\bDiagnostic-only repository inventory report\b|\bNo blocking issue found by deterministic inventory check\b|\bThis report records evidence only\b/i;
 
 const SLASH_PATH_TOKEN_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,12})(?::\d+(?::\d+)?)?/g;
@@ -176,39 +189,56 @@ function parseStatusFiles(output: string): string[] {
     .map((line) => line.trimEnd())
     .filter(Boolean)
     .map((line) => {
-      const path = line.slice(3);
+      const path = line.slice(2).trimStart();
       const renameIndex = path.indexOf(" -> ");
       return normalizeRelativePath(renameIndex >= 0 ? path.slice(renameIndex + 4) : path);
     })
     .filter(Boolean);
 }
 
-function collectChangedFiles(projectRoot: string): { gitAvailable: boolean; files: string[] } {
+function collectChangedFiles(projectRoot: string): {
+  gitAvailable: boolean;
+  files: string[];
+  dirtyFiles: string[];
+  committedFiles: string[];
+} {
   const inside = runGit(projectRoot, ["rev-parse", "--is-inside-work-tree"]);
-  if (inside !== "true") return { gitAvailable: false, files: [] };
+  if (inside !== "true") {
+    return { gitAvailable: false, files: [], dirtyFiles: [], committedFiles: [] };
+  }
 
   const files = new Set<string>();
+  const dirtyFiles = new Set<string>();
+  const committedFiles = new Set<string>();
   const status = runGit(projectRoot, ["status", "--porcelain=v1", "--untracked-files=all"]);
   if (status) {
-    for (const file of parseStatusFiles(status)) files.add(file);
+    for (const file of parseStatusFiles(status)) {
+      dirtyFiles.add(file);
+      files.add(file);
+    }
   }
 
   const baseBranch = getProjectConfig(projectRoot).git.base_branch || "main";
   const diffArgs = [
     ["diff", "--name-only", `${baseBranch}...HEAD`],
     ["diff", "--name-only", `${baseBranch}..HEAD`],
-    ["diff", "--name-only", "HEAD"],
   ];
   for (const args of diffArgs) {
     const diff = runGit(projectRoot, args);
     if (diff) {
       for (const file of diff.split(/\r?\n/).map(normalizeRelativePath).filter(Boolean)) {
+        committedFiles.add(file);
         files.add(file);
       }
     }
   }
 
-  return { gitAvailable: true, files: [...files].sort() };
+  return {
+    gitAvailable: true,
+    files: [...files].sort(),
+    dirtyFiles: [...dirtyFiles].sort(),
+    committedFiles: [...committedFiles].sort(),
+  };
 }
 
 function isPlanArtifact(path: string, task: TaskCompletionEvidenceTask): boolean {
@@ -241,6 +271,21 @@ function isReportArtifactPath(path: string, task: TaskCompletionEvidenceTask): b
   if (/^(result|report|audit|review|findings|discovery)\.(md|mdx|txt)$/i.test(name)) return true;
   return /(^|\/)(reports?|audit|review|reviews|findings|discovery|artifacts)(\/|$)/i.test(
     normalized,
+  );
+}
+
+function requiresCommittedReport(task: TaskCompletionEvidenceTask): boolean {
+  return COMMITTED_REPORT_PATTERN.test(combinedTaskText(task));
+}
+
+function hasDeterministicFallbackReport(
+  task: TaskCompletionEvidenceTask,
+  reportText: string,
+): boolean {
+  return DETERMINISTIC_FALLBACK_REPORT_PATTERN.test(
+    [task.implementationLog, task.reviewComments, task.agentActivityLog, reportText]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .join("\n"),
   );
 }
 
@@ -353,6 +398,17 @@ export function evaluateTaskCompletionEvidence(
   );
   const reportArtifactFiles = gitEvidence.files.filter((file) => isReportArtifactPath(file, task));
   const reportText = collectReportText(projectRoot, reportArtifactFiles);
+  const committedReportRequired = requiresCommittedReport(task);
+  const committedFileSet = new Set(gitEvidence.committedFiles);
+  const dirtyFileSet = new Set(gitEvidence.dirtyFiles);
+  const uncommittedReportArtifactFiles = committedReportRequired
+    ? reportArtifactFiles.filter((file) => !committedFileSet.has(file) || dirtyFileSet.has(file))
+    : [];
+  const deterministicFallbackReport =
+    phase === "completion" &&
+    riskyTask &&
+    reportArtifactFiles.length > 0 &&
+    hasDeterministicFallbackReport(task, reportText);
   const taskReferencedPaths = extractReferencedPaths(combinedTaskText(task), projectRoot);
   const reportReferencedPaths = extractReferencedPaths(reportText, projectRoot, {
     includeUndelimitedMissingRootFiles: true,
@@ -388,6 +444,22 @@ export function evaluateTaskCompletionEvidence(
         issue(
           "zero_delta",
           "No meaningful code, documentation, report, or persisted artifact delta was detected.",
+        ),
+      );
+    }
+    if (uncommittedReportArtifactFiles.length > 0) {
+      issues.push(
+        issue(
+          "uncommitted_report_artifact",
+          `Task requires a committed report, but these report artifacts are not committed cleanly on the task branch: ${uncommittedReportArtifactFiles.join(", ")}.`,
+        ),
+      );
+    }
+    if (deterministicFallbackReport) {
+      issues.push(
+        issue(
+          "deterministic_fallback_report",
+          "Audit/review/discovery completion cannot rely on the deterministic inventory fallback report as the final artifact.",
         ),
       );
     }
@@ -429,8 +501,13 @@ export function evaluateTaskCompletionEvidence(
       genericPlan,
       gitAvailable: gitEvidence.gitAvailable,
       changedFiles: gitEvidence.files,
+      dirtyChangedFiles: gitEvidence.dirtyFiles,
+      committedChangedFiles: gitEvidence.committedFiles,
       meaningfulChangedFiles,
       reportArtifactFiles,
+      committedReportRequired,
+      uncommittedReportArtifactFiles,
+      deterministicFallbackReport,
       referencedPaths,
       missingReferencedPaths: missing,
       existingReferencedPaths: existing,

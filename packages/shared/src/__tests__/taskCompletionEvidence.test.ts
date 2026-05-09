@@ -247,6 +247,201 @@ describe("taskCompletionEvidence", () => {
     expect(result.issues).toEqual([]);
   });
 
+  it("blocks untracked report artifacts when the task requires a committed report", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-uncommitted-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.committedReportRequired).toBe(true);
+    expect(result.evidence.reportArtifactFiles).toContain("reports/audit.md");
+    expect(result.evidence.dirtyChangedFiles).toContain("reports/audit.md");
+    expect(result.evidence.committedChangedFiles).not.toContain("reports/audit.md");
+    expect(result.evidence.uncommittedReportArtifactFiles).toContain("reports/audit.md");
+    expect(codes(result)).toContain("uncommitted_report_artifact");
+  });
+
+  it("blocks tracked dirty report artifacts when the task requires a committed report", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/dirty-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      "Finding cites `README.md` with dirty edits.\n",
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-dirty-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.committedChangedFiles).toContain("reports/audit.md");
+    expect(result.evidence.dirtyChangedFiles).toContain("reports/audit.md");
+    expect(result.evidence.uncommittedReportArtifactFiles).toContain("reports/audit.md");
+    expect(codes(result)).toContain("uncommitted_report_artifact");
+  });
+
+  it("blocks staged report artifacts when the task requires a committed report", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/staged-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-staged-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.dirtyChangedFiles).toContain("reports/audit.md");
+    expect(result.evidence.committedChangedFiles).not.toContain("reports/audit.md");
+    expect(result.evidence.uncommittedReportArtifactFiles).toContain("reports/audit.md");
+    expect(codes(result)).toContain("uncommitted_report_artifact");
+  });
+
+  it("accepts committed report artifacts when a committed report is required", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-committed-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.committedReportRequired).toBe(true);
+    expect(result.evidence.reportArtifactFiles).toContain("reports/audit.md");
+    expect(result.evidence.committedChangedFiles).toContain("reports/audit.md");
+    expect(result.evidence.uncommittedReportArtifactFiles).toEqual([]);
+    expect(result.issues).toEqual([]);
+  });
+
+  it("blocks unrelated dirty report artifacts alongside a valid committed report", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/mixed-report-state"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    writeFileSync(
+      join(root, "reports", "notes.md"),
+      "Uncommitted side note cites `README.md`.\n",
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-mixed-report-state",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.committedChangedFiles).toContain("reports/audit.md");
+    expect(result.evidence.dirtyChangedFiles).toContain("reports/notes.md");
+    expect(result.evidence.uncommittedReportArtifactFiles).toEqual(["reports/notes.md"]);
+    expect(codes(result)).toContain("uncommitted_report_artifact");
+  });
+
+  it("blocks deterministic inventory fallback reports for broad audit tasks", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/fallback-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "# Diagnostic Report",
+        "",
+        "## Scope",
+        "- Diagnostic-only repository inventory report.",
+        "",
+        "## Findings",
+        "### AUDIT-001: No blocking issue found by deterministic inventory check",
+        "- Evidence: Repository inventory confirmed `README.md` exists.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add fallback audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-deterministic-fallback",
+        title: "Full project audit across all available repository areas",
+        description: "Diagnostic only. Produce a report at reports/audit.md.",
+        implementationLog: "Deterministic diagnostic report generated.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.deterministicFallbackReport).toBe(true);
+    expect(codes(result)).toContain("deterministic_fallback_report");
+  });
+
   it("flags missing root-level repo path references in report artifacts", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });
