@@ -33,6 +33,14 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260509-implement-qwen-local-agent-runtime"
+    },
+    {
+      "taskId": "work-20260509-harden-audit-quality-gate",
+      "title": "Harden Audit Quality Gate For Substantive Findings",
+      "status": "next",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260509-harden-audit-quality-gate"
     }
   ]
 }
