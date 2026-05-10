@@ -422,7 +422,7 @@ describe("db", () => {
       expect(runtimeProfileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(22);
+      expect(userVersion).toBe(23);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -476,7 +476,7 @@ describe("db", () => {
       migratedSqlite.close();
 
       expect(dirtyIndex).toBeUndefined();
-      expect(userVersion).toBe(22);
+      expect(userVersion).toBe(23);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -546,7 +546,7 @@ describe("db", () => {
       expect(profileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(22);
+      expect(userVersion).toBe(23);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -615,7 +615,7 @@ describe("db", () => {
         ]),
       );
       expect(warmupTable?.name).toBe("runtime_warmup_sessions");
-      expect(userVersion).toBe(22);
+      expect(userVersion).toBe(23);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -662,7 +662,67 @@ describe("db", () => {
         "idx_runtime_warmup_active_lookup",
         "idx_runtime_warmup_expires",
       ]);
-      expect(userVersion).toBe(22);
+      expect(userVersion).toBe(23);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
+  });
+
+  it("creates roadmap batch artifact contract tables and indexes for fresh databases", () => {
+    closeDb();
+    const dbPath = join(
+      tmpdir(),
+      `aif-shared-roadmap-batches-${Date.now()}-${Math.random()}.sqlite`,
+    );
+
+    try {
+      getDb(dbPath);
+      closeDb();
+
+      const sqlite = new Database(dbPath, { readonly: true });
+      const tables = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (
+              'roadmap_batches',
+              'roadmap_batch_artifacts'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const indexes = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (
+              'idx_roadmap_batches_project_alias',
+              'idx_roadmap_batch_artifacts_batch',
+              'idx_roadmap_batch_artifacts_task',
+              'idx_roadmap_batch_artifacts_project_alias'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const userVersion = sqlite.pragma("user_version", { simple: true }) as number;
+      sqlite.close();
+
+      expect(tables.map((row) => row.name).sort()).toEqual([
+        "roadmap_batch_artifacts",
+        "roadmap_batches",
+      ]);
+      expect(indexes.map((row) => row.name).sort()).toEqual([
+        "idx_roadmap_batch_artifacts_batch",
+        "idx_roadmap_batch_artifacts_project_alias",
+        "idx_roadmap_batch_artifacts_task",
+        "idx_roadmap_batches_project_alias",
+      ]);
+      expect(userVersion).toBe(23);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);

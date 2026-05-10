@@ -381,7 +381,13 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
     }
 
     log.info(
-      { projectId: id, roadmapAlias, created: result.created, skipped: result.skipped },
+      {
+        projectId: id,
+        roadmapAlias,
+        created: result.created,
+        skipped: result.skipped,
+        batchStatus: result.batchSummary?.status,
+      },
       "Roadmap import completed",
     );
 
@@ -794,6 +800,7 @@ async function runRoadmapGenerationJob(
         skipped: result.skipped,
         taskIds: result.taskIds,
         byPhase: result.byPhase,
+        batchSummary: result.batchSummary,
       },
     });
 

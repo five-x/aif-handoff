@@ -61,6 +61,7 @@ vi.mock("../services/runtime.js", () => ({
 // Import after mocks
 const { tasksRouter } = await import("../routes/tasks.js");
 const { broadcast: mockBroadcast } = await import("../ws.js");
+const { createRoadmapBatchContract, listRoadmapBatchArtifacts } = await import("@aif/data");
 
 function createApp() {
   const app = new Hono();
@@ -1855,6 +1856,56 @@ describe("tasks API", () => {
       expect(body.blockedFromStatus).toBe("done");
       expect(body.blockedReason).toContain("generic_plan");
       expect(body.blockedReason).toContain("missing_report_artifact");
+    });
+
+    it("should return audit roadmap report tasks to rework on recoverable approve_done failures", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-rework-"));
+      db.insert(projects)
+        .values({ id: "project-audit-rework", name: "Audit Rework", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-audit-rework-1",
+          projectId: "project-audit-rework",
+          title: "Audit configuration",
+          description: "Report artifact: audit/config.md",
+          taskIntent: "audit",
+          status: "done",
+          plan: "## Plan\n- Inspect configuration\n- Write report",
+        })
+        .run();
+
+      const batch = createRoadmapBatchContract({
+        projectId: "project-audit-rework",
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["ev-audit-rework-1"],
+        artifacts: [
+          {
+            taskId: "ev-audit-rework-1",
+            role: "report",
+            artifactPath: "audit/config.md",
+            projectRoot: rootPath,
+          },
+        ],
+      });
+
+      const res = await app.request("/tasks/ev-audit-rework-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+      expect(body.reworkRequested).toBe(true);
+      expect(body.blockedReason).toContain("missing_artifact");
+      const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      expect(artifact.state).toBe("missing");
+      expect(artifact.failureFamily).toBe("missing_artifact");
     });
 
     it("should block approve_done when audit report references missing files only", async () => {

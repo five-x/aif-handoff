@@ -44,6 +44,10 @@ const {
   updateTaskStatus,
   incrementTaskTokenUsage,
   findTasksByRoadmapAlias,
+  createRoadmapBatchContract,
+  listRoadmapBatchArtifacts,
+  summarizeRoadmapBatch,
+  updateRoadmapBatchArtifactState,
   persistTaskPlanForTask,
   findCoordinatorTaskCandidate,
   findCoordinatorTaskCandidates,
@@ -213,6 +217,71 @@ describe("data layer", () => {
       createTask({ projectId: "proj-2", title: "B", description: "D" });
       expect(listTasks("proj-1")).toHaveLength(1);
       expect(listTasks("proj-2")).toHaveLength(1);
+    });
+  });
+
+  describe("roadmap batch contracts", () => {
+    it("tracks artifact states and unpauses synthesis when reports are valid", () => {
+      const reportTask = createTask({
+        projectId: "proj-1",
+        title: "Audit configuration",
+        description: "Report artifact: audit/config.md",
+        taskIntent: "audit",
+      });
+      const synthesisTask = createTask({
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        paused: true,
+      });
+      expect(reportTask).toBeDefined();
+      expect(synthesisTask).toBeDefined();
+      setTaskFields(synthesisTask!.id, {
+        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+      });
+
+      const summary = createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [reportTask!.id, synthesisTask!.id],
+        synthesisTaskId: synthesisTask!.id,
+        artifacts: [
+          { taskId: reportTask!.id, role: "report", artifactPath: "audit/config.md" },
+          { taskId: synthesisTask!.id, role: "synthesis", artifactPath: "audit/summary.md" },
+        ],
+      });
+
+      expect(summary.status).toBe("expected");
+      expect(summary.synthesisReady).toBe(false);
+      expect(summary.counts.total).toBe(2);
+
+      updateRoadmapBatchArtifactState({
+        taskId: synthesisTask!.id,
+        state: "synthesis_not_ready",
+        failureFamily: "synthesis_not_ready",
+      });
+      expect(summarizeRoadmapBatch(summary.batchId)?.status).toBe("synthesis_not_ready");
+
+      const ready = updateRoadmapBatchArtifactState({
+        taskId: reportTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: { ok: true },
+      });
+
+      expect(ready?.synthesisReady).toBe(true);
+      expect(ready?.status).toBe("synthesis_ready");
+      expect(ready?.failureFamily).toBeNull();
+      const synthesis = findTaskById(synthesisTask!.id);
+      expect(synthesis?.paused).toBe(false);
+      expect(synthesis?.blockedReason).toBeNull();
+      const artifacts = listRoadmapBatchArtifacts(summary.batchId);
+      expect(artifacts.find((artifact) => artifact.taskId === reportTask!.id)?.state).toBe(
+        "valid",
+      );
     });
   });
 

@@ -11,7 +11,14 @@ import {
   getProjectConfig,
   generatePlanPath,
   isTaskIntent,
+  isGitRepo,
   logger,
+  extractAuditPathTokens,
+  isAuditReportArtifactPath,
+  isAuditSynthesisTitle,
+  parseExpectedAuditReportArtifactPath,
+  projectSupportsTaskWorktrees,
+  projectUsesSharedBranchIsolation,
   resolveTaskIntentDefaults,
   validateGeneratedTaskIntent,
   type TaskIntent,
@@ -22,6 +29,10 @@ import {
   findTasksByRoadmapAlias,
   getMinBacklogPosition,
   listTasks,
+  createRoadmapBatchContract,
+  setTaskFields,
+  type RoadmapBatchExecutionPolicy,
+  type RoadmapBatchSummary,
 } from "@aif/data";
 import { UsageSource } from "@aif/runtime";
 import { resolveApiLightModel, runApiRuntimeOneShot } from "./runtime.js";
@@ -297,12 +308,6 @@ function extractAuditRoadmapItems(roadmapContent: string): AuditRoadmapItem[] {
   return items;
 }
 
-function isAuditSynthesisTitle(title: string): boolean {
-  return /\b(?:synthesi[sz]e|synthesis|summary|summari[sz]e|final\s+audit|audit\s+findings\s+summary)\b/i.test(
-    title,
-  );
-}
-
 function getAuditAllowedChangesLines(text: string): string[] {
   return text
     .split(/\r?\n/)
@@ -317,24 +322,8 @@ function getAuditReportArtifactLines(text: string): string[] {
     .filter((line) => /^-\s+report artifact\s*:/i.test(line) || /^report artifact\s*:/i.test(line));
 }
 
-function extractPathTokens(text: string): string[] {
-  return [...text.matchAll(/`?([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9]+)`?/g)].map(
-    (match) => match[1],
-  );
-}
-
-function isAuditReportArtifactPath(path: string): boolean {
-  const lower = path.toLowerCase();
-  return (
-    lower.endsWith(".md") &&
-    (lower.startsWith("audit/") ||
-      lower.includes("/audit/") ||
-      /\b(?:audit|report|summary|findings)\b/.test(lower))
-  );
-}
-
 function hasNonReportAllowedChangeTarget(value: string): boolean {
-  const explicitPaths = extractPathTokens(value);
+  const explicitPaths = extractAuditPathTokens(value);
   if (explicitPaths.some((path) => !isAuditReportArtifactPath(path))) {
     return true;
   }
@@ -381,7 +370,7 @@ function validateAuditReportArtifactText(text: string, issues: string[], label: 
 
   for (const line of lines) {
     const value = line.replace(/^-?\s*report artifact\s*:\s*/i, "").trim();
-    const path = extractPathTokens(value)[0];
+    const path = extractAuditPathTokens(value)[0];
     if (!path || !isAuditReportArtifactPath(path)) {
       issues.push(`${label} is missing a report artifact path`);
     }
@@ -1368,6 +1357,18 @@ function compareRoadmapImportOrder(a: IndexedGeneratedTask, b: IndexedGeneratedT
   return a.task.phase - b.task.phase || a.task.sequence - b.task.sequence || a.index - b.index;
 }
 
+function resolveAuditBatchExecutionPolicy(projectRoot: string): RoadmapBatchExecutionPolicy {
+  if (
+    isGitRepo(projectRoot) &&
+    projectUsesSharedBranchIsolation(projectRoot) &&
+    getEnv().AIF_TASK_WORKTREES_ENABLED &&
+    projectSupportsTaskWorktrees(projectRoot)
+  ) {
+    return "worktree_isolated";
+  }
+  return "serialized_shared_checkout";
+}
+
 // -- Dedupe + batch creation --
 
 export interface ImportResult {
@@ -1376,6 +1377,7 @@ export interface ImportResult {
   skipped: number;
   taskIds: string[];
   byPhase: Record<number, { created: number; skipped: number }>;
+  batchSummary?: RoadmapBatchSummary;
 }
 
 /**
@@ -1416,7 +1418,8 @@ export function importGeneratedTasks(
 
   // Load existing tasks for this alias for dedupe
   const existing = findTasksByRoadmapAlias(projectId, alias);
-  const existingTitles = new Set(existing.map((t) => normalizeTitle(t.title)));
+  const existingByTitle = new Map(existing.map((task) => [normalizeTitle(task.title), task]));
+  const existingTitles = new Set(existingByTitle.keys());
 
   // Reserve every planPath already used by any task in this project (across
   // all aliases), so collision suffixes don't accidentally overwrite an
@@ -1469,6 +1472,15 @@ export function importGeneratedTasks(
     .sort(compareRoadmapImportOrder);
 
   let createdPositionIndex = 0;
+  const auditArtifactInputs: Array<{
+    taskId: string;
+    role: "report" | "synthesis";
+    artifactPath: string;
+    branchName?: string | null;
+    worktreePath?: string | null;
+    projectRoot?: string | null;
+  }> = [];
+  let synthesisTaskId: string | null = null;
 
   for (const { task: genTask } of orderedTasks) {
     const phaseStats = result.byPhase[genTask.phase] ?? { created: 0, skipped: 0 };
@@ -1476,6 +1488,26 @@ export function importGeneratedTasks(
 
     const normalized = normalizeTitle(genTask.title);
     if (existingTitles.has(normalized)) {
+      const existingTask = existingByTitle.get(normalized);
+      if (importIntent === "audit" && existingTask) {
+        const artifactPath = parseExpectedAuditReportArtifactPath(genTask.description ?? "");
+        if (!artifactPath) {
+          throw new RoadmapGenerationError(
+            "VALIDATION_ERROR",
+            `Audit task "${genTask.title}" is missing a concrete report artifact path`,
+          );
+        }
+        const role = isAuditSynthesisTitle(genTask.title) ? "synthesis" : "report";
+        auditArtifactInputs.push({
+          taskId: existingTask.id,
+          role,
+          artifactPath,
+          branchName: existingTask.branchName,
+          worktreePath: existingTask.worktreePath,
+          projectRoot: project.rootPath,
+        });
+        if (role === "synthesis") synthesisTaskId = existingTask.id;
+      }
       log.debug({ title: genTask.title, alias, phase: genTask.phase }, "Task skipped (duplicate)");
       phaseStats.skipped++;
       result.skipped++;
@@ -1516,6 +1548,7 @@ export function importGeneratedTasks(
       skipReview: taskIntent === "audit" ? false : defaults.skipReview,
       useSubagents: taskIntent === "audit" || taskIntent === "spike" ? true : defaults.useSubagents,
       position: importPositionStart + createdPositionIndex * 100,
+      paused: taskIntent === "audit" && isAuditSynthesisTitle(genTask.title),
     });
 
     if (created) {
@@ -1524,7 +1557,44 @@ export function importGeneratedTasks(
       phaseStats.created++;
       result.created++;
       existingTitles.add(normalized);
+      existingByTitle.set(normalized, created);
+      if (taskIntent === "audit") {
+        const artifactPath = parseExpectedAuditReportArtifactPath(genTask.description ?? "");
+        if (!artifactPath) {
+          throw new RoadmapGenerationError(
+            "VALIDATION_ERROR",
+            `Audit task "${genTask.title}" is missing a concrete report artifact path`,
+          );
+        }
+        const role = isAuditSynthesisTitle(genTask.title) ? "synthesis" : "report";
+        auditArtifactInputs.push({
+          taskId: created.id,
+          role,
+          artifactPath,
+          branchName: created.branchName,
+          worktreePath: created.worktreePath,
+          projectRoot: project.rootPath,
+        });
+        if (role === "synthesis") {
+          synthesisTaskId = created.id;
+          setTaskFields(created.id, {
+            blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+          });
+        }
+      }
     }
+  }
+
+  if (importIntent === "audit") {
+    result.batchSummary = createRoadmapBatchContract({
+      projectId,
+      roadmapAlias: alias,
+      taskIntent: importIntent,
+      executionPolicy: resolveAuditBatchExecutionPolicy(project.rootPath),
+      createdTaskIds: result.taskIds,
+      synthesisTaskId,
+      artifacts: auditArtifactInputs,
+    });
   }
 
   log.info(

@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260510-typed-task-intents::entity-capsule
+memory_id: task::aif-handoff::work::work-20260510-harden-audit-roadmap-flow-contract::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260510-typed-task-intents
-source_path: docs/rdpi/work/work-20260510-typed-task-intents
+task_id: work-20260510-harden-audit-roadmap-flow-contract
+source_path: docs/rdpi/work/work-20260510-harden-audit-roadmap-flow-contract
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-05-09
+updated_at: 2026-05-10
 supersedes:
 expires_at:
 tags:
@@ -25,18 +25,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260510-typed-task-intents/research.md
-- docs/rdpi/work/work-20260510-typed-task-intents/design.md
-- docs/rdpi/work/work-20260510-typed-task-intents/plan.md
-- docs/rdpi/work/work-20260510-typed-task-intents/result.md
-  created_at: 2026-05-09
-  last_verified_at: 2026-05-09
+- docs/rdpi/work/work-20260510-harden-audit-roadmap-flow-contract/research.md
+- docs/rdpi/work/work-20260510-harden-audit-roadmap-flow-contract/design.md
+- docs/rdpi/work/work-20260510-harden-audit-roadmap-flow-contract/plan.md
+- docs/rdpi/work/work-20260510-harden-audit-roadmap-flow-contract/result.md
+  created_at: 2026-05-10
+  last_verified_at: 2026-05-10
 
 ---
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260510-typed-task-intents.
+Current capsule for entity aif-handoff, refreshed by task work-20260510-harden-audit-roadmap-flow-contract.
 
 # Why it matters
 
@@ -52,11 +52,11 @@ Do not reuse if the entity boundary or ownership changed.
 
 ## Active decisions
 
-- The shared intent contract is reusable project knowledge after implementation if tests and review pass.
-- The compatibility rule between `isFix` and `taskIntent: "fix"` may be worth documenting in memory after close-out.
-- `general`
-- `audit`
-- `feature`
-- `fix`
-- `spike`
-- `docs`
+- Durable audit batch state should be first-class data, not inferred only from task tags and current checkout state.
+- Report artifact validation should be contract-driven and shared across import, review, completion, approve, and synthesis readiness gates.
+- `blocked_external` should mean external intervention is required, not “the report content is invalid.”
+- Shared machine contract in `@aif/shared`
+- Add a shared audit roadmap contract module that defines report roles, required generated-task markers, expected artifact parsing, synthesis detection, canonical validation issues, and failure taxonomy.
+- Reuse this module from `taskIntent.ts`, `roadmapGeneration.ts`, `taskCompletionEvidence.ts`, `reviewGate.ts`, `coordinator.ts`, and `taskEvents.ts`.
+- Keep generic roadmap and non-audit task behavior unchanged.
+- Durable audit batch/artifact model

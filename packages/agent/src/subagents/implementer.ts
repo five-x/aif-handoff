@@ -1,11 +1,15 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import {
   findProjectById,
+  findRoadmapBatchArtifactByTaskId,
   findTaskById,
   getLatestReworkComment,
+  listValidatedRoadmapReportArtifacts,
   persistTaskPlanForTask,
   setTaskFields,
+  summarizeRoadmapBatch,
   type TaskRow,
 } from "@aif/data";
 import {
@@ -109,6 +113,115 @@ function getChecklistProgress(planText: string | null): {
     parsedTaskCount: parsed.tasks.length,
     pendingTaskCount: pending.tasks.length,
   };
+}
+
+function normalizeArtifactGitPath(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+function readValidatedArtifactContent(input: {
+  artifactPath: string;
+  projectRoot: string;
+  branchName: string | null;
+  worktreePath: string | null;
+}): { content: string; source: string } {
+  const gitPath = normalizeArtifactGitPath(input.artifactPath);
+  if (
+    isAbsolute(input.artifactPath) ||
+    gitPath === ".." ||
+    gitPath.startsWith("../") ||
+    gitPath.includes("/../")
+  ) {
+    throw new Error(`synthesis_not_ready: invalid validated artifact path: ${input.artifactPath}`);
+  }
+
+  if (input.worktreePath) {
+    const artifactPath = resolve(input.worktreePath, input.artifactPath);
+    if (!existsSync(artifactPath)) {
+      throw new Error(
+        `synthesis_not_ready: validated artifact is unavailable: ${input.artifactPath}`,
+      );
+    }
+    return {
+      content: readFileSync(artifactPath, "utf8").trim(),
+      source: input.worktreePath,
+    };
+  }
+
+  if (input.branchName) {
+    try {
+      return {
+        content: execFileSync(
+          "git",
+          ["-c", `safe.directory=${input.projectRoot}`, "show", `${input.branchName}:${gitPath}`],
+          {
+            cwd: input.projectRoot,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        ).trim(),
+        source: `${input.branchName}:${gitPath}`,
+      };
+    } catch {
+      throw new Error(
+        `synthesis_not_ready: validated artifact is unavailable on branch ${input.branchName}: ${input.artifactPath}`,
+      );
+    }
+  }
+
+  const artifactPath = resolve(input.projectRoot, input.artifactPath);
+  if (!existsSync(artifactPath)) {
+    throw new Error(
+      `synthesis_not_ready: validated artifact is unavailable: ${input.artifactPath}`,
+    );
+  }
+  return {
+    content: readFileSync(artifactPath, "utf8").trim(),
+    source: input.projectRoot,
+  };
+}
+
+function buildValidatedAuditSynthesisInput(taskId: string, fallbackRoot: string): string {
+  const synthesisArtifact = findRoadmapBatchArtifactByTaskId(taskId);
+  if (!synthesisArtifact || synthesisArtifact.role !== "synthesis") {
+    return "No validated audit batch input required for this task.";
+  }
+
+  const summary = summarizeRoadmapBatch(synthesisArtifact.batchId);
+  if (!summary?.synthesisReady) {
+    const valid = summary?.counts.valid ?? 0;
+    const total = summary?.counts.total ?? 0;
+    throw new Error(
+      `synthesis_not_ready: waiting for validated audit batch artifacts (${valid}/${total} valid)`,
+    );
+  }
+
+  const reports = listValidatedRoadmapReportArtifacts(synthesisArtifact.batchId);
+  if (reports.length === 0) {
+    throw new Error("synthesis_not_ready: no validated audit report artifacts are available");
+  }
+
+  const sections = reports.map((artifact) => {
+    const root = artifact.projectRoot ?? fallbackRoot;
+    const { content, source } = readValidatedArtifactContent({
+      artifactPath: artifact.artifactPath,
+      branchName: artifact.branchName,
+      worktreePath: artifact.worktreePath,
+      projectRoot: root,
+    });
+    if (!content) {
+      throw new Error(`synthesis_not_ready: validated artifact is empty: ${artifact.artifactPath}`);
+    }
+    return [
+      `--- artifact: ${artifact.artifactPath}`,
+      `task: ${artifact.taskId}`,
+      `source: ${source}`,
+      "---",
+      content,
+    ].join("\n");
+  });
+
+  return sections.join("\n\n");
 }
 
 async function runChecklistSyncQuery(input: {
@@ -218,6 +331,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const blockingFindingsSnapshot = task.reworkRequested
     ? formatAutoReviewStateForPrompt(task.autoReviewState)
     : "No persisted blocking findings snapshot.";
+  const validatedAuditSynthesisInput = buildValidatedAuditSynthesisInput(taskId, projectRoot);
 
   if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
     const nowIso = new Date().toISOString();
@@ -312,6 +426,11 @@ Description: ${task.description}
 Task attachments:
 ${formatAttachmentsForPrompt(task.attachments)}
 
+Validated audit batch inputs:
+<<<VALIDATED_AUDIT_BATCH_INPUTS
+${validatedAuditSynthesisInput}
+VALIDATED_AUDIT_BATCH_INPUTS
+
 Plan path:
 ${planSection}
 
@@ -322,6 +441,7 @@ Execution rules:
 - Keep plan checklist state accurate while implementing.
 - Run tests/lint/verification relevant to the changes.
 - For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete \`path:line\` evidence, \`Risk:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
+- When VALIDATED_AUDIT_BATCH_INPUTS contains report artifacts, use those exact validated report contents as the synthesis source of truth; do not synthesize from unvalidated report-like files.
 - IMPORTANT: The plan file is ${effectivePlanPath}. Always read from and annotate this exact file — do not create plan files at other paths.${reworkProtocolBlock}`;
   const workflowSpec = createRuntimeWorkflowSpec({
     workflowKind: "implementer",

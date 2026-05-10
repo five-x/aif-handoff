@@ -133,6 +133,65 @@ export const taskComments = sqliteTable("task_comments", {
 export type TaskCommentRow = typeof taskComments.$inferSelect;
 export type NewTaskCommentRow = typeof taskComments.$inferInsert;
 
+export const roadmapBatches = sqliteTable("roadmap_batches", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  projectId: text("project_id").notNull(),
+  roadmapAlias: text("roadmap_alias").notNull(),
+  taskIntent: text("task_intent").$type<TaskIntent>().notNull().default("general"),
+  status: text("status").notNull().default("expected"),
+  executionPolicy: text("execution_policy").notNull().default("serialized_shared_checkout"),
+  synthesisTaskId: text("synthesis_task_id"),
+  expectedArtifactCount: integer("expected_artifact_count").notNull().default(0),
+  validArtifactCount: integer("valid_artifact_count").notNull().default(0),
+  invalidArtifactCount: integer("invalid_artifact_count").notNull().default(0),
+  missingArtifactCount: integer("missing_artifact_count").notNull().default(0),
+  externalBlockedArtifactCount: integer("external_blocked_artifact_count").notNull().default(0),
+  synthesisReady: integer("synthesis_ready", { mode: "boolean" }).notNull().default(false),
+  failureFamily: text("failure_family"),
+  summaryJson: text("summary_json"),
+  createdTaskIdsJson: text("created_task_ids_json").notNull().default("[]"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type RoadmapBatchRow = typeof roadmapBatches.$inferSelect;
+export type NewRoadmapBatchRow = typeof roadmapBatches.$inferInsert;
+
+export const roadmapBatchArtifacts = sqliteTable("roadmap_batch_artifacts", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  batchId: text("batch_id").notNull(),
+  projectId: text("project_id").notNull(),
+  roadmapAlias: text("roadmap_alias").notNull(),
+  taskId: text("task_id").notNull(),
+  role: text("role").notNull().default("report"),
+  artifactPath: text("artifact_path").notNull(),
+  state: text("state").notNull().default("expected"),
+  failureFamily: text("failure_family"),
+  validationDetailsJson: text("validation_details_json"),
+  branchName: text("branch_name"),
+  worktreePath: text("worktree_path"),
+  projectRoot: text("project_root"),
+  contentSha: text("content_sha"),
+  validatedAt: text("validated_at"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type RoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferSelect;
+export type NewRoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferInsert;
+
 export const runtimeProfiles = sqliteTable("runtime_profiles", {
   id: text("id")
     .primaryKey()

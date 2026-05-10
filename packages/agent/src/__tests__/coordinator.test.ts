@@ -93,6 +93,8 @@ const { runPlanChecker } = await import("../subagents/planChecker.js");
 const { runImplementer } = await import("../subagents/implementer.js");
 const { runReviewer } = await import("../subagents/reviewer.js");
 const { handleAutoReviewGate } = await import("../autoReviewHandler.js");
+const { createRoadmapBatchContract, listRoadmapBatchArtifacts, updateRoadmapBatchArtifactState } =
+  await import("@aif/data");
 
 function createPlanQualityError(): TaskPlanQualityError {
   return new TaskPlanQualityError(
@@ -306,6 +308,129 @@ describe("coordinator", () => {
     expect(runReviewer).toHaveBeenCalledWith("task-impl", "/tmp/test");
     const task = db.select().from(tasks).where(eq(tasks.id, "task-impl")).get();
     expect(task!.status).toBe("done");
+  });
+
+  it("should hold audit synthesis implementation until report artifacts are valid", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-audit-report",
+        projectId: "test-project",
+        title: "Audit configuration",
+        description: "Report artifact: audit/config.md",
+        taskIntent: "audit",
+        status: "done",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-synthesis",
+        projectId: "test-project",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-report", "task-audit-synthesis"],
+      synthesisTaskId: "task-audit-synthesis",
+      artifacts: [
+        { taskId: "task-audit-report", role: "report", artifactPath: "audit/config.md" },
+        { taskId: "task-audit-synthesis", role: "synthesis", artifactPath: "audit/summary.md" },
+      ],
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+    const synthesis = db.select().from(tasks).where(eq(tasks.id, "task-audit-synthesis")).get();
+    expect(synthesis?.status).toBe("implementing");
+    expect(synthesis?.paused).toBe(true);
+    expect(synthesis?.blockedReason).toContain("synthesis_not_ready");
+    const synthesisArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (artifact) => artifact.taskId === "task-audit-synthesis",
+    );
+    expect(synthesisArtifact?.state).toBe("synthesis_not_ready");
+  });
+
+  it("should pause synthesis when validated branch artifacts are unavailable during implementation", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-audit-report-ready",
+        projectId: "test-project",
+        title: "Audit configuration",
+        description: "Report artifact: audit/config.md",
+        taskIntent: "audit",
+        status: "done",
+        branchName: "audit/config-report",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-synthesis-ready",
+        projectId: "test-project",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-report-ready", "task-audit-synthesis-ready"],
+      synthesisTaskId: "task-audit-synthesis-ready",
+      artifacts: [
+        {
+          taskId: "task-audit-report-ready",
+          role: "report",
+          artifactPath: "audit/config.md",
+          branchName: "audit/config-report",
+        },
+        {
+          taskId: "task-audit-synthesis-ready",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-audit-report-ready",
+      state: "valid",
+      failureFamily: null,
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new Error(
+        "synthesis_not_ready: validated artifact is unavailable on branch audit/config-report: audit/config.md",
+      ),
+    );
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-audit-synthesis-ready", "/tmp/test");
+    expect(runReviewer).not.toHaveBeenCalled();
+    const synthesis = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-synthesis-ready"))
+      .get();
+    expect(synthesis?.status).toBe("implementing");
+    expect(synthesis?.paused).toBe(true);
+    expect(synthesis?.blockedReason).toContain("synthesis_not_ready");
+    const synthesisArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (artifact) => artifact.taskId === "task-audit-synthesis-ready",
+    );
+    expect(synthesisArtifact?.state).toBe("synthesis_not_ready");
+    expect(synthesisArtifact?.failureFamily).toBe("synthesis_not_ready");
   });
 
   it("should pick up review tasks and dispatch reviewer", async () => {

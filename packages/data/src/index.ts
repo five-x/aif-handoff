@@ -40,6 +40,8 @@ import {
   chatMessages,
   usageEvents,
   runtimeWarmupSessions,
+  roadmapBatches,
+  roadmapBatchArtifacts,
   codexSessions,
   codexSessionFiles,
   codexLimitHeads,
@@ -91,6 +93,8 @@ export type ProjectRow = typeof projects.$inferSelect;
 export type AppSettingsRow = typeof appSettings.$inferSelect;
 export type RuntimeProfileRow = typeof runtimeProfiles.$inferSelect;
 export type RuntimeWarmupSessionRow = typeof runtimeWarmupSessions.$inferSelect;
+export type RoadmapBatchRow = typeof roadmapBatches.$inferSelect;
+export type RoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferSelect;
 export type CodexSessionIndexRow = typeof codexSessions.$inferSelect;
 export type CodexSessionFileIndexRow = typeof codexSessionFiles.$inferSelect;
 export type CodexLimitHeadIndexRow = typeof codexLimitHeads.$inferSelect;
@@ -1982,6 +1986,340 @@ export function findTasksByRoadmapAlias(projectId: string, alias: string): TaskR
     .from(tasks)
     .where(and(eq(tasks.projectId, projectId), eq(tasks.roadmapAlias, alias)))
     .all();
+}
+
+export type RoadmapBatchExecutionPolicy = "worktree_isolated" | "serialized_shared_checkout";
+export type RoadmapBatchArtifactRole = "report" | "synthesis";
+export type RoadmapBatchArtifactState =
+  | "expected"
+  | "valid"
+  | "invalid"
+  | "missing"
+  | "synthesis_not_ready"
+  | "external_blocked";
+export type RoadmapBatchFailureFamily =
+  | "invalid_artifact_content"
+  | "missing_artifact"
+  | "missing_tool_evidence"
+  | "synthesis_not_ready"
+  | "external_blocker"
+  | "manual_review_required"
+  | "rework_needed";
+
+export interface RoadmapBatchArtifactInput {
+  taskId: string;
+  role: RoadmapBatchArtifactRole;
+  artifactPath: string;
+  branchName?: string | null;
+  worktreePath?: string | null;
+  projectRoot?: string | null;
+}
+
+export interface CreateRoadmapBatchContractInput {
+  projectId: string;
+  roadmapAlias: string;
+  taskIntent: TaskIntent;
+  executionPolicy: RoadmapBatchExecutionPolicy;
+  createdTaskIds: string[];
+  synthesisTaskId?: string | null;
+  artifacts: RoadmapBatchArtifactInput[];
+}
+
+export interface RoadmapBatchSummary {
+  batchId: string;
+  projectId: string;
+  roadmapAlias: string;
+  taskIntent: TaskIntent;
+  status: string;
+  executionPolicy: RoadmapBatchExecutionPolicy;
+  synthesisTaskId: string | null;
+  synthesisReady: boolean;
+  failureFamily: string | null;
+  counts: {
+    expected: number;
+    valid: number;
+    invalid: number;
+    missing: number;
+    synthesisNotReady: number;
+    externalBlocked: number;
+    total: number;
+  };
+  message: string | null;
+}
+
+function parseJsonStringArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function serializeJson(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function summarizeRoadmapArtifacts(
+  batch: RoadmapBatchRow,
+  artifacts: RoadmapBatchArtifactRow[],
+): RoadmapBatchSummary {
+  const counts = {
+    expected: artifacts.filter((artifact) => artifact.state === "expected").length,
+    valid: artifacts.filter((artifact) => artifact.state === "valid").length,
+    invalid: artifacts.filter((artifact) => artifact.state === "invalid").length,
+    missing: artifacts.filter((artifact) => artifact.state === "missing").length,
+    synthesisNotReady: artifacts.filter((artifact) => artifact.state === "synthesis_not_ready")
+      .length,
+    externalBlocked: artifacts.filter((artifact) => artifact.state === "external_blocked").length,
+    total: artifacts.length,
+  };
+  const nonSynthesis = artifacts.filter((artifact) => artifact.role !== "synthesis");
+  const synthesisReady =
+    nonSynthesis.length > 0 && nonSynthesis.every((artifact) => artifact.state === "valid");
+  const failureFamily =
+    artifacts.find((artifact) => artifact.failureFamily === "external_blocker")?.failureFamily ??
+    artifacts.find(
+      (artifact) =>
+        artifact.failureFamily &&
+        !(synthesisReady && artifact.role === "synthesis" && artifact.failureFamily === "synthesis_not_ready"),
+    )?.failureFamily ??
+    batch.failureFamily;
+  const message = failureFamily
+    ? `Audit batch ${batch.roadmapAlias}: ${failureFamily}`
+    : synthesisReady
+      ? `Audit batch ${batch.roadmapAlias}: synthesis ready`
+      : null;
+
+  return {
+    batchId: batch.id,
+    projectId: batch.projectId,
+    roadmapAlias: batch.roadmapAlias,
+    taskIntent: batch.taskIntent,
+    status: batch.status,
+    executionPolicy: batch.executionPolicy as RoadmapBatchExecutionPolicy,
+    synthesisTaskId: batch.synthesisTaskId,
+    synthesisReady,
+    failureFamily,
+    counts,
+    message,
+  };
+}
+
+function computeRoadmapBatchStatus(input: {
+  artifacts: RoadmapBatchArtifactRow[];
+  synthesisReady: boolean;
+}): { status: string; failureFamily: string | null } {
+  const { artifacts, synthesisReady } = input;
+  if (artifacts.some((artifact) => artifact.failureFamily === "external_blocker")) {
+    return { status: "external_blocked", failureFamily: "external_blocker" };
+  }
+  const firstFailure = artifacts.find((artifact) => artifact.failureFamily)?.failureFamily ?? null;
+  if (artifacts.some((artifact) => artifact.state === "invalid")) {
+    return { status: "rework_needed", failureFamily: firstFailure ?? "invalid_artifact_content" };
+  }
+  if (artifacts.some((artifact) => artifact.state === "missing")) {
+    return { status: "rework_needed", failureFamily: firstFailure ?? "missing_artifact" };
+  }
+  if (artifacts.length > 0 && artifacts.every((artifact) => artifact.state === "valid")) {
+    return { status: "complete", failureFamily: null };
+  }
+  if (synthesisReady) {
+    return { status: "synthesis_ready", failureFamily: null };
+  }
+  if (artifacts.some((artifact) => artifact.state === "synthesis_not_ready")) {
+    return { status: "synthesis_not_ready", failureFamily: "synthesis_not_ready" };
+  }
+  return { status: "expected", failureFamily: null };
+}
+
+export function createRoadmapBatchContract(
+  input: CreateRoadmapBatchContractInput,
+): RoadmapBatchSummary {
+  const db = getDb();
+  const nowIso = new Date().toISOString();
+  const batchId = crypto.randomUUID();
+  const expectedArtifactCount = input.artifacts.length;
+  db.transaction((tx) => {
+    tx.insert(roadmapBatches)
+      .values({
+        id: batchId,
+        projectId: input.projectId,
+        roadmapAlias: input.roadmapAlias,
+        taskIntent: input.taskIntent,
+        status: "expected",
+        executionPolicy: input.executionPolicy,
+        synthesisTaskId: input.synthesisTaskId ?? null,
+        expectedArtifactCount,
+        createdTaskIdsJson: serializeJson(input.createdTaskIds),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      })
+      .run();
+    for (const artifact of input.artifacts) {
+      tx.insert(roadmapBatchArtifacts)
+        .values({
+          id: crypto.randomUUID(),
+          batchId,
+          projectId: input.projectId,
+          roadmapAlias: input.roadmapAlias,
+          taskId: artifact.taskId,
+          role: artifact.role,
+          artifactPath: artifact.artifactPath,
+          state: "expected",
+          branchName: artifact.branchName ?? null,
+          worktreePath: artifact.worktreePath ?? null,
+          projectRoot: artifact.projectRoot ?? null,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        })
+        .run();
+    }
+  });
+  const summary = refreshRoadmapBatchSummary(batchId);
+  if (!summary) {
+    throw new Error(`Roadmap batch ${batchId} was not created`);
+  }
+  return summary;
+}
+
+export function findRoadmapBatchByProjectAlias(
+  projectId: string,
+  roadmapAlias: string,
+): RoadmapBatchRow | undefined {
+  return getDb()
+    .select()
+    .from(roadmapBatches)
+    .where(and(eq(roadmapBatches.projectId, projectId), eq(roadmapBatches.roadmapAlias, roadmapAlias)))
+    .orderBy(desc(roadmapBatches.createdAt))
+    .get();
+}
+
+export function listRoadmapBatchArtifacts(batchId: string): RoadmapBatchArtifactRow[] {
+  return getDb()
+    .select()
+    .from(roadmapBatchArtifacts)
+    .where(eq(roadmapBatchArtifacts.batchId, batchId))
+    .orderBy(asc(roadmapBatchArtifacts.role), asc(roadmapBatchArtifacts.createdAt))
+    .all();
+}
+
+export function findRoadmapBatchArtifactByTaskId(
+  taskId: string,
+): RoadmapBatchArtifactRow | undefined {
+  return getDb()
+    .select()
+    .from(roadmapBatchArtifacts)
+    .where(eq(roadmapBatchArtifacts.taskId, taskId))
+    .orderBy(desc(roadmapBatchArtifacts.createdAt))
+    .get();
+}
+
+export function summarizeRoadmapBatch(batchId: string): RoadmapBatchSummary | null {
+  const batch = getDb().select().from(roadmapBatches).where(eq(roadmapBatches.id, batchId)).get();
+  if (!batch) return null;
+  return summarizeRoadmapArtifacts(batch, listRoadmapBatchArtifacts(batchId));
+}
+
+export function refreshRoadmapBatchSummary(batchId: string): RoadmapBatchSummary | null {
+  const db = getDb();
+  const batch = db.select().from(roadmapBatches).where(eq(roadmapBatches.id, batchId)).get();
+  if (!batch) return null;
+  const artifacts = listRoadmapBatchArtifacts(batchId);
+  const summary = summarizeRoadmapArtifacts(batch, artifacts);
+  const status = computeRoadmapBatchStatus({
+    artifacts,
+    synthesisReady: summary.synthesisReady,
+  });
+  const nowIso = new Date().toISOString();
+  db.update(roadmapBatches)
+    .set({
+      status: status.status,
+      validArtifactCount: summary.counts.valid,
+      invalidArtifactCount: summary.counts.invalid,
+      missingArtifactCount: summary.counts.missing,
+      externalBlockedArtifactCount: summary.counts.externalBlocked,
+      synthesisReady: summary.synthesisReady,
+      failureFamily: status.failureFamily,
+      summaryJson: serializeJson({
+        counts: summary.counts,
+        synthesisReady: summary.synthesisReady,
+        failureFamily: status.failureFamily,
+        message: summary.message,
+      }),
+      updatedAt: nowIso,
+    })
+    .where(eq(roadmapBatches.id, batchId))
+    .run();
+  if (summary.synthesisReady && batch.synthesisTaskId) {
+    db.update(tasks)
+      .set({
+        paused: false,
+        blockedReason: sql`CASE WHEN ${tasks.blockedReason} LIKE 'synthesis_not_ready:%' THEN NULL ELSE ${tasks.blockedReason} END`,
+        updatedAt: nowIso,
+      })
+      .where(eq(tasks.id, batch.synthesisTaskId))
+      .run();
+  }
+  const updated = db.select().from(roadmapBatches).where(eq(roadmapBatches.id, batchId)).get();
+  return updated ? summarizeRoadmapArtifacts(updated, artifacts) : null;
+}
+
+export function updateRoadmapBatchArtifactState(input: {
+  taskId: string;
+  state: RoadmapBatchArtifactState;
+  failureFamily?: RoadmapBatchFailureFamily | null;
+  validationDetails?: unknown;
+  branchName?: string | null;
+  worktreePath?: string | null;
+  projectRoot?: string | null;
+  contentSha?: string | null;
+  validatedAt?: string | null;
+}): RoadmapBatchSummary | null {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.taskId);
+  if (!artifact) return null;
+  const nowIso = new Date().toISOString();
+  getDb()
+    .update(roadmapBatchArtifacts)
+    .set({
+      state: input.state,
+      failureFamily: input.failureFamily ?? null,
+      validationDetailsJson:
+        input.validationDetails === undefined
+          ? artifact.validationDetailsJson
+          : serializeJson(input.validationDetails),
+      branchName: input.branchName ?? artifact.branchName,
+      worktreePath: input.worktreePath ?? artifact.worktreePath,
+      projectRoot: input.projectRoot ?? artifact.projectRoot,
+      contentSha: input.contentSha ?? artifact.contentSha,
+      validatedAt: input.validatedAt ?? (input.state === "valid" ? nowIso : null),
+      updatedAt: nowIso,
+    })
+    .where(eq(roadmapBatchArtifacts.id, artifact.id))
+    .run();
+  return refreshRoadmapBatchSummary(artifact.batchId);
+}
+
+export function listValidatedRoadmapReportArtifacts(batchId: string): RoadmapBatchArtifactRow[] {
+  return getDb()
+    .select()
+    .from(roadmapBatchArtifacts)
+    .where(
+      and(
+        eq(roadmapBatchArtifacts.batchId, batchId),
+        eq(roadmapBatchArtifacts.role, "report"),
+        eq(roadmapBatchArtifacts.state, "valid"),
+      ),
+    )
+    .orderBy(asc(roadmapBatchArtifacts.createdAt))
+    .all();
+}
+
+export function getRoadmapBatchCreatedTaskIds(batch: RoadmapBatchRow): string[] {
+  return parseJsonStringArray(batch.createdTaskIdsJson);
 }
 
 // ── Runtime Warmup Sessions ──────────────────────────────────────────

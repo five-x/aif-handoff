@@ -310,6 +310,29 @@ export interface RoadmapCompletePayload {
   skipped: number;
   taskIds: string[];
   byPhase: Record<number, { created: number; skipped: number }>;
+  batchSummary?: RoadmapBatchSummaryPayload;
+}
+
+export interface RoadmapBatchSummaryPayload {
+  batchId: string;
+  projectId: string;
+  roadmapAlias: string;
+  taskIntent: TaskIntent;
+  status: string;
+  executionPolicy: string;
+  synthesisTaskId: string | null;
+  synthesisReady: boolean;
+  failureFamily: string | null;
+  counts: {
+    expected: number;
+    valid: number;
+    invalid: number;
+    missing: number;
+    synthesisNotReady: number;
+    externalBlocked: number;
+    total: number;
+  };
+  message: string | null;
 }
 
 export interface RoadmapErrorPayload {

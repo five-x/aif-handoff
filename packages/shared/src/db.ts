@@ -136,6 +136,49 @@ function ensureTables(sqlite: Database.Database): void {
     )
   `);
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS roadmap_batches (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      roadmap_alias TEXT NOT NULL,
+      task_intent TEXT NOT NULL DEFAULT 'general',
+      status TEXT NOT NULL DEFAULT 'expected',
+      execution_policy TEXT NOT NULL DEFAULT 'serialized_shared_checkout',
+      synthesis_task_id TEXT,
+      expected_artifact_count INTEGER NOT NULL DEFAULT 0,
+      valid_artifact_count INTEGER NOT NULL DEFAULT 0,
+      invalid_artifact_count INTEGER NOT NULL DEFAULT 0,
+      missing_artifact_count INTEGER NOT NULL DEFAULT 0,
+      external_blocked_artifact_count INTEGER NOT NULL DEFAULT 0,
+      synthesis_ready INTEGER NOT NULL DEFAULT 0,
+      failure_family TEXT,
+      summary_json TEXT,
+      created_task_ids_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS roadmap_batch_artifacts (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      roadmap_alias TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'report',
+      artifact_path TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'expected',
+      failure_family TEXT,
+      validation_details_json TEXT,
+      branch_name TEXT,
+      worktree_path TEXT,
+      project_root TEXT,
+      content_sha TEXT,
+      validated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runtime_profiles (
       id TEXT PRIMARY KEY,
       project_id TEXT,
@@ -713,6 +756,51 @@ const MIGRATIONS: Migration[] = [
       { statementContains: "WHERE is_fix = 1", tableName: "tasks", columnName: "is_fix" },
     ],
   },
+  {
+    version: 23,
+    description: "Persist typed roadmap batch artifact contracts",
+    sql: `
+      CREATE TABLE IF NOT EXISTS roadmap_batches (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        roadmap_alias TEXT NOT NULL,
+        task_intent TEXT NOT NULL DEFAULT 'general',
+        status TEXT NOT NULL DEFAULT 'expected',
+        execution_policy TEXT NOT NULL DEFAULT 'serialized_shared_checkout',
+        synthesis_task_id TEXT,
+        expected_artifact_count INTEGER NOT NULL DEFAULT 0,
+        valid_artifact_count INTEGER NOT NULL DEFAULT 0,
+        invalid_artifact_count INTEGER NOT NULL DEFAULT 0,
+        missing_artifact_count INTEGER NOT NULL DEFAULT 0,
+        external_blocked_artifact_count INTEGER NOT NULL DEFAULT 0,
+        synthesis_ready INTEGER NOT NULL DEFAULT 0,
+        failure_family TEXT,
+        summary_json TEXT,
+        created_task_ids_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      CREATE TABLE IF NOT EXISTS roadmap_batch_artifacts (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        roadmap_alias TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'report',
+        artifact_path TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'expected',
+        failure_family TEXT,
+        validation_details_json TEXT,
+        branch_name TEXT,
+        worktree_path TEXT,
+        project_root TEXT,
+        content_sha TEXT,
+        validated_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -981,6 +1069,11 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_tasks_runtime_profile_id ON tasks(runtime_profile_id)",
     // Runtime profile lookups for chat sessions
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_runtime_profile_id ON chat_sessions(runtime_profile_id)",
+    // Roadmap batch artifact lookups.
+    "CREATE INDEX IF NOT EXISTS idx_roadmap_batches_project_alias ON roadmap_batches(project_id, roadmap_alias)",
+    "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifacts_batch ON roadmap_batch_artifacts(batch_id, role, state)",
+    "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifacts_task ON roadmap_batch_artifacts(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifacts_project_alias ON roadmap_batch_artifacts(project_id, roadmap_alias)",
     // Usage event scope lookups for per-entity aggregation queries and dashboards
     "CREATE INDEX IF NOT EXISTS idx_usage_events_project ON usage_events(project_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_task ON usage_events(task_id, created_at)",

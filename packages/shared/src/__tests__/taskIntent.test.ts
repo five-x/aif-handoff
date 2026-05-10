@@ -157,6 +157,19 @@ describe("taskIntent", () => {
     expect(result).toEqual({ ok: true, issues: [] });
   });
 
+  it("accepts audit synthesis titles through the shared audit contract", () => {
+    const result = validateGeneratedTaskIntent({
+      taskIntent: "audit",
+      title: "Synthesize audit findings",
+      description: completeAuditDescription().replace(
+        "Report artifact: audit/config-audit.md",
+        "Report artifact: audit/security-summary.md",
+      ),
+    });
+
+    expect(result).toEqual({ ok: true, issues: [] });
+  });
+
   it("accepts a complete feature generated card", () => {
     const result = validateGeneratedTaskIntent({
       taskIntent: "feature",

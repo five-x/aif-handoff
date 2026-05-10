@@ -30,7 +30,12 @@ const {
   commitGeneratedRoadmapIfNeeded,
   RoadmapGenerationError,
 } = await import("../services/roadmapGeneration.js");
-const { findTasksByRoadmapAlias, nextBacklogTaskByPosition } = await import("@aif/data");
+const {
+  findRoadmapBatchByProjectAlias,
+  findTasksByRoadmapAlias,
+  listRoadmapBatchArtifacts,
+  nextBacklogTaskByPosition,
+} = await import("@aif/data");
 
 function createProjectWithRoadmap(roadmapContent: string) {
   const tmpDir = mkdtempSync(join(tmpdir(), "roadmap-test-"));
@@ -837,9 +842,12 @@ describe("roadmapGeneration", () => {
       });
 
       expect(result.created).toBe(2);
-      const task = findTasksByRoadmapAlias(projectId, "audit").find(
-        (stored) => stored.title === "Audit: configuration",
-      );
+      expect(result.batchSummary?.status).toBe("expected");
+      expect(result.batchSummary?.executionPolicy).toBe("serialized_shared_checkout");
+      expect(result.batchSummary?.counts.total).toBe(2);
+      const storedTasks = findTasksByRoadmapAlias(projectId, "audit");
+      const task = storedTasks.find((stored) => stored.title === "Audit: configuration");
+      const synthesis = storedTasks.find((stored) => stored.title === "Synthesize audit findings");
       expect(task).toBeDefined();
       expect(task?.taskIntent).toBe("audit");
       expect(task?.plannerMode).toBe("full");
@@ -849,6 +857,16 @@ describe("roadmapGeneration", () => {
       expect(task?.useSubagents).toBe(true);
       expect(task?.tags).toContain("kind:audit");
       expect(task?.tags).toContain("diagnostic-only");
+      expect(synthesis?.paused).toBe(true);
+      expect(synthesis?.blockedReason).toContain("synthesis_not_ready");
+      const batch = findRoadmapBatchByProjectAlias(projectId, "audit");
+      expect(batch).toBeDefined();
+      const artifacts = listRoadmapBatchArtifacts(batch!.id);
+      expect(artifacts.map((artifact) => artifact.role).sort()).toEqual(["report", "synthesis"]);
+      expect(artifacts.map((artifact) => artifact.artifactPath).sort()).toEqual([
+        "audit/2026-05-09-config-audit.md",
+        "audit/2026-05-09-summary.md",
+      ]);
     });
 
     it("should ignore per-task typed intent when import batch intent is omitted", () => {

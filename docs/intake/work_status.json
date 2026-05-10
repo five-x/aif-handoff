@@ -57,6 +57,14 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260510-harden-typed-roadmap-content-validation"
+    },
+    {
+      "taskId": "work-20260510-harden-audit-roadmap-flow-contract",
+      "title": "Harden Audit Roadmap Flow Contract",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260510-harden-audit-roadmap-flow-contract"
     }
   ]
 }

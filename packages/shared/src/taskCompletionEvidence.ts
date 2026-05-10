@@ -2,6 +2,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, relative, resolve, sep } from "node:path";
 import { getProjectConfig } from "./projectConfig.js";
+import {
+  isAuditReportArtifactPath,
+  parseExpectedAuditReportArtifactPath,
+} from "./auditRoadmapContract.js";
 import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
 
 export type TaskCompletionIssueCode =
@@ -30,6 +34,7 @@ export interface TaskCompletionEvidenceTask {
   reviewComments?: string | null;
   agentActivityLog?: string | null;
   manualReviewRequired?: boolean | null;
+  expectedReportArtifactPath?: string | null;
 }
 
 export interface TaskCompletionEvidenceIssue {
@@ -61,6 +66,7 @@ export interface TaskCompletionEvidenceResult {
     reportReferencedPaths: string[];
     missingReportReferencedPaths: string[];
     existingReportReferencedPaths: string[];
+    expectedReportArtifactPath: string | null;
   };
 }
 
@@ -301,13 +307,7 @@ function isMetadataOnlyPath(path: string): boolean {
 function isReportArtifactPath(path: string, task: TaskCompletionEvidenceTask): boolean {
   const normalized = normalizeRelativePath(path);
   if (isPlanArtifact(normalized, task)) return false;
-  if (/^(src|packages\/[^/]+\/src)\//i.test(normalized)) return false;
-  const name = basename(normalized).toLowerCase();
-  if (!/\.(md|mdx|txt)$/i.test(name)) return false;
-  if (/^(result|report|audit|review|findings|discovery)\.(md|mdx|txt)$/i.test(name)) return true;
-  return /(^|\/)(reports?|audit|review|reviews|findings|discovery|artifacts)(\/|$)/i.test(
-    normalized,
-  );
+  return isAuditReportArtifactPath(normalized);
 }
 
 function requiresCommittedReport(task: TaskCompletionEvidenceTask): boolean {
@@ -874,7 +874,16 @@ export function evaluateTaskCompletionEvidence(
   const meaningfulChangedFiles = gitEvidence.files.filter(
     (file) => !isPlanArtifact(file, task) && !isMetadataOnlyPath(file),
   );
-  const reportArtifactFiles = gitEvidence.files.filter((file) => isReportArtifactPath(file, task));
+  const expectedReportArtifactPath =
+    task.expectedReportArtifactPath ??
+    (task.description ? parseExpectedAuditReportArtifactPath(task.description) : null);
+  const reportArtifactFiles = expectedReportArtifactPath
+    ? gitEvidence.files.filter(
+        (file) =>
+          normalizeRelativePath(file) === normalizeRelativePath(expectedReportArtifactPath) &&
+          isReportArtifactPath(file, task),
+      )
+    : gitEvidence.files.filter((file) => isReportArtifactPath(file, task));
   const reportText = collectReportText(projectRoot, reportArtifactFiles);
   const committedReportRequired = riskyTask || requiresCommittedReport(task);
   const committedFileSet = new Set(gitEvidence.committedFiles);
@@ -1046,6 +1055,7 @@ export function evaluateTaskCompletionEvidence(
       reportReferencedPaths,
       missingReportReferencedPaths: reportMissing,
       existingReportReferencedPaths: reportExisting,
+      expectedReportArtifactPath,
     },
   };
 }

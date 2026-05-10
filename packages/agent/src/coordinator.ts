@@ -19,6 +19,10 @@ import {
   claimBacklogTaskForAdvance,
   persistTaskRuntimeLimitSnapshot,
   resolveEffectiveRuntimeProfile,
+  findRoadmapBatchArtifactByTaskId,
+  summarizeRoadmapBatch,
+  updateRoadmapBatchArtifactState,
+  setTaskFields,
   type CoordinatorStage,
   type TaskFieldsPatch,
   type TaskRow,
@@ -30,8 +34,10 @@ import {
   CLEAN_STATE_RESET,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
+  mapTaskCompletionIssueCodeToAuditFailureFamily,
   TaskPlanQualityError,
   withTimeout,
+  type AuditFailureFamily,
   type TaskStatus,
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
@@ -333,6 +339,125 @@ function proactivelyBlockTaskForRuntimeGate(
   );
 }
 
+const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
+  "invalid_artifact_content",
+  "missing_artifact",
+  "missing_tool_evidence",
+  "rework_needed",
+]);
+
+function firstAuditFailureFamily(
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>,
+): AuditFailureFamily {
+  if (result.issues.some((entry) => entry.code === "branch_isolation")) return "external_blocker";
+  if (result.issues.some((entry) => entry.code === "manual_review_required")) {
+    return "manual_review_required";
+  }
+  return mapTaskCompletionIssueCodeToAuditFailureFamily(result.issues[0]?.code ?? "unknown");
+}
+
+function artifactStateForFailureFamily(
+  family: AuditFailureFamily,
+): "invalid" | "missing" | "synthesis_not_ready" | "external_blocked" {
+  if (family === "missing_artifact") return "missing";
+  if (family === "synthesis_not_ready") return "synthesis_not_ready";
+  if (family === "external_blocker") return "external_blocked";
+  return "invalid";
+}
+
+function returnAuditTaskToRework(input: {
+  task: TaskRow;
+  fromStatus: TaskStatus;
+  title: string;
+  blockedReason: string;
+  family: AuditFailureFamily;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+  projectRoot: string;
+}): boolean {
+  updateRoadmapBatchArtifactState({
+    taskId: input.task.id,
+    state: artifactStateForFailureFamily(input.family),
+    failureFamily: input.family,
+    validationDetails: {
+      issues: input.result.issues,
+      evidence: input.result.evidence,
+    },
+    branchName: input.task.branchName,
+    worktreePath: input.task.worktreePath,
+    projectRoot: input.projectRoot,
+  });
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "implementing",
+    {
+      blockedReason: `${input.family}: ${input.blockedReason}`,
+      blockedFromStatus: input.fromStatus,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      reworkRequested: true,
+      manualReviewRequired: false,
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] Audit artifact validation requested rework: ${input.blockedReason}`,
+  );
+  return true;
+}
+
+function holdSynthesisTask(input: {
+  task: TaskRow;
+  projectRoot: string;
+  reason: string;
+  validationDetails?: unknown;
+  fromStatus?: TaskStatus;
+}): boolean {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  if (!artifact || artifact.role !== "synthesis") return false;
+  updateRoadmapBatchArtifactState({
+    taskId: input.task.id,
+    state: "synthesis_not_ready",
+    failureFamily: "synthesis_not_ready",
+    validationDetails: input.validationDetails ?? { reason: input.reason },
+    branchName: input.task.branchName,
+    worktreePath: input.task.worktreePath,
+    projectRoot: input.projectRoot,
+  });
+  setTaskFields(input.task.id, {
+    paused: true,
+    blockedReason: input.reason,
+    blockedFromStatus: input.fromStatus ?? input.task.status,
+    updatedAt: new Date().toISOString(),
+  });
+  appendTaskActivityLog(input.task.id, `[${new Date().toISOString()}] ${input.reason}`);
+  log.info(
+    { taskId: input.task.id, batchId: artifact.batchId },
+    "Held synthesis task until batch is ready",
+  );
+  return true;
+}
+
+function holdSynthesisIfNotReady(task: TaskRow, projectRoot: string): boolean {
+  const artifact = findRoadmapBatchArtifactByTaskId(task.id);
+  if (!artifact || artifact.role !== "synthesis") return false;
+  const summary = summarizeRoadmapBatch(artifact.batchId);
+  if (summary?.synthesisReady) return false;
+
+  const reason = `synthesis_not_ready: waiting for validated audit batch artifacts (${summary?.counts.valid ?? 0}/${summary?.counts.total ?? 0} valid)`;
+  return holdSynthesisTask({
+    task,
+    projectRoot,
+    reason,
+    validationDetails: summary ?? { reason },
+  });
+}
+
+function isSynthesisNotReadyError(err: unknown): err is Error {
+  return err instanceof Error && err.message.startsWith("synthesis_not_ready:");
+}
+
 function blockTaskForCompletionEvidenceIfNeeded(input: {
   task: TaskRow;
   projectRoot: string;
@@ -342,15 +467,64 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   phase?: "pre_implementation" | "completion";
   extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
 }): boolean {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   const result = evaluateTaskCompletionEvidence({
-    task: input.task,
+    task: {
+      ...input.task,
+      expectedReportArtifactPath: artifact?.artifactPath ?? null,
+    },
     projectRoot: input.projectRoot,
     requireManualReview: input.requireManualReview,
     phase: input.phase,
   });
-  if (result.ok) return false;
+  if (result.ok) {
+    if (artifact && input.phase !== "pre_implementation") {
+      updateRoadmapBatchArtifactState({
+        taskId: input.task.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          evidence: result.evidence,
+        },
+        branchName: input.task.branchName,
+        worktreePath: input.task.worktreePath,
+        projectRoot: input.projectRoot,
+      });
+    }
+    return false;
+  }
 
   const blockedReason = formatTaskCompletionBlockedReason(result);
+  const family = firstAuditFailureFamily(result);
+  if (
+    artifact &&
+    input.phase !== "pre_implementation" &&
+    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(family)
+  ) {
+    return returnAuditTaskToRework({
+      task: input.task,
+      fromStatus: input.fromStatus,
+      title: input.title,
+      blockedReason,
+      family,
+      result,
+      projectRoot: input.projectRoot,
+    });
+  }
+  if (artifact) {
+    updateRoadmapBatchArtifactState({
+      taskId: input.task.id,
+      state: artifactStateForFailureFamily(family),
+      failureFamily: family,
+      validationDetails: {
+        issues: result.issues,
+        evidence: result.evidence,
+      },
+      branchName: input.task.branchName,
+      worktreePath: input.task.worktreePath,
+      projectRoot: input.projectRoot,
+    });
+  }
   const nowIso = new Date().toISOString();
   clearTaskRuntimeLimitSnapshot(input.task.id);
   updateTaskStatus(
@@ -509,6 +683,10 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
   );
   const sourceStatus = task.status;
   const taskTitle = task.title;
+
+  if (stage.label === "implementer" && holdSynthesisIfNotReady(task, executionRoot)) {
+    return false;
+  }
 
   if (
     stage.label === "implementer" &&
@@ -711,6 +889,21 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         taskTitle,
         error: planQualityError,
       });
+      flushActivityQueue(task.id);
+      return false;
+    }
+
+    if (
+      stage.label === "implementer" &&
+      isSynthesisNotReadyError(err) &&
+      holdSynthesisTask({
+        task: findTaskById(task.id) ?? task,
+        projectRoot: executionRoot,
+        reason: err.message,
+        validationDetails: { reason: err.message },
+        fromStatus: stage.inProgress,
+      })
+    ) {
       flushActivityQueue(task.id);
       return false;
     }

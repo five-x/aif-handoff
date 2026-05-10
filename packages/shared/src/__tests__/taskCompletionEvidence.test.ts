@@ -1511,6 +1511,88 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("zero_delta");
   });
 
+  it("requires the expected audit report artifact path when one is declared", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/wrong-audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "wrong.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies the repository documentation.",
+        "Risk: The expected report path could otherwise be bypassed.",
+        "Verification: Command `git log -1 --name-only --oneline` output included this file.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/wrong.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add wrong audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-expected-report",
+        title: "Audit expected report path",
+        description: "Report artifact: audit/expected.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.expectedReportArtifactPath).toBe("audit/expected.md");
+    expect(result.evidence.reportArtifactFiles).toEqual([]);
+    expect(codes(result)).toContain("missing_report_artifact");
+  });
+
+  it("accepts expected audit report paths that match the shared audit contract", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/docs-audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(
+      join(root, "docs", "security-audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies the repository documentation.",
+        "Risk: The report path contract can drift across gates.",
+        "Verification: Command `git log -1 --name-only --oneline` output included docs/security-audit.md.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "docs/security-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add docs audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-expected-docs-report",
+        title: "Audit expected docs report path",
+        description: "Report artifact: docs/security-audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.expectedReportArtifactPath).toBe("docs/security-audit.md");
+    expect(result.evidence.reportArtifactFiles).toEqual(["docs/security-audit.md"]);
+    expect(codes(result)).not.toContain("missing_report_artifact");
+  });
+
   it("allows a normal simple task without risk signals or generic plan output", () => {
     const root = initRepo();
 

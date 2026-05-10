@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projects, taskComments, tasks } from "@aif/shared";
@@ -25,6 +25,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 const { runImplementer } = await import("../subagents/implementer.js");
+const { createRoadmapBatchContract, updateRoadmapBatchArtifactState } = await import("@aif/data");
 
 function streamSuccess(result: string): AsyncIterable<{
   type: "result";
@@ -126,6 +127,182 @@ describe("runImplementer rework behavior", () => {
       "Deterministic diagnostic report generated",
     );
     expect(updatedTask?.plan).toContain("- [ ] Keep the run diagnostic-only");
+  });
+
+  it("injects validated audit report artifacts into synthesis prompts", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(streamSuccess("Synthesis done"));
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "audit", "config.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies project docs.",
+        "Risk: Configuration drift can be missed.",
+        "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    db.insert(tasks)
+      .values({
+        id: "task-synthesis-report",
+        projectId: "project-1",
+        title: "Audit configuration",
+        description: "Report artifact: audit/config.md",
+        taskIntent: "audit",
+        status: "done",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-synthesis",
+        projectId: "project-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Synthesize validated audit reports",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-synthesis-report", "task-synthesis"],
+      synthesisTaskId: "task-synthesis",
+      artifacts: [
+        {
+          taskId: "task-synthesis-report",
+          role: "report",
+          artifactPath: "audit/config.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-synthesis-report",
+      state: "valid",
+      failureFamily: null,
+    });
+
+    await runImplementer("task-synthesis", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("<<<VALIDATED_AUDIT_BATCH_INPUTS");
+    expect(call.prompt).toContain("--- artifact: audit/config.md");
+    expect(call.prompt).toContain("Evidence: `README.md:1` identifies project docs.");
+    expect(call.prompt).toContain("use those exact validated report contents");
+  });
+
+  it("reads validated audit report artifacts from producer branches for synthesis prompts", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(streamSuccess("Synthesis done"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "audit/config-report"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "audit", "config.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies project docs from the producer branch.",
+        "Risk: Synthesis can miss branch-only reports.",
+        "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/config.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "main"], { cwd: projectRoot, stdio: "ignore" });
+    expect(existsSync(join(projectRoot, "audit", "config.md"))).toBe(false);
+
+    db.insert(tasks)
+      .values({
+        id: "task-branch-report",
+        projectId: "project-1",
+        title: "Audit configuration",
+        description: "Report artifact: audit/config.md",
+        taskIntent: "audit",
+        status: "done",
+        branchName: "audit/config-report",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-branch-synthesis",
+        projectId: "project-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Synthesize validated audit reports",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-branch-report", "task-branch-synthesis"],
+      synthesisTaskId: "task-branch-synthesis",
+      artifacts: [
+        {
+          taskId: "task-branch-report",
+          role: "report",
+          artifactPath: "audit/config.md",
+          branchName: "audit/config-report",
+          projectRoot,
+        },
+        {
+          taskId: "task-branch-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-branch-report",
+      state: "valid",
+      failureFamily: null,
+    });
+
+    await runImplementer("task-branch-synthesis", projectRoot);
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("source: audit/config-report:audit/config.md");
+    expect(call.prompt).toContain("producer branch");
+    expect(call.prompt).toContain("use those exact validated report contents");
   });
 
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {
