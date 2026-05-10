@@ -188,6 +188,27 @@ interface ValidatedAuditArtifactContent {
   content: string;
 }
 
+interface AuditFindingSection {
+  artifactPath: string;
+  taskId: string;
+  content: string;
+}
+
+interface AuditSourceReportSummary {
+  artifact: ValidatedAuditArtifactContent;
+  includedFindings: AuditFindingSection[];
+  omittedFindingCount: number;
+}
+
+const LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS: RegExp[] = [
+  /\b(?:123abc|abc123|1234567890abcdef)\b/i,
+  /\b(?:Author:\s+Your Name|your\.email@example\.com)\b/i,
+  /\b(?:root-commit|Date:\s+Mon May 10 12:34:56 2026|Author:\s+qwen-local-agent\s+<>|Signed-off-by:\s+qwen-local-agent\s+<>|commit\s+[0-9a-f]*0c0c[0-9a-f]*\b)/i,
+  /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|bytes\s*>\s*\d+\s*byte limit|could not (?:read|inspect|access)|not visible|would show|should show|expected to show)\b/i,
+  /\b(?:will be committed|created and will be committed|has been created and will be committed)\b/i,
+  /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
+];
+
 function readValidatedAuditArtifacts(
   taskId: string,
   fallbackRoot: string,
@@ -249,6 +270,43 @@ function formatValidatedAuditSynthesisInput(artifacts: ValidatedAuditArtifactCon
   return sections.join("\n\n");
 }
 
+function splitAuditFindingSections(content: string): string[] {
+  return content
+    .split(/\n(?=#{2,4}\s+)/)
+    .map((section) => section.trim())
+    .filter((section) => {
+      return (
+        /\bEvidence\s*:/i.test(section) &&
+        /\bRisk\s*:/i.test(section) &&
+        /\bVerification\s*:/i.test(section)
+      );
+    });
+}
+
+function hasLowQualitySynthesisFindingEvidence(section: string): boolean {
+  return LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS.some((pattern) => pattern.test(section));
+}
+
+function summarizeValidatedAuditArtifactsForSynthesis(
+  artifacts: ValidatedAuditArtifactContent[],
+): AuditSourceReportSummary[] {
+  return artifacts.map((artifact) => {
+    const findingSections = splitAuditFindingSections(artifact.content);
+    const includedFindings = findingSections
+      .filter((section) => !hasLowQualitySynthesisFindingEvidence(section))
+      .map((section) => ({
+        artifactPath: artifact.artifactPath,
+        taskId: artifact.taskId,
+        content: section,
+      }));
+    return {
+      artifact,
+      includedFindings,
+      omittedFindingCount: findingSections.length - includedFindings.length,
+    };
+  });
+}
+
 function commitArtifactIfChanged(projectRoot: string, artifactPath: string): string {
   const gitPath = normalizeArtifactGitPath(artifactPath);
   execFileSync("git", ["add", "--", gitPath], {
@@ -278,25 +336,64 @@ function commitArtifactIfChanged(projectRoot: string, artifactPath: string): str
 function buildDeterministicAuditSynthesisContent(
   artifacts: ValidatedAuditArtifactContent[],
 ): string {
+  const sourceSummaries = summarizeValidatedAuditArtifactsForSynthesis(artifacts);
+  const totalIncluded = sourceSummaries.reduce(
+    (sum, summary) => sum + summary.includedFindings.length,
+    0,
+  );
+  const totalOmitted = sourceSummaries.reduce(
+    (sum, summary) => sum + summary.omittedFindingCount,
+    0,
+  );
   const lines = [
     "# Audit Summary",
     "",
     "Generated from validated audit batch reports.",
+    "Only findings with concrete Evidence, Risk, and Verification sections were included.",
     "",
     "## Source Reports",
     "",
-    ...artifacts.map((artifact) => `- ${artifact.artifactPath} (task ${artifact.taskId})`),
+    ...sourceSummaries.map((summary) => {
+      return [
+        `- ${summary.artifact.artifactPath} (task ${summary.artifact.taskId})`,
+        `  - Included findings: ${summary.includedFindings.length}`,
+        `  - Omitted findings: ${summary.omittedFindingCount}`,
+      ].join("\n");
+    }),
     "",
     "## Findings By Source Report",
     "",
   ];
 
-  artifacts.forEach((artifact, index) => {
-    lines.push(`### Source Report ${index + 1}: ${artifact.artifactPath}`);
+  sourceSummaries.forEach((summary, sourceIndex) => {
+    lines.push(`### Source Report ${sourceIndex + 1}: ${summary.artifact.artifactPath}`);
     lines.push("");
-    lines.push(artifact.content.trim());
-    lines.push("");
+    if (summary.includedFindings.length === 0) {
+      lines.push("No findings from this source report passed the synthesis evidence filter.");
+      lines.push("");
+      lines.push(`Evidence: \`${summary.artifact.artifactPath}\` was a validated source report.`);
+      lines.push("Risk: Source report evidence was too weak to include as an audit finding.");
+      lines.push(
+        "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output is recorded in the implementation log for this synthesis artifact.",
+      );
+      lines.push("");
+      return;
+    }
+    summary.includedFindings.forEach((finding, findingIndex) => {
+      lines.push(`#### Finding ${sourceIndex + 1}.${findingIndex + 1}`);
+      lines.push("");
+      lines.push(`Source report: \`${finding.artifactPath}\` (task ${finding.taskId})`);
+      lines.push("");
+      lines.push(finding.content.trim());
+      lines.push("");
+    });
   });
+
+  lines.push("## Synthesis Quality Notes");
+  lines.push("");
+  lines.push(`Included source findings: ${totalIncluded}.`);
+  lines.push(`Omitted source findings: ${totalOmitted}.`);
+  lines.push("");
 
   return `${lines.join("\n").trim()}\n`;
 }

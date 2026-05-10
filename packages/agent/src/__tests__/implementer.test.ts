@@ -322,10 +322,15 @@ describe("runImplementer rework behavior", () => {
     writeFileSync(
       join(projectRoot, "audit", "config.md"),
       [
-        "## Finding",
+        "## Finding: Valid source evidence",
         "Evidence: `README.md:1` identifies project docs from the report branch.",
         "Risk: Synthesis can miss validated source evidence.",
         "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
+        "",
+        "### Finding: Tool limit placeholder",
+        "Evidence: `README.md` was reported as file is too large (8409 bytes > 1000 byte limit).",
+        "Risk: Placeholder inspection claims can make audit synthesis look validated.",
+        "Verification: Command `read_file README.md` output: `file is too large (8409 bytes > 1000 byte limit)`.",
       ].join("\n"),
       "utf8",
     );
@@ -398,6 +403,9 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("Generated from validated audit batch reports.");
     expect(summary).toContain("Evidence: `README.md:1`");
     expect(summary).toContain("Risk: Synthesis can miss validated source evidence.");
+    expect(summary).toContain("Included findings: 1");
+    expect(summary).toContain("Omitted findings: 1");
+    expect(summary).not.toContain("file is too large");
     const gitLog = execFileSync("git", ["log", "-1", "--name-only", "--oneline"], {
       cwd: projectRoot,
       encoding: "utf8",
