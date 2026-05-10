@@ -1373,6 +1373,137 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("insufficient_report_evidence");
   });
 
+  it("blocks audit reports with placeholder git verification output", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/placeholder-git-output"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: Placeholder verification would make the report look validated without real evidence.",
+        "Verification: Command `git log -1 --name-only --oneline` output:",
+        "```",
+        "123abc Add audit report",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-placeholder-git-output",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reportQualityIssues.join(" ")).toContain("placeholder commit hashes");
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
+  it("blocks audit reports that claim existing paths are missing", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs", "ops"), { recursive: true });
+    writeFileSync(join(root, "docs", "ops", "runbook.md"), "# Runbook\n", "utf8");
+    execFileSync("git", ["add", "docs/ops/runbook.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add ops docs", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/false-missing-path"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: False missing-path claims make the audit unreliable.",
+        "Verification: Command `ls -la docs/ops` output:",
+        "```",
+        "ls: cannot access 'docs/ops': No such file or directory",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-false-missing-path",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reportQualityIssues.join(" ")).toContain("docs/ops");
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
+  it("blocks speculative audit reports that admit inspection gaps", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/speculative-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The report may contain unverified assumptions instead of findings.",
+        "The database file is reported as too large to read and may contain unhandled errors.",
+        "Verification: Command `git log -1 --name-only --oneline` output included `reports/audit.md`.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-speculative-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reportQualityIssues.join(" ")).toContain("unverified inspection");
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
   it("blocks risky committed reports without latest implementation-stage tool activity", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/audit-no-tool"], {

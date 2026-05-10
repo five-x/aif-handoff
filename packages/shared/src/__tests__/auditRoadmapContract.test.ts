@@ -103,6 +103,9 @@ describe("auditRoadmapContract", () => {
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("insufficient_report_evidence")).toBe(
       "invalid_artifact_content",
     );
+    expect(mapTaskCompletionIssueCodeToAuditFailureFamily("low_quality_report_evidence")).toBe(
+      "invalid_artifact_content",
+    );
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("manual_review_required")).toBe(
       "manual_review_required",
     );

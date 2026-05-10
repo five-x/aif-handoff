@@ -18,6 +18,7 @@ export type TaskCompletionIssueCode =
   | "missing_review_tool_activity"
   | "invalid_or_missing_file_references"
   | "insufficient_report_evidence"
+  | "low_quality_report_evidence"
   | "branch_isolation"
   | "manual_review_required";
 
@@ -61,6 +62,7 @@ export interface TaskCompletionEvidenceResult {
     implementationToolActivityCount: number;
     reviewStageToolActivityCount: number;
     substantiveReportEvidence: boolean;
+    reportQualityIssues: string[];
     referencedPaths: string[];
     missingReferencedPaths: string[];
     existingReferencedPaths: string[];
@@ -102,6 +104,31 @@ const COMMITTED_REPORT_PATTERN =
 
 const DETERMINISTIC_FALLBACK_REPORT_PATTERN =
   /\bDeterministic diagnostic report generated\b|\bDiagnostic-only repository inventory report\b|\bNo blocking issue found by deterministic inventory check\b|\bThis report records evidence only\b/i;
+
+const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
+  {
+    pattern: /\b(?:123abc|abc123|1234567890abcdef)\b/i,
+    message: "Report artifact contains placeholder commit hashes instead of real command output.",
+  },
+  {
+    pattern: /\b(?:Author:\s+Your Name|your\.email@example\.com)\b/i,
+    message: "Report artifact contains placeholder author metadata instead of real git output.",
+  },
+  {
+    pattern:
+      /\b(?:root-commit|Date:\s+Mon May 10 12:34:56 2026|Author:\s+qwen-local-agent\s+<>|Signed-off-by:\s+qwen-local-agent\s+<>|commit\s+[0-9a-f]*0c0c[0-9a-f]*\b)/i,
+    message: "Report artifact contains synthetic-looking git verification output.",
+  },
+  {
+    pattern:
+      /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|could not (?:read|inspect|access)|not visible|would show|should show|expected to show)\b/i,
+    message: "Report artifact contains unverified inspection claims instead of observed evidence.",
+  },
+  {
+    pattern: /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content)\b/i,
+    message: "Report artifact contains speculative audit claims that are not backed by evidence.",
+  },
+];
 
 const SLASH_PATH_TOKEN_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,12})(?::\d+(?::\d+)?)?/g;
@@ -731,6 +758,50 @@ function hasCommandOutputEvidence(text: string): boolean {
   ).test(text);
 }
 
+function collectFalseMissingPathClaims(text: string, projectRoot: string): string[] {
+  const claimedMissingPaths = new Set<string>();
+  const patterns = [
+    /`([^`\r\n]+)`\s+(?:directory\s+|file\s+)?does not exist/gi,
+    /(?:directory|file)\s+`([^`\r\n]+)`\s+does not exist/gi,
+    /(?:ls|dir):\s+cannot access ['"`]?([^'"`\s\r\n]+)['"`]?:\s+No such file or directory/gi,
+    /cannot find path ['"`]?([^'"`\s\r\n]+)['"`]?/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const rawPath = match[1]?.trim();
+      if (!rawPath || rawPath.includes("*")) continue;
+      const normalized = normalizeRelativePath(rawPath);
+      const absPath = resolve(projectRoot, normalized);
+      if (isInsideRoot(projectRoot, absPath) && existsSync(absPath)) {
+        claimedMissingPaths.add(normalized);
+      }
+    }
+  }
+
+  return [...claimedMissingPaths].sort();
+}
+
+function collectLowQualityReportEvidenceIssues(text: string, projectRoot: string): string[] {
+  if (!text.trim()) return [];
+  const issues = new Set<string>();
+
+  for (const { pattern, message } of LOW_QUALITY_REPORT_PATTERNS) {
+    if (pattern.test(text)) {
+      issues.add(message);
+    }
+  }
+
+  const falseMissingPaths = collectFalseMissingPathClaims(text, projectRoot);
+  if (falseMissingPaths.length > 0) {
+    issues.add(
+      `Report artifact claims existing paths are missing: ${formatPathExamples(falseMissingPaths)}.`,
+    );
+  }
+
+  return [...issues].sort();
+}
+
 function hasStructuredFindingEvidence(
   text: string,
   projectRoot: string,
@@ -993,6 +1064,7 @@ export function evaluateTaskCompletionEvidence(
     excludedReferencedPaths: reportArtifactFiles,
     allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
   });
+  const reportQualityIssues = collectLowQualityReportEvidenceIssues(reportText, projectRoot);
   const committedSubstantiveReportAvailable =
     reportArtifactFiles.length > 0 &&
     uncommittedReportArtifactFiles.length === 0 &&
@@ -1089,6 +1161,14 @@ export function evaluateTaskCompletionEvidence(
         ),
       );
     }
+    if (riskyTask && reportQualityIssues.length > 0) {
+      issues.push(
+        issue(
+          "low_quality_report_evidence",
+          `Audit/review/discovery report artifact contains low-quality or unverified evidence: ${reportQualityIssues.join(" ")}`,
+        ),
+      );
+    }
   }
   if (
     input.requireManualReview ||
@@ -1121,6 +1201,7 @@ export function evaluateTaskCompletionEvidence(
       implementationToolActivityCount,
       reviewStageToolActivityCount,
       substantiveReportEvidence,
+      reportQualityIssues,
       referencedPaths,
       missingReferencedPaths: missing,
       existingReferencedPaths: existing,

@@ -78,6 +78,7 @@ export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailure
   missing_review_tool_activity: "missing_tool_evidence",
   invalid_or_missing_file_references: "invalid_artifact_content",
   insufficient_report_evidence: "invalid_artifact_content",
+  low_quality_report_evidence: "invalid_artifact_content",
   branch_isolation: "external_blocker",
   manual_review_required: "manual_review_required",
   synthesis_not_ready: "synthesis_not_ready",
