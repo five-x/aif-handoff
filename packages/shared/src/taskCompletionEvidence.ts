@@ -354,6 +354,36 @@ function countLatestImplementationToolActivity(
   return lines.slice(latestStart + 1, end).filter((line) => /\]\s+Tool:\s+\S+/.test(line)).length;
 }
 
+function countImplementationToolActivity(agentActivityLog: string | null | undefined): number {
+  if (!agentActivityLog) return 0;
+  const lines = agentActivityLog.split(/\r?\n/);
+  const mainImplementerStart = /\]\s+Agent:\s+(?:implement-coordinator|aif-implement)\s+started\b/i;
+  const anyAgentStart = /\]\s+Agent:\s+.+\s+started\b/i;
+  const mainImplementerEnd =
+    /\]\s+Agent:\s+(?:implement-coordinator|aif-implement)\s+(?:complete|failed)\b/i;
+
+  let active = false;
+  let count = 0;
+  for (const line of lines) {
+    if (mainImplementerStart.test(line)) {
+      active = true;
+      continue;
+    }
+    if (active && mainImplementerEnd.test(line)) {
+      active = false;
+      continue;
+    }
+    if (active && anyAgentStart.test(line)) {
+      active = false;
+      continue;
+    }
+    if (active && /\]\s+Tool:\s+\S+/.test(line)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function countReviewStageRepositoryToolActivity(
   agentActivityLog: string | null | undefined,
 ): number {
@@ -860,6 +890,7 @@ export function evaluateTaskCompletionEvidence(
   const implementationToolActivityCount = countLatestImplementationToolActivity(
     task.agentActivityLog,
   );
+  const implementationToolActivityTotal = countImplementationToolActivity(task.agentActivityLog);
   const reviewStageToolActivityCount = countReviewStageRepositoryToolActivity(
     task.agentActivityLog,
   );
@@ -879,6 +910,10 @@ export function evaluateTaskCompletionEvidence(
     existingReferencedPaths: reportExisting,
     excludedReferencedPaths: reportArtifactFiles,
   });
+  const committedSubstantiveReportAvailable =
+    reportArtifactFiles.length > 0 &&
+    uncommittedReportArtifactFiles.length === 0 &&
+    substantiveReportEvidence;
 
   const issues: TaskCompletionEvidenceIssue[] = [];
   if (input.branchIsolationReason) {
@@ -923,7 +958,11 @@ export function evaluateTaskCompletionEvidence(
         ),
       );
     }
-    if (riskyTask && implementationToolActivityCount === 0) {
+    if (
+      riskyTask &&
+      implementationToolActivityCount === 0 &&
+      !(committedSubstantiveReportAvailable && implementationToolActivityTotal > 0)
+    ) {
       issues.push(
         issue(
           "missing_implementation_tool_activity",

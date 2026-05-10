@@ -850,6 +850,55 @@ describe("taskCompletionEvidence", () => {
     expect(result.issues).toEqual([]);
   });
 
+  it("accepts prior implementation tool activity when a clean committed report survived a no-op rework", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-report-rework"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `git status --short` output was clean after commit.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const noOpReworkActivity = [
+      "[2026-05-09T00:00:07.000Z] Agent: implement-coordinator started (runtime=qwen-local-agent, transport=api, model=Qwen3)",
+      "[2026-05-09T00:00:08.000Z] Agent: implement-coordinator complete (runtime=qwen-local-agent, transport=api, model=Qwen3)",
+    ].join("\n");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-committed-report-noop-rework",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: [
+          IMPLEMENTATION_TOOL_ACTIVITY,
+          noOpReworkActivity,
+          REVIEW_TOOL_ACTIVITY,
+        ].join("\n"),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.implementationToolActivityCount).toBe(0);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(1);
+    expect(result.issues).toEqual([]);
+  });
+
   it("blocks risky committed reports without review-stage repository tool activity", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/audit-no-review-tool"], {
