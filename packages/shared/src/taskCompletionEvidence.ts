@@ -35,6 +35,7 @@ export interface TaskCompletionEvidenceTask {
   agentActivityLog?: string | null;
   manualReviewRequired?: boolean | null;
   expectedReportArtifactPath?: string | null;
+  allowedEvidenceArtifactPaths?: string[] | null;
 }
 
 export interface TaskCompletionEvidenceIssue {
@@ -748,13 +749,34 @@ function hasStructuredFindingEvidence(
   );
 }
 
+function hasStructuredFindingEvidenceWithAllowedArtifactPath(
+  text: string,
+  allowedArtifactPaths: string[],
+): boolean {
+  if (allowedArtifactPaths.length === 0) return false;
+  const findingSections = text.split(/(?:^|\n)#{2,4}\s+|\n(?=-\s+(?:finding|issue|risk)\b)/i);
+  return findingSections.some((section) => {
+    if (!/\bEvidence\s*:/i.test(section)) return false;
+    if (!/\bRisk\s*:/i.test(section)) return false;
+    if (!/\bVerification\s*:/i.test(section)) return false;
+    return allowedArtifactPaths.some((artifactPath) => {
+      const escaped = artifactPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(escaped, "i").test(section);
+    });
+  });
+}
+
 export function hasSubstantiveReportEvidence(input: {
   text: string;
   projectRoot: string;
   existingReferencedPaths?: string[];
   excludedReferencedPaths?: string[];
+  allowedEvidenceArtifactPaths?: string[];
 }): boolean {
   const excludedPaths = new Set((input.excludedReferencedPaths ?? []).map(normalizeRelativePath));
+  const allowedArtifactPaths = [
+    ...new Set((input.allowedEvidenceArtifactPaths ?? []).map(normalizeRelativePath)),
+  ];
   if (hasInvalidExistingLineReference(input.text, input.projectRoot, excludedPaths)) return false;
   const existingPaths =
     input.existingReferencedPaths ??
@@ -770,6 +792,9 @@ export function hasSubstantiveReportEvidence(input: {
     return true;
   }
   if (hasSymbolEvidenceTiedToExistingPath(input.text, evidencePaths, excludedPaths)) return true;
+  if (hasStructuredFindingEvidenceWithAllowedArtifactPath(input.text, allowedArtifactPaths)) {
+    return true;
+  }
   return hasStructuredFindingEvidence(input.text, input.projectRoot, evidencePaths, excludedPaths);
 }
 
@@ -869,10 +894,15 @@ function extractDirectoryLineReferences(text: string, projectRoot: string): stri
 function classifyReferencedPaths(
   projectRoot: string,
   refs: string[],
+  allowedEvidenceArtifactPaths: Set<string> = new Set(),
 ): { existing: string[]; missing: string[] } {
   const existing: string[] = [];
   const missing: string[] = [];
   for (const ref of refs) {
+    if (allowedEvidenceArtifactPaths.has(normalizeRelativePath(ref))) {
+      existing.push(ref);
+      continue;
+    }
     const absPath = resolve(projectRoot, ref);
     if (existsSync(absPath)) {
       existing.push(ref);
@@ -907,6 +937,9 @@ export function evaluateTaskCompletionEvidence(
   const expectedReportArtifactPath =
     task.expectedReportArtifactPath ??
     (task.description ? parseExpectedAuditReportArtifactPath(task.description) : null);
+  const allowedEvidenceArtifactPaths = new Set(
+    (task.allowedEvidenceArtifactPaths ?? []).map(normalizeRelativePath),
+  );
   const reportArtifactFiles = expectedReportArtifactPath
     ? gitEvidence.files.filter(
         (file) =>
@@ -943,16 +976,22 @@ export function evaluateTaskCompletionEvidence(
     ]),
   ].sort();
   const referencedPaths = [...new Set([...taskReferencedPaths, ...reportReferencedPaths])].sort();
-  const { existing, missing } = classifyReferencedPaths(projectRoot, referencedPaths);
+  const { existing, missing } = classifyReferencedPaths(
+    projectRoot,
+    referencedPaths,
+    allowedEvidenceArtifactPaths,
+  );
   const { existing: reportExisting, missing: reportMissing } = classifyReferencedPaths(
     projectRoot,
     reportReferencedPaths,
+    allowedEvidenceArtifactPaths,
   );
   const substantiveReportEvidence = hasSubstantiveReportEvidence({
     text: reportText,
     projectRoot,
     existingReferencedPaths: reportExisting,
     excludedReferencedPaths: reportArtifactFiles,
+    allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
   });
   const committedSubstantiveReportAvailable =
     reportArtifactFiles.length > 0 &&

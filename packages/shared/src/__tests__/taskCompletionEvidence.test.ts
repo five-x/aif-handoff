@@ -1544,6 +1544,49 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("invalid_or_missing_file_references");
   });
 
+  it("allows validated source audit artifact paths as synthesis evidence", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-synthesis"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "summary.md"),
+      [
+        "## Finding 1",
+        "Evidence: `audit/source-audit.md` records the validated source report finding.",
+        "Risk: The synthesis would otherwise reject valid cross-branch audit evidence.",
+        "Verification: Command `git log -1 --name-only --oneline` output included `audit/summary.md`.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit synthesis", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        allowedEvidenceArtifactPaths: ["audit/source-audit.md"],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.existingReportReferencedPaths).toContain("audit/source-audit.md");
+    expect(result.evidence.missingReportReferencedPaths).not.toContain("audit/source-audit.md");
+    expect(codes(result)).not.toContain("invalid_or_missing_file_references");
+    expect(codes(result)).not.toContain("insufficient_report_evidence");
+  });
+
   it("flags mixed existing and missing unquoted root-level refs in report artifacts", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });

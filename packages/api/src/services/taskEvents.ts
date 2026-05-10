@@ -20,6 +20,7 @@ import {
   findTaskById,
   getLatestHumanComment,
   appendTaskActivityLog,
+  listValidatedRoadmapReportArtifacts,
   persistTaskPlanForTask,
   setTaskFields,
   updateRoadmapBatchArtifactState,
@@ -103,6 +104,12 @@ function artifactStateForFailureFamily(
     return "external_blocked";
   }
   return "invalid";
+}
+
+function allowedEvidenceArtifactPathsFor(auditArtifact: RoadmapBatchArtifactRow | undefined) {
+  return auditArtifact?.role === "synthesis"
+    ? listValidatedRoadmapReportArtifacts(auditArtifact.batchId).map((entry) => entry.artifactPath)
+    : [];
 }
 
 function blockTaskForCompletionEvidence(
@@ -322,7 +329,11 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     const branchError = restoreTaskBranchForMutation(task, executionRoot);
     if (branchError && !branchError.ok) {
       const result = evaluateTaskCompletionEvidence({
-        task: { ...task, expectedReportArtifactPath: auditArtifact?.artifactPath },
+        task: {
+          ...task,
+          expectedReportArtifactPath: auditArtifact?.artifactPath,
+          allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+        },
         projectRoot: executionRoot,
         branchIsolationReason: branchError.error,
         phase: "pre_implementation",
@@ -336,7 +347,11 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     }
 
     const result = evaluateTaskCompletionEvidence({
-      task: { ...task, expectedReportArtifactPath: auditArtifact?.artifactPath },
+      task: {
+        ...task,
+        expectedReportArtifactPath: auditArtifact?.artifactPath,
+        allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+      },
       projectRoot: executionRoot,
       phase: "pre_implementation",
     });
@@ -360,7 +375,11 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     const branchError = restoreTaskBranchForMutation(task, executionRoot);
     if (branchError && !branchError.ok) {
       const result = evaluateTaskCompletionEvidence({
-        task: { ...task, expectedReportArtifactPath: auditArtifact?.artifactPath },
+        task: {
+          ...task,
+          expectedReportArtifactPath: auditArtifact?.artifactPath,
+          allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+        },
         projectRoot: executionRoot,
         branchIsolationReason: branchError.error,
       });
@@ -372,7 +391,11 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     }
 
     const result = evaluateTaskCompletionEvidence({
-      task: { ...task, expectedReportArtifactPath: auditArtifact?.artifactPath },
+      task: {
+        ...task,
+        expectedReportArtifactPath: auditArtifact?.artifactPath,
+        allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+      },
       projectRoot: executionRoot,
     });
     if (!result.ok) {

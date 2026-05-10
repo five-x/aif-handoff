@@ -20,6 +20,7 @@ import {
   persistTaskRuntimeLimitSnapshot,
   resolveEffectiveRuntimeProfile,
   findRoadmapBatchArtifactByTaskId,
+  listValidatedRoadmapReportArtifacts,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
   setTaskFields,
@@ -464,10 +465,15 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
 }): boolean {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  const allowedEvidenceArtifactPaths =
+    artifact?.role === "synthesis"
+      ? listValidatedRoadmapReportArtifacts(artifact.batchId).map((entry) => entry.artifactPath)
+      : [];
   const result = evaluateTaskCompletionEvidence({
     task: {
       ...input.task,
       expectedReportArtifactPath: artifact?.artifactPath ?? null,
+      allowedEvidenceArtifactPaths,
     },
     projectRoot: input.projectRoot,
     requireManualReview: input.requireManualReview,
