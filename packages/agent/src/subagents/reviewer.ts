@@ -1,4 +1,10 @@
-import { findProjectById, findTaskById, setTaskFields } from "@aif/data";
+import {
+  findProjectById,
+  findRoadmapBatchArtifactByTaskId,
+  findTaskById,
+  listValidatedRoadmapReportArtifacts,
+  setTaskFields,
+} from "@aif/data";
 import { createRuntimeWorkflowSpec, type RuntimeWorkflowSpec } from "@aif/runtime";
 import { getEnv, logger, formatAttachmentsForPrompt } from "@aif/shared";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
@@ -71,6 +77,21 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
   );
   const reviewPreviousFindings = formatPreviousFindingsForPrompt(reviewPreviousFindingState);
   const securityPreviousFindings = formatPreviousFindingsForPrompt(securityPreviousFindingState);
+  const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
+  const auditSynthesisContext =
+    roadmapArtifact?.role === "synthesis"
+      ? [
+          "Audit synthesis batch context:",
+          `- Synthesis artifact: ${roadmapArtifact.artifactPath}`,
+          "- Validated source report artifacts may live on producer branches or worktrees and may not exist as files in this synthesis checkout.",
+          "- Do not report validated source report artifacts as missing solely because list_files does not show them in the current branch.",
+          "- Review the synthesis artifact content and implementation log instead; the implementation log is allowed to prove producer-branch artifact ingestion.",
+          "Validated source report artifacts:",
+          ...listValidatedRoadmapReportArtifacts(roadmapArtifact.batchId).map(
+            (artifact) => `- ${artifact.artifactPath} (task ${artifact.taskId})`,
+          ),
+        ].join("\n")
+      : "Audit synthesis batch context: not a roadmap-batch synthesis task.";
 
   log.info(
     { taskId, title: task.title, useSubagents, strategy, reviewIteration },
@@ -121,6 +142,8 @@ ${formatAttachmentsForPrompt(task.attachments)}
 Implementation Log:
 ${task.implementationLog ?? "No implementation log available."}
 
+${auditSynthesisContext}
+
 Auto-review strategy: ${strategy}
 Review iteration: ${reviewIteration}
 
@@ -142,6 +165,8 @@ ${formatAttachmentsForPrompt(task.attachments)}
 
 Auto-review strategy: ${strategy}
 Review iteration: ${reviewIteration}
+
+${auditSynthesisContext}
 
 Previous Findings Input:
 ${securityPreviousFindings}
