@@ -1,5 +1,6 @@
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import {
+  evaluateTaskCompletionEvidence,
   hasSubstantiveReportEvidence,
   isRiskyTask,
   type AutoReviewFinding,
@@ -302,10 +303,25 @@ function buildFallbackDecision(
 
 function requiresSubstantiveReviewEvidence(input: ReviewGateInput): boolean {
   if (!input.task || !isRiskyTask(input.task)) return false;
-  return !hasSubstantiveReportEvidence({
-    text: input.reviewComments ?? "",
+  if (
+    hasSubstantiveReportEvidence({
+      text: input.reviewComments ?? "",
+      projectRoot: input.projectRoot,
+    })
+  ) {
+    return false;
+  }
+
+  const taskEvidence = evaluateTaskCompletionEvidence({
+    task: { ...input.task, manualReviewRequired: false },
     projectRoot: input.projectRoot,
   });
+  return !(
+    taskEvidence.evidence.reportArtifactFiles.length > 0 &&
+    taskEvidence.evidence.uncommittedReportArtifactFiles.length === 0 &&
+    taskEvidence.evidence.missingReportReferencedPaths.length === 0 &&
+    taskEvidence.evidence.substantiveReportEvidence
+  );
 }
 
 function buildSubstantiveEvidenceHandoff(

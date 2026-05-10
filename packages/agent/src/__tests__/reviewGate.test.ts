@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAutoReviewFindingId } from "../reviewContract.js";
@@ -50,6 +51,41 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     }
     process.env.ANTHROPIC_BASE_URL = originalAnthropicBaseUrl;
   });
+
+  function initReportRepo(): string {
+    const root = mkdtempSync(join(tmpdir(), "aif-review-gate-"));
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
+    writeFileSync(join(root, "README.md"), "# reviewed\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `rg reviewed README.md` output matched the inspected line.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    return root;
+  }
 
   it("returns success for structured review comments with no blocking findings", async () => {
     const result = await evaluateReviewCommentsForAutoMode(baseInput);
@@ -331,6 +367,36 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       task: {
         id: "audit-task",
         title: "Full repository audit",
+      },
+    });
+
+    expect(result.status).toBe("success");
+  });
+
+  it("allows risky structured success when the committed report artifact is substantive", async () => {
+    const root = initReportRepo();
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | The audit report was committed and reviewed.",
+      ].join("\n"),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: "Report artifact: reports/audit.md",
       },
     });
 
