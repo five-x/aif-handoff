@@ -379,6 +379,60 @@ describe("taskCompletionEvidence", () => {
     expect(result.issues).toEqual([]);
   });
 
+  it("resolves unique tracked basenames mentioned in audit report prose", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(join(root, "src", "bot_intevra", "bot.py"), "def run():\n    pass\n", "utf8");
+    writeFileSync(join(root, "src", "bot_intevra", "db.py"), "def connect():\n    pass\n", "utf8");
+    execFileSync("git", ["add", "src/bot_intevra/bot.py", "src/bot_intevra/db.py"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add python modules", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/basename-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `src/bot_intevra/bot.py:1` defines the bot entry point.",
+        "Risk: Prose also mentions modules like `bot.py` and `db.py`, which are unique tracked basenames below src/bot_intevra.",
+        "Verification: Command `git ls-files` output included src/bot_intevra/bot.py and src/bot_intevra/db.py.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-unique-basename-refs",
+        title: "Audit generated findings",
+        plan: "## Plan\n- Validate source files\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toEqual(
+      expect.arrayContaining(["src/bot_intevra/bot.py", "src/bot_intevra/db.py"]),
+    );
+    expect(result.evidence.missingReportReferencedPaths).not.toContain("bot.py");
+    expect(result.evidence.missingReportReferencedPaths).not.toContain("db.py");
+    expect(codes(result)).not.toContain("invalid_or_missing_file_references");
+  });
+
   it("blocks untracked report artifacts when the task requires a committed report", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });

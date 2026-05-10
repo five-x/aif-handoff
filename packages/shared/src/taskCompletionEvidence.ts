@@ -207,6 +207,18 @@ function runGit(projectRoot: string, args: string[]): string | null {
   }
 }
 
+function listGitTrackedFiles(projectRoot: string): string[] {
+  const output = runGit(projectRoot, ["ls-files"]);
+  if (!output) return [];
+  return output.split(/\r?\n/).map(normalizeRelativePath).filter(Boolean);
+}
+
+function resolveUniqueTrackedBasename(trackedFiles: string[], rootFileName: string): string | null {
+  if (!rootFileName || rootFileName.includes("/") || rootFileName.includes("\\")) return null;
+  const matches = trackedFiles.filter((file) => basename(file) === rootFileName);
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function parseStatusFiles(output: string): string[] {
   return output
     .split(/\r?\n/)
@@ -671,6 +683,12 @@ function extractReferencedPaths(
   options: { includeUndelimitedMissingRootFiles?: boolean } = {},
 ): string[] {
   const refs = new Set<string>();
+  let trackedFiles: string[] | null = null;
+  const resolveMissingRootFile = (fileName: string): string | null => {
+    trackedFiles ??= listGitTrackedFiles(projectRoot);
+    return resolveUniqueTrackedBasename(trackedFiles, fileName);
+  };
+
   for (const match of text.matchAll(SLASH_PATH_TOKEN_PATTERN)) {
     const raw = match[1]?.trim();
     addReferencedPath(refs, projectRoot, raw);
@@ -680,12 +698,18 @@ function extractReferencedPaths(
     if (!raw || raw.includes("/") || raw.includes("\\")) continue;
     const normalized = normalizeRelativePath(raw.replace(/[),.;\]]+$/g, ""));
     const absPath = resolve(projectRoot, normalized);
-    if (
-      !existsSync(absPath) &&
-      !isDelimitedReference(text, match, raw) &&
-      !(options.includeUndelimitedMissingRootFiles && isInReferenceSentence(text, match))
-    ) {
-      continue;
+    if (!existsSync(absPath)) {
+      const resolved = resolveMissingRootFile(normalized);
+      if (resolved) {
+        addReferencedPath(refs, projectRoot, resolved);
+        continue;
+      }
+      if (
+        !isDelimitedReference(text, match, raw) &&
+        !(options.includeUndelimitedMissingRootFiles && isInReferenceSentence(text, match))
+      ) {
+        continue;
+      }
     }
     addReferencedPath(refs, projectRoot, raw);
   }
