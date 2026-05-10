@@ -56,7 +56,7 @@ const GENERIC_PLAN_PATTERN =
 const DIAGNOSTIC_TASK_PATTERN =
   /\b(?:audit|discovery|inventory|gap[-_\s]?analysis|findings?|security[-_\s]+review|code[-_\s]+review|review[-_\s]+findings?|validation[-_\s]+(?:task|report|audit|findings?)|verification[-_\s]+(?:task|report|audit|findings?)|(?:validate|verify)[-_\s]+(?:and[-_\s]+)?(?:report|findings?))\b/i;
 const REPORT_ARTIFACT_PATTERN =
-  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:docs\/)?(?:[\w.@-]+\/)*[\w.@-]*(?:result|report|audit|review|findings|discovery)[\w.@-]*\.(?:md|mdx|txt))(?:[:]\d+(?::\d+)?)?/gi;
+  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:(?:docs\/)?(?:[\w.@-]+\/)*[\w.@-]*(?:result|report|audit|review|findings|discovery)[\w.@-]*|(?:reports?|audit|review|reviews|findings|discovery|artifacts)\/(?:[\w.@-]+\/)*[\w.@-]+)\.(?:md|mdx|txt))(?:[:]\d+(?::\d+)?)?/gi;
 const REPO_PATH_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.(?:jsonc|json|jsx|tsx|yaml|yml|mdx|mjs|cjs|bat|cmd|cpp|css|env|hpp|html|ini|java|lock|md|ps1|py|rs|scss|sh|sql|toml|txt|xml|js|ts|go|kt|cs|c|h))(?:[:]\d+(?::\d+)?)?/gi;
 const DIAGNOSTIC_ONLY_PATTERN =
