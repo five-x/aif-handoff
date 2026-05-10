@@ -501,13 +501,60 @@ function extractNearbyLineReference(
   return { start, end, source: "nearby_phrase" };
 }
 
+function extractDelimitedColonLineReference(
+  text: string,
+  rawPath: string,
+  matchIndex: number,
+): ExtractedLineReference | null {
+  const rawStart = text.indexOf(rawPath, matchIndex);
+  if (rawStart < 0) return null;
+  const afterPath = text.slice(rawStart + rawPath.length, rawStart + rawPath.length + 32);
+  const match = afterPath.match(/^[`'"]?\s*:(\d+)(?::(\d+))?\b/);
+  if (!match) return null;
+  const start = Number.parseInt(match[1], 10);
+  const end = match[2] ? Number.parseInt(match[2], 10) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end, source: "colon" };
+}
+
+function extractAdjacentLineFieldReference(
+  text: string,
+  rawPath: string,
+  matchIndex: number,
+): ExtractedLineReference | null {
+  const rawStart = text.indexOf(rawPath, matchIndex);
+  if (rawStart < 0) return null;
+  const lineStart = Math.max(0, text.lastIndexOf("\n", rawStart) + 1);
+  const lineEnd = text.indexOf("\n", rawStart);
+  const currentLine = text.slice(lineStart, lineEnd >= 0 ? lineEnd : text.length);
+  if (!/\b(?:file|path)\s*(?:\*\*)?\s*:/i.test(currentLine)) return null;
+
+  const nextLines = text.slice(
+    lineEnd >= 0 ? lineEnd : rawStart + rawPath.length,
+    rawStart + rawPath.length + 180,
+  );
+  const match = nextLines.match(
+    /(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:line|lines)\s*(?:\*\*)?\s*:\s*(\d+)(?:\s*[-\u2013]\s*(\d+))?/i,
+  );
+  if (!match) return null;
+  const start = Number.parseInt(match[1], 10);
+  const end = match[2] ? Number.parseInt(match[2], 10) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end, source: "nearby_phrase" };
+}
+
 function extractLineReferenceForPath(
   text: string,
   fullToken: string,
   rawPath: string,
   matchIndex: number,
 ): ExtractedLineReference | null {
-  return extractLineReference(fullToken) ?? extractNearbyLineReference(text, rawPath, matchIndex);
+  return (
+    extractLineReference(fullToken) ??
+    extractDelimitedColonLineReference(text, rawPath, matchIndex) ??
+    extractNearbyLineReference(text, rawPath, matchIndex) ??
+    extractAdjacentLineFieldReference(text, rawPath, matchIndex)
+  );
 }
 
 function fileLineCount(projectRoot: string, path: string): number | null {

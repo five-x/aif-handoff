@@ -484,6 +484,124 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("insufficient_report_evidence");
   });
 
+  it("accepts report evidence split across File and Line fields", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "backup_crypto.py"),
+      [
+        "def encrypt_directory():",
+        "    return True",
+        "",
+        "def decrypt_archive_to_dir():",
+        "    return True",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/bot_intevra/backup_crypto.py"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add backup crypto", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/split-file-line-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "persistence-audit.md"),
+      [
+        "## Evidence",
+        "### 1. Backup Encryption Security",
+        "- **File**: `src/bot_intevra/backup_crypto.py`",
+        "- **Line**: 1-2",
+        "- **Evidence**: `encrypt_directory` uses an explicit implementation path.",
+        "- **Risk**: None identified.",
+        "- **Verification**: Command `grep 'encrypt_directory' src/bot_intevra/backup_crypto.py` output included the function definition.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/persistence-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-split-file-line",
+        title: "Audit persistence and migration safety",
+        plan: "## Plan\n- Validate persistence files\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toContain("src/bot_intevra/backup_crypto.py");
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
+    expect(codes(result)).not.toContain("insufficient_report_evidence");
+  });
+
+  it("accepts line references after closing markdown delimiters", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "backup_crypto.py"),
+      "def derive_key():\n    return True\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/bot_intevra/backup_crypto.py"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add backup crypto", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/delimited-line-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "security-audit.md"),
+      [
+        "## Finding",
+        "Evidence: `src/bot_intevra/backup_crypto.py`:1 defines the key derivation helper.",
+        "Risk: Persistence safety depends on that implementation.",
+        "Verification: Command `grep 'derive_key' src/bot_intevra/backup_crypto.py` output included the helper.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/security-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-delimited-line-ref",
+        title: "Audit persistence and migration safety",
+        plan: "## Plan\n- Validate persistence files\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toContain("src/bot_intevra/backup_crypto.py");
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
+    expect(codes(result)).not.toContain("insufficient_report_evidence");
+  });
+
   it("treats .env.example line references as substantive evidence", () => {
     const root = initRepo();
     writeFileSync(join(root, ".env.example"), "TOKEN=\n", "utf8");
