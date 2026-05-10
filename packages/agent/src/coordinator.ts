@@ -370,6 +370,7 @@ function returnAuditTaskToRework(input: {
   family: AuditFailureFamily;
   result: ReturnType<typeof evaluateTaskCompletionEvidence>;
   projectRoot: string;
+  extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
 }): boolean {
   updateRoadmapBatchArtifactState({
     taskId: input.task.id,
@@ -392,6 +393,7 @@ function returnAuditTaskToRework(input: {
       blockedFromStatus: input.fromStatus,
       retryAfter: null,
       retryCount: input.task.retryCount ?? 0,
+      ...input.extra,
       reworkRequested: true,
       manualReviewRequired: false,
     },
@@ -497,13 +499,25 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   }
 
   const family = firstAuditFailureFamily(result);
-  const shouldReturnToRework =
+  const auditReviewIteration =
+    typeof input.extra?.reviewIterationCount === "number"
+      ? input.extra.reviewIterationCount
+      : (input.task.reviewIterationCount ?? 0);
+  const auditMaxReviewIterations =
+    input.task.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const recoverableAuditArtifactFailure =
     Boolean(artifact) &&
     input.phase !== "pre_implementation" &&
     RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(family);
-  const blockedReason = formatTaskCompletionBlockedReason(result, {
+  const shouldReturnToRework =
+    recoverableAuditArtifactFailure && auditReviewIteration < auditMaxReviewIterations;
+  const auditReworkLimitReached = recoverableAuditArtifactFailure && !shouldReturnToRework;
+  const baseBlockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
+  const blockedReason = auditReworkLimitReached
+    ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
+    : baseBlockedReason;
   if (shouldReturnToRework) {
     return returnAuditTaskToRework({
       task: input.task,
@@ -513,6 +527,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       family,
       result,
       projectRoot: input.projectRoot,
+      extra: input.extra,
     });
   }
   if (artifact) {
@@ -540,7 +555,9 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       retryAfter: null,
       retryCount: input.task.retryCount ?? 0,
       ...input.extra,
-      manualReviewRequired: result.issues.some((entry) => entry.code === "manual_review_required"),
+      manualReviewRequired:
+        auditReworkLimitReached ||
+        result.issues.some((entry) => entry.code === "manual_review_required"),
     },
     { title: input.title, fromStatus: input.fromStatus },
   );
@@ -880,6 +897,10 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
             projectRoot: executionRoot,
             fromStatus: stage.inProgress,
             title: taskTitle,
+            extra: {
+              reviewIterationCount: outcome.currentIteration,
+              autoReviewState: outcome.autoReviewState,
+            },
           })
         ) {
           return false;

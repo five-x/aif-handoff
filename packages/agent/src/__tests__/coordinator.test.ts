@@ -105,6 +105,23 @@ function createPlanQualityError(): TaskPlanQualityError {
   );
 }
 
+function initGitFixture(prefix: string): string {
+  const rootPath = mkdtempSync(join(tmpdir(), prefix));
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.local"], {
+    cwd: rootPath,
+    stdio: "ignore",
+  });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: rootPath, stdio: "ignore" });
+  writeFileSync(join(rootPath, "README.md"), "# audit fixture\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+    cwd: rootPath,
+    stdio: "ignore",
+  });
+  return rootPath;
+}
+
 describe("coordinator", () => {
   beforeEach(() => {
     testDb.current = createTestDb();
@@ -637,6 +654,110 @@ describe("coordinator", () => {
       taskId: "task-review-auto-log",
       projectRoot: "/tmp/test",
     });
+  });
+
+  it("should stop audit evidence-guard rework at max review iterations", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-evidence-limit-");
+    execFileSync("git", ["checkout", "-b", "feature/audit-evidence-limit"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "security.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository fixture heading.",
+        "Risk: Placeholder git output can make a weak audit report look verified.",
+        "Proposed fix: Replace placeholder verification with observed command output.",
+        "Verification: Command `git log -1 --name-only --oneline` output:",
+        "```",
+        "commit 1234567890abcdef1234567890abcdef12345678",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/security.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-evidence-limit-project", name: "Audit Limit", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-evidence-limit",
+        projectId: "audit-evidence-limit-project",
+        title: "Audit security controls",
+        description:
+          "Report artifact: audit/security.md\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-evidence-limit",
+        reviewIterationCount: 2,
+        maxReviewIterations: 3,
+        agentActivityLog: [
+          "[2026-05-10T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-10T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-10T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-10T15:54:03.000Z] Tool: git_commit git commit",
+          "[2026-05-10T15:54:04.000Z] Agent: implement-coordinator complete",
+          "[2026-05-10T15:54:05.000Z] Agent: review-sidecar started",
+          "[2026-05-10T15:54:06.000Z] Tool: read_file audit/security.md",
+          "[2026-05-10T15:54:07.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-evidence-limit-project",
+      roadmapAlias: "audit-limit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-evidence-limit"],
+      artifacts: [
+        {
+          taskId: "task-audit-evidence-limit",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "accepted",
+      currentIteration: 3,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 3,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      autoReviewState: null,
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-audit-evidence-limit")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reviewIterationCount).toBe(3);
+    expect(task!.blockedReason).toContain("placeholder commit hashes");
+    expect(task!.blockedReason).toContain("failed after 3/3 review iterations");
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    expect(artifact?.state).toBe("invalid");
+    expect(artifact?.failureFamily).toBe("invalid_artifact_content");
   });
 
   it("should auto-recover stale implementing task to blocked_external", async () => {
