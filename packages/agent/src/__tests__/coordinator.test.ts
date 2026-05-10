@@ -433,7 +433,7 @@ describe("coordinator", () => {
     expect(synthesisArtifact?.failureFamily).toBe("synthesis_not_ready");
   });
 
-  it("should skip redundant audit rework implementation when completion evidence is already satisfied", async () => {
+  it("should run synthesis rework even when completion evidence is already satisfied", async () => {
     const db = testDb.current;
     const rootPath = mkdtempSync(join(tmpdir(), "coordinator-audit-rework-ready-"));
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: rootPath, stdio: "ignore" });
@@ -528,12 +528,12 @@ describe("coordinator", () => {
 
     await pollAndProcess();
 
-    expect(runImplementer).not.toHaveBeenCalledWith("task-synthesis-ready", rootPath);
+    expect(runImplementer).toHaveBeenCalledWith("task-synthesis-ready", rootPath);
     expect(runReviewer).toHaveBeenCalledWith("task-synthesis-ready", rootPath);
     const task = db.select().from(tasks).where(eq(tasks.id, "task-synthesis-ready")).get();
     expect(task?.status).toBe("done");
     expect(task?.reworkRequested).toBe(false);
-    expect(task?.agentActivityLog).toContain("skipping implementer and returning to review");
+    expect(task?.agentActivityLog).not.toContain("skipping implementer and returning to review");
   });
 
   it("should pick up review tasks and dispatch reviewer", async () => {
