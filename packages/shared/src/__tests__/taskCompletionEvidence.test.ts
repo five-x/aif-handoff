@@ -1420,6 +1420,103 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("insufficient_report_evidence");
   });
 
+  it("blocks owner-grade audit findings whose evidence field lacks a concrete line reference", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/owner-audit-evidence-line"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime-audit.md"),
+      [
+        "## Finding",
+        "Evidence: `src/config.ts` sets the runtime timeout.",
+        "Risk: A hard timeout can reject slow but valid operations without an override path.",
+        "Proposed fix: expose timeout configuration through the runtime profile.",
+        'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add runtime audit", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "owner-audit-evidence-without-line",
+        title: "Audit runtime quality",
+        description:
+          "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks owner-grade audit reports made of governance observations", () => {
+    const root = initRepo();
+    writeFileSync(join(root, "AGENTS.md"), "# Working Agreements\n", "utf8");
+    execFileSync("git", ["add", "AGENTS.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add agents", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/owner-audit-governance"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "architecture-audit.md"),
+      [
+        "## Finding: Overlap in Task/Workflow Routing",
+        "Evidence: `AGENTS.md:1` documents working agreements.",
+        "Risk: This duplication can lead to inconsistent behavior when handling tasks.",
+        "Proposed fix: Consolidate the working agreements section in a single document.",
+        'Verification: Command `rg -n "Working Agreements" AGENTS.md` output: `1:# Working Agreements`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/architecture-audit.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add architecture audit", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "owner-audit-governance",
+        title: "Audit architecture quality",
+        description:
+          "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
   it("accepts owner-grade audit reports with no validated findings and checked evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src"), { recursive: true });

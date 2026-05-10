@@ -882,6 +882,34 @@ describe("roadmapGeneration", () => {
       ]);
     });
 
+    it("should reject reused audit roadmap aliases instead of partially importing duplicates", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      const generation = {
+        alias: "audit",
+        taskIntent: "audit" as const,
+        tasks: [
+          {
+            title: "Audit: configuration",
+            description: auditTaskDescription(),
+            phase: 1,
+            phaseName: "Audit",
+            sequence: 1,
+          },
+          {
+            title: "Synthesize audit findings",
+            description: auditTaskDescription("audit/2026-05-09-summary.md"),
+            phase: 2,
+            phaseName: "Synthesis",
+            sequence: 1,
+          },
+        ],
+      };
+
+      expect(importGeneratedTasks(projectId, generation).created).toBe(2);
+      expect(() => importGeneratedTasks(projectId, generation)).toThrow(RoadmapGenerationError);
+      expect(() => importGeneratedTasks(projectId, generation)).toThrow(/already has 2 task\(s\)/);
+    });
+
     it("should ignore per-task typed intent when import batch intent is omitted", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 

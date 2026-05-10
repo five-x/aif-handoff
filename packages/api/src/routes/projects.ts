@@ -16,6 +16,7 @@ import {
   expireStaleRuntimeWarmupSessions,
   findActiveReadyRuntimeWarmupSession,
   findRuntimeProfileById,
+  findTasksByRoadmapAlias,
   findTaskById,
   markRuntimeWarmupSessionFailed,
   markRuntimeWarmupSessionReady,
@@ -61,6 +62,17 @@ export const projectsRouter = new Hono();
 
 const WARMUP_PROMPT =
   "Study the current project context, including its structure, architecture layers, package boundaries, conventions, and relevant documentation, so this session can be forked for future tasks. Do not edit files. Do not summarize the context; if a final response is required, reply only that warmup is complete.";
+
+function rejectReusedAuditRoadmapAlias(
+  projectId: string,
+  roadmapAlias: string,
+  taskIntent?: TaskIntent,
+): string | null {
+  if ((taskIntent ?? "general") !== "audit") return null;
+  const existingCount = findTasksByRoadmapAlias(projectId, roadmapAlias).length;
+  if (existingCount === 0) return null;
+  return `Audit roadmap alias "${roadmapAlias}" already has ${existingCount} task(s). Use a new roadmap alias for a fresh audit run.`;
+}
 
 function getWarmupEnabled(): boolean {
   return getEnv().AIF_WARMUP_ENABLED;
@@ -323,6 +335,10 @@ projectsRouter.post("/:id/roadmap/generate", jsonValidator(roadmapGenerateSchema
   if (!project) {
     return c.json({ error: "Project not found" }, 404);
   }
+  const aliasError = rejectReusedAuditRoadmapAlias(id, roadmapAlias, taskIntent);
+  if (aliasError) {
+    return c.json({ error: aliasError, code: "ROADMAP_ALIAS_EXISTS" }, 409);
+  }
 
   log.info(
     { projectId: id, roadmapAlias, taskIntent: taskIntent ?? "general", hasVision: !!vision },
@@ -345,6 +361,10 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
   const project = findProjectById(id);
   if (!project) {
     return c.json({ error: "Project not found" }, 404);
+  }
+  const aliasError = rejectReusedAuditRoadmapAlias(id, roadmapAlias, taskIntent);
+  if (aliasError) {
+    return c.json({ error: aliasError, code: "ROADMAP_ALIAS_EXISTS" }, 409);
   }
 
   log.info(
@@ -395,7 +415,11 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
   } catch (err) {
     if (err instanceof RoadmapGenerationError) {
       const status =
-        err.code === "PROJECT_NOT_FOUND" || err.code === "ROADMAP_NOT_FOUND" ? 404 : 500;
+        err.code === "PROJECT_NOT_FOUND" || err.code === "ROADMAP_NOT_FOUND"
+          ? 404
+          : err.code === "ROADMAP_ALIAS_EXISTS"
+            ? 409
+            : 500;
       log.warn(
         { projectId: id, roadmapAlias, code: err.code, error: err.message },
         "Roadmap import failed",

@@ -1465,6 +1465,12 @@ export function importGeneratedTasks(
 
   // Load existing tasks for this alias for dedupe
   const existing = findTasksByRoadmapAlias(projectId, alias);
+  if (importIntent === "audit" && existing.length > 0) {
+    throw new RoadmapGenerationError(
+      "ROADMAP_ALIAS_EXISTS",
+      `Audit roadmap alias "${alias}" already has ${existing.length} task(s). Use a new roadmap alias for a fresh audit run.`,
+    );
+  }
   const existingByTitle = new Map(existing.map((task) => [normalizeTitle(task.title), task]));
   const existingTitles = new Set(existingByTitle.keys());
 

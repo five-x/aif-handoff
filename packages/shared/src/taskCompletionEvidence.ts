@@ -141,6 +141,12 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> =
     message:
       "Report artifact contains non-actionable audit observations instead of concrete technical-quality findings.",
   },
+  {
+    pattern:
+      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|branch naming convention and ownership policy)\b/i,
+    message:
+      "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
+  },
 ];
 
 const SLASH_PATH_TOKEN_PATTERN =
@@ -771,6 +777,40 @@ function hasCommandOutputEvidence(text: string): boolean {
   ).test(text);
 }
 
+function extractEvidenceFieldBlocks(section: string): string[] {
+  const lines = section.split(/\r?\n/);
+  const blocks: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/\bEvidence\s*:/i.test(lines[index])) continue;
+    const block = [lines[index]];
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const line = lines[next];
+      if (!line.trim()) break;
+      if (
+        /^\s*(?:[-*]\s*)?(?:\*\*)?(?:Risk|Proposed fix|Verification|Confidence|Severity)(?:\*\*)?\s*:/i.test(
+          line,
+        ) ||
+        /^#{1,6}\s+\S/.test(line)
+      ) {
+        break;
+      }
+      block.push(line);
+    }
+    blocks.push(block.join("\n"));
+  }
+  return blocks;
+}
+
+function hasConcreteEvidenceFieldLineReference(
+  section: string,
+  projectRoot: string,
+  excludedPaths: Set<string>,
+): boolean {
+  return extractEvidenceFieldBlocks(section).some(
+    (block) => collectExistingRefsWithLineNumbers(block, projectRoot, excludedPaths).length > 0,
+  );
+}
+
 function collectFalseMissingPathClaims(text: string, projectRoot: string): string[] {
   const claimedMissingPaths = new Set<string>();
   const patterns = [
@@ -823,16 +863,23 @@ function hasStructuredFindingEvidence(
   requireProposedFix: boolean,
 ): boolean {
   const findingSections = text.split(/(?:^|\n)#{2,4}\s+|\n(?=-\s+(?:finding|issue|risk)\b)/i);
-  return findingSections.some(
-    (section) =>
-      /\bEvidence\s*:/i.test(section) &&
-      /\bRisk\s*:/i.test(section) &&
-      (!requireProposedFix || /\bProposed fix\s*:/i.test(section)) &&
-      /\bVerification\s*:/i.test(section) &&
-      (collectExistingRefsWithLineNumbers(section, projectRoot, excludedPaths).length > 0 ||
-        hasSymbolEvidenceTiedToExistingPath(section, existingPaths, excludedPaths) ||
-        hasCommandOutputEvidence(section)),
-  );
+  return findingSections.some((section) => {
+    if (!/\bEvidence\s*:/i.test(section)) return false;
+    if (!/\bRisk\s*:/i.test(section)) return false;
+    if (requireProposedFix && !/\bProposed fix\s*:/i.test(section)) return false;
+    if (!/\bVerification\s*:/i.test(section)) return false;
+    if (requireProposedFix) {
+      return (
+        hasConcreteEvidenceFieldLineReference(section, projectRoot, excludedPaths) &&
+        hasCommandOutputEvidence(section)
+      );
+    }
+    return (
+      collectExistingRefsWithLineNumbers(section, projectRoot, excludedPaths).length > 0 ||
+      hasSymbolEvidenceTiedToExistingPath(section, existingPaths, excludedPaths) ||
+      hasCommandOutputEvidence(section)
+    );
+  });
 }
 
 function hasStructuredFindingEvidenceWithAllowedArtifactPath(
@@ -841,6 +888,7 @@ function hasStructuredFindingEvidenceWithAllowedArtifactPath(
   requireProposedFix: boolean,
 ): boolean {
   if (allowedArtifactPaths.length === 0) return false;
+  if (requireProposedFix) return false;
   const findingSections = text.split(/(?:^|\n)#{2,4}\s+|\n(?=-\s+(?:finding|issue|risk)\b)/i);
   return findingSections.some((section) => {
     if (!/\bEvidence\s*:/i.test(section)) return false;
