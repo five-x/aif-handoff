@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, isAbsolute, relative } from "node:path";
 import { z } from "zod";
 import {
@@ -485,7 +485,175 @@ function buildAuditRoadmapItem(title: string, scope: string, reportPath: string)
   ].join("\n");
 }
 
+function existingAuditScopePaths(projectRoot: string, candidates: string[], max = 6): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const candidate of candidates) {
+    const normalized = candidate.replaceAll("\\", "/").replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!normalized || seen.has(normalized)) continue;
+    if (!existsSync(join(projectRoot, normalized))) continue;
+    seen.add(normalized);
+    paths.push(normalized);
+    if (paths.length >= max) break;
+  }
+  return paths;
+}
+
+function listScopedChildren(projectRoot: string, root: string, max = 8): string[] {
+  const rootPath = join(projectRoot, root);
+  if (!existsSync(rootPath)) return [];
+  try {
+    return readdirSync(rootPath)
+      .filter((name) => ![".git", ".venv", "node_modules", "__pycache__"].includes(name))
+      .map((name) => `${root}/${name}`.replaceAll("\\", "/"))
+      .filter((path) => {
+        try {
+          return statSync(join(projectRoot, path)).isDirectory() || /\.[a-z0-9]+$/i.test(path);
+        } catch {
+          return false;
+        }
+      })
+      .slice(0, max);
+  } catch {
+    return [];
+  }
+}
+
+function scopeText(projectRoot: string, candidates: string[], fallback: string[]): string {
+  const paths = existingAuditScopePaths(projectRoot, candidates);
+  if (paths.length > 0) return paths.join(", ");
+  const fallbackPaths = existingAuditScopePaths(projectRoot, fallback, 4);
+  return fallbackPaths.length > 0 ? fallbackPaths.join(", ") : ".";
+}
+
+function buildAuditAreasForProject(projectRoot: string) {
+  const srcChildren = listScopedChildren(projectRoot, "src", 6);
+  const packageChildren = listScopedChildren(projectRoot, "packages", 6);
+  const testChildren = [
+    ...listScopedChildren(projectRoot, "tests", 6),
+    ...listScopedChildren(projectRoot, "test", 4),
+  ];
+  const docsOpsChildren = [
+    ...listScopedChildren(projectRoot, "docs/ops", 5),
+    ...listScopedChildren(projectRoot, "docs", 5),
+  ];
+  const fallback = [
+    "README.md",
+    "AGENTS.md",
+    "pyproject.toml",
+    "package.json",
+    "src",
+    "tests",
+    ".ai-factory/config.yaml",
+  ];
+
+  return [
+    {
+      title: "Audit: project structure and task routing",
+      scope: scopeText(
+        projectRoot,
+        [
+          "README.md",
+          "AGENTS.md",
+          "pyproject.toml",
+          "package.json",
+          "turbo.json",
+          ".ai-factory/config.yaml",
+          "src",
+          ...srcChildren.slice(0, 2),
+          ...packageChildren.slice(0, 2),
+        ],
+        fallback,
+      ),
+    },
+    {
+      title: "Audit: security and configuration controls",
+      scope: scopeText(
+        projectRoot,
+        [
+          ".env.example",
+          ".ai-factory/config.yaml",
+          "src/bot_intevra/config.py",
+          "src/bot_intevra/secret_scan.py",
+          "src",
+          "docs/ops",
+          ...docsOpsChildren.slice(0, 2),
+        ],
+        fallback,
+      ),
+    },
+    {
+      title: "Audit: performance and runtime behavior",
+      scope: scopeText(
+        projectRoot,
+        [
+          "src",
+          "src/bot_intevra/service.py",
+          "src/bot_intevra/bot.py",
+          "src/bot_intevra/llm_client.py",
+          "src/bot_intevra/status_server.py",
+          "pyproject.toml",
+          ...srcChildren.slice(0, 3),
+        ],
+        fallback,
+      ),
+    },
+    {
+      title: "Audit: persistence and data safety",
+      scope: scopeText(
+        projectRoot,
+        [
+          "src/bot_intevra/db.py",
+          "src/bot_intevra/models.py",
+          "data",
+          "migrations",
+          "src",
+          "pyproject.toml",
+          ...srcChildren.slice(0, 3),
+        ],
+        fallback,
+      ),
+    },
+    {
+      title: "Audit: integration and orchestration boundaries",
+      scope: scopeText(
+        projectRoot,
+        [
+          "src",
+          "src/bot_intevra/cli.py",
+          "src/bot_intevra/bot.py",
+          "src/bot_intevra/service.py",
+          "src/bot_intevra/memory_client.py",
+          "src/bot_intevra/transcription_client.py",
+          ...srcChildren.slice(0, 3),
+        ],
+        fallback,
+      ),
+    },
+    {
+      title: "Audit: test and operations readiness",
+      scope: scopeText(
+        projectRoot,
+        [
+          "tests",
+          "test",
+          "pyproject.toml",
+          "package.json",
+          "docker-compose.yml",
+          "docker-compose.production.yml",
+          "docs/ops",
+          "scripts",
+          ...testChildren.slice(0, 3),
+          ...docsOpsChildren.slice(0, 2),
+        ],
+        fallback,
+      ),
+    },
+  ];
+}
+
 function buildDeterministicAuditRoadmapContent(ctx: {
+  projectRoot: string;
   description: string | null;
   architecture: string | null;
   vision: string | null;
@@ -494,33 +662,7 @@ function buildDeterministicAuditRoadmapContent(ctx: {
   const goal =
     ctx.vision?.trim().replace(/\s+/g, " ").slice(0, 180) ||
     "Audit the project for security, performance, correctness, and operational readiness";
-  const areas = [
-    {
-      title: "Audit: project structure and task routing",
-      scope: "package.json, turbo.json, packages/api/src, packages/web/src, packages/shared/src",
-    },
-    {
-      title: "Audit: security and configuration controls",
-      scope: ".env.example, docs/configuration.md, packages/shared/src/env.ts, packages/api/src",
-    },
-    {
-      title: "Audit: performance and realtime behavior",
-      scope: "packages/api/src, packages/web/src, packages/runtime/src, docs/api.md",
-    },
-    {
-      title: "Audit: persistence and migration safety",
-      scope: "packages/shared/src, packages/data/src, docs/api.md",
-    },
-    {
-      title: "Audit: runtime orchestration boundaries",
-      scope: "packages/runtime/src, packages/agent/src, docs/providers.md",
-    },
-    {
-      title: "Audit: test and operations readiness",
-      scope:
-        "packages/api/src/__tests__, packages/shared/src/__tests__, docker-compose.yml, docker-compose.production.yml, docs/ops",
-    },
-  ];
+  const areas = buildAuditAreasForProject(ctx.projectRoot);
 
   const tasks = areas.map((area) =>
     buildAuditRoadmapItem(
@@ -551,6 +693,7 @@ function buildDeterministicAuditRoadmapContent(ctx: {
 function ensureGeneratedAuditRoadmapContent(
   content: string,
   ctx: {
+    projectRoot: string;
     description: string | null;
     architecture: string | null;
     vision: string | null;
@@ -679,7 +822,12 @@ export async function generateRoadmapFile(
   mkdirSync(dirname(roadmapPath), { recursive: true });
 
   let content: string;
-  const auditContext = { description, architecture, vision: vision ?? null };
+  const auditContext = {
+    projectRoot: project.rootPath,
+    description,
+    architecture,
+    vision: vision ?? null,
+  };
   if (existsSync(roadmapPath)) {
     const fileContent = readFileSync(roadmapPath, "utf8").trim();
     // Verify agent wrote a real roadmap, not just a stub

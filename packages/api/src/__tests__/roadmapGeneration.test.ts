@@ -346,7 +346,11 @@ describe("roadmapGeneration", () => {
     });
 
     it("should replace invalid generated audit roadmaps with a deterministic diagnostic roadmap", async () => {
-      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+      const { projectId, tmpDir } = createProjectWithDescription("# My App\nA service to audit");
+      writeFileSync(join(tmpDir, "README.md"), "# My App\n");
+      writeFileSync(join(tmpDir, "pyproject.toml"), '[project]\nname = "my-app"\n');
+      mkdirSync(join(tmpDir, "src", "my_app"), { recursive: true });
+      writeFileSync(join(tmpDir, "src", "my_app", "config.py"), "DEBUG = False\n");
 
       mockRunApiRuntimeOneShot.mockResolvedValue({
         result: {
@@ -376,6 +380,9 @@ describe("roadmapGeneration", () => {
 
       const { readFileSync } = await import("node:fs");
       expect(result.content).toContain("Audit: security and configuration controls");
+      expect(result.content).toContain("Scope: README.md, pyproject.toml");
+      expect(result.content).toContain("src/my_app");
+      expect(result.content).not.toContain("packages/api/src");
       expect(result.content).toContain("Synthesize audit findings");
       expect(result.content).toContain("Allowed changes: only create/update audit/");
       expect(result.content).not.toContain("Initial Audit & Inventory");
