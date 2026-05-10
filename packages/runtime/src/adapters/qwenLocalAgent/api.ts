@@ -17,6 +17,8 @@ const DEFAULT_BASE_URL_ENV_VAR = "QWEN_BASE_URL";
 const DEFAULT_API_KEY_ENV_VAR = "QWEN_API_KEY";
 const DEFAULT_MODEL_ENV_VAR = "QWEN_MODEL";
 const DEFAULT_MAX_TOOL_TURNS = 12;
+const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
+const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -189,6 +191,15 @@ function readMaxToolTurns(input) {
   if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_MAX_TOOL_TURNS;
   return Math.max(1, Math.min(Math.floor(raw), 40));
 }
+function readRepeatedToolCallLimit(input) {
+  const options = asRecord(input.options);
+  const raw =
+    typeof options.repeatedToolCallLimit === "number"
+      ? options.repeatedToolCallLimit
+      : DEFAULT_REPEATED_TOOL_CALL_LIMIT;
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_REPEATED_TOOL_CALL_LIMIT;
+  return Math.max(2, Math.min(Math.floor(raw), 12));
+}
 function parseToolArguments(raw) {
   if (raw == null) return {};
   if (typeof raw === "string") {
@@ -218,6 +229,18 @@ function normalizeToolCalls(value) {
     });
   }
   return calls;
+}
+function stableToolValue(value) {
+  if (Array.isArray(value)) return value.map((item) => stableToolValue(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, stableToolValue(child)]),
+  );
+}
+function buildToolCallSignature(toolName, args) {
+  return JSON.stringify({ toolName, args: stableToolValue(args) });
 }
 function emitEvent(input, events, event) {
   events.push(event);
@@ -256,6 +279,21 @@ function emitToolResult(input, events, toolCall, result) {
     },
   });
 }
+function repeatedToolCallResult(toolName, repeatedCount, repeatedToolCallLimit) {
+  const safeToolName = sanitizeQwenToolNameForLog(toolName);
+  return {
+    ok: false,
+    output: "",
+    error: [
+      `Repeated identical ${safeToolName} call suppressed after ${repeatedCount} consecutive attempts.`,
+      "Do not call the same tool with the same arguments again.",
+      "Use a different verification step, commit required artifacts, or finish with the final result.",
+      `repeatLimit=${repeatedToolCallLimit}`,
+    ].join(" "),
+    exitCode: null,
+    touchedFiles: [],
+  };
+}
 async function postChatCompletions(input, messages, signal) {
   const baseUrl = resolveBaseUrl(input);
   return fetch(`${baseUrl}/chat/completions`, {
@@ -271,6 +309,7 @@ export async function runQwenLocalAgentApi(input, logger) {
   const messages = buildMessages(input);
   const events = [];
   const maxTurns = readMaxToolTurns(input);
+  const repeatedToolCallLimit = readRepeatedToolCallLimit(input);
   const toolContext = createDefaultQwenToolContext({
     projectRoot: input.projectRoot,
     cwd: input.cwd,
@@ -281,6 +320,9 @@ export async function runQwenLocalAgentApi(input, logger) {
   let usage = null;
   let sessionId = null;
   let raw = null;
+  let lastToolCallSignature = null;
+  let repeatedToolCallCount = 0;
+  let repeatedToolCallSuppressions = 0;
   logger?.info?.(
     {
       runtimeId: input.runtimeId,
@@ -357,7 +399,25 @@ export async function runQwenLocalAgentApi(input, logger) {
           continue;
         }
         emitToolUse(input, events, toolCall, args);
-        const result = await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+        const signature = buildToolCallSignature(toolCall.function.name, args);
+        if (signature === lastToolCallSignature) {
+          repeatedToolCallCount += 1;
+        } else {
+          lastToolCallSignature = signature;
+          repeatedToolCallCount = 1;
+          repeatedToolCallSuppressions = 0;
+        }
+        const shouldSuppressRepeatedCall = repeatedToolCallCount > repeatedToolCallLimit;
+        const result = shouldSuppressRepeatedCall
+          ? repeatedToolCallResult(
+              toolCall.function.name,
+              repeatedToolCallCount,
+              repeatedToolCallLimit,
+            )
+          : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+        if (shouldSuppressRepeatedCall) {
+          repeatedToolCallSuppressions += 1;
+        }
         emitToolResult(input, events, toolCall, result);
         messages.push({
           role: "tool",
@@ -365,6 +425,28 @@ export async function runQwenLocalAgentApi(input, logger) {
           name: toolCall.function.name,
           content: qwenToolResultForModel(result),
         });
+        if (repeatedToolCallSuppressions >= REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS) {
+          const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
+          logger?.warn?.(
+            {
+              runtimeId: input.runtimeId,
+              profileId: input.profileId ?? null,
+              repeatedToolName: safeToolName,
+              repeatedToolCallCount,
+              repeatedToolCallLimit,
+            },
+            "Stopped qwen-local-agent after repeated identical tool calls",
+          );
+          return {
+            outputText:
+              `Stopped after a repeated ${safeToolName} tool-call loop. ` +
+              "Partial repository changes may exist; coordinator evidence checks must decide whether rework is required.",
+            sessionId,
+            usage,
+            events,
+            raw,
+          };
+        }
       }
     }
     throw new RuntimeExecutionError(

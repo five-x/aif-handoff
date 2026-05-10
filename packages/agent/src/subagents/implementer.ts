@@ -331,6 +331,9 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const blockingFindingsSnapshot = task.reworkRequested
     ? formatAutoReviewStateForPrompt(task.autoReviewState)
     : "No persisted blocking findings snapshot.";
+  const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
+  const isAuditSynthesisTask = roadmapArtifact?.role === "synthesis";
+  const expectedSynthesisArtifactPath = isAuditSynthesisTask ? roadmapArtifact.artifactPath : null;
   const validatedAuditSynthesisInput = buildValidatedAuditSynthesisInput(taskId, projectRoot);
 
   if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
@@ -438,6 +441,18 @@ Validated audit batch inputs:
 <<<VALIDATED_AUDIT_BATCH_INPUTS
 ${validatedAuditSynthesisInput}
 VALIDATED_AUDIT_BATCH_INPUTS
+
+${
+  expectedSynthesisArtifactPath
+    ? `Audit synthesis mode:
+- Use VALIDATED_AUDIT_BATCH_INPUTS as the source of truth. Do not synthesize from unrelated repository files or old report-like files.
+- Write only the expected synthesis artifact: ${expectedSynthesisArtifactPath}.
+- For each summarized finding, cite the concrete repository path+line evidence contained in the validated source reports. Mention source report artifact names only as provenance, not as the only Evidence reference.
+- After writing ${expectedSynthesisArtifactPath}, use git_status and git_commit for that artifact, then verify with git log -1 --name-only --oneline.
+- Do not repeat identical ls/pwd/status checks. Once the artifact is written and committed, stop using tools and return the concise result.
+`
+    : ""
+}
 
 Plan path:
 ${planSection}

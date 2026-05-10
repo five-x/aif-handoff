@@ -164,6 +164,87 @@ describe("qwen-local-agent adapter", () => {
     const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1].body));
     expect(secondBody.messages.some((message) => message.role === "tool")).toBe(true);
   });
+  it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));
+    const repeatedToolCall = {
+      type: "function",
+      function: {
+        name: "run_shell",
+        arguments: JSON.stringify({ command: "ls", args: ["-la"] }),
+      },
+    };
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-repeated-tools",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call-1", ...repeatedToolCall }],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-repeated-tools",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call-2", ...repeatedToolCall }],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-repeated-tools",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call-3", ...repeatedToolCall }],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-repeated-tools",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call-4", ...repeatedToolCall }],
+              },
+            },
+          ],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          repeatedToolCallLimit: 2,
+          maxToolTurns: 20,
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("repeated run_shell tool-call loop");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(result.events)).toContain("Repeated identical run_shell call suppressed");
+  });
   it("does not log raw provider-supplied unknown tool names or ids", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-unknown-tool-redaction-"));
     const events = [];
