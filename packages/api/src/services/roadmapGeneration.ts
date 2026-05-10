@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute, relative } from "node:path";
 import { z } from "zod";
 import {
   TASK_INTENT_CONTRACTS,
@@ -88,6 +89,13 @@ export interface GenerateRoadmapFileResult {
   content: string;
 }
 
+export interface RoadmapGitCommitResult {
+  committed: boolean;
+  remainingDirty: string | null;
+  commitSha?: string;
+  skippedReason?: string;
+}
+
 /**
  * Generate a ROADMAP.md file for the project using Agent SDK.
  * Reads DESCRIPTION.md and ARCHITECTURE.md for context, then produces
@@ -106,6 +114,118 @@ function resolveExplicitRoadmapIntent(taskIntent: string | null | undefined): Ta
 
 const AUDIT_ROADMAP_VALIDATION_MESSAGE =
   "Audit roadmap generation produced implementation-shaped milestones; no tasks imported.";
+
+function toProjectRelativeGitPath(projectRoot: string, absolutePath: string): string | null {
+  const rel = relative(projectRoot, absolutePath).replaceAll("\\", "/");
+  if (!rel || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) return null;
+  return rel;
+}
+
+function formatDirtyPreview(statusOutput: string): string | null {
+  const lines = statusOutput
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  const preview = lines.slice(0, 5).join(", ");
+  return lines.length > 5 ? `${preview}, +${lines.length - 5} more` : preview;
+}
+
+function runRoadmapGit(
+  projectRoot: string,
+  args: string[],
+  opts: { ignoreExit?: boolean; commitIdentity?: boolean } = {},
+): { stdout: string; stderr: string; status: number } {
+  const configArgs = ["-c", `safe.directory=${projectRoot}`];
+  if (opts.commitIdentity) {
+    configArgs.push("-c", "user.name=AIF Handoff", "-c", "user.email=aif-handoff@local");
+  }
+
+  try {
+    const stdout = execFileSync("git", [...configArgs, ...args], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { stdout: stdout.trim(), stderr: "", status: 0 };
+  } catch (err) {
+    const error = err as { stdout?: Buffer | string; stderr?: Buffer | string; status?: number };
+    const stdout = error.stdout ? error.stdout.toString().trim() : "";
+    const stderr = error.stderr ? error.stderr.toString().trim() : String(err);
+    const status = typeof error.status === "number" ? error.status : 1;
+    if (opts.ignoreExit) return { stdout, stderr, status };
+    throw new RoadmapGenerationError(
+      "GIT_COMMIT_FAILED",
+      `git ${args.join(" ")} failed: ${stderr || stdout || "unknown error"}`,
+    );
+  }
+}
+
+export function commitGeneratedRoadmapIfNeeded(input: {
+  projectRoot: string;
+  roadmapPath: string;
+  roadmapAlias?: string;
+}): RoadmapGitCommitResult {
+  const roadmapRelPath = toProjectRelativeGitPath(input.projectRoot, input.roadmapPath);
+  if (!roadmapRelPath) {
+    return {
+      committed: false,
+      remainingDirty: null,
+      skippedReason: "roadmap_path_outside_project",
+    };
+  }
+
+  const repo = runRoadmapGit(input.projectRoot, ["rev-parse", "--is-inside-work-tree"], {
+    ignoreExit: true,
+  });
+  if (repo.status !== 0 || repo.stdout.trim() !== "true") {
+    return { committed: false, remainingDirty: null, skippedReason: "not_git_worktree" };
+  }
+
+  const roadmapStatus = runRoadmapGit(
+    input.projectRoot,
+    ["status", "--porcelain", "--", roadmapRelPath],
+    { ignoreExit: true },
+  );
+  if (roadmapStatus.status !== 0) {
+    return {
+      committed: false,
+      remainingDirty: null,
+      skippedReason: "roadmap_status_failed",
+    };
+  }
+
+  if (roadmapStatus.stdout.length > 0) {
+    runRoadmapGit(input.projectRoot, ["add", "--", roadmapRelPath]);
+    const staged = runRoadmapGit(
+      input.projectRoot,
+      ["diff", "--cached", "--quiet", "--", roadmapRelPath],
+      { ignoreExit: true },
+    );
+    if (staged.status !== 0) {
+      const suffix = input.roadmapAlias ? ` (${input.roadmapAlias})` : "";
+      runRoadmapGit(
+        input.projectRoot,
+        ["commit", "-m", `docs: update generated roadmap${suffix}`, "--", roadmapRelPath],
+        { commitIdentity: true },
+      );
+    }
+  }
+
+  const status = runRoadmapGit(input.projectRoot, ["status", "--porcelain"], {
+    ignoreExit: true,
+  });
+  const commit = runRoadmapGit(input.projectRoot, ["rev-parse", "--short", "HEAD"], {
+    ignoreExit: true,
+  });
+  const result = {
+    committed: roadmapStatus.stdout.length > 0,
+    remainingDirty: status.status === 0 ? formatDirtyPreview(status.stdout) : null,
+    commitSha: commit.status === 0 && commit.stdout ? commit.stdout : undefined,
+  };
+  log.info({ ...result, roadmapRelPath }, "Generated roadmap git state resolved");
+  return result;
+}
 
 function splitAuditTextLines(text: string): string[] {
   return text

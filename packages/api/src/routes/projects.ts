@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { jsonValidator } from "../middleware/zodValidator.js";
 import { internalBroadcastAuth } from "../middleware/internalBroadcastAuth.js";
-import { logger, getEnv, getProjectConfig, type TaskIntent } from "@aif/shared";
+import {
+  logger,
+  getEnv,
+  getProjectConfig,
+  projectUsesSharedBranchIsolation,
+  type TaskIntent,
+} from "@aif/shared";
 import {
   clearActiveRuntimeWarmupSessions,
   createRuntimeWarmupSession,
@@ -38,6 +44,7 @@ import {
   generateRoadmapFile,
   generateRoadmapTasks,
   importGeneratedTasks,
+  commitGeneratedRoadmapIfNeeded,
   RoadmapGenerationError,
 } from "../services/roadmapGeneration.js";
 import { validateProjectScopedRuntimeProfileSelections } from "../services/runtimeProfileScope.js";
@@ -741,10 +748,30 @@ async function runRoadmapGenerationJob(
     // Step 2: Extract tasks from the generated roadmap
     const extraction = await generateRoadmapTasks({ projectId, roadmapAlias, taskIntent });
 
-    // Step 3: Import with dedupe and tag enrichment
+    // Step 3: Persist the generated roadmap before cards can wake the agent.
+    // Branch-isolated projects require a clean worktree before the first task
+    // can create its feature branch, so leaving ROADMAP.md dirty creates a
+    // self-blocking import batch.
+    const project = findProjectById(projectId);
+    if (!project) {
+      throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
+    }
+    const gitResult = commitGeneratedRoadmapIfNeeded({
+      projectRoot: project.rootPath,
+      roadmapPath: generated.roadmapPath,
+      roadmapAlias,
+    });
+    if (gitResult.remainingDirty && projectUsesSharedBranchIsolation(project.rootPath)) {
+      throw new RoadmapGenerationError(
+        "DIRTY_WORKTREE",
+        `Roadmap generated but tasks were not imported because the project worktree still has uncommitted changes: ${gitResult.remainingDirty}. Commit, stash, or discard them before generating runnable roadmap tasks.`,
+      );
+    }
+
+    // Step 4: Import with dedupe and tag enrichment
     const result = importGeneratedTasks(projectId, extraction);
 
-    // Step 4: Broadcast each created task
+    // Step 5: Broadcast each created task
     for (const taskId of result.taskIds) {
       const task = findTaskById(taskId);
       if (task) {
@@ -757,7 +784,7 @@ async function runRoadmapGenerationJob(
       broadcast({ type: "agent:wake", payload: { id: projectId } });
     }
 
-    // Broadcast completion
+    // Step 6: Broadcast completion
     broadcast({
       type: "roadmap:complete",
       payload: {

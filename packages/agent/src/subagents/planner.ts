@@ -304,12 +304,13 @@ ${handoffContext}
 ${scopeConstraint}
 
 Mode: ${plannerMode}, tests: ${planTests}, docs: ${planDocs}.
-Plan file: @${planPath}
+Plan file reference: @${planPath}
+Filesystem plan path: ${planPath}
 
 ${taskContext}
 
 Create or refine an implementation-ready markdown checklist plan.
-Always write the final plan to @${planPath}.`;
+Always write the final plan to ${planPath}; do not create a filesystem path that starts with @.`;
     workflowSpec = createRuntimeWorkflowSpec({
       workflowKind: "planner",
       prompt,

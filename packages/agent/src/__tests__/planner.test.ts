@@ -91,7 +91,8 @@ describe("runPlanner comment selection", () => {
     const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
     expect(call.prompt).not.toContain("/aif-plan");
     expect(call.prompt).toContain("Mode: fast, tests: false, docs: false.");
-    expect(call.prompt).toContain("Plan file: @.ai-factory/PLAN.md");
+    expect(call.prompt).toContain("Plan file reference: @.ai-factory/PLAN.md");
+    expect(call.prompt).toContain("Filesystem plan path: .ai-factory/PLAN.md");
     expect(call.prompt).toContain("message: comment-12");
     expect(call.prompt).not.toContain("message: comment-11");
     expect(call.prompt).not.toContain("message: comment-01");

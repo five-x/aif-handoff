@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { generatePlanPath, projects } from "@aif/shared";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@aif/shared/server";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -26,6 +27,7 @@ const {
   generateRoadmapTasks,
   importGeneratedTasks,
   buildTaskTags,
+  commitGeneratedRoadmapIfNeeded,
   RoadmapGenerationError,
 } = await import("../services/roadmapGeneration.js");
 const { findTasksByRoadmapAlias, nextBacklogTaskByPosition } = await import("@aif/data");
@@ -70,6 +72,14 @@ function createProjectWithDescription(descriptionContent: string) {
     .run();
 
   return { projectId, tmpDir };
+}
+
+function runGit(cwd: string, args: string[]) {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
 }
 
 function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
@@ -144,6 +154,41 @@ describe("roadmapGeneration", () => {
       expect(tags).toContain("phase:1");
       expect(tags).toContain("seq:01");
       expect(tags).not.toContain("phase:");
+    });
+  });
+
+  describe("commitGeneratedRoadmapIfNeeded", () => {
+    it("commits the generated roadmap without hiding unrelated dirty files", () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "roadmap-git-test-"));
+      const aiFactoryDir = join(tmpDir, ".ai-factory");
+      mkdirSync(aiFactoryDir, { recursive: true });
+      const roadmapPath = join(aiFactoryDir, "ROADMAP.md");
+      writeFileSync(roadmapPath, "# Old Roadmap\n");
+
+      runGit(tmpDir, ["init"]);
+      if (runGit(tmpDir, ["branch", "--show-current"]) !== "main") {
+        runGit(tmpDir, ["checkout", "-b", "main"]);
+      }
+      runGit(tmpDir, ["config", "user.name", "Test User"]);
+      runGit(tmpDir, ["config", "user.email", "test@example.invalid"]);
+      runGit(tmpDir, ["add", ".ai-factory/ROADMAP.md"]);
+      runGit(tmpDir, ["commit", "-m", "docs: seed roadmap"]);
+
+      writeFileSync(roadmapPath, "# New Roadmap\n");
+      writeFileSync(join(tmpDir, "dirty.txt"), "operator note\n");
+
+      const result = commitGeneratedRoadmapIfNeeded({
+        projectRoot: tmpDir,
+        roadmapPath,
+        roadmapAlias: "audit",
+      });
+
+      expect(result.committed).toBe(true);
+      expect(result.remainingDirty).toContain("?? dirty.txt");
+      expect(runGit(tmpDir, ["log", "-1", "--format=%s"])).toBe(
+        "docs: update generated roadmap (audit)",
+      );
+      expect(runGit(tmpDir, ["status", "--porcelain", "--", ".ai-factory/ROADMAP.md"])).toBe("");
     });
   });
 
