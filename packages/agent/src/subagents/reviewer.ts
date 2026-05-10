@@ -126,6 +126,8 @@ Rules:
 - Review is read-only: do not create, edit, delete, move, or commit repository files.
 - For audit, review, discovery, validation, verification, findings, or report tasks, call at least one repository inspection tool before answering, then include at least one Advisory with concrete evidence you inspected: exact existing file path with line/function/symbol reference, or a command and output/status that supports your review conclusion.
 - For audit/report artifacts, block placeholder or unverified evidence: synthetic commit hashes such as 123abc, placeholder authors, fake command output, "too large to read", "would show", "likely", "may contain", or claims that an existing file/directory is missing.
+- For audit/report artifacts whose task description requires Proposed fix, block any finding that has Evidence/Risk/Verification but no Proposed fix.
+- For audit/report artifacts, block non-actionable findings: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims without a concrete technical failure mode.
 - Reuse only IDs provided in the Previous Findings input below.
 - Do not add any headings before, between, or after these sections.
 - Do not use code fences.`;

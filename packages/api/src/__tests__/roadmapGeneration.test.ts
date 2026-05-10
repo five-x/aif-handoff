@@ -90,10 +90,13 @@ function runGit(cwd: string, args: string[]) {
 function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
   return [
     "Scope: src/config.ts, src/index.ts",
+    "Audit mandate: Act as the area owner and find actionable technical-quality risks.",
     "Allowed changes: only create/update one report artifact.",
     `Report artifact: ${reportName}`,
-    "Acceptance criteria: inspect the scoped files and record findings or none.",
-    "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, and Verification: Command ... output ...",
+    "Acceptance criteria: inspect the scoped files and record only actionable findings or no validated findings.",
+    "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+    'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
+    'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
   ].join("\n");
@@ -342,12 +345,17 @@ describe("roadmapGeneration", () => {
       });
 
       const callArgs = mockRunApiRuntimeOneShot.mock.calls[0][0];
-      expect(callArgs.prompt).toContain("diagnostic audit decomposition roadmap");
+      expect(callArgs.prompt).toContain("owner-grade diagnostic audit decomposition roadmap");
       expect(callArgs.prompt).toContain(
         "Do not create implementation, fixing, refactoring, hardening",
       );
+      expect(callArgs.prompt).toContain("Audit mandate:");
+      expect(callArgs.prompt).toContain("Proposed fix:");
+      expect(callArgs.prompt).toContain("Quality bar:");
       expect(callArgs.prompt).toContain("Report artifact: audit/");
-      expect(callArgs.prompt).toContain("every summarized finding must include Evidence: audit/");
+      expect(callArgs.prompt).toContain(
+        "every summarized finding must include Evidence: <source repo path>:<line>",
+      );
     });
 
     it("should replace invalid generated audit roadmaps with a deterministic diagnostic roadmap", async () => {
@@ -385,6 +393,11 @@ describe("roadmapGeneration", () => {
 
       const { readFileSync } = await import("node:fs");
       expect(result.content).toContain("Audit: security and configuration controls");
+      expect(result.content).toContain("Audit: architecture and ownership boundaries");
+      expect(result.content).toContain("Audit mandate:");
+      expect(result.content).toContain("Proposed fix:");
+      expect(result.content).toContain("Quality bar:");
+      expect(result.content).toContain("No-findings rule:");
       expect(result.content).toContain("Scope: README.md, pyproject.toml");
       expect(result.content).toContain("src/my_app");
       expect(result.content).not.toContain("packages/api/src");

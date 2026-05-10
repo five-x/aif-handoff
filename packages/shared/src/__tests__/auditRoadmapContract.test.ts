@@ -14,14 +14,18 @@ import {
 function completeAuditDescription() {
   return [
     "Scope: src/config.ts",
+    "Audit mandate: Act as the security owner and find actionable technical-quality risks.",
     "Allowed changes: only create/update one report artifact.",
     "Report artifact: audit/config-audit.md",
     "Acceptance criteria: inspect the scoped files and record findings or none.",
-    "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, and Verification: Command rg config src/config.ts output matched.",
+    "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, Proposed fix:, and Verification: Command rg config src/config.ts output matched.",
+    'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
+    'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
     "Evidence: src/config.ts:1",
     "Risk: config drift.",
+    "Proposed fix: pin the configuration contract.",
     "Verification: Command rg config src/config.ts output matched.",
   ].join("\n");
 }

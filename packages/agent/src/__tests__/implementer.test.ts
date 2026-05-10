@@ -140,6 +140,7 @@ describe("runImplementer rework behavior", () => {
         "## Finding",
         "Evidence: `README.md:1` identifies project docs.",
         "Risk: Configuration drift can be missed.",
+        "Proposed fix: add an owner-reviewed configuration checklist.",
         "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
       ].join("\n"),
       "utf8",
@@ -234,6 +235,7 @@ describe("runImplementer rework behavior", () => {
         "## Finding",
         "Evidence: `README.md:1` identifies project docs from the producer branch.",
         "Risk: Synthesis can miss branch-only reports.",
+        "Proposed fix: read validated report artifacts from producer branches.",
         "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
       ].join("\n"),
       "utf8",
@@ -325,11 +327,13 @@ describe("runImplementer rework behavior", () => {
         "## Finding: Valid source evidence",
         "Evidence: `README.md:1` identifies project docs from the report branch.",
         "Risk: Synthesis can miss validated source evidence.",
+        "Proposed fix: carry source report branch content into synthesis deterministically.",
         "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
         "",
         "### Finding: Tool limit placeholder",
         "Evidence: `README.md` was reported as file is too large (8409 bytes > 1000 byte limit).",
         "Risk: Placeholder inspection claims can make audit synthesis look validated.",
+        "Proposed fix: replace placeholder inspection with targeted line reads.",
         "Verification: Command `read_file README.md` output: `file is too large (8409 bytes > 1000 byte limit)`.",
       ].join("\n"),
       "utf8",
@@ -403,6 +407,7 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("Generated from validated audit batch reports.");
     expect(summary).toContain("Evidence: `README.md:1`");
     expect(summary).toContain("Risk: Synthesis can miss validated source evidence.");
+    expect(summary).toContain("Proposed fix: carry source report branch content");
     expect(summary).toContain("Included findings: 1");
     expect(summary).toContain("Omitted findings: 1");
     expect(summary).not.toContain("file is too large");

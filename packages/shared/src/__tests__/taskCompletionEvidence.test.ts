@@ -1373,6 +1373,105 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("insufficient_report_evidence");
   });
 
+  it("blocks owner-grade audit findings that omit a proposed fix", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/owner-audit-no-fix"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime-audit.md"),
+      [
+        "## Finding",
+        "Evidence: `src/config.ts:1` sets the runtime timeout.",
+        "Risk: A hard timeout can reject slow but valid operations without an override path.",
+        'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add runtime audit", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "owner-audit-no-proposed-fix",
+        title: "Audit runtime quality",
+        description:
+          "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("accepts owner-grade audit reports with no validated findings and checked evidence", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/owner-audit-no-findings"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime-audit.md"),
+      [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add runtime audit", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "owner-audit-no-findings",
+        title: "Audit runtime quality",
+        description:
+          "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
+    expect(codes(result)).not.toContain("insufficient_report_evidence");
+  });
+
   it("blocks audit reports with placeholder git verification output", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/placeholder-git-output"], {

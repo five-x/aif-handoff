@@ -293,6 +293,10 @@ function hasConcreteRepositoryLineEvidence(section: string): boolean {
   );
 }
 
+function hasProposedFix(section: string): boolean {
+  return /\bProposed fix\s*:/i.test(section);
+}
+
 function summarizeValidatedAuditArtifactsForSynthesis(
   artifacts: ValidatedAuditArtifactContent[],
 ): AuditSourceReportSummary[] {
@@ -302,6 +306,7 @@ function summarizeValidatedAuditArtifactsForSynthesis(
       .filter(
         (section) =>
           hasConcreteRepositoryLineEvidence(section) &&
+          hasProposedFix(section) &&
           !hasLowQualitySynthesisFindingEvidence(section),
       )
       .map((section) => ({
@@ -359,7 +364,7 @@ function buildDeterministicAuditSynthesisContent(
     "# Audit Summary",
     "",
     "Generated from validated audit batch reports.",
-    "Only findings with concrete path:line Evidence, Risk, and Verification sections were included.",
+    "Only findings with concrete path:line Evidence, Risk, Proposed fix, and Verification sections were included.",
     "",
     "## Source Reports",
     "",
@@ -692,7 +697,9 @@ Execution rules:
 - Respect task dependencies and checklist state from the plan file.
 - Keep plan checklist state accurate while implementing.
 - Run tests/lint/verification relevant to the changes.
-- For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete existing file \`path:line\` evidence, \`Risk:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
+- For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete existing file \`path:line\` evidence, \`Risk:\`, \`Proposed fix:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
+- Audit findings must be actionable technical-quality defects, regressions, unsafe operational assumptions, or clearly owned remediation items. Do not count inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, or speculative may/might/could claims as findings.
+- If no actionable finding is found, write "No validated findings" and include checked files and commands with observed outputs instead of inventing weak findings.
 - Audit report verification must be observed, not invented. Paste only command output or tool results you actually obtained. Never use placeholders such as \`123abc\`, \`1234567890abcdef\`, \`Your Name <your.email@example.com>\`, synthetic commit metadata, or generic text like \`All tests passed\` unless that exact output came from a tool.
 - If a scoped file is large, inspect it with targeted tools such as \`rg -n\`, \`nl -ba | sed -n\`, \`head\`, or \`tail\`; do not write "too large to read", "would show", "likely", or "may contain" as evidence. If you cannot inspect an area, record it as an explicit audit limitation, not as a finding.
 - If you claim a file or directory is missing, verify it with a real command first and include the exact output. Do not claim missing paths when \`git ls-files\`, \`ls\`, or \`test -e\` shows they exist.

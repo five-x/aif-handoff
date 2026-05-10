@@ -85,6 +85,12 @@ type AuditRoadmapItem = {
   text: string;
 };
 
+type AuditArea = {
+  title: string;
+  scope: string;
+  mandate: string;
+};
+
 export interface GenerateRoadmapFileInput {
   projectId: string;
   /** Optional label for the generated roadmap. It does not imply task intent. */
@@ -262,6 +268,9 @@ function hasImplementationShapedAuditContent(text: string): boolean {
     if (/\b(?:do not|must not|forbid|forbidden|no source|no config|no test)\b/i.test(line)) {
       return false;
     }
+    if (/\b(?:proposed\s+fix|evidence requirements)\s*:/i.test(line)) {
+      return false;
+    }
     if (!implementationPatterns.some((pattern) => pattern.test(line))) {
       return false;
     }
@@ -402,8 +411,12 @@ function validateAuditRoadmapSource(roadmapContent: string): void {
       "git requirements:",
       "constraint:",
       "diagnostic-only",
+      "audit mandate:",
+      "quality bar:",
+      "no-findings rule:",
       "evidence:",
       "risk:",
+      "proposed fix:",
       "verification:",
       "git status --short",
       "git commit",
@@ -461,14 +474,22 @@ function auditSlug(value: string): string {
   );
 }
 
-function buildAuditRoadmapItem(title: string, scope: string, reportPath: string): string {
+function buildAuditRoadmapItem(
+  title: string,
+  scope: string,
+  reportPath: string,
+  mandate: string,
+): string {
   return [
     `- [ ] **${title}** - Diagnostic-only audit.`,
     `  - Scope: ${scope}`,
+    `  - Audit mandate: ${mandate}`,
     `  - Allowed changes: only create/update ${reportPath}.`,
     `  - Report artifact: ${reportPath}`,
-    "  - Acceptance criteria: inspect the scoped files and record concrete findings or explicitly record no findings.",
-    "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, and Verification: Command ... output ...",
+    "  - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.",
+    "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+    '  - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
+    '  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     "  - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "  - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
   ].join("\n");
@@ -515,7 +536,7 @@ function scopeText(projectRoot: string, candidates: string[], fallback: string[]
   return fallbackPaths.length > 0 ? fallbackPaths.join(", ") : ".";
 }
 
-function buildAuditAreasForProject(projectRoot: string) {
+function buildAuditAreasForProject(projectRoot: string): AuditArea[] {
   const srcChildren = listScopedChildren(projectRoot, "src", 6);
   const packageChildren = listScopedChildren(projectRoot, "packages", 6);
   const testChildren = [
@@ -538,7 +559,7 @@ function buildAuditAreasForProject(projectRoot: string) {
 
   return [
     {
-      title: "Audit: project structure and task routing",
+      title: "Audit: architecture and ownership boundaries",
       scope: scopeText(
         projectRoot,
         [
@@ -554,6 +575,8 @@ function buildAuditAreasForProject(projectRoot: string) {
         ],
         fallback,
       ),
+      mandate:
+        "Act as the architecture owner; verify module boundaries, task/workflow routing, ownership clarity, and coupling risks that would make future changes unsafe.",
     },
     {
       title: "Audit: security and configuration controls",
@@ -570,6 +593,8 @@ function buildAuditAreasForProject(projectRoot: string) {
         ],
         fallback,
       ),
+      mandate:
+        "Act as the security owner; verify secrets handling, configuration defaults, unsafe local endpoints, shell/file boundaries, and deployment-time security assumptions.",
     },
     {
       title: "Audit: performance and runtime behavior",
@@ -586,6 +611,8 @@ function buildAuditAreasForProject(projectRoot: string) {
         ],
         fallback,
       ),
+      mandate:
+        "Act as the runtime owner; verify slow paths, timeout behavior, repeated work, resource growth, and failure modes under realistic production usage.",
     },
     {
       title: "Audit: persistence and data safety",
@@ -602,6 +629,8 @@ function buildAuditAreasForProject(projectRoot: string) {
         ],
         fallback,
       ),
+      mandate:
+        "Act as the data owner; verify migrations, transactions, backup/restore, concurrent writes, data loss risks, and irreversible operations.",
     },
     {
       title: "Audit: integration and orchestration boundaries",
@@ -618,6 +647,8 @@ function buildAuditAreasForProject(projectRoot: string) {
         ],
         fallback,
       ),
+      mandate:
+        "Act as the integration owner; verify external-service contracts, retries, idempotency, error propagation, and boundary assumptions between subsystems.",
     },
     {
       title: "Audit: test and operations readiness",
@@ -637,6 +668,8 @@ function buildAuditAreasForProject(projectRoot: string) {
         ],
         fallback,
       ),
+      mandate:
+        "Act as the QA and operations owner; verify tests prove critical behavior, release commands are executable, runbooks are actionable, and smoke checks cover production risks.",
     },
   ];
 }
@@ -658,6 +691,7 @@ function buildDeterministicAuditRoadmapContent(ctx: {
       area.title,
       area.scope,
       `audit/${reportDate}-${auditSlug(area.title)}-audit.md`,
+      area.mandate,
     ),
   );
   tasks.push(
@@ -665,6 +699,7 @@ function buildDeterministicAuditRoadmapContent(ctx: {
       "Synthesize audit findings",
       `all audit/${reportDate}-*-audit.md reports from this audit batch`,
       `audit/${reportDate}-summary.md`,
+      "Act as the synthesis owner reviewing area reports; include only actionable findings that meet the evidence contract and call out weak reports by source.",
     ),
   );
 
@@ -872,9 +907,15 @@ function buildRoadmapGenerationPrompt(
 
   if (intent === "audit") {
     const reportDate = new Date().toISOString().slice(0, 10);
-    return `You are creating a diagnostic audit decomposition roadmap based on the project context below.
+    return `You are creating an owner-grade diagnostic audit decomposition roadmap based on the project context below.
 
 ${sections.join("\n\n")}
+
+Operating model:
+- Treat the user request as a high-level suspicion that technical quality may be poor.
+- Decompose the audit into owner-area checks; the user should not need to provide detailed audit instructions.
+- Each owner area must produce actionable findings or a rigorous "No validated findings" report.
+- A weak area report should be rejected later, so encode the quality bar directly in every card.
 
 Generate a ROADMAP.md file with the following format:
 
@@ -886,19 +927,25 @@ Generate a ROADMAP.md file with the following format:
 
 - [ ] **Audit: <small area name>** - Diagnostic-only audit.
   - Scope: <3-10 concrete files or directories to inspect>
+  - Audit mandate: <owner role and concrete quality risks to investigate>
   - Allowed changes: only create/update one report artifact.
   - Report artifact: audit/${reportDate}-<short-name>-audit.md
-  - Acceptance criteria: <specific checks this audit must complete>
-  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, and Verification: Command ... output ...
+  - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.
+  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
+  - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.
+  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.
   - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.
   - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.
 
 - [ ] **Synthesize audit findings** - Diagnostic-only synthesis.
   - Scope: all audit/${reportDate}-*-audit.md reports from this audit batch.
+  - Audit mandate: act as the synthesis owner reviewing area reports; include only actionable findings that meet the evidence contract and call out weak reports by source.
   - Allowed changes: only create/update audit/${reportDate}-summary.md.
   - Report artifact: audit/${reportDate}-summary.md
-  - Acceptance criteria: summarize blocking findings, non-blocking findings, and remediation backlog.
-  - Evidence requirements: every summarized finding must include Evidence: audit/${reportDate}-<source>-audit.md, Risk:, and Verification: Command ... output ...
+  - Acceptance criteria: summarize blocking findings, advisory findings, omitted weak findings by source, and remediation backlog.
+  - Evidence requirements: every summarized finding must include Evidence: <source repo path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
+  - Quality bar: do not promote weak source-report observations, inventory notes, speculative risks, or findings without concrete path:line evidence.
+  - No-findings rule: if no source finding meets the bar, write "No validated findings" and list source reports inspected with observed commit/output evidence.
   - Git requirements: run git status --short; git add the summary artifact; git commit the summary artifact; verify with git log -1 --name-only --oneline.
   - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.
 
@@ -1093,7 +1140,7 @@ Required output format (JSON only, no markdown fences):
     {
       "title": "Audit: short area name",
       "taskIntent": "audit",
-      "description": "Scope: ...\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, and Verification: Command ... output ...\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+      "description": "Scope: ...\\nAudit mandate: ...\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
       "phase": 1,
       "phaseName": "Audit",
       "sequence": 1
@@ -1106,8 +1153,8 @@ Rules:
 - Do not create tasks whose primary action is fix, resolve, implement, refactor, harden, expand tests, deploy, or document.
 - Every task must remain diagnostic-only.
 - Every task must set "taskIntent": "audit".
-- Every task description must include Scope:, Allowed changes:, Report artifact:, Acceptance criteria:, Evidence requirements:, Git requirements:, and Constraint:.
-- Every task description must require Evidence: <path>:<line>, Risk:, Verification: Command ... output ..., git status --short, git commit, and git log -1 --name-only --oneline.
+- Every task description must include Scope:, Audit mandate:, Allowed changes:, Report artifact:, Acceptance criteria:, Evidence requirements:, Quality bar:, No-findings rule:, Git requirements:, and Constraint:.
+- Every task description must require Evidence: <path>:<line>, Risk:, Proposed fix:, Verification: Command ... output ..., git status --short, git commit, and git log -1 --name-only --oneline.
 - Return ONLY valid JSON, no explanatory text`;
   }
 

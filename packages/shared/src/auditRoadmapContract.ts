@@ -60,8 +60,12 @@ export const AUDIT_REQUIRED_GENERATED_CARD_MARKERS = [
   "evidence requirements:",
   "git requirements:",
   "constraint:",
+  "audit mandate:",
+  "quality bar:",
+  "no-findings rule:",
   "evidence:",
   "risk:",
+  "proposed fix:",
   "verification:",
   "git status --short",
   "git commit",
@@ -185,6 +189,9 @@ export function hasImplementationShapedAuditText(text: string): boolean {
   return auditTextLines(text).some((line) => {
     const lower = line.toLowerCase();
     if (/\b(?:do not|must not|forbid|forbidden|no source|no config|no test)\b/i.test(lower)) {
+      return false;
+    }
+    if (/\b(?:proposed\s+fix|evidence requirements)\s*:/i.test(lower)) {
       return false;
     }
     if (!implementationPatterns.some((pattern) => pattern.test(line))) {

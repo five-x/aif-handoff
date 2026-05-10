@@ -135,6 +135,12 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> =
       /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
     message: "Report artifact contains speculative audit claims that are not backed by evidence.",
   },
+  {
+    pattern:
+      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully)\b/i,
+    message:
+      "Report artifact contains non-actionable audit observations instead of concrete technical-quality findings.",
+  },
 ];
 
 const SLASH_PATH_TOKEN_PATTERN =
@@ -814,12 +820,14 @@ function hasStructuredFindingEvidence(
   projectRoot: string,
   existingPaths: string[],
   excludedPaths: Set<string>,
+  requireProposedFix: boolean,
 ): boolean {
   const findingSections = text.split(/(?:^|\n)#{2,4}\s+|\n(?=-\s+(?:finding|issue|risk)\b)/i);
   return findingSections.some(
     (section) =>
       /\bEvidence\s*:/i.test(section) &&
       /\bRisk\s*:/i.test(section) &&
+      (!requireProposedFix || /\bProposed fix\s*:/i.test(section)) &&
       /\bVerification\s*:/i.test(section) &&
       (collectExistingRefsWithLineNumbers(section, projectRoot, excludedPaths).length > 0 ||
         hasSymbolEvidenceTiedToExistingPath(section, existingPaths, excludedPaths) ||
@@ -830,12 +838,14 @@ function hasStructuredFindingEvidence(
 function hasStructuredFindingEvidenceWithAllowedArtifactPath(
   text: string,
   allowedArtifactPaths: string[],
+  requireProposedFix: boolean,
 ): boolean {
   if (allowedArtifactPaths.length === 0) return false;
   const findingSections = text.split(/(?:^|\n)#{2,4}\s+|\n(?=-\s+(?:finding|issue|risk)\b)/i);
   return findingSections.some((section) => {
     if (!/\bEvidence\s*:/i.test(section)) return false;
     if (!/\bRisk\s*:/i.test(section)) return false;
+    if (requireProposedFix && !/\bProposed fix\s*:/i.test(section)) return false;
     if (!/\bVerification\s*:/i.test(section)) return false;
     return allowedArtifactPaths.some((artifactPath) => {
       const escaped = artifactPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -844,17 +854,38 @@ function hasStructuredFindingEvidenceWithAllowedArtifactPath(
   });
 }
 
+function hasValidatedNoFindingsEvidence(
+  text: string,
+  projectRoot: string,
+  excludedPaths: Set<string>,
+): boolean {
+  if (!/\bNo validated findings\b/i.test(text)) return false;
+  if (
+    !/\b(?:Checked files|Checked commands|Inspection matrix|Commands run|Files inspected)\b/i.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  return (
+    collectExistingRefsWithLineNumbers(text, projectRoot, excludedPaths).length > 0 &&
+    hasCommandOutputEvidence(text)
+  );
+}
+
 export function hasSubstantiveReportEvidence(input: {
   text: string;
   projectRoot: string;
   existingReferencedPaths?: string[];
   excludedReferencedPaths?: string[];
   allowedEvidenceArtifactPaths?: string[];
+  requireProposedFix?: boolean;
 }): boolean {
   const excludedPaths = new Set((input.excludedReferencedPaths ?? []).map(normalizeRelativePath));
   const allowedArtifactPaths = [
     ...new Set((input.allowedEvidenceArtifactPaths ?? []).map(normalizeRelativePath)),
   ];
+  const requireProposedFix = input.requireProposedFix ?? false;
   if (hasInvalidExistingLineReference(input.text, input.projectRoot, excludedPaths)) return false;
   const existingPaths =
     input.existingReferencedPaths ??
@@ -866,14 +897,40 @@ export function hasSubstantiveReportEvidence(input: {
     (path) => !isExcludedEvidencePath(path, excludedPaths),
   );
   if (evidencePaths.length === 0) return false;
-  if (collectExistingRefsWithLineNumbers(input.text, input.projectRoot, excludedPaths).length > 0) {
+  if (
+    requireProposedFix &&
+    hasValidatedNoFindingsEvidence(input.text, input.projectRoot, excludedPaths)
+  ) {
     return true;
   }
-  if (hasSymbolEvidenceTiedToExistingPath(input.text, evidencePaths, excludedPaths)) return true;
-  if (hasStructuredFindingEvidenceWithAllowedArtifactPath(input.text, allowedArtifactPaths)) {
+  if (
+    !requireProposedFix &&
+    collectExistingRefsWithLineNumbers(input.text, input.projectRoot, excludedPaths).length > 0
+  ) {
     return true;
   }
-  return hasStructuredFindingEvidence(input.text, input.projectRoot, evidencePaths, excludedPaths);
+  if (
+    !requireProposedFix &&
+    hasSymbolEvidenceTiedToExistingPath(input.text, evidencePaths, excludedPaths)
+  ) {
+    return true;
+  }
+  if (
+    hasStructuredFindingEvidenceWithAllowedArtifactPath(
+      input.text,
+      allowedArtifactPaths,
+      requireProposedFix,
+    )
+  ) {
+    return true;
+  }
+  return hasStructuredFindingEvidence(
+    input.text,
+    input.projectRoot,
+    evidencePaths,
+    excludedPaths,
+    requireProposedFix,
+  );
 }
 
 function addReferencedPath(
@@ -1070,6 +1127,7 @@ export function evaluateTaskCompletionEvidence(
     existingReferencedPaths: reportExisting,
     excludedReferencedPaths: reportArtifactFiles,
     allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
+    requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
   });
   const reportQualityIssues = collectLowQualityReportEvidenceIssues(reportText, projectRoot);
   const committedSubstantiveReportAvailable =
