@@ -116,10 +116,16 @@ function blockTaskForCompletionEvidence(
     projectRoot?: string;
   } = {},
 ): EventHandlerResult {
-  const blockedReason = formatTaskCompletionBlockedReason(result);
   const nowIso = new Date().toISOString();
   const failureFamily = firstAuditFailureFamily(result);
   const auditArtifact = options.auditArtifact;
+  const shouldReturnToRework =
+    Boolean(auditArtifact) &&
+    Boolean(options.allowAuditRework) &&
+    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(failureFamily);
+  const blockedReason = formatTaskCompletionBlockedReason(result, {
+    suppressManualReviewWhenActionable: shouldReturnToRework,
+  });
 
   if (auditArtifact) {
     updateRoadmapBatchArtifactState({
@@ -137,11 +143,7 @@ function blockTaskForCompletionEvidence(
     });
   }
 
-  if (
-    auditArtifact &&
-    options.allowAuditRework &&
-    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(failureFamily)
-  ) {
+  if (shouldReturnToRework) {
     setTaskFields(task.id, {
       status: "implementing",
       blockedReason: `${failureFamily}: ${blockedReason}`,

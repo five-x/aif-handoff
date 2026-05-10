@@ -490,13 +490,15 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     return false;
   }
 
-  const blockedReason = formatTaskCompletionBlockedReason(result);
   const family = firstAuditFailureFamily(result);
-  if (
-    artifact &&
+  const shouldReturnToRework =
+    Boolean(artifact) &&
     input.phase !== "pre_implementation" &&
-    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(family)
-  ) {
+    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(family);
+  const blockedReason = formatTaskCompletionBlockedReason(result, {
+    suppressManualReviewWhenActionable: shouldReturnToRework,
+  });
+  if (shouldReturnToRework) {
     return returnAuditTaskToRework({
       task: input.task,
       fromStatus: input.fromStatus,

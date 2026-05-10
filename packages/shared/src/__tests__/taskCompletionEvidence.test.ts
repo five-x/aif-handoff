@@ -367,6 +367,46 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("invalid_or_missing_file_references");
   });
 
+  it("can suppress manual-review wording when actionable issues are present", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "app"), { recursive: true });
+    writeFileSync(join(root, "src", "app", "main.ts"), "export const value = 1;\n", "utf8");
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: src/1-2, src/app/1-20",
+        "Risk: Directory ranges cannot be checked as file evidence.",
+        "Verification: Command `git status --short` output was clean.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      requireManualReview: true,
+      task: {
+        id: "audit-directory-ranges-manual",
+        title: "Audit generated findings",
+        taskIntent: "audit",
+        plan: "## Plan\n- Validate references\n- Write report",
+      },
+    });
+
+    expect(codes(result)).toEqual(
+      expect.arrayContaining(["invalid_or_missing_file_references", "manual_review_required"]),
+    );
+    const reason = formatTaskCompletionBlockedReason(result, {
+      suppressManualReviewWhenActionable: true,
+    });
+    expect(reason).toContain("invalid_or_missing_file_references");
+    expect(reason).toContain("src/app/1-20");
+    expect(reason).not.toContain("manual_review_required");
+    expect(reason).not.toContain("Manual review is required");
+  });
+
   it("allows risky report artifacts that cite existing root-level files", () => {
     const root = initRepo();
     writeFileSync(join(root, "package.json"), '{ "name": "test" }\n', "utf8");

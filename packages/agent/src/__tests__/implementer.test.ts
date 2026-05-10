@@ -317,6 +317,8 @@ describe("runImplementer rework behavior", () => {
         plan: "## Plan\n- [x] Done",
         reworkRequested: true,
         useSubagents: true,
+        blockedReason:
+          "invalid_artifact_content: Completion evidence guard (invalid_or_missing_file_references): Report artifact contains repository path references that do not resolve under the project root: `src/1-2`, `src/bot_intevra/1-20`.",
         reviewComments: "## Blocking Findings\n- [finding-1] code_review | Fix the retry path",
         autoReviewStateJson: JSON.stringify({
           strategy: "closure_first",
@@ -374,11 +376,16 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("<<<REWORK_COMMENT");
     expect(call.prompt).toContain("\nREWORK_COMMENT\n");
     expect(call.prompt).toContain("<<<FULL_REVIEW_COMMENTS");
+    expect(call.prompt).toContain("<<<REWORK_BLOCKED_REASON");
+    expect(call.prompt).toContain("src/1-2");
+    expect(call.prompt).toContain("src/bot_intevra/1-20");
     expect(call.prompt).toContain("## Blocking Findings");
     expect(call.prompt).toContain("<<<BLOCKING_FINDINGS_SNAPSHOT");
     expect(call.prompt).toContain("strategy: closure_first");
     expect(call.prompt).toContain("- [finding-1] code_review | Fix the retry path");
     expect(call.prompt).toContain("Rework handling protocol:");
+    expect(call.prompt).toContain("MUST remove every exact bad reference token");
+    expect(call.prompt).toContain("read-back check proving the bad tokens are absent");
     expect(call.prompt).toContain("blocking finding IDs from BLOCKING_FINDINGS_SNAPSHOT");
 
     // Coordinator lead line is still present further down the prompt

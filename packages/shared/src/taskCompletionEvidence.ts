@@ -1093,8 +1093,16 @@ export function evaluateTaskCompletionEvidence(
   };
 }
 
-export function formatTaskCompletionBlockedReason(result: TaskCompletionEvidenceResult): string {
-  const codes = [...new Set(result.issues.map((entry) => entry.code))];
-  const details = result.issues.map((entry) => entry.message);
+export function formatTaskCompletionBlockedReason(
+  result: TaskCompletionEvidenceResult,
+  options: { suppressManualReviewWhenActionable?: boolean } = {},
+): string {
+  const actionableIssues =
+    options.suppressManualReviewWhenActionable && result.issues.length > 1
+      ? result.issues.filter((entry) => entry.code !== "manual_review_required")
+      : result.issues;
+  const issues = actionableIssues.length > 0 ? actionableIssues : result.issues;
+  const codes = [...new Set(issues.map((entry) => entry.code))];
+  const details = issues.map((entry) => entry.message);
   return `Completion evidence guard (${codes.join(", ")}): ${details.join(" ")}`;
 }
