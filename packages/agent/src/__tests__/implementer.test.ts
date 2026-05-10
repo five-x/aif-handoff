@@ -118,6 +118,7 @@ describe("runImplementer rework behavior", () => {
       "For diagnostic-only audit/review/discovery/validation plans",
     );
     expect(implementCall.prompt).toContain("git log -1 --name-only --oneline");
+    expect(implementCall.prompt).toContain("Do not loop on `git_commit`");
     const reportPath = join(projectRoot, "audit/2026-05-08-initial-audit.md");
     expect(existsSync(reportPath)).toBe(false);
 

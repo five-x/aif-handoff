@@ -164,6 +164,7 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
       : "No prior plan-quality feedback was recorded.";
   const diagnosticPlanningConstraint = [
     "Diagnostic-only planning applies only to explicit audit, discovery, inventory, gap-analysis, findings, security-review, code-review, review-findings, validation-report, validation-task, validation-audit, validation-findings, verification-report, verification-task, verification-audit, or verification-findings work.",
+    "Planning is planning-only: write or update only the plan file requested by the planner, never the report artifact, source files, config files, test files, or git commits.",
     "For those tasks, keep the plan diagnostic-only: write an inspectable report artifact path, cite repository paths that the report must validate, do not implement fixes in this same run, and do not create or execute child implementation tasks.",
     "The plan must make completion verifiable: require report findings or verification items to include exact `path:line` evidence, `Risk:`, and `Verification: Command ... output ...` details.",
     "The plan must require the report artifact to be committed on the task branch, including `git status --short`, `git add <report path>`, `git commit -m ...`, and `git log -1 --name-only --oneline` verification steps.",
@@ -310,7 +311,8 @@ Filesystem plan path: ${planPath}
 ${taskContext}
 
 Create or refine an implementation-ready markdown checklist plan.
-Always write the final plan to ${planPath}; do not create a filesystem path that starts with @.`;
+Always write the final plan to ${planPath}; do not create a filesystem path that starts with @.
+Planning stage must not create report artifacts, edit source/config/test files, run git add, run git commit, or mark the implementation complete.`;
     workflowSpec = createRuntimeWorkflowSpec({
       workflowKind: "planner",
       prompt,

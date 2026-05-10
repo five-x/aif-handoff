@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
-import { chmod, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -244,6 +244,70 @@ describe("qwen-local-agent adapter", () => {
     expect(result.outputText).toContain("repeated run_shell tool-call loop");
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(JSON.stringify(result.events)).toContain("Repeated identical run_shell call suppressed");
+  });
+  it("stops interleaved repeated git_commit loops before exhausting the run turn limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-commit-loop-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.com"]);
+    await expectSpawnOk(root, ["config", "user.name", "Test User"]);
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(path.join(root, "audit", "summary.md"), "# Summary\n", "utf8");
+
+    const repeatedCommitCall = {
+      type: "function",
+      function: {
+        name: "git_commit",
+        arguments: JSON.stringify({
+          paths: ["audit/summary.md"],
+          message: "add audit summary",
+        }),
+      },
+    };
+    const statusCall = {
+      type: "function",
+      function: {
+        name: "git_status",
+        arguments: JSON.stringify({}),
+      },
+    };
+    for (const [index, toolCall] of [
+      repeatedCommitCall,
+      statusCall,
+      repeatedCommitCall,
+      statusCall,
+      repeatedCommitCall,
+    ].entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-git-commit-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: `call-${index + 1}`, ...toolCall }],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          repeatedToolCallLimit: 2,
+          maxToolTurns: 20,
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("repeated git_commit tool-call loop");
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(JSON.stringify(result.events)).toContain(
+      "Repeated identical git_commit call suppressed",
+    );
   });
   it("does not log raw provider-supplied unknown tool names or ids", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-unknown-tool-redaction-"));

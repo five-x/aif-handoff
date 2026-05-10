@@ -121,11 +121,18 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> =
   },
   {
     pattern:
-      /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|could not (?:read|inspect|access)|not visible|would show|should show|expected to show)\b/i,
+      /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|bytes\s*>\s*\d+\s*byte limit|could not (?:read|inspect|access)|not visible|would show|should show|expected to show)\b/i,
     message: "Report artifact contains unverified inspection claims instead of observed evidence.",
   },
   {
-    pattern: /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content)\b/i,
+    pattern:
+      /\b(?:will be committed|created and will be committed|has been created and will be committed)\b/i,
+    message:
+      "Report artifact contains future-tense git verification instead of observed commit output.",
+  },
+  {
+    pattern:
+      /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
     message: "Report artifact contains speculative audit claims that are not backed by evidence.",
   },
 ];

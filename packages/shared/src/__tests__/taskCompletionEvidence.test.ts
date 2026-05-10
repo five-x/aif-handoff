@@ -1504,6 +1504,51 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("low_quality_report_evidence");
   });
 
+  it("blocks audit summaries with tool-size-limit claims and future commit verification", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/weak-synthesis-summary"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "summary.md"),
+      [
+        "# Audit Summary",
+        "",
+        "## Finding",
+        "Evidence: `README.md:1` contains repository documentation.",
+        "Risk: A tool read limit is not a repository finding.",
+        "Verification: Command `read_file README.md` output: `file is too large (8409 bytes > 1000 byte limit)`.",
+        "",
+        "## Git Verification",
+        "The audit/summary.md file has been created and will be committed to the repository.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit summary", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-weak-summary",
+        title: "Synthesize audit findings",
+        description: "Done only when the summary is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reportQualityIssues.join(" ")).toContain("unverified inspection");
+    expect(result.evidence.reportQualityIssues.join(" ")).toContain("future-tense git");
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
   it("blocks risky committed reports without latest implementation-stage tool activity", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/audit-no-tool"], {

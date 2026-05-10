@@ -19,6 +19,7 @@ const DEFAULT_MODEL_ENV_VAR = "QWEN_MODEL";
 const DEFAULT_MAX_TOOL_TURNS = 12;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
+const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set(["git_commit"]);
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -323,6 +324,7 @@ export async function runQwenLocalAgentApi(input, logger) {
   let lastToolCallSignature = null;
   let repeatedToolCallCount = 0;
   let repeatedToolCallSuppressions = 0;
+  const toolCallSignatureCounts = new Map();
   logger?.info?.(
     {
       runtimeId: input.runtimeId,
@@ -400,6 +402,8 @@ export async function runQwenLocalAgentApi(input, logger) {
         }
         emitToolUse(input, events, toolCall, args);
         const signature = buildToolCallSignature(toolCall.function.name, args);
+        const signatureCount = (toolCallSignatureCounts.get(signature) ?? 0) + 1;
+        toolCallSignatureCounts.set(signature, signatureCount);
         if (signature === lastToolCallSignature) {
           repeatedToolCallCount += 1;
         } else {
@@ -407,16 +411,22 @@ export async function runQwenLocalAgentApi(input, logger) {
           repeatedToolCallCount = 1;
           repeatedToolCallSuppressions = 0;
         }
-        const shouldSuppressRepeatedCall = repeatedToolCallCount > repeatedToolCallLimit;
+        const repeatedNonconsecutiveLoop =
+          NONCONSECUTIVE_LOOP_PRONE_TOOLS.has(toolCall.function.name) &&
+          signatureCount > repeatedToolCallLimit;
+        const shouldSuppressRepeatedCall =
+          repeatedToolCallCount > repeatedToolCallLimit || repeatedNonconsecutiveLoop;
         const result = shouldSuppressRepeatedCall
           ? repeatedToolCallResult(
               toolCall.function.name,
-              repeatedToolCallCount,
+              Math.max(repeatedToolCallCount, signatureCount),
               repeatedToolCallLimit,
             )
           : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
         if (shouldSuppressRepeatedCall) {
-          repeatedToolCallSuppressions += 1;
+          repeatedToolCallSuppressions += repeatedNonconsecutiveLoop
+            ? REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS
+            : 1;
         }
         emitToolResult(input, events, toolCall, result);
         messages.push({
