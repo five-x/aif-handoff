@@ -49,6 +49,14 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260510-typed-task-intents"
+    },
+    {
+      "taskId": "work-20260510-harden-typed-roadmap-content-validation",
+      "title": "Harden Typed Roadmap Content Validation",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260510-harden-typed-roadmap-content-validation"
     }
   ]
 }

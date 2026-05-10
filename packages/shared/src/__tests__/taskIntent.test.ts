@@ -90,6 +90,63 @@ describe("taskIntent", () => {
     expect(result.issues).toContain("audit task title describes implementation work");
   });
 
+  it("rejects implementation-shaped audit titles masked with an Audit prefix", () => {
+    const result = validateGeneratedTaskIntent({
+      taskIntent: "audit",
+      title: "Audit: Security Hardening",
+      description: completeAuditDescription(),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContain("audit task title describes implementation work");
+  });
+
+  it("rejects audit cards with contradictory allowed changes", () => {
+    const result = validateGeneratedTaskIntent({
+      taskIntent: "audit",
+      title: "Audit: security configuration",
+      description: completeAuditDescription().replace(
+        "Allowed changes: only create/update one report artifact.",
+        "Allowed changes: None",
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContain("audit task allowed changes cannot be None");
+  });
+
+  it("rejects audit cards that allow extra non-report edits", () => {
+    const result = validateGeneratedTaskIntent({
+      taskIntent: "audit",
+      title: "Audit: security configuration",
+      description: completeAuditDescription().replace(
+        "Allowed changes: only create/update one report artifact.",
+        "Allowed changes: only create/update audit/config-audit.md and packages/api/src/index.ts.",
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContain(
+      "audit task allowed changes must be limited to the report artifact",
+    );
+  });
+
+  it("rejects audit cards without a concrete report artifact path", () => {
+    const result = validateGeneratedTaskIntent({
+      taskIntent: "audit",
+      title: "Audit: security configuration",
+      description: completeAuditDescription().replace(
+        "Report artifact: audit/config-audit.md",
+        "Report artifact: audit report",
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContain(
+      "audit task report artifact must be a concrete .md report path",
+    );
+  });
+
   it("accepts clearly diagnostic audit titles with complete markers", () => {
     const result = validateGeneratedTaskIntent({
       taskIntent: "audit",

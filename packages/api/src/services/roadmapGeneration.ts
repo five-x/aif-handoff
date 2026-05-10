@@ -66,6 +66,13 @@ type IndexedGeneratedTask = {
   index: number;
 };
 
+type AuditRoadmapItem = {
+  index: number;
+  title: string;
+  headline: string;
+  text: string;
+};
+
 export interface GenerateRoadmapFileInput {
   projectId: string;
   /** Optional label for the generated roadmap. It does not imply task intent. */
@@ -95,6 +102,244 @@ function extractRoadmapContent(raw: string): string {
 function resolveExplicitRoadmapIntent(taskIntent: string | null | undefined): TaskIntent {
   const normalized = taskIntent?.trim().toLowerCase();
   return isTaskIntent(normalized) ? normalized : "general";
+}
+
+const AUDIT_ROADMAP_VALIDATION_MESSAGE =
+  "Audit roadmap generation produced implementation-shaped milestones; no tasks imported.";
+
+function splitAuditTextLines(text: string): string[] {
+  return text
+    .split(/\r?\n|[.;]/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function hasImplementationShapedAuditContent(text: string): boolean {
+  const implementationPatterns = [
+    /\bcritical\s+bug\s+resolution\b/i,
+    /\bbug\s+resolution\b/i,
+    /\barchitecture\s+refactoring\b/i,
+    /\bsecurity\s+hardening\b/i,
+    /\btest\s+suite\s+expansion\b/i,
+    /\b(?:fix|fixing|resolve|resolving|implement|implementing|refactor|refactoring|harden|hardening|deploy|deploying|document|documenting)\b/i,
+    /\bexpand(?:ing)?\s+(?:the\s+)?(?:test\s+suite|tests?|coverage)\b/i,
+  ];
+  const diagnosticFrame =
+    /\b(?:diagnostic|findings?\s+(?:about|for|on)|report\s+(?:about|on)|review\s+(?:of|for)|inventory\s+(?:of|for)|evidence\s+(?:of|for)|risk\s+(?:in|of|from))\b/i;
+
+  return splitAuditTextLines(text).some((line) => {
+    if (/\b(?:do not|must not|forbid|forbidden|no source|no config|no test)\b/i.test(line)) {
+      return false;
+    }
+    if (!implementationPatterns.some((pattern) => pattern.test(line))) {
+      return false;
+    }
+    return !diagnosticFrame.test(line);
+  });
+}
+
+function extractAuditRoadmapItems(roadmapContent: string): AuditRoadmapItem[] {
+  const items: AuditRoadmapItem[] = [];
+  const lines = roadmapContent.split(/\r?\n/);
+  let current: { headline: string; lines: string[]; index: number } | null = null;
+
+  const flush = () => {
+    if (!current) return;
+    const headline = current.headline.trim();
+    const boldTitle = headline.match(/\*\*([^*]+)\*\*/)?.[1]?.trim();
+    const withoutCheckbox = headline.replace(/^\s*[-*]\s+\[\s\]\s+/, "").trim();
+    const title = (boldTitle ?? withoutCheckbox.split(/\s+(?:-|--|\u2013|\u2014)\s+/)[0]).trim();
+    items.push({
+      index: current.index,
+      title,
+      headline,
+      text: current.lines.join("\n").trim(),
+    });
+  };
+
+  lines.forEach((line, index) => {
+    const unchecked = line.match(/^\s*[-*]\s+\[\s\]\s+(.+)$/);
+    const checked = /^\s*[-*]\s+\[[xX]\]\s+/.test(line);
+    if (unchecked) {
+      flush();
+      current = { headline: unchecked[1], lines: [line], index: index + 1 };
+      return;
+    }
+    if (checked) {
+      flush();
+      current = null;
+      return;
+    }
+    current?.lines.push(line);
+  });
+  flush();
+
+  return items;
+}
+
+function isAuditSynthesisTitle(title: string): boolean {
+  return /\b(?:synthesi[sz]e|synthesis|summary|summari[sz]e|final\s+audit|audit\s+findings\s+summary)\b/i.test(
+    title,
+  );
+}
+
+function getAuditAllowedChangesLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^-\s+allowed changes\s*:/i.test(line) || /^allowed changes\s*:/i.test(line));
+}
+
+function getAuditReportArtifactLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^-\s+report artifact\s*:/i.test(line) || /^report artifact\s*:/i.test(line));
+}
+
+function extractPathTokens(text: string): string[] {
+  return [...text.matchAll(/`?([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9]+)`?/g)].map(
+    (match) => match[1],
+  );
+}
+
+function isAuditReportArtifactPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith(".md") &&
+    (lower.startsWith("audit/") ||
+      lower.includes("/audit/") ||
+      /\b(?:audit|report|summary|findings)\b/.test(lower))
+  );
+}
+
+function hasNonReportAllowedChangeTarget(value: string): boolean {
+  const explicitPaths = extractPathTokens(value);
+  if (explicitPaths.some((path) => !isAuditReportArtifactPath(path))) {
+    return true;
+  }
+
+  return (
+    /\b(?:edit|modify|change|update|create)\s+(?:source|config|test|tests|package|packages|src|app|apps|runtime|api|web|shared|code)\b/i.test(
+      value,
+    ) ||
+    /\b(?:source|config|test|tests|package|packages|src|app|apps|runtime|api|web|shared|code)\s+(?:file|files|paths?|changes?|edits?)\b/i.test(
+      value,
+    )
+  );
+}
+
+function validateAuditAllowedChangesText(text: string, issues: string[], label: string): void {
+  const lines = getAuditAllowedChangesLines(text);
+  if (lines.length === 0) {
+    issues.push(`${label} is missing Allowed changes`);
+    return;
+  }
+
+  for (const line of lines) {
+    const value = line.replace(/^-?\s*allowed changes\s*:\s*/i, "").trim();
+    if (/^(?:none|no changes|n\/a|nothing)\.?$/i.test(value)) {
+      issues.push(`${label} uses contradictory Allowed changes: None`);
+      continue;
+    }
+    const reportOnly =
+      /\bonly\b/i.test(value) &&
+      /\b(?:create\/update|create or update|create|update)\b/i.test(value) &&
+      /\b(?:report artifact|summary artifact|audit\/[\w./-]+\.md|[\w./-]+\.md)\b/i.test(value);
+    if (!reportOnly || hasNonReportAllowedChangeTarget(value)) {
+      issues.push(`${label} must limit Allowed changes to the report artifact`);
+    }
+  }
+}
+
+function validateAuditReportArtifactText(text: string, issues: string[], label: string): void {
+  const lines = getAuditReportArtifactLines(text);
+  if (lines.length === 0) {
+    issues.push(`${label} is missing a report artifact path`);
+    return;
+  }
+
+  for (const line of lines) {
+    const value = line.replace(/^-?\s*report artifact\s*:\s*/i, "").trim();
+    const path = extractPathTokens(value)[0];
+    if (!path || !isAuditReportArtifactPath(path)) {
+      issues.push(`${label} is missing a report artifact path`);
+    }
+  }
+}
+
+function validateAuditRoadmapSource(roadmapContent: string): void {
+  const items = extractAuditRoadmapItems(roadmapContent);
+  const issues: string[] = [];
+
+  if (items.length === 0) {
+    issues.push("no unchecked audit items found");
+  }
+
+  const synthesisItems = items.filter((item) => isAuditSynthesisTitle(item.title));
+  if (synthesisItems.length !== 1) {
+    issues.push(`expected exactly one final synthesis card, found ${synthesisItems.length}`);
+  }
+
+  for (const item of items) {
+    const label = `item "${item.title}"`;
+    const lower = item.text.toLowerCase();
+    const requiredMarkers = [
+      "scope:",
+      "allowed changes:",
+      "report artifact:",
+      "acceptance criteria:",
+      "evidence requirements:",
+      "git requirements:",
+      "constraint:",
+      "diagnostic-only",
+      "evidence:",
+      "risk:",
+      "verification:",
+      "git status --short",
+      "git commit",
+      "git log -1 --name-only --oneline",
+    ];
+    const missing = requiredMarkers.filter((marker) => !lower.includes(marker));
+    if (missing.length > 0) {
+      issues.push(`${label} is missing ${missing.join(", ")}`);
+    }
+    validateAuditReportArtifactText(item.text, issues, label);
+    if (hasImplementationShapedAuditContent(`${item.title}\n${item.text}`)) {
+      issues.push(`${label} describes implementation work`);
+    }
+    validateAuditAllowedChangesText(item.text, issues, label);
+  }
+
+  if (issues.length > 0) {
+    throw new RoadmapGenerationError(
+      "VALIDATION_ERROR",
+      `${AUDIT_ROADMAP_VALIDATION_MESSAGE} ${issues.slice(0, 5).join("; ")}`,
+    );
+  }
+}
+
+function validateAuditGeneratedBatch(tasks: GeneratedTask[]): string[] {
+  const issues: string[] = [];
+  const synthesisCount = tasks.filter((task) => isAuditSynthesisTitle(task.title)).length;
+  if (synthesisCount !== 1) {
+    issues.push(`expected exactly one final synthesis card, found ${synthesisCount}`);
+  }
+
+  for (const task of tasks) {
+    validateAuditAllowedChangesText(
+      `${task.title}\n${task.description ?? ""}`,
+      issues,
+      `task "${task.title}"`,
+    );
+    validateAuditReportArtifactText(
+      `${task.title}\n${task.description ?? ""}`,
+      issues,
+      `task "${task.title}"`,
+    );
+  }
+
+  return issues;
 }
 
 export async function generateRoadmapFile(
@@ -173,14 +418,23 @@ export async function generateRoadmapFile(
     const fileContent = readFileSync(roadmapPath, "utf8").trim();
     // Verify agent wrote a real roadmap, not just a stub
     if (fileContent.length > 100 && (fileContent.includes("- [") || fileContent.includes("##"))) {
+      if (intent === "audit") {
+        validateAuditRoadmapSource(fileContent);
+      }
       content = fileContent;
       log.info({ projectId, roadmapPath, source: "file" }, "Using roadmap file written by agent");
     } else {
       content = extractRoadmapContent(rawResult);
+      if (intent === "audit") {
+        validateAuditRoadmapSource(content);
+      }
       writeFileSync(roadmapPath, content, "utf8");
     }
   } else if (rawResult) {
     content = extractRoadmapContent(rawResult);
+    if (intent === "audit") {
+      validateAuditRoadmapSource(content);
+    }
     writeFileSync(roadmapPath, content, "utf8");
   } else {
     throw new RoadmapGenerationError("EMPTY_RESPONSE", "Agent returned empty roadmap");
@@ -239,7 +493,7 @@ Generate a ROADMAP.md file with the following format:
   - Allowed changes: only create/update audit/${reportDate}-summary.md.
   - Report artifact: audit/${reportDate}-summary.md
   - Acceptance criteria: summarize blocking findings, non-blocking findings, and remediation backlog.
-  - Evidence requirements: cite source report paths for every summarized finding.
+  - Evidence requirements: every summarized finding must include Evidence: audit/${reportDate}-<source>-audit.md, Risk:, and Verification: Command ... output ...
   - Git requirements: run git status --short; git add the summary artifact; git commit the summary artifact; verify with git log -1 --name-only --oneline.
   - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.
 
@@ -347,6 +601,9 @@ export async function generateRoadmapTasks(
 
   // 2. Query Agent SDK for strict JSON conversion
   const intent = resolveExplicitRoadmapIntent(taskIntent);
+  if (intent === "audit") {
+    validateAuditRoadmapSource(roadmapContent);
+  }
   const prompt = buildExtractionPrompt(roadmapContent, roadmapAlias, intent);
 
   let rawResult = "";
@@ -628,6 +885,8 @@ function validateRoadmapTasks(
   generation: RoadmapGenerationResult,
   requestedIntent: TaskIntent,
 ): void {
+  const auditBatchIssues =
+    requestedIntent === "audit" ? validateAuditGeneratedBatch(generation.tasks) : [];
   const invalid = generation.tasks
     .map((task) => {
       const taskIntent = task.taskIntent ?? generation.taskIntent ?? "general";
@@ -643,15 +902,16 @@ function validateRoadmapTasks(
     })
     .filter((entry) => entry.issues.length > 0);
 
-  if (invalid.length > 0) {
+  if (invalid.length > 0 || auditBatchIssues.length > 0) {
     const details = invalid
       .slice(0, 5)
       .map((entry) => `${entry.task.title} (${entry.issues.join("; ")})`)
       .join(", ");
+    const allDetails = [details, ...auditBatchIssues].filter(Boolean).join("; ");
     if (requestedIntent === "audit") {
       throw new RoadmapGenerationError(
         "VALIDATION_ERROR",
-        `Audit roadmap extraction produced non-diagnostic or incomplete tasks: ${details}`,
+        `${AUDIT_ROADMAP_VALIDATION_MESSAGE} ${allDetails}`,
       );
     }
     throw new RoadmapGenerationError(
@@ -704,7 +964,7 @@ export function importGeneratedTasks(
   generation: RoadmapGenerationResult,
 ): ImportResult {
   const { alias, tasks: generatedTasks } = generation;
-  const importIntent = generation.taskIntent ?? "general";
+  const importIntent: TaskIntent = generation.taskIntent ?? "general";
   const hasExplicitTypedImportIntent =
     generation.taskIntent !== undefined && generation.taskIntent !== "general";
 
@@ -721,6 +981,15 @@ export function importGeneratedTasks(
     throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
   }
   const cfg = getProjectConfig(project.rootPath);
+
+  const validationGeneration: RoadmapGenerationResult = hasExplicitTypedImportIntent
+    ? generation
+    : {
+        ...generation,
+        taskIntent: "general",
+        tasks: generatedTasks.map((task) => ({ ...task, taskIntent: "general" as const })),
+      };
+  validateRoadmapTasks(validationGeneration, importIntent);
 
   // Load existing tasks for this alias for dedupe
   const existing = findTasksByRoadmapAlias(projectId, alias);
@@ -790,29 +1059,7 @@ export function importGeneratedTasks(
       continue;
     }
 
-    if (
-      hasExplicitTypedImportIntent &&
-      genTask.taskIntent !== undefined &&
-      genTask.taskIntent !== importIntent
-    ) {
-      throw new RoadmapGenerationError(
-        "VALIDATION_ERROR",
-        `Generated task intent mismatch: ${genTask.title} expected ${importIntent} but received ${genTask.taskIntent}`,
-      );
-    }
     const taskIntent = hasExplicitTypedImportIntent ? importIntent : "general";
-    const validation = validateGeneratedTaskIntent({
-      title: genTask.title,
-      description: genTask.description,
-      taskIntent,
-    });
-    if (!validation.ok) {
-      throw new RoadmapGenerationError(
-        "VALIDATION_ERROR",
-        `Generated ${taskIntent} task is incomplete: ${genTask.title} (${validation.issues.join("; ")})`,
-      );
-    }
-
     const tags = buildTaskTags(alias, genTask);
     tags.push(`kind:${taskIntent}`);
     if (taskIntent === "audit") {

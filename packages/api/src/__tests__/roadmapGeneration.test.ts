@@ -84,6 +84,29 @@ function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
   ].join("\n");
 }
 
+function auditRoadmapItem(title: string, reportName?: string) {
+  return [
+    `- [ ] **${title}** - Diagnostic-only audit.`,
+    ...auditTaskDescription(reportName)
+      .split("\n")
+      .map((line) => `  - ${line}`),
+  ].join("\n");
+}
+
+function validAuditRoadmapContent() {
+  return [
+    "# Project Audit Roadmap",
+    "",
+    "> Audit the project",
+    "",
+    "## Audit Tasks",
+    "",
+    auditRoadmapItem("Audit: configuration", "audit/2026-05-09-config-audit.md"),
+    "",
+    auditRoadmapItem("Synthesize audit findings", "audit/2026-05-09-summary.md"),
+  ].join("\n");
+}
+
 describe("roadmapGeneration", () => {
   beforeEach(() => {
     testDb.current = createTestDb();
@@ -250,8 +273,7 @@ describe("roadmapGeneration", () => {
 
       mockRunApiRuntimeOneShot.mockResolvedValue({
         result: {
-          outputText:
-            "# Project Audit Roadmap\n\n> Audit the project\n\n## Audit Tasks\n\n- [ ] **Audit: configuration** - Diagnostic-only audit.\n",
+          outputText: validAuditRoadmapContent(),
           usage: {
             inputTokens: 0,
             outputTokens: 0,
@@ -275,6 +297,7 @@ describe("roadmapGeneration", () => {
         "Do not create implementation, fixing, refactoring, hardening",
       );
       expect(callArgs.prompt).toContain("Report artifact: audit/");
+      expect(callArgs.prompt).toContain("every summarized finding must include Evidence: audit/");
     });
   });
 
@@ -468,7 +491,307 @@ describe("roadmapGeneration", () => {
 
       await expect(
         generateRoadmapTasks({ projectId, roadmapAlias: "audit-logging", taskIntent: "audit" }),
-      ).rejects.toThrow("Audit roadmap extraction produced non-diagnostic or incomplete tasks");
+      ).rejects.toThrow("Audit roadmap generation produced implementation-shaped milestones");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      "Critical Bug Resolution",
+      "Architecture Refactoring",
+      "Security Hardening",
+      "Test Suite Expansion",
+    ])("should reject implementation-shaped audit source roadmap term %s", async (term) => {
+      const { projectId } = createProjectWithRoadmap(
+        [
+          "# Project Audit Roadmap",
+          "",
+          `- [ ] **Audit: ${term}** - Diagnostic-only audit.`,
+          "  - Scope: src",
+          "  - Allowed changes: only create/update one report artifact.",
+          "  - Report artifact: audit/bad.md",
+          "  - Acceptance criteria: inspect only.",
+          "  - Evidence requirements: every finding must include Evidence: src/index.ts:1, Risk:, and Verification: Command rg test src output matched.",
+          "  - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
+          "  - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+          "",
+          auditRoadmapItem("Synthesize audit findings", "audit/summary.md"),
+        ].join("\n"),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("Audit roadmap generation produced implementation-shaped milestones");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap with Allowed changes: None before extraction", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace(
+          "Allowed changes: only create/update one report artifact.",
+          "Allowed changes: None",
+        ),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("Allowed changes: None");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap with Allowed changes that include source edits", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace(
+          "Allowed changes: only create/update one report artifact.",
+          "Allowed changes: only create/update audit/config-audit.md and packages/api/src/index.ts.",
+        ),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("must limit Allowed changes to the report artifact");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap missing the final synthesis item before extraction", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        [
+          "# Project Audit Roadmap",
+          "",
+          "> Audit the project",
+          "",
+          "## Audit Tasks",
+          "",
+          auditRoadmapItem("Audit: configuration", "audit/config-audit.md"),
+        ].join("\n"),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("expected exactly one final synthesis card, found 0");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap with extra synthesis items before extraction", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        [
+          validAuditRoadmapContent(),
+          "",
+          auditRoadmapItem("Synthesize final audit summary", "audit/final-summary.md"),
+        ].join("\n"),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("expected exactly one final synthesis card, found 2");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap missing a report artifact path before extraction", async () => {
+      const missingReportArtifact = auditRoadmapItem("Audit: configuration", "audit/config.md")
+        .split("\n")
+        .filter((line) => !line.includes("Report artifact:"))
+        .join("\n");
+      const { projectId } = createProjectWithRoadmap(
+        [
+          "# Project Audit Roadmap",
+          "",
+          missingReportArtifact,
+          "",
+          auditRoadmapItem("Synthesize audit findings", "audit/summary.md"),
+        ].join("\n"),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("missing a report artifact path");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap with non-path report artifact text before extraction", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace(
+          "Report artifact: audit/2026-05-09-config-audit.md",
+          "Report artifact: audit report",
+        ),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("missing a report artifact path");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject generated audit cards with Allowed changes: None", async () => {
+      const { projectId } = createProjectWithRoadmap(validAuditRoadmapContent());
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: JSON.stringify({
+            alias: "audit",
+            tasks: [
+              {
+                title: "Audit: configuration",
+                taskIntent: "audit",
+                description: auditTaskDescription().replace(
+                  "Allowed changes: only create/update one report artifact.",
+                  "Allowed changes: None",
+                ),
+                phase: 1,
+                phaseName: "Audit",
+                sequence: 1,
+              },
+              {
+                title: "Synthesize audit findings",
+                taskIntent: "audit",
+                description: auditTaskDescription("audit/summary.md"),
+                phase: 2,
+                phaseName: "Synthesis",
+                sequence: 1,
+              },
+            ],
+          }),
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("Allowed changes: None");
+    });
+
+    it("should reject generated audit cards with Allowed changes that include source edits", async () => {
+      const { projectId } = createProjectWithRoadmap(validAuditRoadmapContent());
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: JSON.stringify({
+            alias: "audit",
+            tasks: [
+              {
+                title: "Audit: configuration",
+                taskIntent: "audit",
+                description: auditTaskDescription().replace(
+                  "Allowed changes: only create/update one report artifact.",
+                  "Allowed changes: only create/update audit/config-audit.md and packages/api/src/index.ts.",
+                ),
+                phase: 1,
+                phaseName: "Audit",
+                sequence: 1,
+              },
+              {
+                title: "Synthesize audit findings",
+                taskIntent: "audit",
+                description: auditTaskDescription("audit/summary.md"),
+                phase: 2,
+                phaseName: "Synthesis",
+                sequence: 1,
+              },
+            ],
+          }),
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("must limit Allowed changes to the report artifact");
+    });
+
+    it("should reject generated audit cards without a report artifact path", async () => {
+      const { projectId } = createProjectWithRoadmap(validAuditRoadmapContent());
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: JSON.stringify({
+            alias: "audit",
+            tasks: [
+              {
+                title: "Audit: configuration",
+                taskIntent: "audit",
+                description: auditTaskDescription().replace(
+                  "Report artifact: audit/2026-05-09-config-audit.md",
+                  "Report artifact: audit report",
+                ),
+                phase: 1,
+                phaseName: "Audit",
+                sequence: 1,
+              },
+              {
+                title: "Synthesize audit findings",
+                taskIntent: "audit",
+                description: auditTaskDescription("audit/summary.md"),
+                phase: 2,
+                phaseName: "Synthesis",
+                sequence: 1,
+              },
+            ],
+          }),
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("report artifact must be a concrete .md report path");
+    });
+
+    it("should reject Audit prefix masking an implementation-shaped generated title", async () => {
+      const { projectId } = createProjectWithRoadmap(validAuditRoadmapContent());
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: JSON.stringify({
+            alias: "audit",
+            tasks: [
+              {
+                title: "Audit: Critical Bug Resolution",
+                taskIntent: "audit",
+                description: auditTaskDescription(),
+                phase: 1,
+                phaseName: "Audit",
+                sequence: 1,
+              },
+              {
+                title: "Synthesize audit findings",
+                taskIntent: "audit",
+                description: auditTaskDescription("audit/summary.md"),
+                phase: 2,
+                phaseName: "Synthesis",
+                sequence: 1,
+              },
+            ],
+          }),
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("audit task title describes implementation work");
     });
   });
 
@@ -556,19 +879,29 @@ describe("roadmapGeneration", () => {
             phaseName: "Audit",
             sequence: 1,
           },
+          {
+            title: "Synthesize audit findings",
+            description: auditTaskDescription("audit/2026-05-09-summary.md"),
+            phase: 2,
+            phaseName: "Synthesis",
+            sequence: 1,
+          },
         ],
       });
 
-      expect(result.created).toBe(1);
-      const [task] = findTasksByRoadmapAlias(projectId, "audit");
-      expect(task.taskIntent).toBe("audit");
-      expect(task.plannerMode).toBe("full");
-      expect(task.planDocs).toBe(true);
-      expect(task.planTests).toBe(true);
-      expect(task.skipReview).toBe(false);
-      expect(task.useSubagents).toBe(true);
-      expect(task.tags).toContain("kind:audit");
-      expect(task.tags).toContain("diagnostic-only");
+      expect(result.created).toBe(2);
+      const task = findTasksByRoadmapAlias(projectId, "audit").find(
+        (stored) => stored.title === "Audit: configuration",
+      );
+      expect(task).toBeDefined();
+      expect(task?.taskIntent).toBe("audit");
+      expect(task?.plannerMode).toBe("full");
+      expect(task?.planDocs).toBe(true);
+      expect(task?.planTests).toBe(true);
+      expect(task?.skipReview).toBe(false);
+      expect(task?.useSubagents).toBe(true);
+      expect(task?.tags).toContain("kind:audit");
+      expect(task?.tags).toContain("diagnostic-only");
     });
 
     it("should ignore per-task typed intent when import batch intent is omitted", () => {
@@ -647,7 +980,218 @@ describe("roadmapGeneration", () => {
             },
           ],
         }),
-      ).toThrow("Generated task intent mismatch");
+      ).toThrow("expected taskIntent feature but received docs");
+    });
+
+    it("should reject audit import batches without exactly one generated synthesis card", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "audit",
+          taskIntent: "audit",
+          tasks: [
+            {
+              title: "Audit: configuration",
+              taskIntent: "audit",
+              description: auditTaskDescription(),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+          ],
+        }),
+      ).toThrow("expected exactly one final synthesis card, found 0");
+      expect(findTasksByRoadmapAlias(projectId, "audit")).toHaveLength(0);
+    });
+
+    it("should reject audit import batches with extra generated synthesis cards", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "audit",
+          taskIntent: "audit",
+          tasks: [
+            {
+              title: "Audit: configuration",
+              taskIntent: "audit",
+              description: auditTaskDescription(),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+            {
+              title: "Synthesize audit findings",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/summary.md"),
+              phase: 2,
+              phaseName: "Synthesis",
+              sequence: 1,
+            },
+            {
+              title: "Synthesize final audit summary",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/final-summary.md"),
+              phase: 2,
+              phaseName: "Synthesis",
+              sequence: 2,
+            },
+          ],
+        }),
+      ).toThrow("expected exactly one final synthesis card, found 2");
+      expect(findTasksByRoadmapAlias(projectId, "audit")).toHaveLength(0);
+    });
+
+    it("should reject audit import batches with Allowed changes that include source edits", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "audit",
+          taskIntent: "audit",
+          tasks: [
+            {
+              title: "Audit: configuration",
+              taskIntent: "audit",
+              description: auditTaskDescription().replace(
+                "Allowed changes: only create/update one report artifact.",
+                "Allowed changes: only create/update audit/config-audit.md and packages/api/src/index.ts.",
+              ),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+            {
+              title: "Synthesize audit findings",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/summary.md"),
+              phase: 2,
+              phaseName: "Synthesis",
+              sequence: 1,
+            },
+          ],
+        }),
+      ).toThrow("must limit Allowed changes to the report artifact");
+      expect(findTasksByRoadmapAlias(projectId, "audit")).toHaveLength(0);
+    });
+
+    it("should reject audit import batches without a concrete report artifact path", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "audit",
+          taskIntent: "audit",
+          tasks: [
+            {
+              title: "Audit: configuration",
+              taskIntent: "audit",
+              description: auditTaskDescription().replace(
+                "Report artifact: audit/2026-05-09-config-audit.md",
+                "Report artifact: audit report",
+              ),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+            {
+              title: "Synthesize audit findings",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/summary.md"),
+              phase: 2,
+              phaseName: "Synthesis",
+              sequence: 1,
+            },
+          ],
+        }),
+      ).toThrow("report artifact must be a concrete .md report path");
+      expect(findTasksByRoadmapAlias(projectId, "audit")).toHaveLength(0);
+    });
+
+    it("should validate a full typed batch before creating any tasks", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "feature-checkout",
+          taskIntent: "feature",
+          tasks: [
+            {
+              title: "Add checkout flow",
+              taskIntent: "feature",
+              description:
+                "Acceptance criteria: users can submit checkout.\nVerification: npm test -- checkout passes.",
+              phase: 1,
+              phaseName: "Feature",
+              sequence: 1,
+            },
+            {
+              title: "Add checkout confirmation",
+              taskIntent: "feature",
+              description: "Acceptance criteria: users see a confirmation.",
+              phase: 1,
+              phaseName: "Feature",
+              sequence: 2,
+            },
+          ],
+        }),
+      ).toThrow("feature task is missing Verification");
+      expect(findTasksByRoadmapAlias(projectId, "feature-checkout")).toHaveLength(0);
+    });
+
+    it("should validate invalid duplicates before creating valid new typed tasks", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      importGeneratedTasks(projectId, {
+        alias: "audit",
+        tasks: [
+          {
+            title: "Audit: Critical Bug Resolution",
+            description: "Legacy generic duplicate.",
+            phase: 1,
+            phaseName: "Legacy",
+            sequence: 1,
+          },
+        ],
+      });
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "audit",
+          taskIntent: "audit",
+          tasks: [
+            {
+              title: "Audit: Critical Bug Resolution",
+              taskIntent: "audit",
+              description: auditTaskDescription(),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+            {
+              title: "Audit: configuration",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/configuration.md"),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 2,
+            },
+            {
+              title: "Synthesize audit findings",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/summary.md"),
+              phase: 2,
+              phaseName: "Synthesis",
+              sequence: 1,
+            },
+          ],
+        }),
+      ).toThrow("audit task title describes implementation work");
+
+      const stored = findTasksByRoadmapAlias(projectId, "audit");
+      expect(stored).toHaveLength(1);
+      expect(stored[0].title).toBe("Audit: Critical Bug Resolution");
     });
 
     it("should apply full-mode defaults for parallel-enabled projects (still skipReview=true)", () => {

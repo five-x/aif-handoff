@@ -347,6 +347,118 @@ function hasAll(text: string, markers: string[]): boolean {
   return markers.every((marker) => text.includes(marker));
 }
 
+function auditTextLines(text: string): string[] {
+  return text
+    .split(/\r?\n|[.;]/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function hasImplementationShapedAuditText(text: string): boolean {
+  const implementationPatterns = [
+    /\bcritical\s+bug\s+resolution\b/i,
+    /\bbug\s+resolution\b/i,
+    /\barchitecture\s+refactoring\b/i,
+    /\bsecurity\s+hardening\b/i,
+    /\btest\s+suite\s+expansion\b/i,
+    /\b(?:fix|fixing|resolve|resolving|implement|implementing|refactor|refactoring|harden|hardening|deploy|deploying|document|documenting)\b/i,
+    /\bexpand(?:ing)?\s+(?:the\s+)?(?:test\s+suite|tests?|coverage)\b/i,
+  ];
+  const diagnosticFrame =
+    /\b(?:diagnostic|findings?\s+(?:about|for|on)|report\s+(?:about|on)|review\s+(?:of|for)|inventory\s+(?:of|for)|evidence\s+(?:of|for)|risk\s+(?:in|of|from))\b/i;
+
+  return auditTextLines(text).some((line) => {
+    const lower = line.toLowerCase();
+    if (/\b(?:do not|must not|forbid|forbidden|no source|no config|no test)\b/i.test(lower)) {
+      return false;
+    }
+    if (!implementationPatterns.some((pattern) => pattern.test(line))) {
+      return false;
+    }
+    return !diagnosticFrame.test(line);
+  });
+}
+
+function auditAllowedChangesLine(description: string): string | null {
+  return (
+    description
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => /^allowed changes\s*:/i.test(line)) ?? null
+  );
+}
+
+function auditReportArtifactLine(description: string): string | null {
+  return (
+    description
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => /^report artifact\s*:/i.test(line)) ?? null
+  );
+}
+
+function extractPathTokens(text: string): string[] {
+  return [...text.matchAll(/`?([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9]+)`?/g)].map(
+    (match) => match[1],
+  );
+}
+
+function isAuditReportArtifactPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith(".md") &&
+    (lower.startsWith("audit/") ||
+      lower.includes("/audit/") ||
+      /\b(?:audit|report|summary|findings)\b/.test(lower))
+  );
+}
+
+function hasNonReportAllowedChangeTarget(value: string): boolean {
+  const explicitPaths = extractPathTokens(value);
+  if (explicitPaths.some((path) => !isAuditReportArtifactPath(path))) {
+    return true;
+  }
+
+  return (
+    /\b(?:edit|modify|change|update|create)\s+(?:source|config|test|tests|package|packages|src|app|apps|runtime|api|web|shared|code)\b/i.test(
+      value,
+    ) ||
+    /\b(?:source|config|test|tests|package|packages|src|app|apps|runtime|api|web|shared|code)\s+(?:file|files|paths?|changes?|edits?)\b/i.test(
+      value,
+    )
+  );
+}
+
+function validateAuditAllowedChanges(description: string, issues: string[]): void {
+  const line = auditAllowedChangesLine(description);
+  if (!line) return;
+
+  const value = line.replace(/^allowed changes\s*:\s*/i, "").trim();
+  if (/^(?:none|no changes|n\/a|nothing)\.?$/i.test(value)) {
+    issues.push("audit task allowed changes cannot be None");
+    return;
+  }
+
+  const permitsReportWrite =
+    /\bonly\b/i.test(value) &&
+    /\b(?:create\/update|create or update|create|update)\b/i.test(value) &&
+    /\b(?:report artifact|summary artifact|audit\/[\w./-]+\.md|[\w./-]+\.md)\b/i.test(value);
+  if (!permitsReportWrite || hasNonReportAllowedChangeTarget(value)) {
+    issues.push("audit task allowed changes must be limited to the report artifact");
+  }
+}
+
+function validateAuditReportArtifact(description: string, issues: string[]): void {
+  const line = auditReportArtifactLine(description);
+  if (!line) return;
+
+  const value = line.replace(/^report artifact\s*:\s*/i, "").trim();
+  const path = extractPathTokens(value)[0];
+  if (!path || !isAuditReportArtifactPath(path)) {
+    issues.push("audit task report artifact must be a concrete .md report path");
+  }
+}
+
 export function validateGeneratedTaskIntent(
   input: ValidateGeneratedTaskIntentInput,
 ): ValidateGeneratedTaskIntentResult {
@@ -380,9 +492,17 @@ export function validateGeneratedTaskIntent(
       if (!hasAll(text, requiredMarkers)) {
         issues.push("audit task is missing diagnostic report markers");
       }
-      if (implementationTitlePattern.test(title) && !diagnosticTitlePattern.test(title)) {
+      if (
+        (implementationTitlePattern.test(title) && !diagnosticTitlePattern.test(title)) ||
+        hasImplementationShapedAuditText(title)
+      ) {
         issues.push("audit task title describes implementation work");
       }
+      if (hasImplementationShapedAuditText(description)) {
+        issues.push("audit task description describes implementation work");
+      }
+      validateAuditAllowedChanges(description, issues);
+      validateAuditReportArtifact(description, issues);
       break;
     }
     case "feature":
