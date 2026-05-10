@@ -1,6 +1,7 @@
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 import type { TaskStatus } from "./types.js";
+import type { TaskIntent } from "./taskIntent.js";
 
 export const projects = sqliteTable("projects", {
   id: text("id")
@@ -59,6 +60,7 @@ export const tasks = sqliteTable("tasks", {
   description: text("description").notNull().default(""),
   attachments: text("attachments").notNull().default("[]"),
   autoMode: integer("auto_mode", { mode: "boolean" }).notNull().default(true),
+  taskIntent: text("task_intent").$type<TaskIntent>().notNull().default("general"),
   isFix: integer("is_fix", { mode: "boolean" }).notNull().default(false),
   plannerMode: text("planner_mode").notNull().default("fast"),
   planPath: text("plan_path").notNull().default(".ai-factory/PLAN.md"),

@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { logger } from "@aif/shared";
+import { logger, TASK_INTENTS, type TaskIntent } from "@aif/shared";
 import { createTask, findProjectById, toTaskResponse } from "@aif/data";
 import { registerMcpTool, type ToolContext } from "./index.js";
 import { rateLimitError, validationError } from "../middleware/errorHandler.js";
@@ -25,6 +25,7 @@ const createTaskInputSchema: Record<string, z.ZodTypeAny> = {
     .optional()
     .describe("Priority level (0=none, 1=low, 2=medium, 3=high)"),
   tags: z.array(z.string()).optional().describe("Tags for the task"),
+  taskIntent: z.enum(TASK_INTENTS).optional().describe("Typed task intent"),
   plannerMode: z.enum(["fast", "full"]).optional().describe("Planner mode"),
   autoMode: z.boolean().optional().describe("Enable auto mode for agent processing"),
   isFix: z.boolean().optional().describe("Mark task as a fix"),
@@ -61,6 +62,7 @@ type CreateTaskArgs = {
   autoMode?: boolean;
   description?: string;
   isFix?: boolean;
+  taskIntent?: TaskIntent;
   maxReviewIterations?: number;
   modelOverride?: string | null;
   paused?: boolean;
@@ -122,6 +124,7 @@ export function register(server: McpServer, context: ToolContext): void {
         description: args.description ?? "",
         priority: args.priority,
         tags: args.tags,
+        taskIntent: args.taskIntent,
         plannerMode: args.plannerMode,
         autoMode: args.autoMode,
         isFix: args.isFix,

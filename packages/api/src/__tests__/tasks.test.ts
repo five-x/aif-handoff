@@ -300,8 +300,29 @@ describe("tasks API", () => {
       expect(body.description).toBe("Description");
       expect(body.priority).toBe(2);
       expect(body.autoMode).toBe(true);
+      expect(body.taskIntent).toBe("general");
       expect(body.isFix).toBe(false);
       expect(body.status).toBe("backlog");
+    });
+
+    it("should keep omitted taskIntent as general for ordinary create callers", async () => {
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Fix audit logging feature",
+          description: "Add security review coverage",
+          projectId: "test-project",
+          isFix: false,
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.taskIntent).toBe("general");
+      expect(body.isFix).toBe(false);
+      expect(body.plannerMode).toBe("fast");
+      expect(body.skipReview).toBe(true);
     });
 
     it("should reject runtime profiles owned by a different project on create", async () => {
@@ -544,6 +565,29 @@ describe("tasks API", () => {
       expect(res.status).toBe(201);
       const body = await res.json();
       expect(body.isFix).toBe(true);
+      expect(body.taskIntent).toBe("fix");
+    });
+
+    it("should apply typed intent defaults on create", async () => {
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Audit project configuration",
+          projectId: "test-project",
+          taskIntent: "audit",
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.taskIntent).toBe("audit");
+      expect(body.plannerMode).toBe("full");
+      expect(body.planDocs).toBe(true);
+      expect(body.planTests).toBe(true);
+      expect(body.skipReview).toBe(false);
+      expect(body.useSubagents).toBe(true);
+      expect(body.isFix).toBe(false);
     });
 
     it("should create a task with paused=true", async () => {
@@ -898,6 +942,85 @@ describe("tasks API", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.useSubagents).toBe(false);
+    });
+
+    it("should enforce audit defaults when updating taskIntent to audit", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "upd-audit-intent",
+          projectId: "test-project",
+          title: "Audit candidate",
+          plannerMode: "fast",
+          skipReview: true,
+          planDocs: false,
+          planTests: false,
+          useSubagents: false,
+          isFix: false,
+        })
+        .run();
+
+      const res = await app.request("/tasks/upd-audit-intent", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskIntent: "audit",
+          plannerMode: "fast",
+          skipReview: true,
+          planDocs: false,
+          planTests: false,
+          useSubagents: false,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.taskIntent).toBe("audit");
+      expect(body.isFix).toBe(false);
+      expect(body.plannerMode).toBe("full");
+      expect(body.skipReview).toBe(false);
+      expect(body.planDocs).toBe(true);
+      expect(body.planTests).toBe(true);
+      expect(body.useSubagents).toBe(true);
+    });
+
+    it("should preserve audit invariants when updating an audit task without taskIntent", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "upd-existing-audit",
+          projectId: "test-project",
+          title: "Existing audit",
+          taskIntent: "audit",
+          plannerMode: "full",
+          skipReview: false,
+          planDocs: true,
+          planTests: true,
+          useSubagents: true,
+          isFix: false,
+        })
+        .run();
+
+      const res = await app.request("/tasks/upd-existing-audit", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          plannerMode: "fast",
+          skipReview: true,
+          planDocs: false,
+          planTests: false,
+          useSubagents: false,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.taskIntent).toBe("audit");
+      expect(body.plannerMode).toBe("full");
+      expect(body.skipReview).toBe(false);
+      expect(body.planDocs).toBe(true);
+      expect(body.planTests).toBe(true);
+      expect(body.useSubagents).toBe(true);
     });
 
     it("should update paused via PUT", async () => {
@@ -1714,6 +1837,7 @@ describe("tasks API", () => {
           id: "ev-audit-block-1",
           projectId: "project-audit-block",
           title: "Initial audit",
+          taskIntent: "audit",
           status: "done",
           plan: 'Short task\n<aif-plan mode="fast" docs:false tests:false>',
         })

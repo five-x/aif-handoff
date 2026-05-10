@@ -21,6 +21,7 @@ export function CreateTaskCard({ action, projectId, onCreated, onOpenTask }: Cre
         projectId,
         title: action.title,
         description: action.description,
+        taskIntent: action.taskIntent,
         ...(action.isFix ? { isFix: true } : {}),
       },
       {

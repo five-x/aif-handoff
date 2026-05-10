@@ -77,6 +77,7 @@ function ensureTables(sqlite: Database.Database): void {
       description TEXT NOT NULL DEFAULT '',
       attachments TEXT NOT NULL DEFAULT '[]',
       auto_mode INTEGER NOT NULL DEFAULT 1,
+      task_intent TEXT NOT NULL DEFAULT 'general',
       is_fix INTEGER NOT NULL DEFAULT 0,
       planner_mode TEXT NOT NULL DEFAULT 'fast',
       plan_path TEXT NOT NULL DEFAULT '.ai-factory/PLAN.md',
@@ -303,6 +304,11 @@ interface Migration {
   version: number;
   description: string;
   sql: string;
+  skipIfMissingColumns?: Array<{
+    statementContains: string;
+    tableName: string;
+    columnName: string;
+  }>;
   /** Trigger DDL statements that contain internal semicolons and must be executed whole. */
   triggers?: string[];
 }
@@ -696,6 +702,17 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 22,
+    description: "Persist typed task intent on tasks",
+    sql: `
+      ALTER TABLE tasks ADD COLUMN task_intent TEXT NOT NULL DEFAULT 'general';
+      UPDATE tasks SET task_intent = 'fix' WHERE is_fix = 1;
+    `,
+    skipIfMissingColumns: [
+      { statementContains: "WHERE is_fix = 1", tableName: "tasks", columnName: "is_fix" },
+    ],
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -730,6 +747,23 @@ function runMigrations(sqlite: Database.Database): void {
     for (const migration of pending) {
       const statements = splitSqlStatements(migration.sql);
       for (const statement of statements) {
+        const missingColumnSkip = migration.skipIfMissingColumns?.find(
+          (rule) =>
+            statement.includes(rule.statementContains) &&
+            !hasColumn(sqlite, rule.tableName, rule.columnName),
+        );
+        if (missingColumnSkip) {
+          log.debug(
+            {
+              version: migration.version,
+              statement,
+              tableName: missingColumnSkip.tableName,
+              columnName: missingColumnSkip.columnName,
+            },
+            "Migration statement requires missing column, skipping",
+          );
+          continue;
+        }
         try {
           sqlite.exec(statement);
         } catch (err) {

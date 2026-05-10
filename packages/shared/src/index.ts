@@ -51,6 +51,7 @@ export type {
 export {
   TASK_STATUSES,
   type TaskStatus,
+  type TaskIntent,
   AUTO_REVIEW_STRATEGIES,
   type AutoReviewStrategy,
   AUTO_REVIEW_FINDING_SOURCES,
@@ -105,6 +106,25 @@ export {
   type ChatSessionMessage,
 } from "./types.js";
 
+// Task intent contract
+export {
+  TASK_INTENTS,
+  TASK_INTENT_CONTRACTS,
+  formatTaskIntentContractForPrompt,
+  inferTaskIntent,
+  isTaskIntent,
+  normalizeTaskIntent,
+  resolveTaskIntentDefaults,
+  validateGeneratedTaskIntent,
+  type InferTaskIntentInput,
+  type ResolvedTaskIntentDefaults,
+  type TaskIntentContract,
+  type TaskIntentDefaults,
+  type TaskIntentUseSubagentsDefault,
+  type ValidateGeneratedTaskIntentInput,
+  type ValidateGeneratedTaskIntentResult,
+} from "./taskIntent.js";
+
 // Database
 export { getDb, createTestDb, closeDb } from "./db.js";
 
@@ -147,6 +167,8 @@ export { persistTaskPlan } from "./taskPlan.js";
 export {
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
+  hasSubstantiveReportEvidence,
+  isRiskyTask,
   type TaskCompletionEvidenceInput,
   type TaskCompletionEvidenceIssue,
   type TaskCompletionEvidenceResult,

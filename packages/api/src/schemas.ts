@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TASK_EVENTS, TASK_STATUSES, getEnv } from "@aif/shared";
+import { TASK_EVENTS, TASK_INTENTS, TASK_STATUSES, getEnv } from "@aif/shared";
 
 /**
  * ISO-8601 datetime accepted with any offset, but **normalized to UTC `Z`**
@@ -52,13 +52,14 @@ export const createTaskSchema = z.object({
   attachments: z.array(taskAttachmentSchema).max(100).default([]),
   priority: z.number().int().min(0).max(5).default(0),
   autoMode: z.boolean().default(true),
+  taskIntent: z.enum(TASK_INTENTS).optional(),
   isFix: z.boolean().default(false),
-  plannerMode: z.enum(["fast", "full"]).default("fast"),
+  plannerMode: z.enum(["fast", "full"]).optional(),
   planPath: z.string().max(500).optional(),
   planDocs: z.boolean().optional(),
   planTests: z.boolean().optional(),
   skipReview: z.boolean().optional(),
-  useSubagents: z.boolean().default(getEnv().AGENT_USE_SUBAGENTS),
+  useSubagents: z.boolean().optional(),
   maxReviewIterations: z
     .number()
     .int()
@@ -80,6 +81,7 @@ export const updateTaskSchema = z.object({
   attachments: z.array(taskAttachmentSchema).max(100).optional(),
   priority: z.number().int().min(0).max(5).optional(),
   autoMode: z.boolean().optional(),
+  taskIntent: z.enum(TASK_INTENTS).optional(),
   isFix: z.boolean().optional(),
   plannerMode: z.enum(["fast", "full"]).optional(),
   planPath: z.string().max(500).optional(),
@@ -144,10 +146,12 @@ export const broadcastProjectSchema = z.object({
 
 export const roadmapImportSchema = z.object({
   roadmapAlias: z.string().min(1, "Roadmap alias is required").max(200),
+  taskIntent: z.enum(TASK_INTENTS).optional(),
 });
 
 export const roadmapGenerateSchema = z.object({
   roadmapAlias: z.string().min(1, "Roadmap alias is required").max(200),
+  taskIntent: z.enum(TASK_INTENTS).optional(),
   vision: z.string().max(10000).optional(),
 });
 

@@ -161,6 +161,8 @@ describe("runPlanner comment selection", () => {
     expect(call.prompt).toContain("security-review");
     expect(call.prompt).toContain("validation-report");
     expect(call.prompt).toContain("verification-findings");
+    expect(call.prompt).toContain("exact `path:line` evidence");
+    expect(call.prompt).toContain("git log -1 --name-only --oneline");
     expect(call.prompt).not.toContain("audit, review, discovery, validation, verification");
   });
 

@@ -1,3 +1,5 @@
+import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
+
 export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "empty_plan",
   "missing_checklist",
@@ -15,6 +17,7 @@ export type TaskPlanQualityIssueCode = (typeof TASK_PLAN_QUALITY_ISSUE_CODES)[nu
 export interface TaskPlanQualityTask {
   title: string;
   description?: string | null;
+  taskIntent?: TaskIntent | null;
   tags?: string[] | string | null;
   roadmapAlias?: string | null;
   planPath?: string | null;
@@ -79,7 +82,7 @@ function parseTags(tags: TaskPlanQualityTask["tags"]): string[] {
 }
 
 function combinedTaskText(task: TaskPlanQualityTask): string {
-  return [task.title, task.description, task.roadmapAlias, ...parseTags(task.tags)]
+  return [task.title, task.description, task.taskIntent, task.roadmapAlias, ...parseTags(task.tags)]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n");
 }
@@ -125,7 +128,17 @@ export function findDeterministicDiagnosticReportPath(
   input: DeterministicDiagnosticPlanInput,
 ): string | null {
   const sourceText = combinedDiagnosticSourceText(input);
-  if (!DIAGNOSTIC_TASK_PATTERN.test(sourceText)) return null;
+  const taskIntent = inferTaskIntent({
+    taskIntent: input.task.taskIntent,
+    title: input.task.title,
+    description: input.task.description,
+    roadmapAlias: input.task.roadmapAlias,
+    tags: input.task.tags,
+  });
+  const hasExplicitTaskIntent = isTaskIntent(input.task.taskIntent);
+  const isDiagnosticTask =
+    taskIntent === "audit" || (!hasExplicitTaskIntent && DIAGNOSTIC_TASK_PATTERN.test(sourceText));
+  if (!isDiagnosticTask) return null;
   return extractReportArtifactPaths(sourceText)[0] ?? null;
 }
 
@@ -191,7 +204,16 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
   const plan = input.plan?.trim() ?? "";
   const taskText = combinedTaskText(input.task);
   const taskPaths = extractRepoPaths(taskText);
-  const isDiagnosticTask = DIAGNOSTIC_TASK_PATTERN.test(taskText);
+  const taskIntent = inferTaskIntent({
+    taskIntent: input.task.taskIntent,
+    title: input.task.title,
+    description: input.task.description,
+    roadmapAlias: input.task.roadmapAlias,
+    tags: input.task.tags,
+  });
+  const hasExplicitTaskIntent = isTaskIntent(input.task.taskIntent);
+  const isDiagnosticTask =
+    taskIntent === "audit" || (!hasExplicitTaskIntent && DIAGNOSTIC_TASK_PATTERN.test(taskText));
   const issues: TaskPlanQualityIssue[] = [];
 
   if (!plan) {

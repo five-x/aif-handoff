@@ -11,6 +11,7 @@ import {
 import {
   logger,
   formatAttachmentsForPrompt,
+  formatTaskIntentContractForPrompt,
   looksLikeFullPlanUpdate,
   getProjectConfig,
 } from "@aif/shared";
@@ -304,6 +305,9 @@ Rework handling protocol:
 ${scopeConstraint}
 
 ${bodyReworkHeader}Title: ${task.title}
+Task intent contract:
+${formatTaskIntentContractForPrompt(task.taskIntent)}
+
 Description: ${task.description}
 Task attachments:
 ${formatAttachmentsForPrompt(task.attachments)}
@@ -317,6 +321,7 @@ Execution rules:
 - Respect task dependencies and checklist state from the plan file.
 - Keep plan checklist state accurate while implementing.
 - Run tests/lint/verification relevant to the changes.
+- For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete \`path:line\` evidence, \`Risk:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
 - IMPORTANT: The plan file is ${effectivePlanPath}. Always read from and annotate this exact file — do not create plan files at other paths.${reworkProtocolBlock}`;
   const workflowSpec = createRuntimeWorkflowSpec({
     workflowKind: "implementer",

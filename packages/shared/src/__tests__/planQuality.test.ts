@@ -92,6 +92,25 @@ describe("evaluateTaskPlanQuality", () => {
     },
   );
 
+  it.each(["audit-logging", "security-review", "tests", "coverage", "build", "add-checkout"])(
+    "does not apply legacy diagnostic constraints to explicit general task alias %s",
+    (roadmapAlias) => {
+      const result = evaluateTaskPlanQuality({
+        task: {
+          title: "Add audit logging",
+          description: "Capture security review events and test coverage notes.",
+          taskIntent: "general",
+          roadmapAlias,
+          tags: [`rm:${roadmapAlias}`, "kind:general"],
+        },
+        plan: "## Plan\n- [ ] Update the targeted implementation path\n- [ ] Run the focused regression tests",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.categories).not.toContain("missing_diagnostic_report_constraints");
+    },
+  );
+
   it("detects diagnostic plans that implement fixes in the same run", () => {
     const result = evaluateTaskPlanQuality({
       task: { title: "Audit planner output quality" },

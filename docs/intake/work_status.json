@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-09",
+  "updated": "2026-05-10",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -37,10 +37,18 @@
     {
       "taskId": "work-20260509-harden-audit-quality-gate",
       "title": "Harden Audit Quality Gate For Substantive Findings",
-      "status": "next",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260509-harden-audit-quality-gate"
+    },
+    {
+      "taskId": "work-20260510-typed-task-intents",
+      "title": "Introduce Typed Task Intents For Decomposition And Gates",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260510-typed-task-intents"
     }
   ]
 }

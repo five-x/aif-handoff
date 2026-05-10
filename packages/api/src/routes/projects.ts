@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { jsonValidator } from "../middleware/zodValidator.js";
 import { internalBroadcastAuth } from "../middleware/internalBroadcastAuth.js";
-import { logger, getEnv, getProjectConfig } from "@aif/shared";
+import { logger, getEnv, getProjectConfig, type TaskIntent } from "@aif/shared";
 import {
   clearActiveRuntimeWarmupSessions,
   createRuntimeWarmupSession,
@@ -310,40 +310,47 @@ projectsRouter.get("/:id/roadmap/status", (c) => {
 // POST /projects/:id/roadmap/generate — start async roadmap generation + import
 projectsRouter.post("/:id/roadmap/generate", jsonValidator(roadmapGenerateSchema), async (c) => {
   const { id } = c.req.param();
-  const { roadmapAlias, vision } = c.req.valid("json");
+  const { roadmapAlias, taskIntent, vision } = c.req.valid("json");
 
   const project = findProjectById(id);
   if (!project) {
     return c.json({ error: "Project not found" }, 404);
   }
 
-  log.info({ projectId: id, roadmapAlias, hasVision: !!vision }, "Roadmap generation requested");
+  log.info(
+    { projectId: id, roadmapAlias, taskIntent: taskIntent ?? "general", hasVision: !!vision },
+    "Roadmap generation requested",
+  );
 
   // Fire-and-forget: run generation in background, broadcast result via WS
-  runRoadmapGenerationJob(id, roadmapAlias, vision).catch((err) => {
+  runRoadmapGenerationJob(id, roadmapAlias, taskIntent, vision).catch((err) => {
     log.error({ projectId: id, roadmapAlias, err }, "Background roadmap generation crashed");
   });
 
-  return c.json({ status: "started", projectId: id, roadmapAlias }, 202);
+  return c.json({ status: "started", projectId: id, roadmapAlias, taskIntent }, 202);
 });
 
 // POST /projects/:id/roadmap/import — trigger roadmap import and create backlog tasks
 projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), async (c) => {
   const { id } = c.req.param();
-  const { roadmapAlias } = c.req.valid("json");
+  const { roadmapAlias, taskIntent } = c.req.valid("json");
 
   const project = findProjectById(id);
   if (!project) {
     return c.json({ error: "Project not found" }, 404);
   }
 
-  log.info({ projectId: id, roadmapAlias }, "Roadmap import requested");
+  log.info(
+    { projectId: id, roadmapAlias, taskIntent: taskIntent ?? "general" },
+    "Roadmap import requested",
+  );
 
   try {
     // Generate tasks from roadmap via Agent SDK
     const generation = await generateRoadmapTasks({
       projectId: id,
       roadmapAlias,
+      taskIntent,
     });
 
     // Import with dedupe and tag enrichment
@@ -723,15 +730,16 @@ projectsRouter.delete("/:id", (c) => {
 async function runRoadmapGenerationJob(
   projectId: string,
   roadmapAlias: string,
+  taskIntent?: TaskIntent,
   vision?: string,
 ): Promise<void> {
   try {
     // Step 1: Generate ROADMAP.md
-    const generated = await generateRoadmapFile({ projectId, vision });
+    const generated = await generateRoadmapFile({ projectId, roadmapAlias, taskIntent, vision });
     log.info({ projectId, roadmapPath: generated.roadmapPath }, "ROADMAP.md generated");
 
     // Step 2: Extract tasks from the generated roadmap
-    const extraction = await generateRoadmapTasks({ projectId, roadmapAlias });
+    const extraction = await generateRoadmapTasks({ projectId, roadmapAlias, taskIntent });
 
     // Step 3: Import with dedupe and tag enrichment
     const result = importGeneratedTasks(projectId, extraction);

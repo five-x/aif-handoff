@@ -295,6 +295,7 @@ describe("runPlanChecker", () => {
         id: "task-diagnostic-fallback",
         projectId: "project-1",
         title: "Audit",
+        taskIntent: "audit",
         description,
         status: "plan_ready",
         plan: [
@@ -321,7 +322,7 @@ describe("runPlanChecker", () => {
     expect(row?.plan).not.toContain("<aif-plan");
     expect(
       evaluateTaskPlanQuality({
-        task: { title: "Audit", description },
+        task: { title: "Audit", taskIntent: "audit", description },
         plan: row?.plan,
       }).ok,
     ).toBe(true);

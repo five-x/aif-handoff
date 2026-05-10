@@ -1,3 +1,5 @@
+import type { TaskIntent } from "./taskIntent.js";
+
 export const TASK_STATUSES = [
   "backlog",
   "planning",
@@ -10,6 +12,8 @@ export const TASK_STATUSES = [
 ] as const;
 
 export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+export type { TaskIntent };
 
 export const AUTO_REVIEW_STRATEGIES = ["full_re_review", "closure_first"] as const;
 
@@ -107,6 +111,7 @@ export interface Task {
   description: string;
   attachments?: TaskCommentAttachment[];
   autoMode: boolean;
+  taskIntent?: TaskIntent;
   isFix: boolean;
   plannerMode: string;
   planPath: string;
@@ -174,6 +179,7 @@ export interface CreateTaskInput {
   description: string;
   priority?: number;
   autoMode?: boolean;
+  taskIntent?: TaskIntent;
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
@@ -198,6 +204,7 @@ export interface UpdateTaskInput {
   attachments?: TaskCommentAttachment[];
   priority?: number;
   autoMode?: boolean;
+  taskIntent?: TaskIntent;
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
@@ -634,6 +641,7 @@ export interface ChatActionCreateTask {
   type: "create_task";
   title: string;
   description: string;
+  taskIntent?: TaskIntent;
   isFix?: boolean;
 }
 

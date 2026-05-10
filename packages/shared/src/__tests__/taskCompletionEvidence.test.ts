@@ -33,6 +33,86 @@ const IMPLEMENTATION_TOOL_ACTIVITY = [
   "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator complete (runtime=qwen-local-agent, transport=api, model=Qwen3)",
 ].join("\n");
 
+const REVIEW_TOOL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-gate started (runtime=qwen-local-agent, transport=api, model=Qwen3)",
+  "[2026-05-09T00:00:05.000Z] Tool: read_file README.md",
+  "[2026-05-09T00:00:06.000Z] Agent: review-gate complete (runtime=qwen-local-agent, transport=api, model=Qwen3)",
+].join("\n");
+
+const RISKY_COMPLETION_ACTIVITY = `${IMPLEMENTATION_TOOL_ACTIVITY}\n${REVIEW_TOOL_ACTIVITY}`;
+
+const INTERLEAVED_REVIEW_TOOL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:05.000Z] Agent: security-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:06.000Z] Agent: review-sidecar complete (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:07.000Z] Tool: read_file README.md",
+  "[2026-05-09T00:00:08.000Z] Agent: security-sidecar complete (runtime=qwen-local-agent)",
+].join("\n");
+
+const REVIEW_MUTATING_TOOL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:05.000Z] Tool: write_file README.md",
+  "[2026-05-09T00:00:06.000Z] Agent: review-sidecar complete (runtime=qwen-local-agent)",
+].join("\n");
+
+const REVIEW_UNRELATED_SHELL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:05.000Z] Tool: run_shell pwd",
+  "[2026-05-09T00:00:06.000Z] Agent: review-sidecar complete (runtime=qwen-local-agent)",
+].join("\n");
+
+const REVIEW_MUTATING_FIND_SHELL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:05.000Z] Tool: run_shell find . -delete",
+  "[2026-05-09T00:00:06.000Z] Agent: review-sidecar complete (runtime=qwen-local-agent)",
+].join("\n");
+
+const REVIEW_REDIRECTING_CAT_SHELL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:05.000Z] Tool: run_shell cat README.md > reports/out.txt",
+  "[2026-05-09T00:00:06.000Z] Agent: review-sidecar complete (runtime=qwen-local-agent)",
+].join("\n");
+
+const REVIEW_POWERSHELL_WRITING_SHELL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:05.000Z] Tool: run_shell Get-ChildItem -Recurse | Set-Content reports/out.txt",
+  "[2026-05-09T00:00:06.000Z] Agent: review-sidecar complete (runtime=qwen-local-agent)",
+].join("\n");
+
+const REVIEW_READ_ONLY_SHELL_ACTIVITY = [
+  "[2026-05-09T00:00:04.000Z] Agent: review-sidecar started (runtime=qwen-local-agent)",
+  "[2026-05-09T00:00:05.000Z] Tool: run_shell rg test README.md",
+  "[2026-05-09T00:00:06.000Z] Tool: run_shell git diff -- README.md",
+  "[2026-05-09T00:00:07.000Z] Tool: run_shell git show HEAD -- README.md",
+  "[2026-05-09T00:00:08.000Z] Tool: run_shell Get-ChildItem -Recurse",
+  "[2026-05-09T00:00:09.000Z] Tool: run_shell Select-String -Path README.md -Pattern test",
+  "[2026-05-09T00:00:10.000Z] Agent: review-sidecar complete (runtime=qwen-local-agent)",
+].join("\n");
+
+function commitSubstantiveAuditReport(root: string, branch: string): void {
+  execFileSync("git", ["checkout", "-b", branch], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  mkdirSync(join(root, "reports"), { recursive: true });
+  writeFileSync(
+    join(root, "reports", "audit.md"),
+    [
+      "## Finding",
+      "Evidence: `README.md:1` contains the repository root documentation.",
+      "Risk: The audit scope depends on that documented root.",
+      "Verification: Command `rg test README.md` output matched the inspected line.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+}
+
 describe("taskCompletionEvidence", () => {
   it("blocks generic audit plans with no repository delta", () => {
     const root = initRepo();
@@ -114,6 +194,32 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.meaningfulChangedFiles).toContain("src/form.ts");
     expect(codes(result)).not.toContain("missing_report_artifact");
   });
+
+  it.each(["audit-logging", "security-review", "tests", "coverage", "build", "add-checkout"])(
+    "does not treat explicit general task alias %s as risky",
+    (roadmapAlias) => {
+      const root = initRepo();
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "auditLog.ts"), "export const auditLog = true;\n", "utf8");
+
+      const result = evaluateTaskCompletionEvidence({
+        projectRoot: root,
+        task: {
+          id: `general-${roadmapAlias}`,
+          title: "Add audit logging",
+          description: "Capture security review events and test coverage notes.",
+          taskIntent: "general",
+          roadmapAlias,
+          tags: [`rm:${roadmapAlias}`, "kind:general"],
+          plan: "## Plan\n- [ ] Update the implementation path\n- [ ] Run the focused regression tests",
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.evidence.riskyTask).toBe(false);
+      expect(codes(result)).not.toContain("missing_report_artifact");
+    },
+  );
 
   it("allows short concrete pre-implementation plans", () => {
     const root = initRepo();
@@ -240,7 +346,13 @@ describe("taskCompletionEvidence", () => {
     mkdirSync(join(root, "reports"), { recursive: true });
     writeFileSync(
       join(root, "reports", "audit.md"),
-      "Findings cite `README.md` and package.json.\n",
+      [
+        "## Finding",
+        "Evidence: `README.md:1` and package.json define the audited root files.",
+        "Risk: Missing either file would break the documented package entry points.",
+        "Verification: Command `git diff --name-only` output included reports/audit.md.",
+        "",
+      ].join("\n"),
       "utf8",
     );
     execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
@@ -255,19 +367,32 @@ describe("taskCompletionEvidence", () => {
         id: "audit-root-level-refs",
         title: "Audit generated findings",
         plan: "## Plan\n- Validate root files\n- Write report",
-        agentActivityLog: IMPLEMENTATION_TOOL_ACTIVITY,
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
       },
     });
 
     expect(result.ok).toBe(true);
-    expect(result.evidence.reportReferencedPaths).toEqual(["README.md", "package.json"]);
+    expect(result.evidence.reportReferencedPaths).toEqual(
+      expect.arrayContaining(["README.md", "package.json"]),
+    );
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
     expect(result.issues).toEqual([]);
   });
 
   it("blocks untracked report artifacts when the task requires a committed report", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });
-    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `git status --short` output was clean after commit.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
 
     const result = evaluateTaskCompletionEvidence({
       projectRoot: root,
@@ -295,7 +420,17 @@ describe("taskCompletionEvidence", () => {
       stdio: "ignore",
     });
     mkdirSync(join(root, "reports"), { recursive: true });
-    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `git status --short` output was clean after commit.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
     execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
       cwd: root,
@@ -330,7 +465,17 @@ describe("taskCompletionEvidence", () => {
       stdio: "ignore",
     });
     mkdirSync(join(root, "reports"), { recursive: true });
-    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `git status --short` output was clean after commit.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
     execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
 
     const result = evaluateTaskCompletionEvidence({
@@ -356,7 +501,17 @@ describe("taskCompletionEvidence", () => {
       stdio: "ignore",
     });
     mkdirSync(join(root, "reports"), { recursive: true });
-    writeFileSync(join(root, "reports", "audit.md"), "Finding cites `README.md`.\n", "utf8");
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `git status --short` output was clean after commit.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
     execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
       cwd: root,
@@ -370,7 +525,7 @@ describe("taskCompletionEvidence", () => {
         title: "Full project audit",
         description: "Done only when the report is committed.",
         plan: "## Plan\n- Write reports/audit.md",
-        agentActivityLog: IMPLEMENTATION_TOOL_ACTIVITY,
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
       },
     });
 
@@ -380,6 +535,404 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.committedChangedFiles).toContain("reports/audit.md");
     expect(result.evidence.uncommittedReportArtifactFiles).toEqual([]);
     expect(result.issues).toEqual([]);
+  });
+
+  it("blocks risky committed reports without review-stage repository tool activity", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-no-review-tool"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `git status --short` output was clean after commit.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-committed-report-no-review-tool",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: IMPLEMENTATION_TOOL_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.implementationToolActivityCount).toBe(2);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_review_tool_activity");
+  });
+
+  it("counts interleaved review sidecar repository tool activity", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-interleaved-review-tool"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `rg reviewed README.md` output matched the inspected line.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-interleaved-review-tool",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: `${IMPLEMENTATION_TOOL_ACTIVITY}\n${INTERLEAVED_REVIEW_TOOL_ACTIVITY}`,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(1);
+    expect(result.issues).toEqual([]);
+  });
+
+  it("does not count review-stage write tools as repository inspection activity", () => {
+    const root = initRepo();
+    commitSubstantiveAuditReport(root, "feature/audit-review-write-tool");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-review-write-tool",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: `${IMPLEMENTATION_TOOL_ACTIVITY}\n${REVIEW_MUTATING_TOOL_ACTIVITY}`,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_review_tool_activity");
+  });
+
+  it("does not count unrelated review-stage shell commands as repository inspection activity", () => {
+    const root = initRepo();
+    commitSubstantiveAuditReport(root, "feature/audit-review-pwd-tool");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-review-pwd-tool",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: `${IMPLEMENTATION_TOOL_ACTIVITY}\n${REVIEW_UNRELATED_SHELL_ACTIVITY}`,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_review_tool_activity");
+  });
+
+  it("does not count mutating review-stage shell commands as repository inspection activity", () => {
+    const root = initRepo();
+    commitSubstantiveAuditReport(root, "feature/audit-review-find-delete");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-review-find-delete",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: `${IMPLEMENTATION_TOOL_ACTIVITY}\n${REVIEW_MUTATING_FIND_SHELL_ACTIVITY}`,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_review_tool_activity");
+  });
+
+  it("does not count redirecting review-stage shell commands as repository inspection activity", () => {
+    const root = initRepo();
+    commitSubstantiveAuditReport(root, "feature/audit-review-cat-redirection");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-review-cat-redirection",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: `${IMPLEMENTATION_TOOL_ACTIVITY}\n${REVIEW_REDIRECTING_CAT_SHELL_ACTIVITY}`,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_review_tool_activity");
+  });
+
+  it("does not count PowerShell write forms as repository inspection activity", () => {
+    const root = initRepo();
+    commitSubstantiveAuditReport(root, "feature/audit-review-powershell-write");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-review-powershell-write",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: `${IMPLEMENTATION_TOOL_ACTIVITY}\n${REVIEW_POWERSHELL_WRITING_SHELL_ACTIVITY}`,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(0);
+    expect(codes(result)).toContain("missing_review_tool_activity");
+  });
+
+  it("counts read-only review-stage shell inspection commands", () => {
+    const root = initRepo();
+    commitSubstantiveAuditReport(root, "feature/audit-review-shell-readonly");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-review-shell-readonly",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        plan: "## Plan\n- Write reports/audit.md",
+        agentActivityLog: `${IMPLEMENTATION_TOOL_ACTIVITY}\n${REVIEW_READ_ONLY_SHELL_ACTIVITY}`,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reviewStageToolActivityCount).toBe(5);
+    expect(result.issues).toEqual([]);
+  });
+
+  it("blocks circular audit reports that only cite runtime mechanics", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/circular-audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "# Audit Report",
+        "",
+        "- Report artifact committed at reports/audit.md.",
+        "- Task ran with repository tools.",
+        "- Agent activity log shows implementation and review-gate execution.",
+        "- Repository reference: README.md.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add circular audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-circular-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks impossible path-line evidence references", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/impossible-line-audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:999999` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: The referenced line was inspected.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add impossible line audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-impossible-line-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks circular claims tied to existing non-report files", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/circular-existing-path-audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` validated this report exists and the task ran.",
+        "Risk: The task would otherwise lack a committed report.",
+        "Verification: `README.md:1` verified the report artifact was committed.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add circular existing path report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-circular-existing-path-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks self-referential report path evidence", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/self-referential-audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: reports/audit.md:1 proves this report exists.",
+        "Risk: The task would otherwise lack a committed report.",
+        "Verification: reports/audit.md:1 was committed.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add self audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-self-referential-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks structured-looking reports that mention paths without exact evidence markers", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/weak-structured-audit-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: README.md was mentioned during the run.",
+        "Risk: The report may be generic.",
+        "Verification: The task ran and this artifact was committed.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add weak structured audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-weak-structured-report",
+        title: "Full project audit",
+        description: "Done only when the report is committed.",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("insufficient_report_evidence");
   });
 
   it("blocks risky committed reports without latest implementation-stage tool activity", () => {

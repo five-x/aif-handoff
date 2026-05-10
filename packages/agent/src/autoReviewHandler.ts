@@ -137,6 +137,7 @@ export async function handleAutoReviewGate(
     strategy: env.AGENT_AUTO_REVIEW_STRATEGY,
     iteration: currentIteration,
     previousFindings: refreshedTask.autoReviewState?.findings ?? [],
+    task: refreshedTask,
   });
 
   if (reviewGate.status === "success") {

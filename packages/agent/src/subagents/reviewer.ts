@@ -102,6 +102,8 @@ or
 Rules:
 - Blocking Findings must list only issues that should block automatic completion for this review source.
 - Advisories are non-blocking suggestions or follow-ups.
+- Review is read-only: do not create, edit, delete, move, or commit repository files.
+- For audit, review, discovery, validation, verification, findings, or report tasks, call at least one repository inspection tool before answering, then include at least one Advisory with concrete evidence you inspected: exact existing file path with line/function/symbol reference, or a command and output/status that supports your review conclusion.
 - Reuse only IDs provided in the Previous Findings input below.
 - Do not add any headings before, between, or after these sections.
 - Do not use code fences.`;

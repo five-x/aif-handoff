@@ -3,7 +3,6 @@ import { Cpu, Plus, X, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Radio } from "@/components/ui/radio";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useCreateTask } from "@/hooks/useTasks";
@@ -12,7 +11,14 @@ import { useProjects } from "@/hooks/useProjects";
 import { useSettings, useProjectDefaults } from "@/hooks/useSettings";
 import { useRuntimeProfiles, useRuntimes } from "@/hooks/useRuntimeProfiles";
 import { formatRuntimeProfileOptionLabel } from "@/lib/runtimeProfiles";
-import { generatePlanPath, defaultsForMode } from "@aif/shared/browser";
+import {
+  TASK_INTENT_CONTRACTS,
+  TASK_INTENTS,
+  generatePlanPath,
+  defaultsForMode,
+  resolveTaskIntentDefaults,
+  type TaskIntent,
+} from "@aif/shared/browser";
 import { PlannerSettings } from "./PlannerSettings";
 
 interface Props {
@@ -26,6 +32,7 @@ export function AddTaskForm({ projectId }: Props) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [autoMode, setAutoMode] = useState(true);
+  const [taskIntent, setTaskIntent] = useState<TaskIntent>("general");
   const [isFix, setIsFix] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [plannerMode, setPlannerMode] = useState<"full" | "fast">("fast");
@@ -75,25 +82,32 @@ export function AddTaskForm({ projectId }: Props) {
   const plansDir = defaults?.paths?.plans ?? ".ai-factory/plans/";
 
   const syncServerDefaultsIntoForm = useCallback(() => {
+    const intentDefaults = resolveTaskIntentDefaults("general", {
+      envUseSubagents: useSubagentsDefault,
+    });
     setUseSubagents(useSubagentsDefault);
     setMaxReviewIterations(maxReviewIterationsDefault);
     setPlanPath(defaultPlanPath);
     setRuntimeProfileId("");
     setModelOverride("");
     setPriority(0);
+    setTaskIntent("general");
+    setIsFix(false);
     // Apply mode-driven flag defaults; isParallel forces full mode defaults.
-    const seededMode = isParallel ? "full" : plannerMode;
+    const seededMode = isParallel ? "full" : intentDefaults.plannerMode;
     const flags = defaultsForMode(seededMode);
+    setPlannerMode(seededMode);
     setSkipReview(flags.skipReview);
     setPlanDocs(flags.planDocs);
     setPlanTests(flags.planTests);
-  }, [defaultPlanPath, isParallel, maxReviewIterationsDefault, plannerMode, useSubagentsDefault]);
+  }, [defaultPlanPath, isParallel, maxReviewIterationsDefault, useSubagentsDefault]);
 
   const resetAndCloseForm = useCallback(() => {
     setIsOpen(false);
     setTitle("");
     setDescription("");
     setAutoMode(true);
+    setTaskIntent("general");
     setIsFix(false);
     setShowAdvanced(false);
     setPlannerMode("fast");
@@ -139,6 +153,23 @@ export function AddTaskForm({ projectId }: Props) {
     }
   };
 
+  const applyIntentDefaults = (nextIntent: TaskIntent, nextTitle = title) => {
+    const intentDefaults = resolveTaskIntentDefaults(nextIntent, {
+      envUseSubagents: useSubagentsDefault,
+    });
+    const nextMode = isParallel ? "full" : intentDefaults.plannerMode;
+    setTaskIntent(nextIntent);
+    setIsFix(intentDefaults.isFix);
+    setPlannerMode(nextMode);
+    setSkipReview(nextIntent === "audit" ? false : intentDefaults.skipReview);
+    setPlanDocs(intentDefaults.planDocs);
+    setPlanTests(intentDefaults.planTests);
+    setUseSubagents(
+      nextIntent === "audit" || nextIntent === "spike" ? true : intentDefaults.useSubagents,
+    );
+    syncPlanPath(nextTitle, nextMode);
+  };
+
   const handleTitleChange = (value: string) => {
     setTitle(value);
     syncPlanPath(value, plannerMode);
@@ -154,10 +185,14 @@ export function AddTaskForm({ projectId }: Props) {
   };
 
   // Effective values: parallel projects force full mode
-  const effectiveMode = isParallel ? "full" : plannerMode;
+  const effectiveIntent = isFix ? "fix" : taskIntent;
+  const effectiveMode = effectiveIntent === "audit" || isParallel ? "full" : plannerMode;
   const effectivePlanPath = isParallel
     ? generatePlanPath(title.trim(), "full", { plansDir, defaultPlanPath })
     : planPath.trim() || defaultPlanPath;
+  const effectiveSkipReview = effectiveIntent === "audit" ? false : skipReview;
+  const effectiveUseSubagents =
+    effectiveIntent === "audit" || effectiveIntent === "spike" ? true : useSubagents;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -170,13 +205,14 @@ export function AddTaskForm({ projectId }: Props) {
         title: title.trim(),
         description: description.trim(),
         autoMode,
-        isFix,
+        taskIntent: effectiveIntent,
+        isFix: effectiveIntent === "fix",
         plannerMode: effectiveMode,
         planPath: effectivePlanPath,
         planDocs,
         planTests,
-        skipReview,
-        useSubagents,
+        skipReview: effectiveSkipReview,
+        useSubagents: effectiveUseSubagents,
         maxReviewIterations,
         runtimeProfileId: runtimeProfileId || null,
         modelOverride: modelOverride.trim() || null,
@@ -228,34 +264,19 @@ export function AddTaskForm({ projectId }: Props) {
           <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
             Task type
           </p>
-          <label className="flex items-start gap-2 text-xs text-muted-foreground">
-            <Radio
-              name="taskType"
-              aria-label="Standard"
-              checked={!isFix}
-              onChange={() => setIsFix(false)}
-              className="mt-0.5 h-3.5 w-3.5"
-            />
-            <span>
-              <span className="font-medium text-foreground">Standard</span>
-              {" - Default task flow."}
-            </span>
-          </label>
-          <label className="flex items-start gap-2 text-xs text-muted-foreground">
-            <Radio
-              name="taskType"
-              aria-label="Fix"
-              checked={isFix}
-              onChange={() => setIsFix(true)}
-              className="mt-0.5 h-3.5 w-3.5"
-            />
-            <span>
-              <span className="font-medium text-foreground">Fix</span>
-              {
-                " - Use when something is not working correctly or is broken; a patch will be created for the self-learning system."
-              }
-            </span>
-          </label>
+          <Select
+            selectSize="sm"
+            value={taskIntent}
+            onChange={(e) => applyIntentDefaults(e.target.value as TaskIntent)}
+            options={TASK_INTENTS.map((intent) => ({
+              value: intent,
+              label: TASK_INTENT_CONTRACTS[intent].label,
+            }))}
+            className="w-full"
+          />
+          <p className="text-[10px] text-muted-foreground">
+            {TASK_INTENT_CONTRACTS[taskIntent].decomposition}
+          </p>
         </div>
         <label className="flex items-start gap-2 text-xs text-muted-foreground">
           <Checkbox

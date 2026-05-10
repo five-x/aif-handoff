@@ -19,6 +19,7 @@ import type {
   CreateRuntimeProfileInput,
   UpdateRuntimeProfileInput,
   RuntimeLimitSnapshot,
+  TaskIntent,
 } from "@aif/shared/browser";
 
 export class ApiError extends Error {
@@ -443,6 +444,7 @@ export const api = {
   importRoadmap(
     projectId: string,
     roadmapAlias: string,
+    taskIntent?: TaskIntent,
   ): Promise<{
     roadmapAlias: string;
     created: number;
@@ -450,12 +452,15 @@ export const api = {
     taskIds: string[];
     byPhase: Record<number, { created: number; skipped: number }>;
   }> {
-    console.debug("[api] POST /projects/%s/roadmap/import", projectId, { roadmapAlias });
+    console.debug("[api] POST /projects/%s/roadmap/import", projectId, {
+      roadmapAlias,
+      taskIntent,
+    });
     return request(
       `/projects/${projectId}/roadmap/import`,
       {
         method: "POST",
-        body: JSON.stringify({ roadmapAlias }),
+        body: JSON.stringify({ roadmapAlias, taskIntent }),
       },
       IMPORT_ROADMAP_TIMEOUT_MS,
     );
@@ -465,14 +470,16 @@ export const api = {
     projectId: string,
     roadmapAlias: string,
     vision?: string,
-  ): Promise<{ status: string; projectId: string; roadmapAlias: string }> {
+    taskIntent?: TaskIntent,
+  ): Promise<{ status: string; projectId: string; roadmapAlias: string; taskIntent?: TaskIntent }> {
     console.debug("[api] POST /projects/%s/roadmap/generate", projectId, {
       roadmapAlias,
       vision,
+      taskIntent,
     });
     return request(`/projects/${projectId}/roadmap/generate`, {
       method: "POST",
-      body: JSON.stringify({ roadmapAlias, vision }),
+      body: JSON.stringify({ roadmapAlias, vision, taskIntent }),
     });
   },
 

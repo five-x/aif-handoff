@@ -8,7 +8,13 @@ import {
   setTaskFields,
 } from "@aif/data";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
-import { logger, formatAttachmentsForPrompt, getEnv, getProjectConfig } from "@aif/shared";
+import {
+  logger,
+  formatAttachmentsForPrompt,
+  formatTaskIntentContractForPrompt,
+  getEnv,
+  getProjectConfig,
+} from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import {
   assertCurrentBranch,
@@ -151,12 +157,17 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
   const planPath = normalizePlanPath(task.planPath, executionRoot);
   const planDocs = task.planDocs ? "true" : "false";
   const planTests = task.planTests ? "true" : "false";
+  const taskIntentContract = formatTaskIntentContractForPrompt(task.taskIntent);
   const planningFeedback =
     task.blockedFromStatus === "plan_ready" && task.blockedReason
       ? `Previous plan-quality feedback that must be addressed:\n${task.blockedReason}`
       : "No prior plan-quality feedback was recorded.";
-  const diagnosticPlanningConstraint =
-    "Diagnostic-only planning applies only to explicit audit, discovery, inventory, gap-analysis, findings, security-review, code-review, review-findings, validation-report, validation-task, validation-audit, validation-findings, verification-report, verification-task, verification-audit, or verification-findings work. For those tasks, keep the plan diagnostic-only: write an inspectable report artifact path, cite repository paths that the report must validate, do not implement fixes in this same run, and do not create or execute child implementation tasks.";
+  const diagnosticPlanningConstraint = [
+    "Diagnostic-only planning applies only to explicit audit, discovery, inventory, gap-analysis, findings, security-review, code-review, review-findings, validation-report, validation-task, validation-audit, validation-findings, verification-report, verification-task, verification-audit, or verification-findings work.",
+    "For those tasks, keep the plan diagnostic-only: write an inspectable report artifact path, cite repository paths that the report must validate, do not implement fixes in this same run, and do not create or execute child implementation tasks.",
+    "The plan must make completion verifiable: require report findings or verification items to include exact `path:line` evidence, `Risk:`, and `Verification: Command ... output ...` details.",
+    "The plan must require the report artifact to be committed on the task branch, including `git status --short`, `git add <report path>`, `git commit -m ...`, and `git log -1 --name-only --oneline` verification steps.",
+  ].join(" ");
 
   // Deterministic branch handling. Two contracts, applied in order:
   //
@@ -249,6 +260,9 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
   }
 
   const taskContext = `Title: ${task.title}
+Task intent contract:
+${taskIntentContract}
+
 Description: ${task.description}
 Task attachments:
 ${taskAttachmentsForPrompt}

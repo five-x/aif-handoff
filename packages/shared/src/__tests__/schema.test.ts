@@ -147,6 +147,7 @@ describe("tasks schema", () => {
     expect(result!.position).toBe(1000.0);
     expect(result!.description).toBe("");
     expect(result!.autoMode).toBe(true);
+    expect(result!.taskIntent).toBe("general");
     expect(result!.plan).toBeNull();
     expect(result!.implementationLog).toBeNull();
     expect(result!.reviewComments).toBeNull();

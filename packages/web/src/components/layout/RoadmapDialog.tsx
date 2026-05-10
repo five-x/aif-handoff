@@ -9,9 +9,15 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { Project } from "@aif/shared/browser";
+import {
+  TASK_INTENT_CONTRACTS,
+  TASK_INTENTS,
+  type Project,
+  type TaskIntent,
+} from "@aif/shared/browser";
 import type { RoadmapImportResult } from "./Header";
 
 interface RoadmapDialogProps {
@@ -28,6 +34,7 @@ export function RoadmapDialog({
   onImportComplete,
 }: RoadmapDialogProps) {
   const [alias, setAlias] = useState("");
+  const [taskIntent, setTaskIntent] = useState<TaskIntent>("general");
   const [vision, setVision] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +46,7 @@ export function RoadmapDialog({
 
   const resetAndCheck = useCallback((projectId: string) => {
     setAlias("");
+    setTaskIntent("general");
     setVision("");
     setError(null);
     setResult(null);
@@ -104,12 +112,12 @@ export function RoadmapDialog({
     setError(null);
     setResult(null);
     try {
-      await api.generateRoadmap(project.id, alias.trim(), vision.trim() || undefined);
+      await api.generateRoadmap(project.id, alias.trim(), vision.trim() || undefined, taskIntent);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     }
-  }, [project, alias, vision]);
+  }, [project, alias, taskIntent, vision]);
 
   const handleImport = useCallback(async () => {
     if (!project || !alias.trim()) return;
@@ -117,7 +125,7 @@ export function RoadmapDialog({
     setError(null);
     setResult(null);
     try {
-      const res = await api.importRoadmap(project.id, alias.trim());
+      const res = await api.importRoadmap(project.id, alias.trim(), taskIntent);
       setResult(res);
       setImportLoading(false);
       onImportComplete?.(res);
@@ -125,7 +133,7 @@ export function RoadmapDialog({
       setError(err instanceof Error ? err.message : String(err));
       setImportLoading(false);
     }
-  }, [project, alias, onImportComplete]);
+  }, [project, alias, taskIntent, onImportComplete]);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -167,6 +175,20 @@ export function RoadmapDialog({
                 onChange={(e) => setAlias(e.target.value)}
                 placeholder="e.g. v1.0, sprint-1, mvp"
                 disabled={loading || importLoading}
+              />
+            </div>
+            <div>
+              <label htmlFor="roadmap-task-intent" className="block text-xs font-medium mb-1">
+                Task intent
+              </label>
+              <Select
+                value={taskIntent}
+                onChange={(e) => setTaskIntent(e.target.value as TaskIntent)}
+                disabled={loading || importLoading}
+                options={TASK_INTENTS.map((intent) => ({
+                  value: intent,
+                  label: TASK_INTENT_CONTRACTS[intent].label,
+                }))}
               />
             </div>
             <div>

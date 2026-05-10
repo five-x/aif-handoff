@@ -33,6 +33,7 @@ const {
   searchTasks,
   toTaskResponse,
   touchLastSyncedAt,
+  updateTask,
   updateTaskStatus,
   setTaskFields,
   listTasksPaginated,
@@ -185,6 +186,72 @@ describe("MCP tools", () => {
       });
       expect(task).toBeDefined();
       expect(task!.priority).toBe(2);
+    });
+
+    it("keeps omitted taskIntent as general for MCP create data path", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Fix audit logging feature",
+        description: "Add security review coverage",
+        isFix: false,
+      });
+
+      expect(task).toBeDefined();
+      expect(task!.taskIntent).toBe("general");
+      expect(task!.isFix).toBe(false);
+    });
+
+    it("enforces audit defaults for MCP update data path", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Audit candidate",
+        description: "Desc",
+        plannerMode: "fast",
+        skipReview: true,
+        planDocs: false,
+        planTests: false,
+        useSubagents: false,
+      });
+
+      const updated = updateTask(task!.id, {
+        taskIntent: "audit",
+        plannerMode: "fast",
+        skipReview: true,
+        planDocs: false,
+        planTests: false,
+        useSubagents: false,
+      });
+
+      expect(updated!.taskIntent).toBe("audit");
+      expect(updated!.plannerMode).toBe("full");
+      expect(updated!.skipReview).toBe(false);
+      expect(updated!.planDocs).toBe(true);
+      expect(updated!.planTests).toBe(true);
+      expect(updated!.useSubagents).toBe(true);
+    });
+
+    it("preserves audit invariants for MCP updates that omit taskIntent", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Existing audit",
+        description: "Desc",
+        taskIntent: "audit",
+      });
+
+      const updated = updateTask(task!.id, {
+        plannerMode: "fast",
+        skipReview: true,
+        planDocs: false,
+        planTests: false,
+        useSubagents: false,
+      });
+
+      expect(updated!.taskIntent).toBe("audit");
+      expect(updated!.plannerMode).toBe("full");
+      expect(updated!.skipReview).toBe(false);
+      expect(updated!.planDocs).toBe(true);
+      expect(updated!.planTests).toBe(true);
+      expect(updated!.useSubagents).toBe(true);
     });
   });
 

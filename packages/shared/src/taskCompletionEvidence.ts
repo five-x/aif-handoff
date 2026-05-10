@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, relative, resolve, sep } from "node:path";
 import { getProjectConfig } from "./projectConfig.js";
+import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
 
 export type TaskCompletionIssueCode =
   | "zero_delta"
@@ -10,7 +11,9 @@ export type TaskCompletionIssueCode =
   | "uncommitted_report_artifact"
   | "deterministic_fallback_report"
   | "missing_implementation_tool_activity"
+  | "missing_review_tool_activity"
   | "invalid_or_missing_file_references"
+  | "insufficient_report_evidence"
   | "branch_isolation"
   | "manual_review_required";
 
@@ -18,6 +21,7 @@ export interface TaskCompletionEvidenceTask {
   id: string;
   title: string;
   description?: string | null;
+  taskIntent?: TaskIntent | null;
   tags?: string[] | string | null;
   roadmapAlias?: string | null;
   plan?: string | null;
@@ -49,6 +53,8 @@ export interface TaskCompletionEvidenceResult {
     uncommittedReportArtifactFiles: string[];
     deterministicFallbackReport: boolean;
     implementationToolActivityCount: number;
+    reviewStageToolActivityCount: number;
+    substantiveReportEvidence: boolean;
     referencedPaths: string[];
     missingReferencedPaths: string[];
     existingReferencedPaths: string[];
@@ -131,6 +137,7 @@ function combinedTaskText(task: TaskCompletionEvidenceTask): string {
   return [
     task.title,
     task.description,
+    task.taskIntent,
     task.roadmapAlias,
     ...parseTags(task.tags),
     task.plan,
@@ -142,8 +149,23 @@ function combinedTaskText(task: TaskCompletionEvidenceTask): string {
     .join("\n");
 }
 
-function isRiskyTask(task: TaskCompletionEvidenceTask): boolean {
-  const text = [task.title, task.description, task.roadmapAlias, ...parseTags(task.tags)]
+export function isRiskyTask(task: TaskCompletionEvidenceTask): boolean {
+  const taskIntent = inferTaskIntent({
+    taskIntent: task.taskIntent,
+    title: task.title,
+    description: task.description,
+    roadmapAlias: task.roadmapAlias,
+    tags: task.tags,
+  });
+  if (taskIntent === "audit" || taskIntent === "spike") return true;
+  if (isTaskIntent(task.taskIntent)) return false;
+  const text = [
+    task.title,
+    task.description,
+    task.taskIntent,
+    task.roadmapAlias,
+    ...parseTags(task.tags),
+  ]
     .filter(Boolean)
     .join("\n");
   if (CONTEXTUAL_VALIDATION_PATTERN.test(text)) return true;
@@ -320,6 +342,84 @@ function countLatestImplementationToolActivity(
   return lines.slice(latestStart + 1, end).filter((line) => /\]\s+Tool:\s+\S+/.test(line)).length;
 }
 
+function countReviewStageRepositoryToolActivity(
+  agentActivityLog: string | null | undefined,
+): number {
+  if (!agentActivityLog) return 0;
+  const lines = agentActivityLog.split(/\r?\n/);
+  const reviewAgentEvent =
+    /\]\s+Agent:\s+(?:review-sidecar|security-sidecar|aif-review|aif-security-checklist|review-gate)\s+(started|complete|failed)\b/i;
+
+  let count = 0;
+  let activeReviewAgents = 0;
+  for (const line of lines) {
+    const event = line.match(reviewAgentEvent)?.[1]?.toLowerCase();
+    if (event === "started") {
+      activeReviewAgents += 1;
+      continue;
+    }
+    if (event === "complete" || event === "failed") {
+      activeReviewAgents = Math.max(0, activeReviewAgents - 1);
+      continue;
+    }
+    if (activeReviewAgents > 0 && isReviewInspectionToolLine(line)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function isReviewInspectionToolLine(line: string): boolean {
+  const match = line.match(/\]\s+Tool:\s+(\S+)(?:\s+(.+))?$/);
+  if (!match) return false;
+  const tool = match[1].toLowerCase();
+  const detail = match[2]?.trim() ?? "";
+
+  if (
+    [
+      "read_file",
+      "list_files",
+      "search_files",
+      "grep",
+      "rg",
+      "git_status",
+      "git_diff",
+      "git_show",
+      "git_log",
+    ].includes(tool)
+  ) {
+    return true;
+  }
+
+  if (tool !== "run_shell") return false;
+  return isReadOnlyInspectionShellCommand(detail);
+}
+
+function isReadOnlyInspectionShellCommand(detail: string): boolean {
+  const command = detail.trim();
+  if (!command || hasShellMutationRisk(command)) return false;
+  return /^(?:rg|grep|findstr|select-string|git\s+(?:status|diff|show|log|ls-files|grep)|ls|dir|get-childitem|cat|type|sed|head|tail|find|test|wc)\b/i.test(
+    command,
+  );
+}
+
+function hasShellMutationRisk(command: string): boolean {
+  const lower = command.toLowerCase();
+  if (/[;&|<>]/.test(command) || /`/.test(command) || /\$\(/.test(command)) {
+    return true;
+  }
+  if (/^find\b/.test(lower) && /\s-(?:delete|exec|execdir|ok|okdir)\b/.test(lower)) {
+    return true;
+  }
+  if (/^sed\b/.test(lower) && /(?:^|\s)(?:-i(?:\b|[^a-z])|--in-place(?:=|\b))/.test(lower)) {
+    return true;
+  }
+  if (/^git\s+(?:diff|show|log|grep)\b/.test(lower) && /(?:^|\s)--output(?:=|\b)/.test(lower)) {
+    return true;
+  }
+  return false;
+}
+
 function collectReportText(projectRoot: string, reportFiles: string[]): string {
   const chunks: string[] = [];
   for (const file of reportFiles) {
@@ -334,6 +434,203 @@ function collectReportText(projectRoot: string, reportFiles: string[]): string {
     }
   }
   return chunks.join("\n");
+}
+
+function isExcludedEvidencePath(path: string, excludedPaths: Set<string>): boolean {
+  return excludedPaths.has(normalizeRelativePath(path));
+}
+
+function hasNonCircularEvidenceContext(text: string, rawPath: string, matchIndex: number): boolean {
+  const lineStart = Math.max(0, text.lastIndexOf("\n", matchIndex) + 1);
+  const lineEnd = text.indexOf("\n", matchIndex);
+  const line = text.slice(lineStart, lineEnd >= 0 ? lineEnd : text.length);
+  if (
+    /\b(?:this\s+report|report\s+artifact|report\s+exists|task\s+ran|agent\s+(?:used|activity)|repository\s+tools|tool\s+activity|committed|commit(?:ted)?|runtime\s+mechanics|mechanical\s+execution)\b/i.test(
+      line,
+    )
+  ) {
+    return false;
+  }
+  return (
+    !/^\s*(?:report|artifact|self)\s*(?:path|reference)?\s*:/i.test(line) || !line.includes(rawPath)
+  );
+}
+
+function extractLineReference(fullToken: string): { start: number; end: number } | null {
+  const match = fullToken.match(/:(\d+)(?::(\d+))?\b/);
+  if (!match) return null;
+  const start = Number.parseInt(match[1], 10);
+  const end = match[2] ? Number.parseInt(match[2], 10) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end };
+}
+
+function fileLineCount(projectRoot: string, path: string): number | null {
+  const absPath = resolve(projectRoot, path);
+  if (!isInsideRoot(projectRoot, absPath) || !existsSync(absPath)) return null;
+  try {
+    const stat = statSync(absPath);
+    if (!stat.isFile() || stat.size > 512_000) return null;
+    const content = readFileSync(absPath, "utf8");
+    if (content.length === 0) return 0;
+    return content.split(/\r?\n/).length;
+  } catch {
+    return null;
+  }
+}
+
+function hasValidLineReference(
+  projectRoot: string,
+  normalizedPath: string,
+  fullToken: string,
+): boolean {
+  const reference = extractLineReference(fullToken);
+  if (!reference || reference.start < 1 || reference.end < reference.start) return false;
+  const lines = fileLineCount(projectRoot, normalizedPath);
+  return lines !== null && reference.end <= lines;
+}
+
+function hasInvalidExistingLineReference(
+  text: string,
+  projectRoot: string,
+  excludedPaths: Set<string>,
+): boolean {
+  for (const match of text.matchAll(SLASH_PATH_TOKEN_PATTERN)) {
+    const full = match[0] ?? "";
+    const raw = match[1]?.trim();
+    if (!raw || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    const normalized = normalizeRelativePath(raw);
+    if (
+      existsSync(resolve(projectRoot, normalized)) &&
+      !isExcludedEvidencePath(normalized, excludedPaths) &&
+      !hasValidLineReference(projectRoot, normalized, full)
+    ) {
+      return true;
+    }
+  }
+  for (const match of text.matchAll(ROOT_FILE_TOKEN_PATTERN)) {
+    const full = match[0] ?? "";
+    const raw = match[1]?.trim();
+    if (!raw || raw.includes("/") || raw.includes("\\") || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    const normalized = normalizeRelativePath(raw);
+    if (
+      existsSync(resolve(projectRoot, normalized)) &&
+      !isExcludedEvidencePath(normalized, excludedPaths) &&
+      !hasValidLineReference(projectRoot, normalized, full)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectExistingRefsWithLineNumbers(
+  text: string,
+  projectRoot: string,
+  excludedPaths: Set<string> = new Set(),
+): string[] {
+  const refs = new Set<string>();
+  for (const match of text.matchAll(SLASH_PATH_TOKEN_PATTERN)) {
+    const full = match[0] ?? "";
+    const raw = match[1]?.trim();
+    if (!raw || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    const normalized = addReferencedPath(refs, projectRoot, raw);
+    if (
+      normalized &&
+      (!existsSync(resolve(projectRoot, normalized)) ||
+        !hasValidLineReference(projectRoot, normalized, full) ||
+        isExcludedEvidencePath(normalized, excludedPaths) ||
+        !hasNonCircularEvidenceContext(text, raw, match.index ?? 0))
+    ) {
+      refs.delete(normalized);
+    }
+  }
+  for (const match of text.matchAll(ROOT_FILE_TOKEN_PATTERN)) {
+    const full = match[0] ?? "";
+    const raw = match[1]?.trim();
+    if (!raw || raw.includes("/") || raw.includes("\\") || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    const normalized = addReferencedPath(refs, projectRoot, raw);
+    if (
+      normalized &&
+      (!existsSync(resolve(projectRoot, normalized)) ||
+        !hasValidLineReference(projectRoot, normalized, full) ||
+        isExcludedEvidencePath(normalized, excludedPaths) ||
+        !hasNonCircularEvidenceContext(text, raw, match.index ?? 0))
+    ) {
+      refs.delete(normalized);
+    }
+  }
+  return [...refs].sort();
+}
+
+function hasSymbolEvidenceTiedToExistingPath(
+  text: string,
+  existingPaths: string[],
+  excludedPaths: Set<string> = new Set(),
+): boolean {
+  return existingPaths
+    .filter((path) => !isExcludedEvidencePath(path, excludedPaths))
+    .some((path) => {
+      const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pathPattern = new RegExp(escaped, "i");
+      const lines = text.split(/\r?\n/);
+      return lines.some((line, index) => {
+        if (!pathPattern.test(line)) return false;
+        const windowText = lines.slice(Math.max(0, index - 1), index + 2).join("\n");
+        return /\b(?:function|class|method|symbol|handler|component|interface|type|const|let|var|export)\s+[`'"]?[A-Za-z_$][\w$]*|[`'"]?[A-Za-z_$][\w$]*(?:\(\)|#\w+)\b/.test(
+          windowText,
+        );
+      });
+    });
+}
+
+function hasCommandOutputEvidence(text: string): boolean {
+  return /(?:\b(?:command|cmd|shell|powershell|pwsh)\s*:?[^\n]{0,160}\b(?:npm|pnpm|yarn|rg|vitest|jest|tsc|eslint|node|curl)\b[^\n]{0,160}\b(?:exit code|output|stdout|stderr|passed|failed|matched|returned)\b|\b(?:npm|pnpm|yarn|rg|vitest|jest|tsc|eslint)\b[^\n]{0,160}\b(?:exit code|output|stdout|stderr|passed|failed|matched|returned)\b)/i.test(
+    text,
+  );
+}
+
+function hasStructuredFindingEvidence(
+  text: string,
+  projectRoot: string,
+  existingPaths: string[],
+  excludedPaths: Set<string>,
+): boolean {
+  const findingSections = text.split(/(?:^|\n)#{2,4}\s+|\n(?=-\s+(?:finding|issue|risk)\b)/i);
+  return findingSections.some(
+    (section) =>
+      /\bEvidence\s*:/i.test(section) &&
+      /\bRisk\s*:/i.test(section) &&
+      /\bVerification\s*:/i.test(section) &&
+      (collectExistingRefsWithLineNumbers(section, projectRoot, excludedPaths).length > 0 ||
+        hasSymbolEvidenceTiedToExistingPath(section, existingPaths, excludedPaths) ||
+        hasCommandOutputEvidence(section)),
+  );
+}
+
+export function hasSubstantiveReportEvidence(input: {
+  text: string;
+  projectRoot: string;
+  existingReferencedPaths?: string[];
+  excludedReferencedPaths?: string[];
+}): boolean {
+  const excludedPaths = new Set((input.excludedReferencedPaths ?? []).map(normalizeRelativePath));
+  if (hasInvalidExistingLineReference(input.text, input.projectRoot, excludedPaths)) return false;
+  const existingPaths =
+    input.existingReferencedPaths ??
+    classifyReferencedPaths(
+      input.projectRoot,
+      extractReferencedPaths(input.text, input.projectRoot),
+    ).existing;
+  const evidencePaths = existingPaths.filter(
+    (path) => !isExcludedEvidencePath(path, excludedPaths),
+  );
+  if (evidencePaths.length === 0) return false;
+  if (collectExistingRefsWithLineNumbers(input.text, input.projectRoot, excludedPaths).length > 0) {
+    return true;
+  }
+  if (hasSymbolEvidenceTiedToExistingPath(input.text, evidencePaths, excludedPaths)) return true;
+  return hasStructuredFindingEvidence(input.text, input.projectRoot, evidencePaths, excludedPaths);
 }
 
 function addReferencedPath(
@@ -443,6 +740,9 @@ export function evaluateTaskCompletionEvidence(
   const implementationToolActivityCount = countLatestImplementationToolActivity(
     task.agentActivityLog,
   );
+  const reviewStageToolActivityCount = countReviewStageRepositoryToolActivity(
+    task.agentActivityLog,
+  );
   const taskReferencedPaths = extractReferencedPaths(combinedTaskText(task), projectRoot);
   const reportReferencedPaths = extractReferencedPaths(reportText, projectRoot, {
     includeUndelimitedMissingRootFiles: true,
@@ -453,6 +753,12 @@ export function evaluateTaskCompletionEvidence(
     projectRoot,
     reportReferencedPaths,
   );
+  const substantiveReportEvidence = hasSubstantiveReportEvidence({
+    text: reportText,
+    projectRoot,
+    existingReferencedPaths: reportExisting,
+    excludedReferencedPaths: reportArtifactFiles,
+  });
 
   const issues: TaskCompletionEvidenceIssue[] = [];
   if (input.branchIsolationReason) {
@@ -505,6 +811,14 @@ export function evaluateTaskCompletionEvidence(
         ),
       );
     }
+    if (riskyTask && reviewStageToolActivityCount === 0) {
+      issues.push(
+        issue(
+          "missing_review_tool_activity",
+          "Audit/review/discovery tasks require repository tool activity during review-sidecar, security-sidecar, aif-review, aif-security-checklist, or review-gate validation.",
+        ),
+      );
+    }
 
     let invalidEvidenceMessage: string | null = null;
     if (reportMissing.length > 0) {
@@ -520,6 +834,20 @@ export function evaluateTaskCompletionEvidence(
 
     if (invalidEvidenceMessage) {
       issues.push(issue("invalid_or_missing_file_references", invalidEvidenceMessage));
+    }
+    if (
+      riskyTask &&
+      reportArtifactFiles.length > 0 &&
+      reportMissing.length === 0 &&
+      reportReferencedPaths.length > 0 &&
+      !substantiveReportEvidence
+    ) {
+      issues.push(
+        issue(
+          "insufficient_report_evidence",
+          "Audit/review/discovery report artifact lacks substantive evidence markers such as path+line references, symbol references tied to files, command output, or structured findings with evidence/risk/verification.",
+        ),
+      );
     }
   }
   if (
@@ -551,6 +879,8 @@ export function evaluateTaskCompletionEvidence(
       uncommittedReportArtifactFiles,
       deterministicFallbackReport,
       implementationToolActivityCount,
+      reviewStageToolActivityCount,
+      substantiveReportEvidence,
       referencedPaths,
       missingReferencedPaths: missing,
       existingReferencedPaths: existing,

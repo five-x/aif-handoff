@@ -1,4 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createAutoReviewFindingId } from "../reviewContract.js";
 
 const { executeSubagentQueryMock } = vi.hoisted(() => ({
@@ -66,6 +69,44 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       fixesMarkdown: "- none",
       autoReviewState: null,
     });
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores raw embedded sidecar headings when parsing the canonical summary", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | README.md:1 was inspected.",
+        "",
+        "## Raw Code Review",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- README.md:1 was inspected.",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Raw Security Audit",
+        "## Blocking Findings",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.metrics.parserMode).toBe("structured");
     expect(executeSubagentQueryMock).not.toHaveBeenCalled();
   });
 
@@ -227,14 +268,72 @@ describe("evaluateReviewCommentsForAutoMode", () => {
   it("delegates model resolution to subagentQuery on fallback (no modelOverride)", async () => {
     executeSubagentQueryMock.mockResolvedValueOnce({ resultText: "SUCCESS" });
 
-    await evaluateReviewCommentsForAutoMode({
+    const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
       reviewComments: "legacy malformed review text",
     });
 
+    expect(result.status).toBe("success");
     const call = executeSubagentQueryMock.mock.calls[0][0] as Record<string, unknown>;
     expect(call.modelOverride).toBeUndefined();
     expect(call.suppressModelFallback).toBeUndefined();
     expect(call.workflowSpec).toEqual(expect.objectContaining({ sessionReusePolicy: "never" }));
+  });
+
+  it("requires manual review when fallback SUCCESS tries to accept risky output without evidence", async () => {
+    executeSubagentQueryMock.mockResolvedValueOnce({ resultText: "SUCCESS" });
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: "Looks good.",
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: "Review the generated audit report.",
+      },
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.handoffReason).toBe("risky_review_without_substantive_evidence");
+    expect(result.metrics.parserMode).toBe("fallback");
+    expect(result.blockingFindings[0]?.source).toBe("review_gate");
+  });
+
+  it("allows risky structured success when review comments contain substantive evidence", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aif-review-gate-"));
+    writeFileSync(join(root, "README.md"), "# reviewed\n", "utf8");
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Evidence reviewed",
+        "",
+        "## Evidence",
+        "Evidence: `README.md:1` was inspected for the audit report.",
+        "Risk: The report scope depends on the repository root documentation.",
+        "Verification: Command `rg reviewed README.md` output matched the inspected line.",
+      ].join("\n"),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+      },
+    });
+
+    expect(result.status).toBe("success");
   });
 });

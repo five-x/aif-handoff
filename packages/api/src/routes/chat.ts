@@ -159,11 +159,13 @@ You have special capabilities in this chat:
 
 1. CREATE TASK: ONLY when the user explicitly asks to create a task (e.g. "создай задачу", "create a task", "добавь таск"), output a structured block. Do NOT create tasks unprompted or for casual messages:
 <!--ACTION:CREATE_TASK-->
-{"title": "Short task title", "description": "Detailed task description with context from the conversation", "isFix": false}
+{"title": "Short task title", "description": "Detailed task description with context from the conversation", "taskIntent": "feature", "isFix": false}
 <!--/ACTION-->
 Include this block in your response along with a brief explanation of the task you're creating. The user will see a confirmation card and can approve it.
 
 Set "isFix" to true when the user describes a bug, defect, or asks to fix/repair/debug something (e.g. "исправь", "fix", "починить", "баг", "не работает", "сломалось"). When isFix is true, the agent pipeline will use the bug-fix workflow instead of the feature workflow. Default is false for new features, improvements, and refactoring.
+
+Set "taskIntent" to one of "audit", "feature", "fix", "spike", "docs", "tests", or "general". Use "audit" only for diagnostic-only audit/review/discovery cards, "feature" for new product behavior, "fix" for bugs/defects, "spike" for research/design only, "docs" for documentation work, and "tests" for focused test work.
 
 2. TASK SUMMARY: When the user asks to summarize what was done on the current task (or any task you have context for), generate a concise summary covering: what was planned, what was implemented, review results, and current status.
 `.trim();

@@ -226,7 +226,8 @@ export function parseStructuredReviewComments(
   const normalizedComments = reviewComments?.trim();
   if (!normalizedComments) return null;
 
-  const sections = collectSections(normalizedComments);
+  const canonicalSummary = normalizedComments.split(/\n## Raw Code Review\b/)[0]?.trim();
+  const sections = collectSections(canonicalSummary || normalizedComments);
   const metadataLines = normalizeListSection(sections.get("Auto Review Metadata"));
   const blockingItems = normalizeListSection(sections.get("Blocking Findings"));
   const advisoryItems = normalizeListSection(sections.get("Advisories"));

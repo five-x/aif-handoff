@@ -113,6 +113,10 @@ describe("runImplementer rework behavior", () => {
     const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
     expect(implementCall.prompt).toContain("/aif-implement @.ai-factory/PLAN.md");
     expect(implementCall.prompt).toContain("Plan path:\n@.ai-factory/PLAN.md");
+    expect(implementCall.prompt).toContain(
+      "For diagnostic-only audit/review/discovery/validation plans",
+    );
+    expect(implementCall.prompt).toContain("git log -1 --name-only --oneline");
     const reportPath = join(projectRoot, "audit/2026-05-08-initial-audit.md");
     expect(existsSync(reportPath)).toBe(false);
 

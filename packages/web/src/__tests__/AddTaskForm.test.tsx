@@ -80,6 +80,7 @@ describe("AddTaskForm", () => {
           projectId: "p-1",
           title: "Task with auto mode",
           autoMode: true,
+          taskIntent: "general",
           isFix: false,
         }),
         expect.any(Object),
@@ -103,17 +104,19 @@ describe("AddTaskForm", () => {
         projectId: "p-1",
         title: "Task manual mode",
         autoMode: false,
+        taskIntent: "general",
         isFix: false,
       }),
       expect.any(Object),
     );
   });
 
-  it("submits isFix=true when Fix checkbox is checked", () => {
+  it("submits fix intent when Fix task type is selected", () => {
     render(<AddTaskForm projectId="p-1" />);
 
     fireEvent.click(screen.getByText("Add task"));
-    fireEvent.click(screen.getByLabelText("Fix"));
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
     fireEvent.change(screen.getByPlaceholderText("Task title"), {
       target: { value: "Fix issue" },
     });
@@ -123,6 +126,7 @@ describe("AddTaskForm", () => {
       expect.objectContaining({
         projectId: "p-1",
         title: "Fix issue",
+        taskIntent: "fix",
         isFix: true,
       }),
       expect.any(Object),
@@ -334,7 +338,7 @@ describe("AddTaskForm", () => {
 
     fireEvent.click(screen.getByText("Add task"));
     fireEvent.click(screen.getByRole("button", { name: "Runtime override" }));
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "rp-1" } });
+    fireEvent.change(screen.getAllByRole("combobox").at(-1)!, { target: { value: "rp-1" } });
     fireEvent.change(screen.getByPlaceholderText("runtime default"), {
       target: { value: "  openai/gpt-4o-mini  " },
     });
@@ -372,7 +376,7 @@ describe("AddTaskForm", () => {
 
     fireEvent.click(screen.getByText("Add task"));
     fireEvent.click(screen.getByRole("button", { name: "Runtime override" }));
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "rp-1" } });
+    fireEvent.change(screen.getAllByRole("combobox").at(-1)!, { target: { value: "rp-1" } });
 
     expect(
       screen.getByText(
@@ -471,6 +475,29 @@ describe("AddTaskForm", () => {
         skipReview: true,
         planDocs: false,
         planTests: false,
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("applies typed audit defaults from the task type selector", () => {
+    render(<AddTaskForm projectId="p-1" />);
+    fireEvent.click(screen.getByText("Add task"));
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    fireEvent.click(screen.getByRole("button", { name: "Audit" }));
+    fireEvent.change(screen.getByPlaceholderText("Task title"), {
+      target: { value: "Audit configuration" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(mutateCreateTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskIntent: "audit",
+        plannerMode: "full",
+        skipReview: false,
+        planDocs: true,
+        planTests: true,
+        useSubagents: true,
+        isFix: false,
       }),
       expect.any(Object),
     );

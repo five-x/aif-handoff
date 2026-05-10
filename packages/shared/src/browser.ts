@@ -3,6 +3,7 @@
 export {
   TASK_STATUSES,
   type TaskStatus,
+  type TaskIntent,
   AUTO_REVIEW_STRATEGIES,
   type AutoReviewStrategy,
   AUTO_REVIEW_FINDING_SOURCES,
@@ -62,6 +63,24 @@ export {
   type UpdateChatSessionInput,
   type ChatSessionMessage,
 } from "./types.js";
+
+export {
+  TASK_INTENTS,
+  TASK_INTENT_CONTRACTS,
+  formatTaskIntentContractForPrompt,
+  inferTaskIntent,
+  isTaskIntent,
+  normalizeTaskIntent,
+  resolveTaskIntentDefaults,
+  validateGeneratedTaskIntent,
+  type InferTaskIntentInput,
+  type ResolvedTaskIntentDefaults,
+  type TaskIntentContract,
+  type TaskIntentDefaults,
+  type TaskIntentUseSubagentsDefault,
+  type ValidateGeneratedTaskIntentInput,
+  type ValidateGeneratedTaskIntentResult,
+} from "./taskIntent.js";
 
 export {
   STATUS_CONFIG,

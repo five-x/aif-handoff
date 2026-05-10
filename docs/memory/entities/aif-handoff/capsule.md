@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260509-make-audit-pipeline-toolful::entity-capsule
+memory_id: task::aif-handoff::work::work-20260510-typed-task-intents::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260509-make-audit-pipeline-toolful
-source_path: docs/rdpi/work/work-20260509-make-audit-pipeline-toolful
+task_id: work-20260510-typed-task-intents
+source_path: docs/rdpi/work/work-20260510-typed-task-intents
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -25,10 +25,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/research.md
-- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/design.md
-- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/plan.md
-- docs/rdpi/work/work-20260509-make-audit-pipeline-toolful/result.md
+- docs/rdpi/work/work-20260510-typed-task-intents/research.md
+- docs/rdpi/work/work-20260510-typed-task-intents/design.md
+- docs/rdpi/work/work-20260510-typed-task-intents/plan.md
+- docs/rdpi/work/work-20260510-typed-task-intents/result.md
   created_at: 2026-05-09
   last_verified_at: 2026-05-09
 
@@ -36,7 +36,7 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260509-make-audit-pipeline-toolful.
+Current capsule for entity aif-handoff, refreshed by task work-20260510-typed-task-intents.
 
 # Why it matters
 
@@ -49,3 +49,14 @@ Reuse before editing the same component or domain.
 # When not to reuse
 
 Do not reuse if the entity boundary or ownership changed.
+
+## Active decisions
+
+- The shared intent contract is reusable project knowledge after implementation if tests and review pass.
+- The compatibility rule between `isFix` and `taskIntent: "fix"` may be worth documenting in memory after close-out.
+- `general`
+- `audit`
+- `feature`
+- `fix`
+- `spike`
+- `docs`

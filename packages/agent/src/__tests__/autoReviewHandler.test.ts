@@ -317,6 +317,10 @@ describe("handleAutoReviewGate", () => {
           text: "Persist auto review state",
         },
       ],
+      task: expect.objectContaining({
+        id: "task-1",
+        autoMode: true,
+      }),
     });
   });
 

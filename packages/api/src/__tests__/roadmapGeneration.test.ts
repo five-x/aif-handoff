@@ -72,6 +72,18 @@ function createProjectWithDescription(descriptionContent: string) {
   return { projectId, tmpDir };
 }
 
+function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
+  return [
+    "Scope: src/config.ts, src/index.ts",
+    "Allowed changes: only create/update one report artifact.",
+    `Report artifact: ${reportName}`,
+    "Acceptance criteria: inspect the scoped files and record findings or none.",
+    "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, and Verification: Command ... output ...",
+    "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
+    "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+  ].join("\n");
+}
+
 describe("roadmapGeneration", () => {
   beforeEach(() => {
     testDb.current = createTestDb();
@@ -199,6 +211,71 @@ describe("roadmapGeneration", () => {
       });
       expect(result.content).toContain("e-commerce");
     });
+
+    it.each(["audit-logging", "security-review", "tests", "coverage", "build", "add-checkout"])(
+      "should keep generic roadmap prompts for typed-looking alias %s without explicit intent",
+      async (roadmapAlias) => {
+        const { projectId } = createProjectWithDescription("# My App\nA platform service");
+
+        mockRunApiRuntimeOneShot.mockResolvedValue({
+          result: {
+            outputText:
+              "# Project Roadmap\n\n> Add audit logging and improve test coverage\n\n## Milestones\n\n- [ ] **Audit logging** - Capture events\n",
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              costUsd: 0,
+            },
+          },
+          context: {},
+        });
+
+        await generateRoadmapFile({
+          projectId,
+          roadmapAlias,
+          vision: "Add audit logging, run a security review, and improve test coverage",
+        });
+
+        const callArgs = mockRunApiRuntimeOneShot.mock.calls[0][0];
+        expect(callArgs.prompt).toContain("ROADMAP.md");
+        expect(callArgs.prompt).not.toContain("diagnostic audit decomposition roadmap");
+        expect(callArgs.prompt).not.toContain("test-only backlog");
+        expect(callArgs.prompt).not.toContain('Every task must set "taskIntent": "feature"');
+      },
+    );
+
+    it("should generate a diagnostic audit roadmap when audit intent is requested", async () => {
+      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText:
+            "# Project Audit Roadmap\n\n> Audit the project\n\n## Audit Tasks\n\n- [ ] **Audit: configuration** - Diagnostic-only audit.\n",
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit-logging",
+        taskIntent: "audit",
+        vision: "\u043f\u0440\u043e\u0432\u0435\u0434\u0438 \u0430\u0443\u0434\u0438\u0442",
+      });
+
+      const callArgs = mockRunApiRuntimeOneShot.mock.calls[0][0];
+      expect(callArgs.prompt).toContain("diagnostic audit decomposition roadmap");
+      expect(callArgs.prompt).toContain(
+        "Do not create implementation, fixing, refactoring, hardening",
+      );
+      expect(callArgs.prompt).toContain("Report artifact: audit/");
+    });
   });
 
   describe("generateRoadmapTasks", () => {
@@ -254,6 +331,47 @@ describe("roadmapGeneration", () => {
       expect(result.tasks).toHaveLength(2);
       expect(result.tasks[0].title).toBe("Task A");
     });
+
+    it.each(["audit-logging", "security-review", "tests", "coverage", "build", "add-checkout"])(
+      "keeps generic roadmap extraction general for typed-looking alias %s",
+      async (roadmapAlias) => {
+        const { projectId } = createProjectWithRoadmap(
+          "# Roadmap\n- [ ] **Add audit logging** - Capture security review events",
+        );
+
+        mockRunApiRuntimeOneShot.mockResolvedValue({
+          result: {
+            outputText: JSON.stringify({
+              alias: "v1",
+              tasks: [
+                {
+                  title: "Add audit logging",
+                  taskIntent: "audit",
+                  description: "Capture security review events",
+                  phase: 1,
+                  phaseName: "Observability",
+                  sequence: 1,
+                },
+              ],
+            }),
+            usage: {
+              inputTokens: 100,
+              outputTokens: 50,
+              totalTokens: 150,
+              costUsd: 0.001,
+            },
+          },
+          context: {},
+        });
+
+        const result = await generateRoadmapTasks({ projectId, roadmapAlias });
+
+        expect(result.tasks[0].taskIntent).toBe("general");
+        const callArgs = mockRunApiRuntimeOneShot.mock.calls[0][0];
+        expect(callArgs.prompt).toContain("project roadmap");
+        expect(callArgs.prompt).not.toContain("diagnostic audit roadmap");
+      },
+    );
 
     it("should handle agent returning markdown-fenced JSON", async () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap\n- [ ] X");
@@ -318,6 +436,40 @@ describe("roadmapGeneration", () => {
         RoadmapGenerationError,
       );
     });
+
+    it("should reject generic implementation tasks for audit roadmap imports", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        "# Project Audit Roadmap\n- [ ] **Resolve Critical Bugs** - Fix crashes",
+      );
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: JSON.stringify({
+            alias: "audit",
+            tasks: [
+              {
+                title: "Resolve Critical Bugs",
+                description: "Fix crashes",
+                phase: 1,
+                phaseName: "Phase 1",
+                sequence: 1,
+              },
+            ],
+          }),
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit-logging", taskIntent: "audit" }),
+      ).rejects.toThrow("Audit roadmap extraction produced non-diagnostic or incomplete tasks");
+    });
   });
 
   describe("importGeneratedTasks", () => {
@@ -360,6 +512,142 @@ describe("roadmapGeneration", () => {
         expect(task.planDocs).toBe(false);
         expect(task.planTests).toBe(false);
       }
+    });
+
+    it.each(["audit-logging", "security-review", "tests", "coverage", "build", "add-checkout"])(
+      "should keep typed-looking import alias %s as general without explicit intent",
+      (alias) => {
+        const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+        const result = importGeneratedTasks(projectId, {
+          alias,
+          tasks: [
+            {
+              title: "Add audit logging",
+              description: "Capture security review events and test coverage notes",
+              phase: 1,
+              phaseName: "Observability",
+              sequence: 1,
+            },
+          ],
+        });
+
+        expect(result.created).toBe(1);
+        const [task] = findTasksByRoadmapAlias(projectId, alias);
+        expect(task.taskIntent).toBe("general");
+        expect(task.plannerMode).toBe("fast");
+        expect(task.skipReview).toBe(true);
+        expect(task.tags).toContain("kind:general");
+        expect(task.tags).not.toContain("diagnostic-only");
+      },
+    );
+
+    it("should import audit roadmap tasks with full planning and review enabled", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = importGeneratedTasks(projectId, {
+        alias: "audit",
+        taskIntent: "audit",
+        tasks: [
+          {
+            title: "Audit: configuration",
+            description: auditTaskDescription(),
+            phase: 1,
+            phaseName: "Audit",
+            sequence: 1,
+          },
+        ],
+      });
+
+      expect(result.created).toBe(1);
+      const [task] = findTasksByRoadmapAlias(projectId, "audit");
+      expect(task.taskIntent).toBe("audit");
+      expect(task.plannerMode).toBe("full");
+      expect(task.planDocs).toBe(true);
+      expect(task.planTests).toBe(true);
+      expect(task.skipReview).toBe(false);
+      expect(task.useSubagents).toBe(true);
+      expect(task.tags).toContain("kind:audit");
+      expect(task.tags).toContain("diagnostic-only");
+    });
+
+    it("should ignore per-task typed intent when import batch intent is omitted", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = importGeneratedTasks(projectId, {
+        alias: "feature-checkout",
+        tasks: [
+          {
+            title: "Add checkout flow",
+            taskIntent: "feature",
+            description:
+              "Acceptance criteria: users can submit checkout.\nVerification: npm test -- checkout passes.",
+            phase: 1,
+            phaseName: "Feature",
+            sequence: 1,
+          },
+        ],
+      });
+
+      expect(result.created).toBe(1);
+      const [task] = findTasksByRoadmapAlias(projectId, "feature-checkout");
+      expect(task.taskIntent).toBe("general");
+      expect(task.plannerMode).toBe("fast");
+      expect(task.planDocs).toBe(false);
+      expect(task.planTests).toBe(false);
+      expect(task.skipReview).toBe(true);
+      expect(task.tags).toContain("kind:general");
+    });
+
+    it("should import feature roadmap tasks with typed feature defaults when batch intent is explicit", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = importGeneratedTasks(projectId, {
+        alias: "feature-checkout",
+        taskIntent: "feature",
+        tasks: [
+          {
+            title: "Add checkout flow",
+            taskIntent: "feature",
+            description:
+              "Acceptance criteria: users can submit checkout.\nVerification: npm test -- checkout passes.",
+            phase: 1,
+            phaseName: "Feature",
+            sequence: 1,
+          },
+        ],
+      });
+
+      expect(result.created).toBe(1);
+      const [task] = findTasksByRoadmapAlias(projectId, "feature-checkout");
+      expect(task.taskIntent).toBe("feature");
+      expect(task.plannerMode).toBe("full");
+      expect(task.planDocs).toBe(true);
+      expect(task.planTests).toBe(true);
+      expect(task.skipReview).toBe(false);
+      expect(task.tags).toContain("kind:feature");
+    });
+
+    it("should reject per-task intent mismatches in explicitly typed import batches", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "feature-checkout",
+          taskIntent: "feature",
+          tasks: [
+            {
+              title: "Add checkout flow",
+              taskIntent: "docs",
+              description:
+                "Acceptance criteria: users can submit checkout.\nVerification: npm test -- checkout passes.",
+              phase: 1,
+              phaseName: "Feature",
+              sequence: 1,
+            },
+          ],
+        }),
+      ).toThrow("Generated task intent mismatch");
     });
 
     it("should apply full-mode defaults for parallel-enabled projects (still skipReview=true)", () => {

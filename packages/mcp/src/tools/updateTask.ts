@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { logger } from "@aif/shared";
+import { logger, TASK_INTENTS, type TaskIntent } from "@aif/shared";
 import { findTaskById, updateTask, toTaskResponse } from "@aif/data";
 import { registerMcpTool, type ToolContext } from "./index.js";
 import { rateLimitError, toMcpError, validationError } from "../middleware/errorHandler.js";
@@ -26,6 +26,7 @@ const updateTaskInputSchema: Record<string, z.ZodTypeAny> = {
   tags: z.array(z.string()).optional().describe("Updated tags"),
   plan: z.string().nullable().optional().describe("Plan content (null to clear)"),
   autoMode: z.boolean().optional().describe("Enable/disable auto mode"),
+  taskIntent: z.enum(TASK_INTENTS).optional().describe("Typed task intent"),
   isFix: z.boolean().optional().describe("Mark/unmark as fix"),
   plannerMode: z.enum(["fast", "full"]).optional().describe("Planner mode"),
   planDocs: z.boolean().optional().describe("Include documentation in plan"),
@@ -63,6 +64,7 @@ type UpdateTaskArgs = {
   description?: string;
   implementationLog?: string | null;
   isFix?: boolean;
+  taskIntent?: TaskIntent;
   maxReviewIterations?: number;
   modelOverride?: string | null;
   paused?: boolean;

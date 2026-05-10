@@ -1,5 +1,11 @@
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
-import type { AutoReviewFinding, AutoReviewStrategy } from "@aif/shared";
+import {
+  hasSubstantiveReportEvidence,
+  isRiskyTask,
+  type AutoReviewFinding,
+  type AutoReviewStrategy,
+  type TaskCompletionEvidenceTask,
+} from "@aif/shared";
 import {
   createAutoReviewFindingId,
   parseStructuredReviewComments,
@@ -12,7 +18,8 @@ export type ReviewGateParserMode = "structured" | "fallback";
 
 export type ReviewGateManualHandoffReason =
   | "new_blockers_after_rework"
-  | "malformed_review_output_fallback";
+  | "malformed_review_output_fallback"
+  | "risky_review_without_substantive_evidence";
 
 export interface ReviewGateMetrics {
   strategy: AutoReviewStrategy;
@@ -52,6 +59,7 @@ export interface ReviewGateInput {
   strategy: AutoReviewStrategy;
   iteration: number;
   previousFindings: AutoReviewFinding[];
+  task?: TaskCompletionEvidenceTask;
 }
 
 const SUCCESS_TOKEN = "SUCCESS";
@@ -186,6 +194,9 @@ function buildStructuredDecision(
   });
 
   if (parsed.blockingFindings.length === 0) {
+    if (requiresSubstantiveReviewEvidence(input)) {
+      return buildSubstantiveEvidenceHandoff(input, metrics);
+    }
     return {
       status: "success",
       metrics,
@@ -264,6 +275,9 @@ function buildFallbackDecision(
   }
 
   if (fallbackFindings.length === 0) {
+    if (requiresSubstantiveReviewEvidence(input)) {
+      return buildSubstantiveEvidenceHandoff(input, metrics);
+    }
     return {
       status: "success",
       metrics,
@@ -282,6 +296,45 @@ function buildFallbackDecision(
       strategy: input.strategy,
       iteration: input.iteration,
       findings: fallbackFindings,
+    }),
+  };
+}
+
+function requiresSubstantiveReviewEvidence(input: ReviewGateInput): boolean {
+  if (!input.task || !isRiskyTask(input.task)) return false;
+  return !hasSubstantiveReportEvidence({
+    text: input.reviewComments ?? "",
+    projectRoot: input.projectRoot,
+  });
+}
+
+function buildSubstantiveEvidenceHandoff(
+  input: ReviewGateInput,
+  metrics: ReviewGateMetrics,
+): ReviewGateResult {
+  const finding: AutoReviewFinding = {
+    id: createAutoReviewFindingId(
+      "review_gate",
+      "Risky audit/review/discovery acceptance requires substantive review evidence",
+    ),
+    source: "review_gate",
+    text: "Risky audit/review/discovery acceptance requires substantive review evidence.",
+  };
+
+  return {
+    status: "manual_review_required",
+    handoffReason: "risky_review_without_substantive_evidence",
+    metrics: {
+      ...metrics,
+      newBlockingCount: metrics.newBlockingCount + 1,
+      totalBlockingCount: metrics.totalBlockingCount + 1,
+    },
+    blockingFindings: [finding],
+    fixesMarkdown: formatFixesMarkdown([finding]),
+    autoReviewState: toAutoReviewState({
+      strategy: input.strategy,
+      iteration: input.iteration,
+      findings: [finding],
     }),
   };
 }

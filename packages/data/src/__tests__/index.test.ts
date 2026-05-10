@@ -135,6 +135,22 @@ describe("data layer", () => {
       expect(t).toBeDefined();
       expect(t!.title).toBe("T");
       expect(t!.status).toBe("backlog");
+      expect(t!.taskIntent).toBe("general");
+    });
+
+    it("keeps omitted taskIntent as general even when title looks typed", () => {
+      const t = createTask({
+        projectId: "proj-1",
+        title: "Fix audit logging feature",
+        description: "Add security review coverage",
+        isFix: false,
+      });
+
+      expect(t).toBeDefined();
+      expect(t!.taskIntent).toBe("general");
+      expect(t!.isFix).toBe(false);
+      expect(t!.plannerMode).toBe("fast");
+      expect(t!.skipReview).toBe(true);
     });
 
     it("creates a task with all optional fields", () => {
@@ -145,6 +161,7 @@ describe("data layer", () => {
         attachments: [{ type: "file", url: "a.txt" }],
         priority: 2,
         autoMode: true,
+        taskIntent: "fix",
         isFix: true,
         plannerMode: "fast",
         planPath: "/plan.md",
@@ -161,7 +178,25 @@ describe("data layer", () => {
       expect(t!.priority).toBe(2);
       expect(t!.autoMode).toBe(true);
       expect(t!.isFix).toBe(true);
+      expect(t!.taskIntent).toBe("fix");
       expect(t!.roadmapAlias).toBe("alias-1");
+    });
+
+    it("applies typed intent defaults when task settings are omitted", () => {
+      const t = createTask({
+        projectId: "proj-1",
+        title: "Audit configuration",
+        description: "Diagnostic-only audit",
+        taskIntent: "audit",
+      });
+
+      expect(t).toBeDefined();
+      expect(t!.taskIntent).toBe("audit");
+      expect(t!.plannerMode).toBe("full");
+      expect(t!.planDocs).toBe(true);
+      expect(t!.planTests).toBe(true);
+      expect(t!.skipReview).toBe(false);
+      expect(t!.useSubagents).toBe(true);
     });
   });
 
@@ -186,6 +221,71 @@ describe("data layer", () => {
       const t = createTask({ projectId: "proj-1", title: "Old", description: "D" });
       const updated = updateTask(t!.id, { title: "New" });
       expect(updated!.title).toBe("New");
+    });
+
+    it("keeps taskIntent and isFix compatible on update", () => {
+      const t = createTask({ projectId: "proj-1", title: "Docs", description: "D" });
+      const fix = updateTask(t!.id, { isFix: true });
+      expect(fix!.taskIntent).toBe("fix");
+      expect(fix!.isFix).toBe(true);
+
+      const general = updateTask(t!.id, { isFix: false });
+      expect(general!.taskIntent).toBe("general");
+      expect(general!.isFix).toBe(false);
+    });
+
+    it("forces audit defaults when taskIntent changes to audit", () => {
+      const t = createTask({
+        projectId: "proj-1",
+        title: "Audit later",
+        description: "D",
+        plannerMode: "fast",
+        skipReview: true,
+        planDocs: false,
+        planTests: false,
+        useSubagents: false,
+      });
+
+      const updated = updateTask(t!.id, {
+        taskIntent: "audit",
+        plannerMode: "fast",
+        skipReview: true,
+        planDocs: false,
+        planTests: false,
+        useSubagents: false,
+      });
+
+      expect(updated!.taskIntent).toBe("audit");
+      expect(updated!.isFix).toBe(false);
+      expect(updated!.plannerMode).toBe("full");
+      expect(updated!.skipReview).toBe(false);
+      expect(updated!.planDocs).toBe(true);
+      expect(updated!.planTests).toBe(true);
+      expect(updated!.useSubagents).toBe(true);
+    });
+
+    it("preserves audit invariants when later updates omit taskIntent", () => {
+      const t = createTask({
+        projectId: "proj-1",
+        title: "Audit now",
+        description: "D",
+        taskIntent: "audit",
+      });
+
+      const updated = updateTask(t!.id, {
+        plannerMode: "fast",
+        skipReview: true,
+        planDocs: false,
+        planTests: false,
+        useSubagents: false,
+      });
+
+      expect(updated!.taskIntent).toBe("audit");
+      expect(updated!.plannerMode).toBe("full");
+      expect(updated!.skipReview).toBe(false);
+      expect(updated!.planDocs).toBe(true);
+      expect(updated!.planTests).toBe(true);
+      expect(updated!.useSubagents).toBe(true);
     });
 
     it("serializes attachments", () => {

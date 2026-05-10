@@ -4,7 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { rmSync } from "fs";
 import { eq } from "drizzle-orm";
-import { chatSessions } from "../schema.js";
+import { chatSessions, tasks } from "../schema.js";
 import { closeDb, createTestDb, getDb } from "../db.js";
 
 function removeSqliteArtifacts(dbPath: string): void {
@@ -222,6 +222,22 @@ describe("db", () => {
       `,
       )
       .run("legacy-chat", "legacy-project", "Legacy Chat", "legacy-agent-session");
+    sqlite
+      .prepare(
+        `
+        INSERT INTO tasks (id, project_id, title)
+        VALUES (?, ?, ?)
+      `,
+      )
+      .run("legacy-task", "legacy-project", "Legacy Task");
+    sqlite
+      .prepare(
+        `
+        INSERT INTO tasks (id, project_id, title, is_fix)
+        VALUES (?, ?, ?, ?)
+      `,
+      )
+      .run("legacy-fix-task", "legacy-project", "Legacy Fix Task", 1);
     sqlite.pragma("user_version = 5");
     sqlite.close();
 
@@ -235,6 +251,11 @@ describe("db", () => {
 
       expect(migrated).toBeDefined();
       expect(migrated?.runtimeSessionId).toBe("legacy-agent-session");
+      const migratedTask = db.select().from(tasks).where(eq(tasks.id, "legacy-task")).get();
+      expect(migratedTask?.taskIntent).toBe("general");
+      const migratedFixTask = db.select().from(tasks).where(eq(tasks.id, "legacy-fix-task")).get();
+      expect(migratedFixTask?.isFix).toBe(true);
+      expect(migratedFixTask?.taskIntent).toBe("fix");
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -401,7 +422,7 @@ describe("db", () => {
       expect(runtimeProfileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(21);
+      expect(userVersion).toBe(22);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -455,7 +476,7 @@ describe("db", () => {
       migratedSqlite.close();
 
       expect(dirtyIndex).toBeUndefined();
-      expect(userVersion).toBe(21);
+      expect(userVersion).toBe(22);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -525,7 +546,7 @@ describe("db", () => {
       expect(profileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(21);
+      expect(userVersion).toBe(22);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -594,7 +615,7 @@ describe("db", () => {
         ]),
       );
       expect(warmupTable?.name).toBe("runtime_warmup_sessions");
-      expect(userVersion).toBe(21);
+      expect(userVersion).toBe(22);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -641,7 +662,7 @@ describe("db", () => {
         "idx_runtime_warmup_active_lookup",
         "idx_runtime_warmup_expires",
       ]);
-      expect(userVersion).toBe(21);
+      expect(userVersion).toBe(22);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);

@@ -2,7 +2,15 @@ import { Hono } from "hono";
 import { jsonValidator } from "../middleware/zodValidator.js";
 import { internalBroadcastAuth } from "../middleware/internalBroadcastAuth.js";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { logger, parseAttachments, getProjectConfig, defaultsForMode } from "@aif/shared";
+import {
+  logger,
+  parseAttachments,
+  getProjectConfig,
+  defaultsForMode,
+  normalizeTaskIntent,
+  resolveTaskIntentDefaults,
+  getEnv,
+} from "@aif/shared";
 import {
   createTaskSchema,
   updateTaskSchema,
@@ -135,31 +143,48 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
     ? getProjectConfig(project.rootPath).paths.plan
     : ".ai-factory/PLAN.md";
 
-  // Parallel-enabled projects enforce full mode and unique planPath
-  if (project?.parallelEnabled) {
-    body.plannerMode = "full";
-  }
+  const taskIntent = body.isFix === true ? "fix" : normalizeTaskIntent(body.taskIntent, "general");
+  const envUseSubagents = getEnv().AGENT_USE_SUBAGENTS;
+  const intentDefaults = resolveTaskIntentDefaults(taskIntent, {
+    envUseSubagents,
+  });
+  const resolvedPlannerMode = project?.parallelEnabled
+    ? "full"
+    : (body.plannerMode ?? intentDefaults.plannerMode);
+  const generalModeDefaults = defaultsForMode(resolvedPlannerMode);
+  const flagDefaults = taskIntent === "general" ? generalModeDefaults : intentDefaults;
+  const resolvedIsFix = taskIntent === "fix";
 
   // Fill omitted flag values from mode-driven defaults (mirror of web UI behavior).
-  const modeDefaults = defaultsForMode(body.plannerMode);
-  const resolvedSkipReview = body.skipReview ?? modeDefaults.skipReview;
-  const resolvedPlanDocs = body.planDocs ?? modeDefaults.planDocs;
-  const resolvedPlanTests = body.planTests ?? modeDefaults.planTests;
+  const resolvedSkipReview =
+    taskIntent === "audit" ? false : (body.skipReview ?? flagDefaults.skipReview);
+  const resolvedPlanDocs = body.planDocs ?? flagDefaults.planDocs;
+  const resolvedPlanTests = body.planTests ?? flagDefaults.planTests;
+  const resolvedUseSubagents =
+    taskIntent === "audit" || taskIntent === "spike"
+      ? true
+      : (body.useSubagents ??
+        (taskIntent === "general" ? envUseSubagents : intentDefaults.useSubagents));
   if (
+    body.plannerMode === undefined ||
     body.skipReview === undefined ||
     body.planDocs === undefined ||
-    body.planTests === undefined
+    body.planTests === undefined ||
+    body.useSubagents === undefined
   ) {
     log.debug(
       {
-        plannerMode: body.plannerMode,
+        plannerMode: resolvedPlannerMode,
+        taskIntent,
         filled: {
+          plannerMode: body.plannerMode === undefined,
           skipReview: body.skipReview === undefined,
           planDocs: body.planDocs === undefined,
           planTests: body.planTests === undefined,
+          useSubagents: body.useSubagents === undefined,
         },
       },
-      "Applied mode-driven task flag defaults",
+      "Applied intent-driven task defaults",
     );
   }
 
@@ -171,13 +196,14 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
     attachments: [],
     priority: body.priority,
     autoMode: body.autoMode,
-    isFix: body.isFix,
-    plannerMode: body.plannerMode,
+    taskIntent,
+    isFix: resolvedIsFix,
+    plannerMode: resolvedPlannerMode,
     planPath: body.planPath ?? defaultPlanPath,
     planDocs: resolvedPlanDocs,
     planTests: resolvedPlanTests,
     skipReview: resolvedSkipReview,
-    useSubagents: body.useSubagents,
+    useSubagents: resolvedUseSubagents,
     maxReviewIterations: body.maxReviewIterations,
     paused: body.paused,
     runtimeProfileId: body.runtimeProfileId,

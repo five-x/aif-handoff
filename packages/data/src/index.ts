@@ -32,6 +32,7 @@ import {
   parseTaskTokenUsage,
   persistTaskPlan,
   projects,
+  resolveTaskIntentDefaults,
   taskComments,
   tasks,
   runtimeProfiles,
@@ -56,7 +57,9 @@ import {
   type UpdateRuntimeProfileInput,
   type RuntimeWarmupSessionStatus,
   type Task,
+  type TaskIntent,
   type TaskStatus,
+  normalizeTaskIntent,
   resolveRuntimeLimitFutureHint,
   sanitizeRuntimeLimitSnapshotForExposure,
   selectViolatedWindowForExactThreshold,
@@ -73,6 +76,14 @@ const log = createLogger("data");
 const AUTO_REVIEW_STRATEGY_SET = new Set<string>(AUTO_REVIEW_STRATEGIES);
 const AUTO_REVIEW_FINDING_SOURCE_SET = new Set<string>(AUTO_REVIEW_FINDING_SOURCES);
 const APP_SETTINGS_ID = 1;
+
+function resolvePersistedTaskIntent(input: {
+  taskIntent?: TaskIntent | null;
+  isFix?: boolean | null;
+}): TaskIntent {
+  if (input.isFix === true) return "fix";
+  return normalizeTaskIntent(input.taskIntent, "general");
+}
 
 export type TaskRow = typeof tasks.$inferSelect;
 export type CommentRow = typeof taskComments.$inferSelect;
@@ -121,6 +132,7 @@ export type TaskFieldsUpdate = {
   attachments?: unknown[];
   priority?: number;
   autoMode?: boolean;
+  taskIntent?: TaskIntent;
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
@@ -553,7 +565,7 @@ export function getMinBacklogPosition(projectId: string): number | null {
 /** Summary projection — excludes heavy text fields for list/search responses. */
 export type TaskSummaryRow = Pick<TaskRow,
   | "id" | "projectId" | "title" | "status" | "priority" | "position"
-  | "autoMode" | "isFix" | "paused" | "roadmapAlias" | "tags"
+  | "autoMode" | "taskIntent" | "isFix" | "paused" | "roadmapAlias" | "tags"
   | "runtimeProfileId" | "modelOverride"
   | "blockedReason" | "blockedFromStatus" | "retryAfter" | "retryCount"
   | "reworkRequested" | "reviewIterationCount" | "maxReviewIterations" | "manualReviewRequired"
@@ -569,6 +581,7 @@ const SUMMARY_COLUMNS = {
   priority: tasks.priority,
   position: tasks.position,
   autoMode: tasks.autoMode,
+  taskIntent: tasks.taskIntent,
   isFix: tasks.isFix,
   paused: tasks.paused,
   roadmapAlias: tasks.roadmapAlias,
@@ -693,6 +706,7 @@ export function createTask(input: {
   attachments?: unknown[];
   priority?: number;
   autoMode?: boolean;
+  taskIntent?: TaskIntent;
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
@@ -713,10 +727,30 @@ export function createTask(input: {
   const db = getDb();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const taskIntent = resolvePersistedTaskIntent(input);
+  const intentDefaults = resolveTaskIntentDefaults(taskIntent, {
+    envUseSubagents: getEnv().AGENT_USE_SUBAGENTS,
+  });
+  let plannerMode = input.plannerMode ?? intentDefaults.plannerMode;
+  const isFix = taskIntent === "fix";
+  let planDocs = input.planDocs ?? intentDefaults.planDocs;
+  let planTests = input.planTests ?? intentDefaults.planTests;
+  let skipReview = input.skipReview ?? intentDefaults.skipReview;
+  let useSubagents = input.useSubagents ?? intentDefaults.useSubagents;
+
+  if (taskIntent === "audit") {
+    plannerMode = "full";
+    planDocs = true;
+    planTests = true;
+    skipReview = false;
+    useSubagents = true;
+  } else if (taskIntent === "spike") {
+    useSubagents = true;
+  }
 
   // Auto-compute planPath for full mode when no explicit path is provided
   let resolvedPlanPath = input.planPath;
-  if (input.plannerMode === "full") {
+  if (plannerMode === "full") {
     const project = findProjectById(input.projectId);
     const projectRoot = project?.rootPath ?? process.cwd();
     const cfg = getProjectConfig(projectRoot);
@@ -740,13 +774,14 @@ export function createTask(input: {
       attachments: JSON.stringify(input.attachments ?? []),
       priority: input.priority,
       autoMode: input.autoMode,
-      isFix: input.isFix,
-      plannerMode: input.plannerMode,
+      taskIntent,
+      isFix,
+      plannerMode,
       planPath: resolvedPlanPath,
-      planDocs: input.planDocs,
-      planTests: input.planTests,
-      skipReview: input.skipReview,
-      useSubagents: input.useSubagents,
+      planDocs,
+      planTests,
+      skipReview,
+      useSubagents,
       maxReviewIterations: input.maxReviewIterations,
       paused: input.paused,
       runtimeProfileId: input.runtimeProfileId ?? null,
@@ -779,6 +814,46 @@ export function createTask(input: {
 export function updateTask(id: string, fields: TaskFieldsUpdate): TaskRow | undefined {
   const { attachments, tags, runtimeOptions, autoReviewState, ...rest } = fields;
   const patch: TaskFieldsPatch = { ...rest, updatedAt: new Date().toISOString() };
+  const existing = findTaskById(id);
+  let effectiveIntent = existing?.taskIntent;
+  if (fields.taskIntent !== undefined || fields.isFix !== undefined) {
+    let normalizedIntent: TaskIntent | undefined;
+    if (fields.taskIntent !== undefined) {
+      normalizedIntent = resolvePersistedTaskIntent({
+        taskIntent: fields.taskIntent,
+        isFix: fields.isFix,
+      });
+    } else if (fields.isFix === true) {
+      normalizedIntent = "fix";
+    } else if (fields.isFix === false) {
+      normalizedIntent = existing?.taskIntent === "fix" ? "general" : existing?.taskIntent;
+    }
+
+    if (normalizedIntent !== undefined) {
+      effectiveIntent = normalizedIntent;
+      patch.taskIntent = normalizedIntent;
+      patch.isFix = normalizedIntent === "fix";
+      if (normalizedIntent !== existing?.taskIntent && normalizedIntent !== "general") {
+        const intentDefaults = resolveTaskIntentDefaults(normalizedIntent, {
+          envUseSubagents: getEnv().AGENT_USE_SUBAGENTS,
+        });
+        patch.plannerMode = patch.plannerMode ?? intentDefaults.plannerMode;
+        patch.planDocs = patch.planDocs ?? intentDefaults.planDocs;
+        patch.planTests = patch.planTests ?? intentDefaults.planTests;
+        patch.skipReview = patch.skipReview ?? intentDefaults.skipReview;
+        patch.useSubagents = patch.useSubagents ?? intentDefaults.useSubagents;
+      }
+    }
+  }
+  if (effectiveIntent === "audit") {
+    patch.plannerMode = "full";
+    patch.planDocs = true;
+    patch.planTests = true;
+    patch.skipReview = false;
+    patch.useSubagents = true;
+  } else if (effectiveIntent === "spike") {
+    patch.useSubagents = true;
+  }
   if (attachments !== undefined) {
     patch.attachments = JSON.stringify(attachments);
   }
