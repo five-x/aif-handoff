@@ -342,6 +342,151 @@ function validateAuditGeneratedBatch(tasks: GeneratedTask[]): string[] {
   return issues;
 }
 
+function auditSlug(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "area"
+  );
+}
+
+function buildAuditRoadmapItem(title: string, scope: string, reportPath: string): string {
+  return [
+    `- [ ] **${title}** - Diagnostic-only audit.`,
+    `  - Scope: ${scope}`,
+    `  - Allowed changes: only create/update ${reportPath}.`,
+    `  - Report artifact: ${reportPath}`,
+    "  - Acceptance criteria: inspect the scoped files and record concrete findings or explicitly record no findings.",
+    "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, and Verification: Command ... output ...",
+    "  - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
+    "  - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+  ].join("\n");
+}
+
+function buildDeterministicAuditRoadmapContent(ctx: {
+  description: string | null;
+  architecture: string | null;
+  vision: string | null;
+}): string {
+  const reportDate = new Date().toISOString().slice(0, 10);
+  const goal =
+    ctx.vision?.trim().replace(/\s+/g, " ").slice(0, 180) ||
+    "Audit the project for security, performance, correctness, and operational readiness";
+  const areas = [
+    {
+      title: "Audit: project structure and task routing",
+      scope: "package.json, turbo.json, packages/api/src, packages/web/src, packages/shared/src",
+    },
+    {
+      title: "Audit: security and configuration controls",
+      scope: ".env.example, docs/configuration.md, packages/shared/src/env.ts, packages/api/src",
+    },
+    {
+      title: "Audit: performance and realtime behavior",
+      scope: "packages/api/src, packages/web/src, packages/runtime/src, docs/api.md",
+    },
+    {
+      title: "Audit: persistence and migration safety",
+      scope: "packages/shared/src, packages/data/src, docs/api.md",
+    },
+    {
+      title: "Audit: runtime orchestration boundaries",
+      scope: "packages/runtime/src, packages/agent/src, docs/providers.md",
+    },
+    {
+      title: "Audit: test and operations readiness",
+      scope:
+        "packages/api/src/__tests__, packages/shared/src/__tests__, docker-compose.yml, docker-compose.production.yml, docs/ops",
+    },
+  ];
+
+  const tasks = areas.map((area) =>
+    buildAuditRoadmapItem(
+      area.title,
+      area.scope,
+      `audit/${reportDate}-${auditSlug(area.title)}-audit.md`,
+    ),
+  );
+  tasks.push(
+    buildAuditRoadmapItem(
+      "Synthesize audit findings",
+      `all audit/${reportDate}-*-audit.md reports from this audit batch`,
+      `audit/${reportDate}-summary.md`,
+    ),
+  );
+
+  return [
+    "# Project Audit Roadmap",
+    "",
+    `> ${goal}`,
+    "",
+    "## Audit Tasks",
+    "",
+    tasks.join("\n\n"),
+  ].join("\n");
+}
+
+function ensureGeneratedAuditRoadmapContent(
+  content: string,
+  ctx: {
+    description: string | null;
+    architecture: string | null;
+    vision: string | null;
+  },
+  source: "file" | "output",
+): string {
+  try {
+    validateAuditRoadmapSource(content);
+    return content;
+  } catch (err) {
+    log.warn(
+      {
+        err,
+        source,
+      },
+      "Generated audit roadmap failed validation; using deterministic diagnostic fallback",
+    );
+    const fallback = buildDeterministicAuditRoadmapContent(ctx);
+    validateAuditRoadmapSource(fallback);
+    return fallback;
+  }
+}
+
+function auditDescriptionFromItem(item: AuditRoadmapItem): string {
+  return item.text
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => line.trim().replace(/^-\s+/, ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildAuditRoadmapGenerationResult(
+  roadmapContent: string,
+  alias: string,
+): RoadmapGenerationResult {
+  let auditSequence = 0;
+  let synthesisSequence = 0;
+  return {
+    alias,
+    taskIntent: "audit",
+    tasks: extractAuditRoadmapItems(roadmapContent).map((item) => {
+      const synthesis = isAuditSynthesisTitle(item.title);
+      const sequence = synthesis ? ++synthesisSequence : ++auditSequence;
+      return {
+        title: item.title,
+        taskIntent: "audit" as const,
+        description: auditDescriptionFromItem(item),
+        phase: synthesis ? 2 : 1,
+        phaseName: synthesis ? "Synthesis" : "Audit",
+        sequence,
+      };
+    }),
+  };
+}
+
 export async function generateRoadmapFile(
   input: GenerateRoadmapFileInput,
 ): Promise<GenerateRoadmapFileResult> {
@@ -414,26 +559,29 @@ export async function generateRoadmapFile(
   mkdirSync(dirname(roadmapPath), { recursive: true });
 
   let content: string;
+  const auditContext = { description, architecture, vision: vision ?? null };
   if (existsSync(roadmapPath)) {
     const fileContent = readFileSync(roadmapPath, "utf8").trim();
     // Verify agent wrote a real roadmap, not just a stub
     if (fileContent.length > 100 && (fileContent.includes("- [") || fileContent.includes("##"))) {
       if (intent === "audit") {
-        validateAuditRoadmapSource(fileContent);
+        content = ensureGeneratedAuditRoadmapContent(fileContent, auditContext, "file");
+        writeFileSync(roadmapPath, content, "utf8");
+      } else {
+        content = fileContent;
       }
-      content = fileContent;
       log.info({ projectId, roadmapPath, source: "file" }, "Using roadmap file written by agent");
     } else {
       content = extractRoadmapContent(rawResult);
       if (intent === "audit") {
-        validateAuditRoadmapSource(content);
+        content = ensureGeneratedAuditRoadmapContent(content, auditContext, "output");
       }
       writeFileSync(roadmapPath, content, "utf8");
     }
   } else if (rawResult) {
     content = extractRoadmapContent(rawResult);
     if (intent === "audit") {
-      validateAuditRoadmapSource(content);
+      content = ensureGeneratedAuditRoadmapContent(content, auditContext, "output");
     }
     writeFileSync(roadmapPath, content, "utf8");
   } else {
@@ -603,6 +751,13 @@ export async function generateRoadmapTasks(
   const intent = resolveExplicitRoadmapIntent(taskIntent);
   if (intent === "audit") {
     validateAuditRoadmapSource(roadmapContent);
+    const result = buildAuditRoadmapGenerationResult(roadmapContent, roadmapAlias);
+    validateRoadmapTasks(result, intent);
+    log.info(
+      { projectId, roadmapAlias, taskCount: result.tasks.length, source: "deterministic-audit" },
+      "Audit roadmap generation complete",
+    );
+    return result;
   }
   const prompt = buildExtractionPrompt(roadmapContent, roadmapAlias, intent);
 
