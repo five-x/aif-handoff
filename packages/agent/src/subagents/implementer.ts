@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
@@ -181,10 +181,20 @@ function readValidatedArtifactContent(input: {
   };
 }
 
-function buildValidatedAuditSynthesisInput(taskId: string, fallbackRoot: string): string {
+interface ValidatedAuditArtifactContent {
+  artifactPath: string;
+  taskId: string;
+  source: string;
+  content: string;
+}
+
+function readValidatedAuditArtifacts(
+  taskId: string,
+  fallbackRoot: string,
+): ValidatedAuditArtifactContent[] {
   const synthesisArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   if (!synthesisArtifact || synthesisArtifact.role !== "synthesis") {
-    return "No validated audit batch input required for this task.";
+    return [];
   }
 
   const summary = summarizeRoadmapBatch(synthesisArtifact.batchId);
@@ -201,7 +211,7 @@ function buildValidatedAuditSynthesisInput(taskId: string, fallbackRoot: string)
     throw new Error("synthesis_not_ready: no validated audit report artifacts are available");
   }
 
-  const sections = reports.map((artifact) => {
+  return reports.map((artifact) => {
     const root = artifact.projectRoot ?? fallbackRoot;
     const { content, source } = readValidatedArtifactContent({
       artifactPath: artifact.artifactPath,
@@ -212,16 +222,102 @@ function buildValidatedAuditSynthesisInput(taskId: string, fallbackRoot: string)
     if (!content) {
       throw new Error(`synthesis_not_ready: validated artifact is empty: ${artifact.artifactPath}`);
     }
+    return {
+      artifactPath: artifact.artifactPath,
+      taskId: artifact.taskId,
+      source,
+      content,
+    };
+  });
+}
+
+function formatValidatedAuditSynthesisInput(artifacts: ValidatedAuditArtifactContent[]): string {
+  if (artifacts.length === 0) {
+    return "No validated audit batch input required for this task.";
+  }
+
+  const sections = artifacts.map((artifact) => {
     return [
       `--- artifact: ${artifact.artifactPath}`,
       `task: ${artifact.taskId}`,
-      `source: ${source}`,
+      `source: ${artifact.source}`,
       "---",
-      content,
+      artifact.content,
     ].join("\n");
   });
 
   return sections.join("\n\n");
+}
+
+function commitArtifactIfChanged(projectRoot: string, artifactPath: string): string {
+  const gitPath = normalizeArtifactGitPath(artifactPath);
+  execFileSync("git", ["add", "--", gitPath], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const status = execFileSync("git", ["status", "--short", "--", gitPath], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (status) {
+    execFileSync("git", ["commit", "--no-verify", "-m", "Audit: synthesize validated reports"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+  return execFileSync("git", ["log", "-1", "--name-only", "--oneline", "--", gitPath], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function buildDeterministicAuditSynthesisContent(
+  artifacts: ValidatedAuditArtifactContent[],
+): string {
+  const lines = [
+    "# Audit Summary",
+    "",
+    "Generated from validated audit batch reports.",
+    "",
+    "## Source Reports",
+    "",
+    ...artifacts.map((artifact) => `- ${artifact.artifactPath} (task ${artifact.taskId})`),
+    "",
+    "## Findings By Source Report",
+    "",
+  ];
+
+  artifacts.forEach((artifact, index) => {
+    lines.push(`### Source Report ${index + 1}: ${artifact.artifactPath}`);
+    lines.push("");
+    lines.push(artifact.content.trim());
+    lines.push("");
+  });
+
+  return `${lines.join("\n").trim()}\n`;
+}
+
+function runDeterministicAuditSynthesisRework(input: {
+  task: TaskRow;
+  projectRoot: string;
+  artifactPath: string;
+  artifacts: ValidatedAuditArtifactContent[];
+}): string {
+  const artifactPath = resolve(input.projectRoot, input.artifactPath);
+  mkdirSync(dirname(artifactPath), { recursive: true });
+  const content = buildDeterministicAuditSynthesisContent(input.artifacts);
+  writeFileSync(artifactPath, content, "utf8");
+  const gitLog = commitArtifactIfChanged(input.projectRoot, input.artifactPath);
+  return [
+    "Deterministic audit synthesis rework completed from validated report artifacts.",
+    `Report artifact: ${input.artifactPath}`,
+    "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
+    gitLog,
+  ].join("\n");
 }
 
 async function runChecklistSyncQuery(input: {
@@ -334,7 +430,10 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   const isAuditSynthesisTask = roadmapArtifact?.role === "synthesis";
   const expectedSynthesisArtifactPath = isAuditSynthesisTask ? roadmapArtifact.artifactPath : null;
-  const validatedAuditSynthesisInput = buildValidatedAuditSynthesisInput(taskId, projectRoot);
+  const validatedAuditArtifacts = isAuditSynthesisTask
+    ? readValidatedAuditArtifacts(taskId, projectRoot)
+    : [];
+  const validatedAuditSynthesisInput = formatValidatedAuditSynthesisInput(validatedAuditArtifacts);
 
   if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
     const nowIso = new Date().toISOString();
@@ -360,6 +459,28 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   }
 
   log.info({ taskId, title: task.title, useSubagents }, "Starting implementation stage");
+
+  if (expectedSynthesisArtifactPath && task.reworkRequested) {
+    const nowIso = new Date().toISOString();
+    const resultText = runDeterministicAuditSynthesisRework({
+      task,
+      projectRoot,
+      artifactPath: expectedSynthesisArtifactPath,
+      artifacts: validatedAuditArtifacts,
+    });
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      reworkRequested: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(taskId, "Agent", "Deterministic audit synthesis rework complete");
+    log.info(
+      { taskId, artifactPath: expectedSynthesisArtifactPath },
+      "Audit synthesis rework completed deterministically",
+    );
+    return;
+  }
 
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
 All files must be created and modified inside this directory. Do NOT create files outside of it.`;

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projects, taskComments, tasks } from "@aif/shared";
@@ -304,6 +304,114 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("source: audit/config-report:audit/config.md");
     expect(call.prompt).toContain("producer branch");
     expect(call.prompt).toContain("use those exact validated report contents");
+  });
+
+  it("uses deterministic audit synthesis for rework instead of looping through runtime commits", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "audit", "config.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies project docs from the report branch.",
+        "Risk: Synthesis can miss validated source evidence.",
+        "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md", "audit/config.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed report", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-report-for-deterministic-synthesis",
+        projectId: "project-1",
+        title: "Audit configuration",
+        description: "Report artifact: audit/config.md",
+        taskIntent: "audit",
+        status: "done",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-deterministic-synthesis",
+        projectId: "project-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Synthesize validated audit reports",
+        reworkRequested: true,
+        blockedReason:
+          "invalid_artifact_content: Completion evidence guard (low_quality_report_evidence)",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-report-for-deterministic-synthesis", "task-deterministic-synthesis"],
+      synthesisTaskId: "task-deterministic-synthesis",
+      artifacts: [
+        {
+          taskId: "task-report-for-deterministic-synthesis",
+          role: "report",
+          artifactPath: "audit/config.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-deterministic-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-report-for-deterministic-synthesis",
+      state: "valid",
+      failureFamily: null,
+    });
+
+    await runImplementer("task-deterministic-synthesis", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(summary).toContain("Generated from validated audit batch reports.");
+    expect(summary).toContain("Evidence: `README.md:1`");
+    expect(summary).toContain("Risk: Synthesis can miss validated source evidence.");
+    const gitLog = execFileSync("git", ["log", "-1", "--name-only", "--oneline"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    });
+    expect(gitLog).toContain("audit/summary.md");
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-deterministic-synthesis"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit synthesis rework completed",
+    );
   });
 
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {
