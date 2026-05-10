@@ -99,7 +99,7 @@ const DETERMINISTIC_FALLBACK_REPORT_PATTERN =
 const SLASH_PATH_TOKEN_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,12})(?::\d+(?::\d+)?)?/g;
 const ROOT_FILE_TOKEN_PATTERN =
-  /(?:^|[\s`'"\[(])([\w.-]+\.(?:jsonc|json|jsx|tsx|yaml|yml|mdx|mjs|cjs|bat|cmd|cpp|css|env|hpp|html|ini|java|lock|md|ps1|py|rs|scss|sh|sql|toml|txt|xml|js|ts|go|kt|cs|c|h))(?::\d+(?::\d+)?)?(?=$|[\s`'"\]),.;])/gi;
+  /(?:^|[\s`'"\[(])((?:\.env(?:\.[\w-]+)+)|[\w.-]+\.(?:jsonc|json|jsx|tsx|yaml|yml|mdx|mjs|cjs|bat|cmd|cpp|css|env|hpp|html|ini|java|lock|md|ps1|py|rs|scss|sh|sql|toml|txt|xml|js|ts|go|kt|cs|c|h))(?::\d+(?::\d+)?)?(?=$|[\s`'"\]),.;])/gi;
 
 function normalizeRelativePath(path: string): string {
   return path

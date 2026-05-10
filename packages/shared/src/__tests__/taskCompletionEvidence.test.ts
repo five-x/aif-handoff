@@ -484,6 +484,51 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("insufficient_report_evidence");
   });
 
+  it("treats .env.example line references as substantive evidence", () => {
+    const root = initRepo();
+    writeFileSync(join(root, ".env.example"), "TOKEN=\n", "utf8");
+    execFileSync("git", ["add", ".env.example"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add env example", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/env-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `.env.example:1` documents the expected token variable.",
+        "Risk: Environment templates must not contain live secret values.",
+        "Verification: Command `git ls-files` output included .env.example.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-env-example",
+        title: "Audit security configuration",
+        plan: "## Plan\n- Validate environment template\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toContain(".env.example");
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
+  });
+
   it("blocks untracked report artifacts when the task requires a committed report", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });
