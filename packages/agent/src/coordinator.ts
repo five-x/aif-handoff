@@ -34,7 +34,7 @@ import {
   CLEAN_STATE_RESET,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
-  mapTaskCompletionIssueCodeToAuditFailureFamily,
+  selectTaskCompletionAuditFailureFamily,
   TaskPlanQualityError,
   withTimeout,
   type AuditFailureFamily,
@@ -349,11 +349,7 @@ const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
 function firstAuditFailureFamily(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
 ): AuditFailureFamily {
-  if (result.issues.some((entry) => entry.code === "branch_isolation")) return "external_blocker";
-  if (result.issues.some((entry) => entry.code === "manual_review_required")) {
-    return "manual_review_required";
-  }
-  return mapTaskCompletionIssueCodeToAuditFailureFamily(result.issues[0]?.code ?? "unknown");
+  return selectTaskCompletionAuditFailureFamily(result.issues.map((entry) => entry.code));
 }
 
 function artifactStateForFailureFamily(

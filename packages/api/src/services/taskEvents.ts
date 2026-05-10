@@ -9,7 +9,7 @@ import {
   isBranchIsolationError,
   looksLikeFullPlanUpdate,
   getProjectConfig,
-  mapTaskCompletionIssueCodeToAuditFailureFamily,
+  selectTaskCompletionAuditFailureFamily,
   restorePersistedBranch,
   type AuditFailureFamily,
   type TaskEvent,
@@ -91,16 +91,7 @@ function assertTaskBranchPostRun(task: TaskRow, projectRoot: string): EventHandl
 function firstAuditFailureFamily(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
 ): AuditFailureFamily {
-  if (result.issues.some((entry) => entry.code === "branch_isolation")) {
-    return "external_blocker";
-  }
-  if (result.issues.some((entry) => entry.code === "manual_review_required")) {
-    return "manual_review_required";
-  }
-  const firstIssue = result.issues[0];
-  return firstIssue
-    ? mapTaskCompletionIssueCodeToAuditFailureFamily(firstIssue.code)
-    : "external_blocker";
+  return selectTaskCompletionAuditFailureFamily(result.issues.map((entry) => entry.code));
 }
 
 function artifactStateForFailureFamily(

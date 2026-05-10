@@ -7,6 +7,7 @@ import {
   isAuditSynthesisTitle,
   mapTaskCompletionIssueCodeToAuditFailureFamily,
   parseExpectedAuditReportArtifactPath,
+  selectTaskCompletionAuditFailureFamily,
   validateGeneratedAuditCard,
 } from "../auditRoadmapContract.js";
 
@@ -110,6 +111,21 @@ describe("auditRoadmapContract", () => {
     );
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("branch_isolation")).toBe(
       "external_blocker",
+    );
+  });
+
+  it("selects actionable audit failure families before manual review handoff", () => {
+    expect(
+      selectTaskCompletionAuditFailureFamily([
+        "invalid_or_missing_file_references",
+        "manual_review_required",
+      ]),
+    ).toBe("invalid_artifact_content");
+    expect(
+      selectTaskCompletionAuditFailureFamily(["branch_isolation", "missing_report_artifact"]),
+    ).toBe("external_blocker");
+    expect(selectTaskCompletionAuditFailureFamily(["manual_review_required"])).toBe(
+      "manual_review_required",
     );
   });
 });

@@ -863,6 +863,12 @@ function issue(code: TaskCompletionIssueCode, message: string): TaskCompletionEv
   return { code, message };
 }
 
+function formatPathExamples(paths: string[], limit = 8): string {
+  const shown = paths.slice(0, limit).map((path) => `\`${path}\``);
+  const remaining = paths.length - shown.length;
+  return remaining > 0 ? `${shown.join(", ")} and ${remaining} more` : shown.join(", ");
+}
+
 export function evaluateTaskCompletionEvidence(
   input: TaskCompletionEvidenceInput,
 ): TaskCompletionEvidenceResult {
@@ -990,14 +996,12 @@ export function evaluateTaskCompletionEvidence(
 
     let invalidEvidenceMessage: string | null = null;
     if (reportMissing.length > 0) {
-      invalidEvidenceMessage =
-        "Report artifact contains repository path references that do not resolve under the project root.";
+      invalidEvidenceMessage = `Report artifact contains repository path references that do not resolve under the project root: ${formatPathExamples(reportMissing)}. Replace them with concrete existing file paths and line references, or remove unsupported citations.`;
     } else if (riskyTask && reportArtifactFiles.length > 0 && reportReferencedPaths.length === 0) {
       invalidEvidenceMessage =
-        "Audit/review/discovery report artifact does not cite any repository file references to validate.";
+        "Audit/review/discovery report artifact does not cite any repository file references to validate. Add concrete existing file references such as `path/to/file.ext:line`.";
     } else if (referencedPaths.length > 0 && missing.length > 0 && existing.length === 0) {
-      invalidEvidenceMessage =
-        "Repository path references in task evidence do not resolve under the project root.";
+      invalidEvidenceMessage = `Repository path references in task evidence do not resolve under the project root: ${formatPathExamples(missing)}. Replace them with concrete existing file paths and line references, or remove unsupported citations.`;
     }
 
     if (invalidEvidenceMessage) {

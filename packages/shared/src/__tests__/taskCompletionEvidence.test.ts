@@ -303,6 +303,7 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.existingReportReferencedPaths).toContain("src/app.ts");
     expect(result.evidence.missingReportReferencedPaths).toContain("src/ghost.ts");
     expect(codes(result)).toContain("invalid_or_missing_file_references");
+    expect(formatTaskCompletionBlockedReason(result)).toContain("src/ghost.ts");
   });
 
   it("requires report-local repo references for risky reports", () => {

@@ -87,6 +87,16 @@ export function mapTaskCompletionIssueCodeToAuditFailureFamily(code: string): Au
   return TASK_COMPLETION_ISSUE_FAILURE_FAMILIES[code] ?? "external_blocker";
 }
 
+export function selectTaskCompletionAuditFailureFamily(issueCodes: string[]): AuditFailureFamily {
+  if (issueCodes.includes("branch_isolation")) return "external_blocker";
+
+  const primaryCode = issueCodes.find((code) => code !== "manual_review_required");
+  if (primaryCode) return mapTaskCompletionIssueCodeToAuditFailureFamily(primaryCode);
+
+  if (issueCodes.includes("manual_review_required")) return "manual_review_required";
+  return "external_blocker";
+}
+
 export function isAuditSynthesisTitle(title: string): boolean {
   return /\b(?:synthesi[sz]e|synthesis|summary|summari[sz]e|final\s+audit|audit\s+findings\s+summary)\b/i.test(
     title,

@@ -377,6 +377,10 @@ You are addressing a REWORK REQUEST on a previously-completed task. The rework c
 ${formatReworkCommentForPrompt(latestReworkComment)}
 REWORK_COMMENT
 
+<<<REWORK_BLOCKED_REASON
+${task.blockedReason ?? "No blocked reason available."}
+REWORK_BLOCKED_REASON
+
 <<<FULL_REVIEW_COMMENTS
 ${task.reviewComments ?? "No review comments available."}
 FULL_REVIEW_COMMENTS
@@ -398,7 +402,9 @@ Rework handling protocol:
 3) Make the minimal set of changes required. Do NOT refactor unrelated code.
 4) If the rework request cannot be satisfied (e.g. it asks for something impossible or contradicts an earlier decision), say so EXPLICITLY in the final result text — do not silently skip it or claim "already done".
 5) If the plan checklist shows all items completed, do not interpret that as "nothing to do" — the rework comment is the source of truth for this run.
-6) In the final result text, explicitly list which blocking finding IDs from BLOCKING_FINDINGS_SNAPSHOT were addressed and which IDs remain unresolved.`
+6) Treat REWORK_BLOCKED_REASON as actionable guard feedback. If it names invalid or missing report references, edit the report artifact to remove or replace those exact references before closing.
+7) In diagnostic audit/report tasks, every Evidence reference must be an existing file under the project root with a concrete line or line range. Do not cite directories such as src:1-2 or src/bot_intevra:1-20; cite specific files instead.
+8) In the final result text, explicitly list which blocking finding IDs from BLOCKING_FINDINGS_SNAPSHOT were addressed and which IDs remain unresolved.`
     : "";
 
   const reworkSystemAppend = isRework
@@ -440,7 +446,8 @@ Execution rules:
 - Respect task dependencies and checklist state from the plan file.
 - Keep plan checklist state accurate while implementing.
 - Run tests/lint/verification relevant to the changes.
-- For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete \`path:line\` evidence, \`Risk:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
+- For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete existing file \`path:line\` evidence, \`Risk:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
+- Before closing diagnostic audit/report work, verify every cited repository path exists under the project root. Replace directory references, nonexistent paths, and placeholders with concrete existing file references and line numbers.
 - When VALIDATED_AUDIT_BATCH_INPUTS contains report artifacts, use those exact validated report contents as the synthesis source of truth; do not synthesize from unvalidated report-like files.
 - IMPORTANT: The plan file is ${effectivePlanPath}. Always read from and annotate this exact file — do not create plan files at other paths.${reworkProtocolBlock}`;
   const workflowSpec = createRuntimeWorkflowSpec({

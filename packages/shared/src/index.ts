@@ -145,6 +145,7 @@ export {
   mapTaskCompletionIssueCodeToAuditFailureFamily,
   parseAuditReportArtifactPath,
   parseExpectedAuditReportArtifactPath,
+  selectTaskCompletionAuditFailureFamily,
   validateGeneratedAuditCard,
   type AuditArtifactRole,
   type AuditArtifactState,
