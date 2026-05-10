@@ -29,7 +29,7 @@ export const CLEAN_STATE_RESET = {
 } as const satisfies Omit<TransitionPatch, "status">;
 
 export function applyHumanTaskEvent(
-  task: Pick<Task, "status" | "autoMode" | "blockedFromStatus">,
+  task: Pick<Task, "status" | "autoMode" | "blockedFromStatus" | "reworkRequested">,
   event: TaskEvent,
 ): TransitionResult {
   switch (event) {
@@ -91,7 +91,14 @@ export function applyHumanTaskEvent(
       if (!task.blockedFromStatus) {
         return { ok: false, error: "blockedFromStatus is missing for retry_from_blocked" };
       }
-      return { ok: true, patch: { ...CLEAN_STATE_RESET, status: task.blockedFromStatus } };
+      return {
+        ok: true,
+        patch: {
+          ...CLEAN_STATE_RESET,
+          status: task.blockedFromStatus,
+          reworkRequested: task.reworkRequested,
+        },
+      };
     }
     default:
       return { ok: false, error: "Unknown task event" };

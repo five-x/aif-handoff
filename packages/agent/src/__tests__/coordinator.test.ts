@@ -11,7 +11,7 @@ import { createTestDb } from "@aif/shared/server";
 import { RuntimeExecutionError } from "@aif/runtime";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -431,6 +431,109 @@ describe("coordinator", () => {
     );
     expect(synthesisArtifact?.state).toBe("synthesis_not_ready");
     expect(synthesisArtifact?.failureFamily).toBe("synthesis_not_ready");
+  });
+
+  it("should skip redundant audit rework implementation when completion evidence is already satisfied", async () => {
+    const db = testDb.current;
+    const rootPath = mkdtempSync(join(tmpdir(), "coordinator-audit-rework-ready-"));
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: rootPath, stdio: "ignore" });
+    writeFileSync(join(rootPath, "README.md"), "# audit fixture\n");
+    execFileSync("git", ["add", "README.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-synthesis"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "summary.md"),
+      [
+        "## Finding 1",
+        "Evidence: `audit/source-audit.md` records the validated source audit report.",
+        "Risk: Re-running the synthesis implementer can loop after the report is already committed.",
+        "Verification: Command `git log -1 --name-only --oneline` output included `audit/summary.md`.",
+        "",
+      ].join("\n"),
+    );
+    execFileSync("git", ["add", "audit/summary.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit summary", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({
+        id: "audit-rework-project",
+        name: "Audit Rework",
+        rootPath,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-source-audit",
+        projectId: "audit-rework-project",
+        title: "Audit source",
+        description: "Report artifact: audit/source-audit.md",
+        taskIntent: "audit",
+        status: "done",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-synthesis-ready",
+        projectId: "audit-rework-project",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        autoMode: true,
+        reworkRequested: true,
+        branchName: "feature/audit-synthesis",
+        agentActivityLog: [
+          "[2026-05-10T15:53:42.113Z] Agent: implement-coordinator started",
+          "[2026-05-10T15:54:22.699Z] Tool: write_file audit/summary.md",
+          "[2026-05-10T15:54:25.610Z] Tool: git_commit git commit",
+          "[2026-05-10T15:54:33.912Z] Agent: implement-coordinator complete",
+          "[2026-05-10T15:54:33.947Z] Agent: review-sidecar started",
+          "[2026-05-10T15:54:35.784Z] Tool: list_files audit",
+          "[2026-05-10T15:54:39.896Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "audit-rework-project",
+      roadmapAlias: "audit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-audit", "task-synthesis-ready"],
+      synthesisTaskId: "task-synthesis-ready",
+      artifacts: [
+        { taskId: "task-source-audit", role: "report", artifactPath: "audit/source-audit.md" },
+        { taskId: "task-synthesis-ready", role: "synthesis", artifactPath: "audit/summary.md" },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-audit",
+      state: "valid",
+      failureFamily: null,
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).not.toHaveBeenCalledWith("task-synthesis-ready", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-synthesis-ready", rootPath);
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-synthesis-ready")).get();
+    expect(task?.status).toBe("done");
+    expect(task?.reworkRequested).toBe(false);
+    expect(task?.agentActivityLog).toContain("skipping implementer and returning to review");
   });
 
   it("should pick up review tasks and dispatch reviewer", async () => {

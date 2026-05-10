@@ -561,6 +561,25 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   return true;
 }
 
+function reworkCompletionEvidenceAlreadySatisfied(task: TaskRow, projectRoot: string): boolean {
+  if (!task.reworkRequested) return false;
+  const artifact = findRoadmapBatchArtifactByTaskId(task.id);
+  if (!artifact) return false;
+  const allowedEvidenceArtifactPaths =
+    artifact.role === "synthesis"
+      ? listValidatedRoadmapReportArtifacts(artifact.batchId).map((entry) => entry.artifactPath)
+      : [];
+  const result = evaluateTaskCompletionEvidence({
+    task: {
+      ...task,
+      expectedReportArtifactPath: artifact.artifactPath,
+      allowedEvidenceArtifactPaths,
+    },
+    projectRoot,
+  });
+  return result.ok;
+}
+
 function findTaskPlanQualityError(error: unknown): TaskPlanQualityError | null {
   if (error instanceof TaskPlanQualityError) return error;
   if (error instanceof Error && "cause" in error && error.cause) {
@@ -690,6 +709,32 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
   if (stage.label === "implementer" && holdSynthesisIfNotReady(task, executionRoot)) {
     return false;
+  }
+
+  if (
+    stage.label === "implementer" &&
+    reworkCompletionEvidenceAlreadySatisfied(task, executionRoot)
+  ) {
+    const nowIso = new Date().toISOString();
+    clearTaskRuntimeLimitSnapshot(task.id);
+    updateTaskStatus(
+      task.id,
+      "review",
+      {
+        ...CLEAN_STATE_RESET,
+        reviewIterationCount: task.reviewIterationCount ?? 0,
+      },
+      { title: taskTitle, fromStatus: sourceStatus },
+    );
+    appendTaskActivityLog(
+      task.id,
+      `[${nowIso}] Completion evidence already satisfied before rework implementation; skipping implementer and returning to review.`,
+    );
+    log.info(
+      { taskId: task.id, from: sourceStatus, to: "review" },
+      "Skipped redundant rework implementation because completion evidence is already satisfied",
+    );
+    return true;
   }
 
   if (

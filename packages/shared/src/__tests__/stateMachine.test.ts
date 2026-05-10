@@ -139,6 +139,22 @@ describe("task state machine", () => {
     }
   });
 
+  it("preserves rework intent when retrying a blocked rework task", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "implementing" as const,
+      blockedReason: "runtime timeout",
+      reworkRequested: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("implementing");
+      expect(result.patch.reworkRequested).toBe(true);
+    }
+  });
+
   it("allows start_implementation from plan_ready when autoMode=false", () => {
     const result = applyHumanTaskEvent(
       { ...makeTask("plan_ready"), autoMode: false },
