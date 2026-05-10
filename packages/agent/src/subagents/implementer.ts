@@ -287,13 +287,23 @@ function hasLowQualitySynthesisFindingEvidence(section: string): boolean {
   return LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS.some((pattern) => pattern.test(section));
 }
 
+function hasConcreteRepositoryLineEvidence(section: string): boolean {
+  return /(?:^|[\s`'"\[(])(?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12}:\d+(?::\d+)?(?=$|[\s`'"\]),.;])/i.test(
+    section,
+  );
+}
+
 function summarizeValidatedAuditArtifactsForSynthesis(
   artifacts: ValidatedAuditArtifactContent[],
 ): AuditSourceReportSummary[] {
   return artifacts.map((artifact) => {
     const findingSections = splitAuditFindingSections(artifact.content);
     const includedFindings = findingSections
-      .filter((section) => !hasLowQualitySynthesisFindingEvidence(section))
+      .filter(
+        (section) =>
+          hasConcreteRepositoryLineEvidence(section) &&
+          !hasLowQualitySynthesisFindingEvidence(section),
+      )
       .map((section) => ({
         artifactPath: artifact.artifactPath,
         taskId: artifact.taskId,
@@ -349,7 +359,7 @@ function buildDeterministicAuditSynthesisContent(
     "# Audit Summary",
     "",
     "Generated from validated audit batch reports.",
-    "Only findings with concrete Evidence, Risk, and Verification sections were included.",
+    "Only findings with concrete path:line Evidence, Risk, and Verification sections were included.",
     "",
     "## Source Reports",
     "",
