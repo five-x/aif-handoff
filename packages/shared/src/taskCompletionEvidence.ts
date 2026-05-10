@@ -106,6 +106,8 @@ const SLASH_PATH_TOKEN_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,12})(?::\d+(?::\d+)?)?/g;
 const ROOT_FILE_TOKEN_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.env(?:\.[\w-]+)+)|[\w.-]+\.(?:jsonc|json|jsx|tsx|yaml|yml|mdx|mjs|cjs|bat|cmd|cpp|css|env|hpp|html|ini|java|lock|md|ps1|py|rs|scss|sh|sql|toml|txt|xml|js|ts|go|kt|cs|c|h))(?::\d+(?::\d+)?)?(?=$|[\s`'"\]),.;])/gi;
+const DIRECTORY_LINE_REFERENCE_PATTERN =
+  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+\d+(?:-\d+)?)(?=$|[\s`'"\]),.;])/g;
 
 function normalizeRelativePath(path: string): string {
   return path
@@ -842,6 +844,28 @@ function extractReferencedPaths(
   return [...refs].sort();
 }
 
+function extractDirectoryLineReferences(text: string, projectRoot: string): string[] {
+  const refs = new Set<string>();
+  for (const match of text.matchAll(DIRECTORY_LINE_REFERENCE_PATTERN)) {
+    const raw = match[1]?.trim();
+    if (!raw) continue;
+    const normalized = normalizeRelativePath(raw.replace(/[),.;\]]+$/g, ""));
+    const lastSlash = normalized.lastIndexOf("/");
+    if (lastSlash <= 0) continue;
+    const directory = normalized.slice(0, lastSlash);
+    const absDirectory = resolve(projectRoot, directory);
+    if (!isInsideRoot(projectRoot, absDirectory) || !existsSync(absDirectory)) continue;
+    try {
+      if (statSync(absDirectory).isDirectory()) {
+        refs.add(normalized);
+      }
+    } catch {
+      // Ignore races between existsSync and statSync; missing paths are handled by normal refs.
+    }
+  }
+  return [...refs].sort();
+}
+
 function classifyReferencedPaths(
   projectRoot: string,
   refs: string[],
@@ -910,9 +934,14 @@ export function evaluateTaskCompletionEvidence(
     task.agentActivityLog,
   );
   const taskReferencedPaths = extractReferencedPaths(combinedTaskText(task), projectRoot);
-  const reportReferencedPaths = extractReferencedPaths(reportText, projectRoot, {
-    includeUndelimitedMissingRootFiles: true,
-  });
+  const reportReferencedPaths = [
+    ...new Set([
+      ...extractReferencedPaths(reportText, projectRoot, {
+        includeUndelimitedMissingRootFiles: true,
+      }),
+      ...extractDirectoryLineReferences(reportText, projectRoot),
+    ]),
+  ].sort();
   const referencedPaths = [...new Set([...taskReferencedPaths, ...reportReferencedPaths])].sort();
   const { existing, missing } = classifyReferencedPaths(projectRoot, referencedPaths);
   const { existing: reportExisting, missing: reportMissing } = classifyReferencedPaths(
