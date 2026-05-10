@@ -433,6 +433,57 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("invalid_or_missing_file_references");
   });
 
+  it("accepts report evidence paths followed by nearby line ranges", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "config.py"),
+      "import os\n\nVALUE = os.getenv('VALUE')\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/bot_intevra/config.py"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/line-range-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `src/bot_intevra/config.py` (lines 1-100) loads configuration from environment variables.",
+        "Risk: Broad environment configuration requires careful deployment controls.",
+        "Verification: Command `git ls-files` output included src/bot_intevra/config.py.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-nearby-line-range",
+        title: "Audit security configuration",
+        plan: "## Plan\n- Validate config files\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toContain("src/bot_intevra/config.py");
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
+    expect(codes(result)).not.toContain("insufficient_report_evidence");
+  });
+
   it("blocks untracked report artifacts when the task requires a committed report", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });

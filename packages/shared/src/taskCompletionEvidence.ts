@@ -468,13 +468,46 @@ function hasNonCircularEvidenceContext(text: string, rawPath: string, matchIndex
   );
 }
 
-function extractLineReference(fullToken: string): { start: number; end: number } | null {
+interface ExtractedLineReference {
+  start: number;
+  end: number;
+  source: "colon" | "nearby_phrase";
+}
+
+function extractLineReference(fullToken: string): ExtractedLineReference | null {
   const match = fullToken.match(/:(\d+)(?::(\d+))?\b/);
   if (!match) return null;
   const start = Number.parseInt(match[1], 10);
   const end = match[2] ? Number.parseInt(match[2], 10) : start;
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  return { start, end };
+  return { start, end, source: "colon" };
+}
+
+function extractNearbyLineReference(
+  text: string,
+  rawPath: string,
+  matchIndex: number,
+): ExtractedLineReference | null {
+  const rawStart = text.indexOf(rawPath, matchIndex);
+  if (rawStart < 0) return null;
+  const afterPath = text.slice(rawStart + rawPath.length, rawStart + rawPath.length + 80);
+  const match = afterPath.match(
+    /^[`'"]?\s*(?:\(|,)?\s*(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/i,
+  );
+  if (!match) return null;
+  const start = Number.parseInt(match[1], 10);
+  const end = match[2] ? Number.parseInt(match[2], 10) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end, source: "nearby_phrase" };
+}
+
+function extractLineReferenceForPath(
+  text: string,
+  fullToken: string,
+  rawPath: string,
+  matchIndex: number,
+): ExtractedLineReference | null {
+  return extractLineReference(fullToken) ?? extractNearbyLineReference(text, rawPath, matchIndex);
 }
 
 function fileLineCount(projectRoot: string, path: string): number | null {
@@ -491,15 +524,18 @@ function fileLineCount(projectRoot: string, path: string): number | null {
   }
 }
 
-function hasValidLineReference(
+function isValidLineReference(
   projectRoot: string,
   normalizedPath: string,
-  fullToken: string,
+  reference: ExtractedLineReference,
 ): boolean {
-  const reference = extractLineReference(fullToken);
-  if (!reference || reference.start < 1 || reference.end < reference.start) return false;
+  if (reference.start < 1 || reference.end < reference.start) return false;
   const lines = fileLineCount(projectRoot, normalizedPath);
-  return lines !== null && reference.end <= lines;
+  if (lines === null) return false;
+  if (reference.source === "nearby_phrase") {
+    return reference.start <= lines;
+  }
+  return reference.end <= lines;
 }
 
 function hasInvalidExistingLineReference(
@@ -510,12 +546,14 @@ function hasInvalidExistingLineReference(
   for (const match of text.matchAll(SLASH_PATH_TOKEN_PATTERN)) {
     const full = match[0] ?? "";
     const raw = match[1]?.trim();
-    if (!raw || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    if (!raw) continue;
+    const reference = extractLineReferenceForPath(text, full, raw, match.index ?? 0);
+    if (!reference) continue;
     const normalized = normalizeRelativePath(raw);
     if (
       existsSync(resolve(projectRoot, normalized)) &&
       !isExcludedEvidencePath(normalized, excludedPaths) &&
-      !hasValidLineReference(projectRoot, normalized, full)
+      !isValidLineReference(projectRoot, normalized, reference)
     ) {
       return true;
     }
@@ -523,12 +561,14 @@ function hasInvalidExistingLineReference(
   for (const match of text.matchAll(ROOT_FILE_TOKEN_PATTERN)) {
     const full = match[0] ?? "";
     const raw = match[1]?.trim();
-    if (!raw || raw.includes("/") || raw.includes("\\") || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    if (!raw || raw.includes("/") || raw.includes("\\")) continue;
+    const reference = extractLineReferenceForPath(text, full, raw, match.index ?? 0);
+    if (!reference) continue;
     const normalized = normalizeRelativePath(raw);
     if (
       existsSync(resolve(projectRoot, normalized)) &&
       !isExcludedEvidencePath(normalized, excludedPaths) &&
-      !hasValidLineReference(projectRoot, normalized, full)
+      !isValidLineReference(projectRoot, normalized, reference)
     ) {
       return true;
     }
@@ -545,12 +585,14 @@ function collectExistingRefsWithLineNumbers(
   for (const match of text.matchAll(SLASH_PATH_TOKEN_PATTERN)) {
     const full = match[0] ?? "";
     const raw = match[1]?.trim();
-    if (!raw || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    if (!raw) continue;
+    const reference = extractLineReferenceForPath(text, full, raw, match.index ?? 0);
+    if (!reference) continue;
     const normalized = addReferencedPath(refs, projectRoot, raw);
     if (
       normalized &&
       (!existsSync(resolve(projectRoot, normalized)) ||
-        !hasValidLineReference(projectRoot, normalized, full) ||
+        !isValidLineReference(projectRoot, normalized, reference) ||
         isExcludedEvidencePath(normalized, excludedPaths) ||
         !hasNonCircularEvidenceContext(text, raw, match.index ?? 0))
     ) {
@@ -560,12 +602,14 @@ function collectExistingRefsWithLineNumbers(
   for (const match of text.matchAll(ROOT_FILE_TOKEN_PATTERN)) {
     const full = match[0] ?? "";
     const raw = match[1]?.trim();
-    if (!raw || raw.includes("/") || raw.includes("\\") || !/:\d+(?::\d+)?\b/.test(full)) continue;
+    if (!raw || raw.includes("/") || raw.includes("\\")) continue;
+    const reference = extractLineReferenceForPath(text, full, raw, match.index ?? 0);
+    if (!reference) continue;
     const normalized = addReferencedPath(refs, projectRoot, raw);
     if (
       normalized &&
       (!existsSync(resolve(projectRoot, normalized)) ||
-        !hasValidLineReference(projectRoot, normalized, full) ||
+        !isValidLineReference(projectRoot, normalized, reference) ||
         isExcludedEvidencePath(normalized, excludedPaths) ||
         !hasNonCircularEvidenceContext(text, raw, match.index ?? 0))
     ) {
