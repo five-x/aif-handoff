@@ -529,6 +529,51 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.substantiveReportEvidence).toBe(true);
   });
 
+  it("accepts read_file command output as structured review evidence", () => {
+    const root = initRepo();
+    writeFileSync(join(root, ".env.example"), "TOKEN=\n", "utf8");
+    execFileSync("git", ["add", ".env.example"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add env example", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/read-file-evidence"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: .env.example is treated as a secret-like path.",
+        "Risk: Review evidence may come from a repository tool guard instead of file contents.",
+        "Verification: Command read_file path=.env.example output error: read path references a secret-like path.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-read-file-command-evidence",
+        title: "Audit security configuration",
+        plan: "## Plan\n- Validate environment template\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toContain(".env.example");
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
+  });
+
   it("blocks untracked report artifacts when the task requires a committed report", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });

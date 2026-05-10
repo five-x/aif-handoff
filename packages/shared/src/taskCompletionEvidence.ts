@@ -641,9 +641,14 @@ function hasSymbolEvidenceTiedToExistingPath(
 }
 
 function hasCommandOutputEvidence(text: string): boolean {
-  return /(?:\b(?:command|cmd|shell|powershell|pwsh)\s*:?[^\n]{0,160}\b(?:npm|pnpm|yarn|rg|vitest|jest|tsc|eslint|node|curl)\b[^\n]{0,160}\b(?:exit code|output|stdout|stderr|passed|failed|matched|returned)\b|\b(?:npm|pnpm|yarn|rg|vitest|jest|tsc|eslint)\b[^\n]{0,160}\b(?:exit code|output|stdout|stderr|passed|failed|matched|returned)\b)/i.test(
-    text,
-  );
+  const commandNames =
+    "npm|pnpm|yarn|rg|grep|cat|ls|sed|head|tail|find|wc|git|vitest|jest|tsc|eslint|node|curl|read_file|list_files|search_files";
+  const outputWords =
+    "exit code|output|stdout|stderr|passed|failed|matched|returned|included|error";
+  return new RegExp(
+    `(?:\\b(?:command|cmd|shell|powershell|pwsh)\\s*:?[^\\n]{0,160}\\b(?:${commandNames})\\b[^\\n]{0,160}\\b(?:${outputWords})\\b|\\b(?:${commandNames})\\b[^\\n]{0,160}\\b(?:${outputWords})\\b)`,
+    "i",
+  ).test(text);
 }
 
 function hasStructuredFindingEvidence(
