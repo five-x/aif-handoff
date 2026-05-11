@@ -1435,21 +1435,40 @@ export function claimBacklogTaskForAdvance(taskId: string): boolean {
 /**
  * Count tasks the auto-queue must consider "still in flight" before advancing
  * the next backlog item. Includes blocked_external so retry-cycles don't
- * cause the pool to overshoot. Excludes terminal (done/verified) and the
+ * cause the pool to overshoot. A manually failed audit report artifact that
+ * already reached a terminal invalid/missing state is treated as an artifact
+ * outcome, not active pipeline work. Excludes terminal (done/verified) and the
  * source state (backlog).
  */
 export function countActivePipelineTasksForProject(projectId: string): number {
-  const row = getDb()
-    .select({ cnt: count() })
+  const rows = getDb()
+    .select({
+      status: tasks.status,
+      manualReviewRequired: tasks.manualReviewRequired,
+      retryAfter: tasks.retryAfter,
+      reworkRequested: tasks.reworkRequested,
+      artifactRole: roadmapBatchArtifacts.role,
+      artifactState: roadmapBatchArtifacts.state,
+    })
     .from(tasks)
+    .leftJoin(roadmapBatchArtifacts, eq(roadmapBatchArtifacts.taskId, tasks.id))
     .where(
       and(
         eq(tasks.projectId, projectId),
         inArray(tasks.status, ["planning", "plan_ready", "implementing", "review", "blocked_external"]),
       ),
     )
-    .get();
-  return row?.cnt ?? 0;
+    .all();
+  return rows.filter((row) => {
+    const terminalManualAuditReportBlock =
+      row.status === "blocked_external" &&
+      row.manualReviewRequired &&
+      !row.retryAfter &&
+      !row.reworkRequested &&
+      row.artifactRole === "report" &&
+      (row.artifactState === "invalid" || row.artifactState === "missing");
+    return !terminalManualAuditReportBlock;
+  }).length;
 }
 
 /**
@@ -2006,6 +2025,13 @@ export type RoadmapBatchFailureFamily =
   | "manual_review_required"
   | "rework_needed";
 
+const SYNTHESIS_SOURCE_TERMINAL_STATES = new Set<string>([
+  "valid",
+  "invalid",
+  "missing",
+  "external_blocked",
+]);
+
 export interface RoadmapBatchArtifactInput {
   taskId: string;
   role: RoadmapBatchArtifactRole;
@@ -2079,15 +2105,22 @@ function summarizeRoadmapArtifacts(
   };
   const nonSynthesis = artifacts.filter((artifact) => artifact.role !== "synthesis");
   const synthesisReady =
-    nonSynthesis.length > 0 && nonSynthesis.every((artifact) => artifact.state === "valid");
-  const failureFamily =
-    artifacts.find((artifact) => artifact.failureFamily === "external_blocker")?.failureFamily ??
-    artifacts.find(
-      (artifact) =>
-        artifact.failureFamily &&
-        !(synthesisReady && artifact.role === "synthesis" && artifact.failureFamily === "synthesis_not_ready"),
-    )?.failureFamily ??
-    batch.failureFamily;
+    nonSynthesis.length > 0 &&
+    nonSynthesis.every((artifact) => SYNTHESIS_SOURCE_TERMINAL_STATES.has(artifact.state));
+  const artifactFailureFamily = synthesisReady
+    ? artifacts.find(
+        (artifact) =>
+          artifact.role === "synthesis" &&
+          artifact.failureFamily &&
+          artifact.failureFamily !== "synthesis_not_ready",
+      )?.failureFamily
+    : (artifacts.find((artifact) => artifact.failureFamily === "external_blocker")?.failureFamily ??
+      artifacts.find(
+        (artifact) =>
+          artifact.failureFamily &&
+          !(artifact.role === "synthesis" && artifact.failureFamily === "synthesis_not_ready"),
+      )?.failureFamily);
+  const failureFamily = artifactFailureFamily ?? batch.failureFamily;
   const message = failureFamily
     ? `Audit batch ${batch.roadmapAlias}: ${failureFamily}`
     : synthesisReady
@@ -2114,6 +2147,17 @@ function computeRoadmapBatchStatus(input: {
   synthesisReady: boolean;
 }): { status: string; failureFamily: string | null } {
   const { artifacts, synthesisReady } = input;
+  const synthesisArtifact = artifacts.find((artifact) => artifact.role === "synthesis");
+  if (synthesisReady && synthesisArtifact?.state === "valid") {
+    return { status: "complete", failureFamily: null };
+  }
+  if (
+    synthesisReady &&
+    synthesisArtifact &&
+    (synthesisArtifact.state === "expected" || synthesisArtifact.state === "synthesis_not_ready")
+  ) {
+    return { status: "synthesis_ready", failureFamily: null };
+  }
   if (artifacts.some((artifact) => artifact.failureFamily === "external_blocker")) {
     return { status: "external_blocked", failureFamily: "external_blocker" };
   }
@@ -2126,9 +2170,6 @@ function computeRoadmapBatchStatus(input: {
   }
   if (artifacts.length > 0 && artifacts.every((artifact) => artifact.state === "valid")) {
     return { status: "complete", failureFamily: null };
-  }
-  if (synthesisReady) {
-    return { status: "synthesis_ready", failureFamily: null };
   }
   if (artifacts.some((artifact) => artifact.state === "synthesis_not_ready")) {
     return { status: "synthesis_not_ready", failureFamily: "synthesis_not_ready" };
@@ -2312,6 +2353,23 @@ export function listValidatedRoadmapReportArtifacts(batchId: string): RoadmapBat
         eq(roadmapBatchArtifacts.batchId, batchId),
         eq(roadmapBatchArtifacts.role, "report"),
         eq(roadmapBatchArtifacts.state, "valid"),
+      ),
+    )
+    .orderBy(asc(roadmapBatchArtifacts.createdAt))
+    .all();
+}
+
+export function listRoadmapReportArtifactsForSynthesis(
+  batchId: string,
+): RoadmapBatchArtifactRow[] {
+  return getDb()
+    .select()
+    .from(roadmapBatchArtifacts)
+    .where(
+      and(
+        eq(roadmapBatchArtifacts.batchId, batchId),
+        eq(roadmapBatchArtifacts.role, "report"),
+        inArray(roadmapBatchArtifacts.state, ["valid", "invalid", "missing", "external_blocked"]),
       ),
     )
     .orderBy(asc(roadmapBatchArtifacts.createdAt))

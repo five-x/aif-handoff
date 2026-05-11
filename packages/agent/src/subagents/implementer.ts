@@ -6,10 +6,11 @@ import {
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
   getLatestReworkComment,
-  listValidatedRoadmapReportArtifacts,
+  listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
   setTaskFields,
   summarizeRoadmapBatch,
+  type RoadmapBatchArtifactRow,
   type TaskRow,
 } from "@aif/data";
 import {
@@ -188,6 +189,19 @@ interface ValidatedAuditArtifactContent {
   content: string;
 }
 
+interface WeakAuditArtifactSummary {
+  artifactPath: string;
+  taskId: string;
+  state: RoadmapBatchArtifactRow["state"];
+  failureFamily: string | null;
+  validationDetails: string | null;
+}
+
+interface AuditSynthesisInputs {
+  validatedArtifacts: ValidatedAuditArtifactContent[];
+  weakArtifacts: WeakAuditArtifactSummary[];
+}
+
 interface AuditFindingSection {
   artifactPath: string;
   taskId: string;
@@ -209,13 +223,19 @@ const LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS: RegExp[] = [
   /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
 ];
 
-function readValidatedAuditArtifacts(
-  taskId: string,
-  fallbackRoot: string,
-): ValidatedAuditArtifactContent[] {
+function formatArtifactValidationDetails(raw: string | null): string | null {
+  if (!raw) return null;
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSynthesisInputs {
   const synthesisArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   if (!synthesisArtifact || synthesisArtifact.role !== "synthesis") {
-    return [];
+    return { validatedArtifacts: [], weakArtifacts: [] };
   }
 
   const summary = summarizeRoadmapBatch(synthesisArtifact.batchId);
@@ -227,33 +247,51 @@ function readValidatedAuditArtifacts(
     );
   }
 
-  const reports = listValidatedRoadmapReportArtifacts(synthesisArtifact.batchId);
+  const reports = listRoadmapReportArtifactsForSynthesis(synthesisArtifact.batchId);
   if (reports.length === 0) {
-    throw new Error("synthesis_not_ready: no validated audit report artifacts are available");
+    throw new Error("synthesis_not_ready: no terminal audit report artifacts are available");
   }
 
-  return reports.map((artifact) => {
-    const root = artifact.projectRoot ?? fallbackRoot;
-    const { content, source } = readValidatedArtifactContent({
-      artifactPath: artifact.artifactPath,
-      branchName: artifact.branchName,
-      worktreePath: artifact.worktreePath,
-      projectRoot: root,
+  const validatedArtifacts = reports
+    .filter((artifact) => artifact.state === "valid")
+    .map((artifact) => {
+      const root = artifact.projectRoot ?? fallbackRoot;
+      const { content, source } = readValidatedArtifactContent({
+        artifactPath: artifact.artifactPath,
+        branchName: artifact.branchName,
+        worktreePath: artifact.worktreePath,
+        projectRoot: root,
+      });
+      if (!content) {
+        throw new Error(
+          `synthesis_not_ready: validated artifact is empty: ${artifact.artifactPath}`,
+        );
+      }
+      return {
+        artifactPath: artifact.artifactPath,
+        taskId: artifact.taskId,
+        source,
+        content,
+      };
     });
-    if (!content) {
-      throw new Error(`synthesis_not_ready: validated artifact is empty: ${artifact.artifactPath}`);
-    }
-    return {
+  const weakArtifacts = reports
+    .filter((artifact) => artifact.state !== "valid")
+    .map((artifact) => ({
       artifactPath: artifact.artifactPath,
       taskId: artifact.taskId,
-      source,
-      content,
-    };
-  });
+      state: artifact.state,
+      failureFamily: artifact.failureFamily,
+      validationDetails: formatArtifactValidationDetails(artifact.validationDetailsJson),
+    }));
+
+  return { validatedArtifacts, weakArtifacts };
 }
 
-function formatValidatedAuditSynthesisInput(artifacts: ValidatedAuditArtifactContent[]): string {
-  if (artifacts.length === 0) {
+function formatValidatedAuditSynthesisInput(
+  artifacts: ValidatedAuditArtifactContent[],
+  weakArtifacts: WeakAuditArtifactSummary[] = [],
+): string {
+  if (artifacts.length === 0 && weakArtifacts.length === 0) {
     return "No validated audit batch input required for this task.";
   }
 
@@ -266,6 +304,30 @@ function formatValidatedAuditSynthesisInput(artifacts: ValidatedAuditArtifactCon
       artifact.content,
     ].join("\n");
   });
+
+  if (weakArtifacts.length > 0) {
+    sections.push(
+      [
+        "--- weak_or_invalid_artifacts ---",
+        "These report artifacts are terminal batch sources but did not pass validation.",
+        "Use them only to report audit coverage gaps; do not promote their findings as source-of-truth audit findings.",
+        ...weakArtifacts.map((artifact) => {
+          const details = artifact.validationDetails
+            ? `\n  validationDetails: ${artifact.validationDetails}`
+            : "";
+          return [
+            `- artifact: ${artifact.artifactPath}`,
+            `  task: ${artifact.taskId}`,
+            `  state: ${artifact.state}`,
+            `  failureFamily: ${artifact.failureFamily ?? "none"}`,
+            details,
+          ]
+            .filter(Boolean)
+            .join("\n");
+        }),
+      ].join("\n"),
+    );
+  }
 
   return sections.join("\n\n");
 }
@@ -350,6 +412,7 @@ function commitArtifactIfChanged(projectRoot: string, artifactPath: string): str
 
 function buildDeterministicAuditSynthesisContent(
   artifacts: ValidatedAuditArtifactContent[],
+  weakArtifacts: WeakAuditArtifactSummary[] = [],
 ): string {
   const sourceSummaries = summarizeValidatedAuditArtifactsForSynthesis(artifacts);
   const totalIncluded = sourceSummaries.reduce(
@@ -363,18 +426,23 @@ function buildDeterministicAuditSynthesisContent(
   const lines = [
     "# Audit Summary",
     "",
-    "Generated from validated audit batch reports.",
+    "Generated from terminal audit batch report artifacts.",
     "Only findings with concrete path:line Evidence, Risk, Proposed fix, and Verification sections were included.",
+    "Weak or invalid source reports are listed as coverage gaps only.",
     "",
     "## Source Reports",
     "",
-    ...sourceSummaries.map((summary) => {
-      return [
-        `- ${summary.artifact.artifactPath} (task ${summary.artifact.taskId})`,
-        `  - Included findings: ${summary.includedFindings.length}`,
-        `  - Omitted findings: ${summary.omittedFindingCount}`,
-      ].join("\n");
-    }),
+    sourceSummaries.length > 0
+      ? sourceSummaries
+          .map((summary) => {
+            return [
+              `- ${summary.artifact.artifactPath} (task ${summary.artifact.taskId})`,
+              `  - Included findings: ${summary.includedFindings.length}`,
+              `  - Omitted findings: ${summary.omittedFindingCount}`,
+            ].join("\n");
+          })
+          .join("\n")
+      : "- No validated source reports were available.",
     "",
     "## Findings By Source Report",
     "",
@@ -404,10 +472,34 @@ function buildDeterministicAuditSynthesisContent(
     });
   });
 
+  if (sourceSummaries.length === 0) {
+    lines.push("No validated source reports were available for finding synthesis.");
+    lines.push("");
+  }
+
+  lines.push("## Weak Or Invalid Reports");
+  lines.push("");
+  if (weakArtifacts.length === 0) {
+    lines.push("No weak or invalid report artifacts were present in the batch.");
+  } else {
+    weakArtifacts.forEach((artifact) => {
+      lines.push(`- ${artifact.artifactPath} (task ${artifact.taskId})`);
+      lines.push(`  - State: ${artifact.state}`);
+      lines.push(`  - Failure family: ${artifact.failureFamily ?? "none"}`);
+      if (artifact.validationDetails) {
+        lines.push(
+          `  - Validation details: ${artifact.validationDetails.replace(/\n/g, "\n    ")}`,
+        );
+      }
+    });
+  }
+  lines.push("");
+
   lines.push("## Synthesis Quality Notes");
   lines.push("");
   lines.push(`Included source findings: ${totalIncluded}.`);
   lines.push(`Omitted source findings: ${totalOmitted}.`);
+  lines.push(`Weak or invalid source reports: ${weakArtifacts.length}.`);
   lines.push("");
 
   return `${lines.join("\n").trim()}\n`;
@@ -418,10 +510,11 @@ function runDeterministicAuditSynthesisRework(input: {
   projectRoot: string;
   artifactPath: string;
   artifacts: ValidatedAuditArtifactContent[];
+  weakArtifacts: WeakAuditArtifactSummary[];
 }): string {
   const artifactPath = resolve(input.projectRoot, input.artifactPath);
   mkdirSync(dirname(artifactPath), { recursive: true });
-  const content = buildDeterministicAuditSynthesisContent(input.artifacts);
+  const content = buildDeterministicAuditSynthesisContent(input.artifacts, input.weakArtifacts);
   writeFileSync(artifactPath, content, "utf8");
   const gitLog = commitArtifactIfChanged(input.projectRoot, input.artifactPath);
   return [
@@ -542,10 +635,15 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   const isAuditSynthesisTask = roadmapArtifact?.role === "synthesis";
   const expectedSynthesisArtifactPath = isAuditSynthesisTask ? roadmapArtifact.artifactPath : null;
-  const validatedAuditArtifacts = isAuditSynthesisTask
-    ? readValidatedAuditArtifacts(taskId, projectRoot)
-    : [];
-  const validatedAuditSynthesisInput = formatValidatedAuditSynthesisInput(validatedAuditArtifacts);
+  const auditSynthesisInputs = isAuditSynthesisTask
+    ? readAuditSynthesisInputs(taskId, projectRoot)
+    : { validatedArtifacts: [], weakArtifacts: [] };
+  const validatedAuditArtifacts = auditSynthesisInputs.validatedArtifacts;
+  const weakAuditArtifacts = auditSynthesisInputs.weakArtifacts;
+  const validatedAuditSynthesisInput = formatValidatedAuditSynthesisInput(
+    validatedAuditArtifacts,
+    weakAuditArtifacts,
+  );
 
   if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
     const nowIso = new Date().toISOString();
@@ -579,6 +677,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       projectRoot,
       artifactPath: expectedSynthesisArtifactPath,
       artifacts: validatedAuditArtifacts,
+      weakArtifacts: weakAuditArtifacts,
     });
     setTaskFields(taskId, {
       implementationLog: resultText,
@@ -680,6 +779,7 @@ ${
   expectedSynthesisArtifactPath
     ? `Audit synthesis mode:
 - Use VALIDATED_AUDIT_BATCH_INPUTS as the source of truth. Do not synthesize from unrelated repository files or old report-like files.
+- Validated report artifacts may contribute audit findings. Weak or invalid report artifacts may only be summarized in a Weak/Invalid Reports section as coverage gaps with their state and failure reason.
 - Write only the expected synthesis artifact: ${expectedSynthesisArtifactPath}.
 - For each summarized finding, cite the concrete repository path+line evidence contained in the validated source reports. Mention source report artifact names only as provenance, not as the only Evidence reference.
 - After writing ${expectedSynthesisArtifactPath}, use git_status and git_commit for that artifact, then verify with git log -1 --name-only --oneline.

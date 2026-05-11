@@ -158,6 +158,17 @@ describe("runImplementer rework behavior", () => {
       .run();
     db.insert(tasks)
       .values({
+        id: "task-weak-report",
+        projectId: "project-1",
+        title: "Audit security",
+        description: "Report artifact: audit/security.md",
+        taskIntent: "audit",
+        status: "blocked_external",
+        manualReviewRequired: true,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
         id: "task-synthesis",
         projectId: "project-1",
         title: "Synthesize audit findings",
@@ -173,13 +184,19 @@ describe("runImplementer rework behavior", () => {
       roadmapAlias: "audit",
       taskIntent: "audit",
       executionPolicy: "serialized_shared_checkout",
-      createdTaskIds: ["task-synthesis-report", "task-synthesis"],
+      createdTaskIds: ["task-synthesis-report", "task-weak-report", "task-synthesis"],
       synthesisTaskId: "task-synthesis",
       artifacts: [
         {
           taskId: "task-synthesis-report",
           role: "report",
           artifactPath: "audit/config.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-weak-report",
+          role: "report",
+          artifactPath: "audit/security.md",
           projectRoot,
         },
         {
@@ -195,6 +212,12 @@ describe("runImplementer rework behavior", () => {
       state: "valid",
       failureFamily: null,
     });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-weak-report",
+      state: "invalid",
+      failureFamily: "invalid_artifact_content",
+      validationDetails: { issues: ["low_quality_report_evidence"] },
+    });
 
     await runImplementer("task-synthesis", projectRoot);
 
@@ -203,6 +226,9 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("<<<VALIDATED_AUDIT_BATCH_INPUTS");
     expect(call.prompt).toContain("--- artifact: audit/config.md");
     expect(call.prompt).toContain("Evidence: `README.md:1` identifies project docs.");
+    expect(call.prompt).toContain("--- weak_or_invalid_artifacts ---");
+    expect(call.prompt).toContain("artifact: audit/security.md");
+    expect(call.prompt).toContain("failureFamily: invalid_artifact_content");
     expect(call.prompt).toContain("use those exact validated report contents");
   });
 
@@ -404,7 +430,7 @@ describe("runImplementer rework behavior", () => {
 
     expect(queryMock).not.toHaveBeenCalled();
     const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
-    expect(summary).toContain("Generated from validated audit batch reports.");
+    expect(summary).toContain("Generated from terminal audit batch report artifacts.");
     expect(summary).toContain("Evidence: `README.md:1`");
     expect(summary).toContain("Risk: Synthesis can miss validated source evidence.");
     expect(summary).toContain("Proposed fix: carry source report branch content");

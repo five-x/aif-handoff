@@ -2,7 +2,7 @@ import {
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
-  listValidatedRoadmapReportArtifacts,
+  listRoadmapReportArtifactsForSynthesis,
   setTaskFields,
 } from "@aif/data";
 import { createRuntimeWorkflowSpec, type RuntimeWorkflowSpec } from "@aif/runtime";
@@ -86,9 +86,10 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
           "- Validated source report artifacts may live on producer branches or worktrees and may not exist as files in this synthesis checkout.",
           "- Do not report validated source report artifacts as missing solely because list_files does not show them in the current branch.",
           "- Review the synthesis artifact content and implementation log instead; the implementation log is allowed to prove producer-branch artifact ingestion.",
-          "Validated source report artifacts:",
-          ...listValidatedRoadmapReportArtifacts(roadmapArtifact.batchId).map(
-            (artifact) => `- ${artifact.artifactPath} (task ${artifact.taskId})`,
+          "Terminal source report artifacts:",
+          ...listRoadmapReportArtifactsForSynthesis(roadmapArtifact.batchId).map(
+            (artifact) =>
+              `- ${artifact.artifactPath} (task ${artifact.taskId}, state ${artifact.state})`,
           ),
         ].join("\n")
       : "Audit synthesis batch context: not a roadmap-batch synthesis task.";

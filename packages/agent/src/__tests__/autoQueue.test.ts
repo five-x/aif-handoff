@@ -25,8 +25,14 @@ const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
 vi.stubEnv("AIF_TASK_WORKTREES_ENABLED", "true");
 
 const { processAutoQueueAdvance, processDueScheduledTasks } = await import("../coordinator.js");
-const { findTaskById, setAutoQueueMode, updateTaskStatus, setTaskFields } =
-  await import("@aif/data");
+const {
+  createRoadmapBatchContract,
+  findTaskById,
+  setAutoQueueMode,
+  updateRoadmapBatchArtifactState,
+  updateTaskStatus,
+  setTaskFields,
+} = await import("@aif/data");
 
 function seedProject(id: string, opts: { autoQueue?: boolean; parallel?: boolean } = {}) {
   testDb.current
@@ -128,6 +134,31 @@ describe("processAutoQueueAdvance", () => {
       seedTask("t2", "seq", 200);
       expect(processAutoQueueAdvance()).toBe(0);
       expect(findTaskById("t2")?.status).toBe("backlog");
+    });
+
+    it("advances after a manual-blocked audit report artifact reaches invalid terminal state", () => {
+      seedTask("t1", "seq", 100, {
+        status: "blocked_external",
+        taskIntent: "audit",
+        manualReviewRequired: true,
+      });
+      seedTask("t2", "seq", 200);
+      createRoadmapBatchContract({
+        projectId: "seq",
+        roadmapAlias: "audit-v4",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["t1", "t2"],
+        artifacts: [{ taskId: "t1", role: "report", artifactPath: "audit/security.md" }],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "t1",
+        state: "invalid",
+        failureFamily: "invalid_artifact_content",
+      });
+
+      expect(processAutoQueueAdvance()).toBe(1);
+      expect(findTaskById("t2")?.status).toBe("planning");
     });
 
     it("skips paused backlog tasks and picks the next unpaused one", () => {

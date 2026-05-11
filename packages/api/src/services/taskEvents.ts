@@ -20,7 +20,7 @@ import {
   findTaskById,
   getLatestHumanComment,
   appendTaskActivityLog,
-  listValidatedRoadmapReportArtifacts,
+  listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
   setTaskFields,
   updateRoadmapBatchArtifactState,
@@ -108,7 +108,9 @@ function artifactStateForFailureFamily(
 
 function allowedEvidenceArtifactPathsFor(auditArtifact: RoadmapBatchArtifactRow | undefined) {
   return auditArtifact?.role === "synthesis"
-    ? listValidatedRoadmapReportArtifacts(auditArtifact.batchId).map((entry) => entry.artifactPath)
+    ? listRoadmapReportArtifactsForSynthesis(auditArtifact.batchId).map(
+        (entry) => entry.artifactPath,
+      )
     : [];
 }
 

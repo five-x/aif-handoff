@@ -283,6 +283,68 @@ describe("data layer", () => {
         "valid",
       );
     });
+
+    it("treats invalid terminal report artifacts as synthesis inputs rather than batch blockers", () => {
+      const validReportTask = createTask({
+        projectId: "proj-1",
+        title: "Audit architecture",
+        description: "Report artifact: audit/architecture.md",
+        taskIntent: "audit",
+      });
+      const invalidReportTask = createTask({
+        projectId: "proj-1",
+        title: "Audit security",
+        description: "Report artifact: audit/security.md",
+        taskIntent: "audit",
+      });
+      const synthesisTask = createTask({
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        paused: true,
+      });
+      setTaskFields(synthesisTask!.id, {
+        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+      });
+
+      const summary = createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-v4",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [validReportTask!.id, invalidReportTask!.id, synthesisTask!.id],
+        synthesisTaskId: synthesisTask!.id,
+        artifacts: [
+          { taskId: validReportTask!.id, role: "report", artifactPath: "audit/architecture.md" },
+          { taskId: invalidReportTask!.id, role: "report", artifactPath: "audit/security.md" },
+          { taskId: synthesisTask!.id, role: "synthesis", artifactPath: "audit/summary.md" },
+        ],
+      });
+
+      const partial = updateRoadmapBatchArtifactState({
+        taskId: validReportTask!.id,
+        state: "valid",
+        failureFamily: null,
+      });
+      expect(partial?.synthesisReady).toBe(false);
+
+      const ready = updateRoadmapBatchArtifactState({
+        taskId: invalidReportTask!.id,
+        state: "invalid",
+        failureFamily: "invalid_artifact_content",
+        validationDetails: { issues: ["low_quality_report_evidence"] },
+      });
+
+      expect(ready?.synthesisReady).toBe(true);
+      expect(ready?.status).toBe("synthesis_ready");
+      expect(ready?.failureFamily).toBeNull();
+      expect(ready?.counts.valid).toBe(1);
+      expect(ready?.counts.invalid).toBe(1);
+      expect(findTaskById(synthesisTask!.id)?.paused).toBe(false);
+      expect(findTaskById(synthesisTask!.id)?.blockedReason).toBeNull();
+      expect(summarizeRoadmapBatch(summary.batchId)?.synthesisReady).toBe(true);
+    });
   });
 
   describe("updateTask", () => {
@@ -1403,6 +1465,35 @@ describe("data layer", () => {
       const a = createTask({ projectId: "proj-1", title: "A", description: "" });
       updateTaskStatus(a!.id, "blocked_external");
       expect(countActivePipelineTasksForProject("proj-1")).toBe(1);
+    });
+
+    it("countActivePipelineTasksForProject ignores terminal manual audit report blocks", () => {
+      const report = createTask({
+        projectId: "proj-1",
+        title: "Audit security",
+        description: "Report artifact: audit/security.md",
+        taskIntent: "audit",
+      });
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-v4",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [report!.id],
+        artifacts: [{ taskId: report!.id, role: "report", artifactPath: "audit/security.md" }],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: report!.id,
+        state: "invalid",
+        failureFamily: "invalid_artifact_content",
+      });
+      updateTaskStatus(report!.id, "blocked_external", {
+        manualReviewRequired: true,
+        reworkRequested: false,
+        retryAfter: null,
+      });
+
+      expect(countActivePipelineTasksForProject("proj-1")).toBe(0);
     });
 
     it("hasActiveBranchBoundTasksForProject returns false when no task has a branchName", () => {

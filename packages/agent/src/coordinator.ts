@@ -20,7 +20,7 @@ import {
   persistTaskRuntimeLimitSnapshot,
   resolveEffectiveRuntimeProfile,
   findRoadmapBatchArtifactByTaskId,
-  listValidatedRoadmapReportArtifacts,
+  listRoadmapReportArtifactsForSynthesis,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
   setTaskFields,
@@ -469,7 +469,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   const allowedEvidenceArtifactPaths =
     artifact?.role === "synthesis"
-      ? listValidatedRoadmapReportArtifacts(artifact.batchId).map((entry) => entry.artifactPath)
+      ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => entry.artifactPath)
       : [];
   const result = evaluateTaskCompletionEvidence({
     task: {
@@ -585,7 +585,7 @@ function reworkCompletionEvidenceAlreadySatisfied(task: TaskRow, projectRoot: st
   if (artifact.role === "synthesis") return false;
   const allowedEvidenceArtifactPaths =
     artifact.role === "synthesis"
-      ? listValidatedRoadmapReportArtifacts(artifact.batchId).map((entry) => entry.artifactPath)
+      ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => entry.artifactPath)
       : [];
   const result = evaluateTaskCompletionEvidence({
     task: {
