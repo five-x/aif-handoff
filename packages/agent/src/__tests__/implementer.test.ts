@@ -775,6 +775,121 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
   });
 
+  it("deterministically rewrites repeated audit validator report failures", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "alpha.ts"), "export const alpha = 1;\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "beta.ts"), "export const beta = 1;\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "gamma.ts"), "export const gamma = 1;\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "audit", "security.md"),
+      [
+        "# Audit",
+        "",
+        "No validated findings.",
+        "",
+        "## Finding: Candidate",
+        "Evidence: `alpha.ts:1`",
+        "Risk: This was not verified.",
+        "Verification: expected command output would show the issue.",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync(
+      "git",
+      ["add", "README.md", "src/alpha.ts", "src/beta.ts", "src/gamma.ts", "audit/security.md"],
+      { cwd: projectRoot, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = "Scope: README.md, src\nReport artifact: audit/security.md";
+    db.insert(tasks)
+      .values({
+        id: "task-audit-repeated-validator-repair",
+        projectId: "project-1",
+        title: "Audit security",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "finding-missing-scope",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (missing_scope_coverage): Report artifact does not cover declared audit scope roots.",
+            },
+            {
+              id: "finding-contradictory",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (contradictory_findings_and_no_findings): Report artifact mixes validated findings with a No Validated Findings claim.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-repeated-validator-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-repeated-validator-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-repeated-validator-repair",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-repeated-validator-repair", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const repaired = readFileSync(join(projectRoot, "audit", "security.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("`README.md:1`");
+    expect(repaired).toContain("`src/alpha.ts:1`");
+    expect(repaired).toContain("`src/beta.ts:1`");
+    expect(repaired).toContain("`src/gamma.ts:1`");
+    expect(repaired).not.toContain("Candidate");
+    expect(repaired).not.toContain("would show");
+    const validation = validateAuditReportArtifact({
+      text: repaired,
+      projectRoot,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/security.md"],
+      requireProposedFix: true,
+    });
+    expect(validation.ok).toBe(true);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-repeated-validator-repair"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+  });
+
   it("does NOT resume a stored session when rework is requested", async () => {
     const db = testDb.current;
     db.insert(tasks)

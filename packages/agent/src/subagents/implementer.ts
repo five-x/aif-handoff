@@ -319,7 +319,7 @@ function isAuditEvidenceRepairMode(
 
 function shouldUseDeterministicAuditReportRepair(
   task: Pick<TaskRow, "blockedReason" | "reviewComments"> & {
-    autoReviewState?: { findings: Array<{ text: string }> } | null;
+    autoReviewState?: { iteration?: number; findings: Array<{ text: string }> } | null;
   },
 ): boolean {
   const text = [
@@ -327,8 +327,21 @@ function shouldUseDeterministicAuditReportRepair(
     task.reviewComments ?? "",
     ...(task.autoReviewState?.findings.map((finding) => finding.text) ?? []),
   ].join("\n");
-  return /\b(?:governance_observation_as_finding|governance\/documentation observations|synthetic-looking git|placeholder commit hash|fake command output)\b/i.test(
-    text,
+  if (
+    /\b(?:governance_observation_as_finding|governance\/documentation observations|synthetic-looking git|placeholder commit hash|fake command output)\b/i.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+
+  const reviewIteration = task.autoReviewState?.iteration ?? 0;
+  return (
+    reviewIteration >= 2 &&
+    /\bAudit report validator blocked completion\b/i.test(text) &&
+    /\b(?:contradictory_findings_and_no_findings|invalid_or_missing_file_references|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim|low_quality_report_evidence|insufficient_report_evidence)\b/i.test(
+      text,
+    )
   );
 }
 
