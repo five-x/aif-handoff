@@ -67,6 +67,8 @@ describe("auditRoadmapContract", () => {
     expect(isAuditReportArtifactPath("src/security-audit.md")).toBe(false);
     expect(isAuditReportArtifactPath("tests/security-audit.md")).toBe(false);
     expect(isAuditReportArtifactPath("../audit/security-audit.md")).toBe(false);
+    expect(isAuditReportArtifactPath(".ai-factory/plans/audit-security.md")).toBe(false);
+    expect(isAuditReportArtifactPath("aif-plan/audit-security.md")).toBe(false);
   });
 
   it("identifies audit synthesis titles", () => {

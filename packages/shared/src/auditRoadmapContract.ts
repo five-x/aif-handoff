@@ -122,7 +122,11 @@ export function isAuditReportArtifactPath(path: string): boolean {
     /^[a-z]:\//i.test(lower) ||
     lower === ".." ||
     lower.startsWith("../") ||
-    lower.includes("/../")
+    lower.includes("/../") ||
+    lower.startsWith(".ai-factory/") ||
+    lower.includes("/.ai-factory/") ||
+    lower.startsWith("aif-plan/") ||
+    lower.includes("/aif-plan/")
   ) {
     return false;
   }

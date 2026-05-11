@@ -99,6 +99,35 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("missing_diagnostic_report_constraints");
   });
 
+  it("rejects diagnostic plans that use the plan file as the report artifact", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Audit: architecture and ownership boundaries",
+        description:
+          "Scope: src.\nReport artifact: audit/2026-05-11-audit-architecture-and-ownership-boundaries-audit.md\nConstraint: diagnostic-only.",
+        taskIntent: "audit",
+        planPath: ".ai-factory/plans/audit-architecture-and-ownership-boundaries-4.md",
+      },
+      plan: [
+        "## Diagnostic-only plan",
+        "",
+        "Report artifact: `.ai-factory/plans/audit-architecture-and-ownership-boundaries-4.md`",
+        "",
+        "- [ ] Keep the run diagnostic-only: do not implement fixes.",
+        "- [ ] Create or update `.ai-factory/plans/audit-architecture-and-ownership-boundaries-4.md` with findings.",
+        "- [ ] Verify every repository path referenced in `.ai-factory/plans/audit-architecture-and-ownership-boundaries-4.md` exists.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toEqual(
+      expect.arrayContaining([
+        "missing_diagnostic_report_constraints",
+        "diagnostic_report_artifact_mismatch",
+      ]),
+    );
+  });
+
   it.each(["security-review", "code-review", "validation-report", "verification-findings"])(
     "requires diagnostic constraints for hyphenated diagnostic task names: %s",
     (title) => {
@@ -161,6 +190,28 @@ describe("evaluateTaskPlanQuality", () => {
     expect(plan).toContain("audit/2026-05-08-initial-audit.md");
     expect(plan).toContain("- [ ] Keep the run diagnostic-only");
     expect(plan).not.toContain("<aif-plan");
+    expect(evaluateTaskPlanQuality({ task, plan }).ok).toBe(true);
+  });
+
+  it("builds deterministic diagnostic fallback from the declared report artifact before stale plan text", () => {
+    const task = {
+      title: "Audit: architecture and ownership boundaries",
+      taskIntent: "audit" as const,
+      description:
+        "Scope: src.\nReport artifact: audit/2026-05-11-audit-architecture-and-ownership-boundaries-audit.md\nConstraint: diagnostic-only.",
+      planPath: ".ai-factory/plans/audit-architecture-and-ownership-boundaries-4.md",
+    };
+    const plan = buildDeterministicDiagnosticPlan({
+      task,
+      extraText: [
+        "Report artifact: `.ai-factory/plans/audit-architecture-and-ownership-boundaries-4.md`",
+      ],
+    });
+
+    expect(plan).toContain("audit/2026-05-11-audit-architecture-and-ownership-boundaries-audit.md");
+    expect(plan).not.toContain(
+      ".ai-factory/plans/audit-architecture-and-ownership-boundaries-4.md",
+    );
     expect(evaluateTaskPlanQuality({ task, plan }).ok).toBe(true);
   });
 

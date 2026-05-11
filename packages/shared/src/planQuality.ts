@@ -1,4 +1,8 @@
 import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
+import {
+  isAuditReportArtifactPath,
+  parseExpectedAuditReportArtifactPath,
+} from "./auditRoadmapContract.js";
 
 export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "empty_plan",
@@ -9,6 +13,7 @@ export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "thinking_artifact",
   "missing_task_specific_artifact_path",
   "missing_diagnostic_report_constraints",
+  "diagnostic_report_artifact_mismatch",
   "diagnostic_scope_violation",
 ] as const;
 
@@ -107,7 +112,11 @@ function extractReportArtifactPaths(text: string): string[] {
   const paths = new Set<string>();
   for (const match of text.matchAll(REPORT_ARTIFACT_PATTERN)) {
     const raw = match[1]?.trim();
-    if (raw) paths.add(normalizePath(raw));
+    if (!raw) continue;
+    const normalized = normalizePath(raw);
+    if (isAuditReportArtifactPath(normalized)) {
+      paths.add(normalized);
+    }
   }
   return [...paths].sort();
 }
@@ -139,6 +148,12 @@ export function findDeterministicDiagnosticReportPath(
   const isDiagnosticTask =
     taskIntent === "audit" || (!hasExplicitTaskIntent && DIAGNOSTIC_TASK_PATTERN.test(sourceText));
   if (!isDiagnosticTask) return null;
+
+  const declaredReportPath = input.task.description
+    ? parseExpectedAuditReportArtifactPath(input.task.description)
+    : null;
+  if (declaredReportPath) return normalizePath(declaredReportPath);
+
   return extractReportArtifactPaths(sourceText)[0] ?? null;
 }
 
@@ -214,6 +229,9 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
   const hasExplicitTaskIntent = isTaskIntent(input.task.taskIntent);
   const isDiagnosticTask =
     taskIntent === "audit" || (!hasExplicitTaskIntent && DIAGNOSTIC_TASK_PATTERN.test(taskText));
+  const declaredReportPath = input.task.description
+    ? parseExpectedAuditReportArtifactPath(input.task.description)
+    : null;
   const issues: TaskPlanQualityIssue[] = [];
 
   if (!plan) {
@@ -262,6 +280,12 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
     const reportPaths = extractReportArtifactPaths(plan);
     const missingReportPath = reportPaths.length === 0;
     const missingDiagnosticOnlyConstraint = !DIAGNOSTIC_ONLY_PATTERN.test(plan);
+    const normalizedDeclaredReportPath = declaredReportPath
+      ? normalizePath(declaredReportPath)
+      : null;
+    const missingDeclaredReportPath =
+      normalizedDeclaredReportPath !== null &&
+      !reportPaths.some((path) => normalizePath(path) === normalizedDeclaredReportPath);
     if (missingReportPath || missingDiagnosticOnlyConstraint) {
       const missing = [
         missingReportPath ? "report artifact path" : null,
@@ -273,6 +297,15 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
         issue(
           "missing_diagnostic_report_constraints",
           `Diagnostic task plan is missing ${missing}.`,
+        ),
+      );
+    }
+
+    if (missingDeclaredReportPath) {
+      issues.push(
+        issue(
+          "diagnostic_report_artifact_mismatch",
+          `Diagnostic task plan must use declared report artifact path ${declaredReportPath}.`,
         ),
       );
     }
