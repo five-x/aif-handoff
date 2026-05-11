@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projects, taskComments, tasks } from "@aif/shared";
+import { projects, taskComments, tasks, validateAuditReportArtifact } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -610,7 +610,7 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("stage only audit/security.md");
   });
 
-  it("enables audit evidence repair mode from auto-review findings even without blockedReason", async () => {
+  it("enables audit evidence repair prompt mode from auto-review findings even without blockedReason", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -624,16 +624,15 @@ describe("runImplementer rework behavior", () => {
         reworkRequested: true,
         useSubagents: true,
         blockedReason: null,
-        reviewComments:
-          "## Blocking Findings\n- Synthetic-looking git verification output in the audit report.",
+        reviewComments: "## Blocking Findings\n- Audit report lacks substantive scoped evidence.",
         autoReviewStateJson: JSON.stringify({
           strategy: "full_re_review",
           iteration: 1,
           findings: [
             {
-              id: "finding-synthetic-git",
+              id: "finding-insufficient-evidence",
               source: "review_gate",
-              text: "Audit report validator blocked completion (low_quality_report_evidence): report artifact contains synthetic-looking git verification output and governance/documentation observations.",
+              text: "Audit report validator blocked completion (insufficient_report_evidence): report artifact lacks substantive scoped evidence markers.",
             },
           ],
         }),
@@ -663,7 +662,117 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("Do not preserve review-rejected findings");
     expect(call.prompt).toContain("Never type an example git hash into the report");
     expect(call.prompt).toContain("audit/architecture.md");
-    expect(call.prompt).toContain("finding-synthetic-git");
+    expect(call.prompt).toContain("finding-insufficient-evidence");
+  });
+
+  it("deterministically rewrites governance-only audit report rework", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\n", "utf8");
+    writeFileSync(join(projectRoot, "pyproject.toml"), '[project]\nname = "test"\n', "utf8");
+    writeFileSync(join(projectRoot, "src", "config.py"), "VALUE = 1\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "audit", "architecture.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding: Missing Ownership Clarity",
+        "Evidence: `AGENTS.md:1-1`",
+        "Risk: The project has unclear ownership.",
+        "Proposed fix: Add ownership docs.",
+        "Verification: Command `git log -1 --oneline` output: `1234567 (HEAD -> main)`",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync(
+      "git",
+      ["add", "README.md", "AGENTS.md", "pyproject.toml", "src/config.py", "audit/architecture.md"],
+      { cwd: projectRoot, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description =
+      "Scope: README.md, AGENTS.md, pyproject.toml, src\nReport artifact: audit/architecture.md";
+    db.insert(tasks)
+      .values({
+        id: "task-audit-deterministic-repair",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "finding-governance",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (governance_observation_as_finding): Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-deterministic-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-deterministic-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-deterministic-repair",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-deterministic-repair", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const repaired = readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("`README.md:1`");
+    expect(repaired).toContain("`AGENTS.md:1`");
+    expect(repaired).toContain("`pyproject.toml:1`");
+    expect(repaired).toContain("`src/config.py:1`");
+    expect(repaired).not.toContain("Missing Ownership Clarity");
+    expect(repaired).not.toContain("1234567");
+    const validation = validateAuditReportArtifact({
+      text: repaired,
+      projectRoot,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/architecture.md"],
+      requireProposedFix: true,
+    });
+    expect(validation.ok).toBe(true);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-deterministic-repair"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
   });
 
   it("does NOT resume a stored session when rework is requested", async () => {
