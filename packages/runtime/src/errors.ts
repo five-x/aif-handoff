@@ -231,7 +231,15 @@ const SHARED_FALLBACK_PATTERNS: ReadonlyArray<{
   },
   {
     category: "context_length",
-    patterns: ["context_length_exceeded", "maximum context length"],
+    patterns: [
+      "context_length_exceeded",
+      "maximum context length",
+      "exceed_context_size_error",
+      "exceeds the available context size",
+      "available context size",
+      "n_prompt_tokens",
+      "n_ctx",
+    ],
   },
   {
     category: "content_filter",

@@ -212,6 +212,29 @@ describe("classifyStageError", () => {
     }
   });
 
+  it("blocks context length errors without retrying the same oversized prompt", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError(
+          "request (28310 tokens) exceeds the available context size (24576)",
+          undefined,
+          "context_length",
+        ),
+        retryCount: 2,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(2);
+      expect(result.blockedReason).toBe(
+        "Request exceeded the model context limit. Manual action required before retry.",
+      );
+    }
+  });
+
   it("redacts raw upstream error text from blocked reasons and activity logs", () => {
     const err = new RuntimeExecutionError(
       'upstream leaked "token=abc123" <script>alert(1)</script>',

@@ -3,7 +3,12 @@
  * and decides whether to accept, request rework, or stop at manual review.
  */
 
-import { createTaskComment, findTaskById } from "@aif/data";
+import {
+  createTaskComment,
+  findRoadmapBatchArtifactByTaskId,
+  findTaskById,
+  listRoadmapReportArtifactsForSynthesis,
+} from "@aif/data";
 import { getEnv, logger, type AutoReviewState } from "@aif/shared";
 import { logActivity } from "./hooks.js";
 import {
@@ -40,6 +45,20 @@ export type ReviewGateOutcome =
 interface AutoReviewInput {
   taskId: string;
   projectRoot: string;
+}
+
+function buildReviewGateTaskContext(task: NonNullable<ReturnType<typeof findTaskById>>) {
+  const artifact = findRoadmapBatchArtifactByTaskId(task.id);
+  const allowedEvidenceArtifactPaths =
+    artifact?.role === "synthesis"
+      ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => entry.artifactPath)
+      : [];
+
+  return {
+    ...task,
+    expectedReportArtifactPath: artifact?.artifactPath ?? null,
+    allowedEvidenceArtifactPaths,
+  };
 }
 
 function buildSummaryComment(input: {
@@ -137,7 +156,7 @@ export async function handleAutoReviewGate(
     strategy: env.AGENT_AUTO_REVIEW_STRATEGY,
     iteration: currentIteration,
     previousFindings: refreshedTask.autoReviewState?.findings ?? [],
-    task: refreshedTask,
+    task: buildReviewGateTaskContext(refreshedTask),
   });
 
   if (reviewGate.status === "success") {

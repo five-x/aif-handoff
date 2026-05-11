@@ -561,6 +561,59 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toBe("Implementation done");
   });
 
+  it("compacts oversized implement-coordinator rework prompts before runtime dispatch", async () => {
+    const db = testDb.current;
+    const longDescription = `Desc start\n${"d".repeat(90_000)}\nDesc end`;
+    const longReview = `## Blocking Findings\n- [finding-large] code_review | Review start ${"r".repeat(
+      100_000,
+    )} Review end`;
+    db.insert(tasks)
+      .values({
+        id: "task-large-rework",
+        projectId: "project-1",
+        title: "Large rework",
+        description: longDescription,
+        status: "implementing",
+        plan: "## Plan\n- [x] Done",
+        reworkRequested: true,
+        useSubagents: true,
+        blockedReason: `Context failure ${"b".repeat(20_000)} final instruction`,
+        reviewComments: longReview,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "closure_first",
+          iteration: 3,
+          findings: Array.from({ length: 30 }, (_, index) => ({
+            id: `finding-${index + 1}`,
+            source: "code_review",
+            text: `Finding ${index + 1} ${"x".repeat(2_000)}`,
+          })),
+        }),
+      })
+      .run();
+    db.insert(taskComments)
+      .values({
+        id: "large-comment",
+        taskId: "task-large-rework",
+        author: "human",
+        message: `Please repair ${"m".repeat(50_000)} final ask`,
+        attachments: "[]",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      })
+      .run();
+
+    await runImplementer("task-large-rework", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt.length).toBeLessThanOrEqual(78_000);
+    expect(call.prompt).toContain("REWORK REQUEST");
+    expect(call.prompt).toContain("TASK_DESCRIPTION compacted");
+    expect(call.prompt).toContain("FULL_REVIEW_COMMENTS compacted");
+    expect(call.prompt).toContain("REWORK_COMMENT_MESSAGE compacted");
+    expect(call.prompt).toContain("additional blocking finding(s) omitted");
+    expect(call.prompt).toContain("Implement the task using the provided plan.");
+  });
+
   it("adds a focused audit evidence repair contract for repeated evidence guard failures", async () => {
     const db = testDb.current;
     db.insert(tasks)

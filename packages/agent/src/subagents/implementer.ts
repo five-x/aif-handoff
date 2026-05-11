@@ -29,6 +29,136 @@ import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
 
 const log = logger("implementer");
 const AGENT_NAME = "implement-coordinator";
+// Keep user prompt below the 27K prompt-token envelope so Qwen profiles with
+// max_tokens=5000 still have room for system text and tool schemas in 32K ctx.
+const IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET = 26_000;
+const PROMPT_BUDGET_CHARS_PER_TOKEN = 3;
+const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
+  IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET * PROMPT_BUDGET_CHARS_PER_TOKEN;
+const PROMPT_SECTION_LIMITS = {
+  reworkComment: 8_000,
+  reworkCommentMessage: 5_000,
+  reworkCommentAttachments: 2_000,
+  blockedReason: 3_000,
+  reviewComments: 8_000,
+  blockingFindingsSnapshot: 8_000,
+  blockingFindingText: 900,
+  blockingFindingCount: 20,
+  taskDescription: 12_000,
+  taskAttachments: 4_000,
+  validatedAuditBatchInput: 18_000,
+  validatedAuditArtifactContentMin: 2_000,
+  validatedAuditArtifactContentMax: 8_000,
+};
+
+function estimatePromptTokens(text: string): number {
+  return Math.ceil(text.length / PROMPT_BUDGET_CHARS_PER_TOKEN);
+}
+
+function compactTextForPrompt(label: string, text: string, maxChars: number): string {
+  const value = text.trim();
+  if (value.length <= maxChars) return value;
+
+  const note = `\n\n[... ${label} compacted: omitted ${
+    value.length - maxChars
+  } characters to stay within implementer prompt budget ...]\n\n`;
+  const available = Math.max(0, maxChars - note.length);
+  if (available <= 0) {
+    return `[... ${label} omitted to stay within implementer prompt budget ...]`;
+  }
+
+  const headLength = Math.ceil(available * 0.6);
+  const tailLength = available - headLength;
+  return `${value.slice(0, headLength).trimEnd()}${note}${value
+    .slice(value.length - tailLength)
+    .trimStart()}`;
+}
+
+function compactPromptBetweenMarkers(prompt: string, marker: string, maxChars: number): string {
+  const startMarker = `<<<${marker}\n`;
+  const start = prompt.indexOf(startMarker);
+  if (start < 0) return prompt;
+  const contentStart = start + startMarker.length;
+  const end = prompt.indexOf(`\n${marker}`, contentStart);
+  if (end < 0) return prompt;
+
+  const content = prompt.slice(contentStart, end);
+  const compacted = compactTextForPrompt(marker, content, maxChars);
+  if (compacted === content.trim()) return prompt;
+  return `${prompt.slice(0, contentStart)}${compacted}${prompt.slice(end)}`;
+}
+
+function compactPromptBetween(
+  prompt: string,
+  startMarker: string,
+  endMarker: string,
+  label: string,
+  maxChars: number,
+): string {
+  const start = prompt.indexOf(startMarker);
+  if (start < 0) return prompt;
+  const contentStart = start + startMarker.length;
+  const end = prompt.indexOf(endMarker, contentStart);
+  if (end < 0) return prompt;
+
+  const content = prompt.slice(contentStart, end);
+  const compacted = compactTextForPrompt(label, content, maxChars);
+  if (compacted === content.trim()) return prompt;
+  return `${prompt.slice(0, contentStart)}${compacted}${prompt.slice(end)}`;
+}
+
+function compactImplementerPromptToBudget(prompt: string): {
+  prompt: string;
+  compacted: boolean;
+  originalEstimatedTokens: number;
+  estimatedTokens: number;
+} {
+  const originalEstimatedTokens = estimatePromptTokens(prompt);
+  if (originalEstimatedTokens <= IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET) {
+    return {
+      prompt,
+      compacted: false,
+      originalEstimatedTokens,
+      estimatedTokens: originalEstimatedTokens,
+    };
+  }
+
+  let compacted = prompt;
+  compacted = compactPromptBetweenMarkers(compacted, "VALIDATED_AUDIT_BATCH_INPUTS", 10_000);
+  compacted = compactPromptBetweenMarkers(compacted, "FULL_REVIEW_COMMENTS", 5_000);
+  compacted = compactPromptBetweenMarkers(compacted, "BLOCKING_FINDINGS_SNAPSHOT", 5_000);
+  compacted = compactPromptBetweenMarkers(compacted, "REWORK_COMMENT", 5_000);
+  compacted = compactPromptBetweenMarkers(compacted, "REWORK_BLOCKED_REASON", 2_000);
+  compacted = compactPromptBetween(
+    compacted,
+    "Description: ",
+    "\nTask attachments:",
+    "TASK_DESCRIPTION",
+    6_000,
+  );
+  compacted = compactPromptBetween(
+    compacted,
+    "Task attachments:\n",
+    "\n\nValidated audit batch inputs:",
+    "TASK_ATTACHMENTS",
+    2_000,
+  );
+
+  if (estimatePromptTokens(compacted) > IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET) {
+    compacted = compactTextForPrompt(
+      "IMPLEMENT_COORDINATOR_PROMPT",
+      compacted,
+      IMPLEMENT_COORDINATOR_CHAR_BUDGET,
+    );
+  }
+
+  return {
+    prompt: compacted,
+    compacted: compacted !== prompt,
+    originalEstimatedTokens,
+    estimatedTokens: estimatePromptTokens(compacted),
+  };
+}
 
 function formatReworkCommentForPrompt(
   comment: {
@@ -39,12 +169,24 @@ function formatReworkCommentForPrompt(
   } | null,
 ): string {
   if (!comment) return "No rework comments found for rework request.";
-  return [
-    `[${comment.createdAt}] ${comment.author}`,
-    `message: ${comment.message}`,
-    "attachments:",
-    formatAttachmentsForPrompt(comment.attachments),
-  ].join("\n");
+  return compactTextForPrompt(
+    "REWORK_COMMENT",
+    [
+      `[${comment.createdAt}] ${comment.author}`,
+      `message: ${compactTextForPrompt(
+        "REWORK_COMMENT_MESSAGE",
+        comment.message,
+        PROMPT_SECTION_LIMITS.reworkCommentMessage,
+      )}`,
+      "attachments:",
+      compactTextForPrompt(
+        "REWORK_COMMENT_ATTACHMENTS",
+        formatAttachmentsForPrompt(comment.attachments),
+        PROMPT_SECTION_LIMITS.reworkCommentAttachments,
+      ),
+    ].join("\n"),
+    PROMPT_SECTION_LIMITS.reworkComment,
+  );
 }
 
 function formatAutoReviewStateForPrompt(
@@ -61,12 +203,30 @@ function formatAutoReviewStateForPrompt(
     return "No persisted blocking findings snapshot.";
   }
 
-  return [
+  const visibleFindings = state.findings.slice(0, PROMPT_SECTION_LIMITS.blockingFindingCount);
+  const omittedCount = Math.max(0, state.findings.length - visibleFindings.length);
+  const lines = [
     `strategy: ${state.strategy}`,
     `iteration: ${state.iteration}`,
     "findings:",
-    ...state.findings.map((finding) => `- [${finding.id}] ${finding.source} | ${finding.text}`),
-  ].join("\n");
+    ...visibleFindings.map((finding) => {
+      const text = compactTextForPrompt(
+        "BLOCKING_FINDING_TEXT",
+        finding.text,
+        PROMPT_SECTION_LIMITS.blockingFindingText,
+      );
+      return `- [${finding.id}] ${finding.source} | ${text}`;
+    }),
+  ];
+  if (omittedCount > 0) {
+    lines.push(`- [... ${omittedCount} additional blocking finding(s) omitted ...]`);
+  }
+
+  return compactTextForPrompt(
+    "BLOCKING_FINDINGS_SNAPSHOT",
+    lines.join("\n"),
+    PROMPT_SECTION_LIMITS.blockingFindingsSnapshot,
+  );
 }
 
 function isBlockedImplementationResult(resultText: string): boolean {
@@ -527,13 +687,20 @@ function formatValidatedAuditSynthesisInput(
     return "No validated audit batch input required for this task.";
   }
 
+  const artifactContentLimit = Math.max(
+    PROMPT_SECTION_LIMITS.validatedAuditArtifactContentMin,
+    Math.min(
+      PROMPT_SECTION_LIMITS.validatedAuditArtifactContentMax,
+      Math.floor(PROMPT_SECTION_LIMITS.validatedAuditBatchInput / Math.max(artifacts.length, 1)),
+    ),
+  );
   const sections = artifacts.map((artifact) => {
     return [
       `--- artifact: ${artifact.artifactPath}`,
       `task: ${artifact.taskId}`,
       `source: ${artifact.source}`,
       "---",
-      artifact.content,
+      compactValidatedAuditArtifactContent(artifact.content, artifactContentLimit),
     ].join("\n");
   });
 
@@ -561,7 +728,36 @@ function formatValidatedAuditSynthesisInput(
     );
   }
 
-  return sections.join("\n\n");
+  return compactTextForPrompt(
+    "VALIDATED_AUDIT_BATCH_INPUTS",
+    sections.join("\n\n"),
+    PROMPT_SECTION_LIMITS.validatedAuditBatchInput,
+  );
+}
+
+function compactValidatedAuditArtifactContent(content: string, maxChars: number): string {
+  const trimmed = content.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const findingSections = splitAuditFindingSections(trimmed);
+  if (findingSections.length === 0) {
+    return compactTextForPrompt("VALIDATED_AUDIT_ARTIFACT_CONTENT", trimmed, maxChars);
+  }
+
+  const selected: string[] = [];
+  let usedChars = 0;
+  for (const section of findingSections) {
+    const nextLength = section.length + 2;
+    if (selected.length > 0 && usedChars + nextLength > maxChars) break;
+    selected.push(section);
+    usedChars += nextLength;
+  }
+  const omitted = Math.max(0, findingSections.length - selected.length);
+  const summarized = [
+    `[validated audit report compacted for implementer prompt budget; included finding sections: ${selected.length}; omitted finding sections: ${omitted}]`,
+    ...selected,
+  ].join("\n\n");
+  return compactTextForPrompt("VALIDATED_AUDIT_ARTIFACT_CONTENT", summarized, maxChars);
 }
 
 function splitAuditFindingSections(content: string): string[] {
@@ -907,6 +1103,26 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const blockingFindingsSnapshot = task.reworkRequested
     ? formatAutoReviewStateForPrompt(task.autoReviewState)
     : "No persisted blocking findings snapshot.";
+  const reworkBlockedReasonForPrompt = compactTextForPrompt(
+    "REWORK_BLOCKED_REASON",
+    task.blockedReason ?? "No blocked reason available.",
+    PROMPT_SECTION_LIMITS.blockedReason,
+  );
+  const reviewCommentsForPrompt = compactTextForPrompt(
+    "FULL_REVIEW_COMMENTS",
+    task.reviewComments ?? "No review comments available.",
+    PROMPT_SECTION_LIMITS.reviewComments,
+  );
+  const taskDescriptionForPrompt = compactTextForPrompt(
+    "TASK_DESCRIPTION",
+    task.description ?? "",
+    PROMPT_SECTION_LIMITS.taskDescription,
+  );
+  const taskAttachmentsForPrompt = compactTextForPrompt(
+    "TASK_ATTACHMENTS",
+    formatAttachmentsForPrompt(task.attachments),
+    PROMPT_SECTION_LIMITS.taskAttachments,
+  );
   const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   const isAuditSynthesisTask = roadmapArtifact?.role === "synthesis";
   const expectedSynthesisArtifactPath = isAuditSynthesisTask ? roadmapArtifact.artifactPath : null;
@@ -1061,11 +1277,11 @@ ${formatReworkCommentForPrompt(latestReworkComment)}
 REWORK_COMMENT
 
 <<<REWORK_BLOCKED_REASON
-${task.blockedReason ?? "No blocked reason available."}
+${reworkBlockedReasonForPrompt}
 REWORK_BLOCKED_REASON
 
 <<<FULL_REVIEW_COMMENTS
-${task.reviewComments ?? "No review comments available."}
+${reviewCommentsForPrompt}
 FULL_REVIEW_COMMENTS
 
 <<<BLOCKING_FINDINGS_SNAPSHOT
@@ -1126,7 +1342,7 @@ Rework handling protocol:
 `
     : "";
 
-  const prompt = `${topReworkHeader}${useSubagents ? "Implement the task using the provided plan." : implementSlashCommand}
+  const rawPrompt = `${topReworkHeader}${useSubagents ? "Implement the task using the provided plan." : implementSlashCommand}
 
 ${scopeConstraint}
 
@@ -1134,9 +1350,9 @@ ${bodyReworkHeader}Title: ${task.title}
 Task intent contract:
 ${formatTaskIntentContractForPrompt(task.taskIntent)}
 
-Description: ${task.description}
+Description: ${taskDescriptionForPrompt}
 Task attachments:
-${formatAttachmentsForPrompt(task.attachments)}
+${taskAttachmentsForPrompt}
 
 Validated audit batch inputs:
 <<<VALIDATED_AUDIT_BATCH_INPUTS
@@ -1177,6 +1393,20 @@ Execution rules:
 - Before closing diagnostic audit/report work, verify every cited repository path exists under the project root. Replace directory references, nonexistent paths, and placeholders with concrete existing file references and line numbers.
 - When VALIDATED_AUDIT_BATCH_INPUTS contains report artifacts, use those exact validated report contents as the synthesis source of truth; do not synthesize from unvalidated report-like files.
 - IMPORTANT: The plan file is ${effectivePlanPath}. Always read from and annotate this exact file — do not create plan files at other paths.${reworkProtocolBlock}`;
+  const promptBudget = compactImplementerPromptToBudget(rawPrompt);
+  const prompt = promptBudget.prompt;
+  if (promptBudget.compacted) {
+    log.warn(
+      {
+        taskId,
+        originalEstimatedTokens: promptBudget.originalEstimatedTokens,
+        estimatedTokens: promptBudget.estimatedTokens,
+        tokenBudget: IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET,
+        promptLength: prompt.length,
+      },
+      "Compacted implementer prompt to stay within input token budget",
+    );
+  }
   const workflowSpec = createRuntimeWorkflowSpec({
     workflowKind: "implementer",
     prompt,

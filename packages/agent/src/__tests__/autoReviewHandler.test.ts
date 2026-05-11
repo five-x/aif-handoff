@@ -3,9 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockFindTaskById = vi.fn();
 const mockCreateTaskComment = vi.fn();
 const mockAppendTaskActivityLog = vi.fn();
+const mockFindRoadmapBatchArtifactByTaskId = vi.fn();
+const mockListRoadmapReportArtifactsForSynthesis = vi.fn();
 
 vi.mock("@aif/data", () => ({
   findTaskById: (...args: unknown[]) => mockFindTaskById(...args),
+  findRoadmapBatchArtifactByTaskId: (...args: unknown[]) =>
+    mockFindRoadmapBatchArtifactByTaskId(...args),
+  listRoadmapReportArtifactsForSynthesis: (...args: unknown[]) =>
+    mockListRoadmapReportArtifactsForSynthesis(...args),
   createTaskComment: (...args: unknown[]) => mockCreateTaskComment(...args),
   appendTaskActivityLog: (...args: unknown[]) => mockAppendTaskActivityLog(...args),
 }));
@@ -22,6 +28,8 @@ describe("handleAutoReviewGate", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFindRoadmapBatchArtifactByTaskId.mockReturnValue(null);
+    mockListRoadmapReportArtifactsForSynthesis.mockReturnValue([]);
   });
 
   it("returns null when task is not in autoMode", async () => {
@@ -322,6 +330,53 @@ describe("handleAutoReviewGate", () => {
         autoMode: true,
       }),
     });
+  });
+
+  it("passes synthesis source report artifact paths into review evidence checks", async () => {
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      reviewComments: "specific review text",
+      reviewIterationCount: 0,
+      maxReviewIterations: 3,
+      autoReviewState: null,
+    });
+    mockFindRoadmapBatchArtifactByTaskId.mockReturnValue({
+      taskId: "task-1",
+      batchId: "batch-1",
+      role: "synthesis",
+      artifactPath: "audit/summary.md",
+    });
+    mockListRoadmapReportArtifactsForSynthesis.mockReturnValue([
+      { artifactPath: "audit/architecture-audit.md" },
+      { artifactPath: "audit/security-audit.md" },
+    ]);
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "success",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      blockingFindings: [],
+      fixesMarkdown: "- none",
+      autoReviewState: null,
+    });
+
+    await handleAutoReviewGate(baseInput);
+
+    expect(evaluateReviewCommentsForAutoMode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: expect.objectContaining({
+          expectedReportArtifactPath: "audit/summary.md",
+          allowedEvidenceArtifactPaths: ["audit/architecture-audit.md", "audit/security-audit.md"],
+        }),
+      }),
+    );
   });
 
   it("writes activity log entries for gate start and outcome", async () => {

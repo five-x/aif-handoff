@@ -72,6 +72,14 @@ describe("classifyByMessageFallback", () => {
     ["model not found", "model_not_found"],
     ["no endpoints found", "model_not_found"],
     ["context_length_exceeded", "context_length"],
+    [
+      "request (24630 tokens) exceeds the available context size (24576), try increasing it",
+      "context_length",
+    ],
+    [
+      '{"error":{"type":"exceed_context_size_error","n_prompt_tokens":28310,"n_ctx":24576}}',
+      "context_length",
+    ],
     ["content_filter triggered", "content_filter"],
   ] as Array<[string, RuntimeErrorCategory]>)("classifies %s → %s", (message, expected) => {
     expect(classifyByMessageFallback(message)).toBe(expected);
