@@ -127,6 +127,147 @@ describe("auditReportValidator", () => {
     expect(result.substantiveEvidence).toBe(true);
   });
 
+  it("accepts path line ranges as evidence coverage", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `README.md:1-1`",
+      "- `src/config.ts:1-1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: README.md, src/config.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.scopeCoverage).toEqual([
+      expect.objectContaining({
+        root: "README.md",
+        coveredFiles: ["README.md"],
+        ok: true,
+      }),
+      expect.objectContaining({
+        root: "src/config.ts",
+        coveredFiles: ["src/config.ts"],
+        ok: true,
+      }),
+    ]);
+  });
+
+  it("rejects low-quality governance reports even when range citations cover scope", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "AGENTS.md"),
+      Array.from({ length: 24 }, (_, index) => `agent line ${index + 1}`).join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "README.md"),
+      Array.from({ length: 100 }, (_, index) => `readme line ${index + 1}`).join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "pyproject.toml"),
+      Array.from({ length: 20 }, (_, index) => `pyproject line ${index + 1}`).join("\n"),
+      "utf8",
+    );
+    mkdirSync(join(root, ".ai-factory"), { recursive: true });
+    writeFileSync(
+      join(root, ".ai-factory", "config.yaml"),
+      Array.from({ length: 12 }, (_, index) => `config line ${index + 1}`).join("\n"),
+      "utf8",
+    );
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    for (const file of ["__init__.py", "cli.py", "config.py"]) {
+      writeFileSync(
+        join(root, "src", "bot_intevra", file),
+        Array.from({ length: 8 }, (_, index) => `${file} line ${index + 1}`).join("\n"),
+        "utf8",
+      );
+    }
+
+    const text = [
+      "# Audit: Architecture and Ownership Boundaries",
+      "",
+      "## Findings",
+      "",
+      "### Finding 1: Incomplete Ownership Clarity",
+      "- **Severity:** Advisory",
+      "- **Evidence:** `AGENTS.md:17-20`",
+      "- **Risk:** The working agreements section lacks explicit ownership clarity for different components.",
+      "- **Proposed Fix:** Add a section in `AGENTS.md` that outlines ownership boundaries.",
+      '- **Verification:** Command `grep -A 20 "Working Agreements" AGENTS.md` output: `agent line 17`',
+      "",
+      "### Finding 2: Coupling Risks in Task/Workflow Routing",
+      "- **Severity:** Advisory",
+      "- **Evidence:** `README.md:85-90`",
+      "- **Risk:** The task routing logic does not explicitly define boundaries for task/workflow routing.",
+      "- **Proposed Fix:** Refactor `README.md` to include clear boundaries.",
+      '- **Verification:** Command `grep -A 10 "Commands" README.md` output: `readme line 85`',
+      "",
+      "### Finding 3: Missing Dependency Documentation",
+      "- **Severity:** Advisory",
+      "- **Evidence:** `pyproject.toml:7-16`",
+      "- **Risk:** The dependency list does not include documentation for each dependency.",
+      "- **Proposed Fix:** Add comments to each dependency in `pyproject.toml`.",
+      '- **Verification:** Command `grep -A 10 "dependencies" pyproject.toml` output: `pyproject line 7`',
+      "",
+      "### Finding 4: Missing Ownership Clarity in .ai-factory/config.yaml",
+      "- **Severity:** Advisory",
+      "- **Evidence:** `.ai-factory/config.yaml:1-10`",
+      "- **Risk:** The configuration file does not explicitly define ownership for configuration sections.",
+      "- **Proposed Fix:** Add ownership boundaries to `.ai-factory/config.yaml`.",
+      "- **Verification:** Command `head -n 10 .ai-factory/config.yaml` output: `config line 1`",
+      "",
+      "### Finding 5: Missing Ownership Clarity in src/bot_intevra",
+      "- **Severity:** Advisory",
+      "- **Evidence:** `src/bot_intevra/__init__.py:1-5`, `src/bot_intevra/cli.py:1-5`, `src/bot_intevra/config.py:1-5`",
+      "- **Risk:** The initialization and configuration files do not explicitly define ownership.",
+      "- **Proposed Fix:** Add ownership comments to the files.",
+      "- **Verification:** Command `head -n 5 src/bot_intevra/__init__.py` output: `__init__.py line 1`",
+      "",
+      "## Git Verification",
+      "- **Git Log:** Command `git log -1 --name-only --oneline` output:",
+      "```",
+      "abcdef0 (HEAD -> main) Add audit report for architecture and ownership boundaries",
+      "audit/2026-05-11-audit-architecture-and-ownership-boundaries-audit.md",
+      "```",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription:
+        "Scope: README.md, AGENTS.md, pyproject.toml, .ai-factory/config.yaml, src/bot_intevra",
+      reportArtifactPaths: [
+        "audit/2026-05-11-audit-architecture-and-ownership-boundaries-audit.md",
+      ],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "fake_or_placeholder_command_output",
+        "governance_observation_as_finding",
+      ]),
+    );
+    expect(issueCodes(result)).not.toContain("missing_scope_coverage");
+  });
+
   it("accepts valid findings that cover declared source directory scope", () => {
     const root = initRepo();
     writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");

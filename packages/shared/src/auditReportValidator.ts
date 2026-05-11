@@ -70,7 +70,8 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
 }> = [
   {
     code: "fake_or_placeholder_command_output",
-    pattern: /\b(?:123abc|abc123|1234567890abcdef[0-9a-f]*)\b/i,
+    pattern:
+      /\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b/i,
     message: "Report artifact contains placeholder commit hashes instead of real command output.",
   },
   {
@@ -113,16 +114,16 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "governance_observation_as_finding",
     pattern:
-      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|branch naming convention and ownership policy)\b/i,
+      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|missing ownership clarity|incomplete ownership clarity|does not explicitly define ownership|does not explicitly define boundaries|missing dependency documentation|branch naming convention and ownership policy)\b/i,
     message:
       "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
   },
 ];
 
 const SLASH_PATH_TOKEN_PATTERN =
-  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,12})(?::\d+(?::\d+)?)?/g;
+  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,12})(?::\d+(?:(?::|[-\u2013])\d+)?)?/g;
 const ROOT_FILE_TOKEN_PATTERN =
-  /(?:^|[\s`'"\[(])((?:\.env(?:\.[\w-]+)+)|[\w.-]+\.(?:jsonc|json|jsx|tsx|yaml|yml|mdx|mjs|cjs|bat|cmd|cpp|css|env|hpp|html|ini|java|lock|md|ps1|py|rs|scss|sh|sql|toml|txt|xml|js|ts|go|kt|cs|c|h))(?::\d+(?::\d+)?)?(?=$|[\s`'"\]),.;])/gi;
+  /(?:^|[\s`'"\[(])((?:\.env(?:\.[\w-]+)+)|[\w.-]+\.(?:jsonc|json|jsx|tsx|yaml|yml|mdx|mjs|cjs|bat|cmd|cpp|css|env|hpp|html|ini|java|lock|md|ps1|py|rs|scss|sh|sql|toml|txt|xml|js|ts|go|kt|cs|c|h))(?::\d+(?:(?::|[-\u2013])\d+)?)?(?=$|[\s`'"\]),.;])/gi;
 const DIRECTORY_LINE_REFERENCE_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+\d(?:[\d-]*))(?=$|[\s`'"\]),.;])/g;
 
@@ -322,7 +323,7 @@ interface LineReference {
 }
 
 function extractLineReference(fullToken: string): LineReference | null {
-  const match = fullToken.match(/:(\d+)(?::(\d+))?\b/);
+  const match = fullToken.match(/:(\d+)(?:(?::|[-\u2013])(\d+))?\b/);
   if (!match) return null;
   const start = Number.parseInt(match[1], 10);
   const end = match[2] ? Number.parseInt(match[2], 10) : start;
@@ -763,7 +764,7 @@ export function validateAuditReportArtifact(
       .filter((entry) => entry.exists && !entry.ok)
       .map((entry) => {
         if (entry.kind === "file") {
-          return `${entry.root} needs an existing \`path:line\` citation to that exact file`;
+          return `${entry.root} needs an existing \`path:line\` or \`path:start-end\` citation to that exact file`;
         }
         if (entry.kind === "directory") {
           const needsFiles =
