@@ -357,6 +357,15 @@ function shouldUseDeterministicAuditReportRepair(
   );
   const validatorIssuePattern =
     /\b(?:contradictory_findings_and_no_findings|invalid_or_missing_file_references|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim|low_quality_report_evidence|insufficient_report_evidence)\b/i;
+  const deterministicReportIssuePattern =
+    /\b(?:contradictory_findings_and_no_findings|invalid_line_reference|missing_declared_scope_root|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim)\b/i;
+  if (
+    reviewIteration >= 1 &&
+    currentReportIssueCodes.some((code) => deterministicReportIssuePattern.test(code))
+  ) {
+    return true;
+  }
+
   return (
     reviewIteration >= 2 &&
     ((/\bAudit report validator blocked completion\b/i.test(text) &&

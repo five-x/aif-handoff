@@ -775,7 +775,7 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
   });
 
-  it("deterministically rewrites repeated audit validator report failures", async () => {
+  it("deterministically rewrites structurally invalid audit validator reports", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -830,7 +830,7 @@ describe("runImplementer rework behavior", () => {
         useSubagents: true,
         autoReviewStateJson: JSON.stringify({
           strategy: "full_re_review",
-          iteration: 2,
+          iteration: 1,
           findings: [
             {
               id: "finding-missing-scope",
