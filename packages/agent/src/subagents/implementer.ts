@@ -215,6 +215,14 @@ interface AuditSourceReportSummary {
 }
 
 const AUDIT_EVIDENCE_REPAIR_MARKER = "audit_evidence_repair_required";
+const AUDIT_EVIDENCE_REPAIR_SIGNAL_PATTERNS: RegExp[] = [
+  new RegExp(AUDIT_EVIDENCE_REPAIR_MARKER, "i"),
+  /\b(?:low_quality_report_evidence|insufficient_report_evidence)\b/i,
+  /\bAudit report validator blocked completion\b/i,
+  /\breport artifact contains\b/i,
+  /\b(?:synthetic-looking git|synthetic git|placeholder commit hash|fake command output)\b/i,
+  /\b(?:governance\/documentation observations|not actionable technical-quality findings|non-actionable audit observations)\b/i,
+];
 
 const LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS: RegExp[] = [
   /\b(?:123abc|abc123|1234567890abcdef)\b/i,
@@ -289,11 +297,23 @@ function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSy
   return { validatedArtifacts, weakArtifacts };
 }
 
-function isAuditEvidenceRepairMode(task: TaskRow, artifactPath: string | null): boolean {
-  return Boolean(
-    task.reworkRequested &&
-    artifactPath &&
-    task.blockedReason?.includes(AUDIT_EVIDENCE_REPAIR_MARKER),
+function isAuditEvidenceRepairSignal(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return AUDIT_EVIDENCE_REPAIR_SIGNAL_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function isAuditEvidenceRepairMode(
+  task: Pick<TaskRow, "reworkRequested" | "blockedReason" | "reviewComments"> & {
+    autoReviewState?: { findings: Array<{ text: string }> } | null;
+  },
+  artifactPath: string | null,
+): boolean {
+  if (!task.reworkRequested || !artifactPath) return false;
+  if (isAuditEvidenceRepairSignal(task.blockedReason)) return true;
+  if (isAuditEvidenceRepairSignal(task.reviewComments)) return true;
+  return (
+    task.autoReviewState?.findings.some((finding) => isAuditEvidenceRepairSignal(finding.text)) ??
+    false
   );
 }
 
@@ -781,9 +801,12 @@ Rework handling protocol:
 - Rebuild the report from observed evidence. Remove speculative claims, placeholder command output, "could not read", "would show", "likely", "may contain", and any fake commit hashes or synthetic tool output.
 - Add an "Evidence Register" section near the top with a markdown table: ID | Claim | Evidence | Verification. Each row must tie one claim to concrete existing repository file references such as \`path/to/file.ext:line\` and/or exact command output you actually observed.
 - Every finding kept in the report must include these labels: Evidence:, Risk:, Proposed fix:, Verification:. Evidence must include concrete existing file:line references. Verification must name the exact command or tool used and paste the observed output or a concise exact excerpt.
+- Do not preserve review-rejected findings. If FULL_REVIEW_COMMENTS or BLOCKING_FINDINGS_SNAPSHOT says a finding is governance/documentation-only, non-actionable, speculative, or based on fake git output, delete that finding entirely instead of rephrasing it.
+- If all existing findings are rejected by that filter, rewrite the report as "No validated findings" with an Evidence Register that lists the scoped files and exact commands checked. This is better than inventing weak findings.
 - If a scoped file is large, inspect it with targeted commands such as \`rg -n\`, \`nl -ba | sed -n\`, \`head\`, or \`tail\`; do not write that it was too large or inaccessible unless a real command proves that limitation.
 - If no actionable finding survives this evidence check, write "No validated findings" and keep the Evidence Register with the files and commands checked.
 - Before closing, run exactly one bounded report-only git transaction: self-check ${expectedAuditReportArtifactPath}, stage only ${expectedAuditReportArtifactPath}, commit only that artifact if it changed, then verify with \`git log -1 --name-only --oneline -- ${expectedAuditReportArtifactPath}\`.
+- Never type an example git hash into the report. The only acceptable git hash text is exact output from the git tool/command you just ran. If you cannot observe the git output, do not include a Git Verification block in the report; state the unresolved verification gap in the final result instead.
 - Do not create repeated empty commits. If there are no report changes to commit, record \`git status --short -- ${expectedAuditReportArtifactPath}\` and \`git log -1 --name-only --oneline -- ${expectedAuditReportArtifactPath}\`, then stop.
 `
     : "";

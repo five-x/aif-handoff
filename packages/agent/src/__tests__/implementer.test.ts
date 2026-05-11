@@ -610,6 +610,62 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("stage only audit/security.md");
   });
 
+  it("enables audit evidence repair mode from auto-review findings even without blockedReason", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-audit-review-finding-repair",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: "Report artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        blockedReason: null,
+        reviewComments:
+          "## Blocking Findings\n- Synthetic-looking git verification output in the audit report.",
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 1,
+          findings: [
+            {
+              id: "finding-synthetic-git",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (low_quality_report_evidence): report artifact contains synthetic-looking git verification output and governance/documentation observations.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-review-finding-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-review-finding-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-review-finding-repair",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-review-finding-repair", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("Audit evidence repair mode:");
+    expect(call.prompt).toContain("Do not preserve review-rejected findings");
+    expect(call.prompt).toContain("Never type an example git hash into the report");
+    expect(call.prompt).toContain("audit/architecture.md");
+    expect(call.prompt).toContain("finding-synthetic-git");
+  });
+
   it("does NOT resume a stored session when rework is requested", async () => {
     const db = testDb.current;
     db.insert(tasks)
