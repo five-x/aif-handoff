@@ -932,6 +932,11 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       : null;
   const currentAuditReportIssueCodes =
     currentAuditReportValidation?.issues.map((issue) => issue.code) ?? [];
+  const currentReportNeedsDeterministicRepair = currentAuditReportIssueCodes.some((code) =>
+    /\b(?:contradictory_findings_and_no_findings|invalid_line_reference|missing_declared_scope_root|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim)\b/i.test(
+      code,
+    ),
+  );
 
   if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
     const nowIso = new Date().toISOString();
@@ -1013,7 +1018,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
 
   if (
     expectedAuditReportArtifactPath &&
-    auditEvidenceRepairMode &&
+    (auditEvidenceRepairMode || currentReportNeedsDeterministicRepair) &&
     shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)
   ) {
     const nowIso = new Date().toISOString();

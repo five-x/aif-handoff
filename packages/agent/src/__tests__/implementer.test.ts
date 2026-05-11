@@ -828,22 +828,14 @@ describe("runImplementer rework behavior", () => {
         plan: "## Plan\n- [ ] Repair audit report",
         reworkRequested: true,
         useSubagents: true,
-        autoReviewStateJson: JSON.stringify({
-          strategy: "full_re_review",
-          iteration: 1,
-          findings: [
-            {
-              id: "finding-missing-scope",
-              source: "review_gate",
-              text: "Audit report validator blocked completion (missing_scope_coverage): Report artifact does not cover declared audit scope roots.",
-            },
-            {
-              id: "finding-contradictory",
-              source: "review_gate",
-              text: "Audit report validator blocked completion (contradictory_findings_and_no_findings): Report artifact mixes validated findings with a No Validated Findings claim.",
-            },
-          ],
-        }),
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          "- Review Iteration: 1",
+          "",
+          "## Blocking Findings",
+          "- none",
+        ].join("\n"),
       })
       .run();
     createRoadmapBatchContract({
