@@ -345,6 +345,70 @@ describe("data layer", () => {
       expect(findTaskById(synthesisTask!.id)?.blockedReason).toBeNull();
       expect(summarizeRoadmapBatch(summary.batchId)?.synthesisReady).toBe(true);
     });
+
+    it("keeps inconclusive synthesis as invalid and exposes its failure family", () => {
+      const reportTask = createTask({
+        projectId: "proj-1",
+        title: "Audit implementation",
+        description: "Report artifact: audit/implementation.md",
+        taskIntent: "audit",
+      });
+      const synthesisTask = createTask({
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+      });
+
+      const summary = createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-inconclusive-fixture",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [reportTask!.id, synthesisTask!.id],
+        synthesisTaskId: synthesisTask!.id,
+        artifacts: [
+          { taskId: reportTask!.id, role: "report", artifactPath: "audit/implementation.md" },
+          { taskId: synthesisTask!.id, role: "synthesis", artifactPath: "audit/summary.md" },
+        ],
+      });
+
+      updateRoadmapBatchArtifactState({
+        taskId: reportTask!.id,
+        state: "valid",
+        failureFamily: null,
+      });
+      const inconclusive = updateRoadmapBatchArtifactState({
+        taskId: synthesisTask!.id,
+        state: "invalid",
+        failureFamily: "inconclusive_batch_evidence",
+        validationDetails: {
+          auditSynthesisOutcome: {
+            kind: "inconclusive_batch_evidence",
+            sourceReportCount: 1,
+            validatedFindingCount: 0,
+            weakReportCount: 0,
+          },
+        },
+      });
+
+      expect(inconclusive?.synthesisReady).toBe(true);
+      expect(inconclusive?.status).toBe("rework_needed");
+      expect(inconclusive?.failureFamily).toBe("inconclusive_batch_evidence");
+      expect(summarizeRoadmapBatch(summary.batchId)?.failureFamily).toBe(
+        "inconclusive_batch_evidence",
+      );
+      expect(
+        listRoadmapBatchArtifacts(summary.batchId).find(
+          (artifact) => artifact.taskId === synthesisTask!.id,
+        ),
+      ).toEqual(
+        expect.objectContaining({
+          state: "invalid",
+          failureFamily: "inconclusive_batch_evidence",
+        }),
+      );
+    });
   });
 
   describe("updateTask", () => {

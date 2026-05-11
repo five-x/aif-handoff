@@ -20,6 +20,9 @@ import {
   looksLikeFullPlanUpdate,
   getProjectConfig,
   validateAuditReportArtifact,
+  classifyAuditSynthesisSourceReports,
+  extractAuditSynthesisCommandEvidence,
+  formatAuditSynthesisOutcomeForArtifact,
 } from "@aif/shared";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import { logActivity } from "../hooks.js";
@@ -871,6 +874,19 @@ function collectSynthesisNoFindingsEvidence(input: {
   return refsByArtifact;
 }
 
+function collectSynthesisNoFindingsCommandEvidence(
+  artifacts: ValidatedAuditArtifactContent[],
+): Map<string, string[]> {
+  const commandsByArtifact = new Map<string, string[]>();
+  for (const artifact of artifacts) {
+    commandsByArtifact.set(
+      artifact.artifactPath,
+      extractAuditSynthesisCommandEvidence(artifact.content),
+    );
+  }
+  return commandsByArtifact;
+}
+
 function firstOutputLine(text: string): string {
   return text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "<empty>";
 }
@@ -945,6 +961,15 @@ function buildDeterministicAuditSynthesisContent(
   weakArtifacts: WeakAuditArtifactSummary[] = [],
   projectRoot: string,
 ): string {
+  const sourceOutcome = classifyAuditSynthesisSourceReports({
+    projectRoot,
+    reports: artifacts.map((artifact) => ({
+      artifactPath: artifact.artifactPath,
+      taskId: artifact.taskId,
+      content: artifact.content,
+    })),
+    weakReportCount: weakArtifacts.length,
+  });
   const sourceSummaries = summarizeValidatedAuditArtifactsForSynthesis(artifacts);
   const totalIncluded = sourceSummaries.reduce(
     (sum, summary) => sum + summary.includedFindings.length,
@@ -955,8 +980,67 @@ function buildDeterministicAuditSynthesisContent(
     0,
   );
 
+  if (sourceOutcome.kind === "inconclusive_batch_evidence") {
+    const lines = [
+      "# Audit Inconclusive",
+      "",
+      formatAuditSynthesisOutcomeForArtifact(sourceOutcome),
+      "",
+      "Audit outcome: Audit inconclusive.",
+      "",
+      sourceOutcome.reason,
+      "No findings from the source reports survived the strict synthesis evidence filter, but the batch evidence does not support a product-quality no-findings conclusion.",
+      "",
+      "## Source Reports Checked",
+      "",
+      sourceSummaries.length > 0
+        ? sourceSummaries
+            .map((summary) => {
+              return [
+                `- ${summary.artifact.artifactPath} (task ${summary.artifact.taskId})`,
+                `  - Included findings: ${summary.includedFindings.length}`,
+                `  - Omitted findings: ${summary.omittedFindingCount}`,
+              ].join("\n");
+            })
+            .join("\n")
+        : "- No validated source reports were available.",
+      "",
+      "## Weak Or Invalid Reports",
+      "",
+    ];
+
+    if (weakArtifacts.length === 0) {
+      lines.push("No weak or invalid report artifacts were present in the batch.");
+    } else {
+      weakArtifacts.forEach((artifact) => {
+        lines.push(`- ${artifact.artifactPath} (task ${artifact.taskId})`);
+        lines.push(`  - State: ${artifact.state}`);
+        lines.push(`  - Failure family: ${artifact.failureFamily ?? "none"}`);
+        if (artifact.validationDetails) {
+          lines.push(
+            `  - Validation details: ${artifact.validationDetails.replace(/\n/g, "\n    ")}`,
+          );
+        }
+      });
+    }
+
+    lines.push("");
+    lines.push("## Synthesis Quality Notes");
+    lines.push("");
+    lines.push(`Included source findings: ${totalIncluded}.`);
+    lines.push(`Omitted source findings: ${totalOmitted}.`);
+    lines.push(`Weak or invalid source reports: ${weakArtifacts.length}.`);
+    lines.push(
+      `Inventory-only no-findings source reports: ${sourceOutcome.inventoryOnlyNoFindingsReportCount}.`,
+    );
+    lines.push("");
+
+    return `${lines.join("\n").trim()}\n`;
+  }
+
   if (totalIncluded === 0) {
     const refsByArtifact = collectSynthesisNoFindingsEvidence({ artifacts, projectRoot });
+    const commandsByArtifact = collectSynthesisNoFindingsCommandEvidence(artifacts);
     const checkedRefs = [
       ...new Set(
         [...refsByArtifact.values()].flatMap((refs) => refs).filter((ref) => ref.length > 0),
@@ -966,7 +1050,11 @@ function buildDeterministicAuditSynthesisContent(
     const lines = [
       "# Audit Summary",
       "",
+      formatAuditSynthesisOutcomeForArtifact(sourceOutcome),
+      "",
       "No validated findings.",
+      "",
+      "Audit outcome: Validated no-findings with substantive audit evidence.",
       "",
       "Generated from terminal audit batch report artifacts. Source report findings were included only when they carried concrete path:line Evidence, Risk, Proposed fix, and Verification sections.",
       "",
@@ -995,11 +1083,15 @@ function buildDeterministicAuditSynthesisContent(
             ? refs.map((ref) => `\`${ref}\``).join(", ")
             : "No concrete line evidence was available in this source report.";
         const firstEvidencePath = refs.length > 0 ? pathFromLineEvidenceRef(refs[0]) : null;
-        const verification = firstEvidencePath
-          ? `Command \`git ls-files -- ${firstEvidencePath}\` output includes \`${firstOutputLine(
-              runGitText(projectRoot, ["ls-files", "--", firstEvidencePath]),
-            )}\``
-          : "Source report provided no concrete repository line evidence to carry forward.";
+        const commands = commandsByArtifact.get(summary.artifact.artifactPath) ?? [];
+        const verification =
+          commands.length > 0
+            ? commands[0].replace(/\s+/g, " ")
+            : firstEvidencePath
+              ? `Command \`git ls-files -- ${firstEvidencePath}\` output includes \`${firstOutputLine(
+                  runGitText(projectRoot, ["ls-files", "--", firstEvidencePath]),
+                )}\``
+              : "Source report provided no concrete repository line evidence to carry forward.";
         return `| \`${summary.artifact.artifactPath}\` | ${evidence} | ${verification} |`;
       }),
       "",
@@ -1011,9 +1103,11 @@ function buildDeterministicAuditSynthesisContent(
       "",
       "## Checked Commands",
       "",
-      ...(checkedPaths.length > 0
-        ? checkedPaths.flatMap((path) => formatSynthesisCheckedCommand(projectRoot, path))
-        : ["- No repository command outputs were available from the validated source reports."]),
+      ...([...commandsByArtifact.values()].flat().length > 0
+        ? [...commandsByArtifact.values()].flat()
+        : checkedPaths.length > 0
+          ? checkedPaths.flatMap((path) => formatSynthesisCheckedCommand(projectRoot, path))
+          : ["- No repository command outputs were available from the validated source reports."]),
       "",
       "## Weak Or Invalid Reports",
       "",
@@ -1047,6 +1141,10 @@ function buildDeterministicAuditSynthesisContent(
 
   const lines = [
     "# Audit Summary",
+    "",
+    formatAuditSynthesisOutcomeForArtifact(sourceOutcome),
+    "",
+    "Audit outcome: Validated findings present.",
     "",
     "Generated from terminal audit batch report artifacts.",
     "Only findings with concrete path:line Evidence, Risk, Proposed fix, and Verification sections were included.",

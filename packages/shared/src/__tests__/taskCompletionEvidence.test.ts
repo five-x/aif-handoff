@@ -7,6 +7,7 @@ import {
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
 } from "../taskCompletionEvidence.js";
+import { formatAuditSynthesisOutcomeForArtifact } from "../auditSynthesisClassifier.js";
 
 function initRepo(): string {
   const root = mkdtempSync(join(tmpdir(), "aif-evidence-"));
@@ -24,6 +25,46 @@ function initRepo(): string {
 
 function codes(result: ReturnType<typeof evaluateTaskCompletionEvidence>): string[] {
   return result.issues.map((issue) => issue.code);
+}
+
+function commitAuditSynthesisWithMetadata(
+  root: string,
+  branchName: string,
+  outcomeBlock: string,
+): void {
+  execFileSync("git", ["checkout", "-b", branchName], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  mkdirSync(join(root, "audit"), { recursive: true });
+  writeFileSync(
+    join(root, "audit", "summary.md"),
+    [
+      "# Audit Summary",
+      "",
+      outcomeBlock,
+      "",
+      "No validated findings.",
+      "",
+      "## Checked Files",
+      "",
+      "- `README.md:1`",
+      "",
+      "## Checked Commands",
+      "",
+      '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  execFileSync("git", ["add", "audit/summary.md"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  execFileSync("git", ["commit", "-m", "add audit synthesis", "--no-verify"], {
+    cwd: root,
+    stdio: "ignore",
+  });
 }
 
 const IMPLEMENTATION_TOOL_ACTIVITY = [
@@ -2030,6 +2071,197 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.missingReportReferencedPaths).not.toContain("audit/source-audit.md");
     expect(codes(result)).not.toContain("invalid_or_missing_file_references");
     expect(codes(result)).not.toContain("insufficient_report_evidence");
+  });
+
+  it("blocks audit synthesis when persisted source outcome is inconclusive despite stronger final text", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-inconclusive-synthesis"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "summary.md"),
+      [
+        "# Audit Summary",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "inconclusive_batch_evidence",
+          reason:
+            "Audit inconclusive: source reports were limited to inventory and existence checks.",
+          sourceReportCount: 6,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 6,
+          weakReportCount: 0,
+        }),
+        "",
+        "No validated findings.",
+        "",
+        "## Checked Files",
+        "",
+        "- `README.md:1`",
+        "",
+        "## Checked Commands",
+        "",
+        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add audit synthesis", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-inconclusive-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(codes(result)).toContain("audit_inconclusive");
+  });
+
+  it("blocks audit synthesis with forged no-findings metadata and zero source reports", () => {
+    const root = initRepo();
+    commitAuditSynthesisWithMetadata(
+      root,
+      "feature/audit-forged-zero-source-synthesis",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "validated_no_findings",
+        reason: "Forged stale no-findings outcome.",
+        sourceReportCount: 0,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 0,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 0,
+      }),
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-forged-zero-source-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(codes(result)).toContain("audit_inconclusive");
+  });
+
+  it("blocks audit synthesis with forged no-findings metadata and inventory-only source counts", () => {
+    const root = initRepo();
+    commitAuditSynthesisWithMetadata(
+      root,
+      "feature/audit-forged-inventory-source-synthesis",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "validated_no_findings",
+        reason: "Forged no-findings outcome from inventory reports.",
+        sourceReportCount: 6,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 0,
+        inventoryOnlyNoFindingsReportCount: 6,
+        weakReportCount: 0,
+      }),
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-forged-inventory-source-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(result.evidence.auditSynthesisOutcome?.inventoryOnlyNoFindingsReportCount).toBe(6);
+    expect(codes(result)).toContain("audit_inconclusive");
+  });
+
+  it("allows audit synthesis with persisted substantive no-findings outcome", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-substantive-no-findings"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "summary.md"),
+      [
+        "# Audit Summary",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "validated_no_findings",
+          reason:
+            "No findings survived validation and all source reports included substantive no-findings evidence.",
+          sourceReportCount: 1,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 1,
+          inventoryOnlyNoFindingsReportCount: 0,
+          weakReportCount: 0,
+        }),
+        "",
+        "No validated findings.",
+        "",
+        "## Checked Files",
+        "",
+        "- `README.md:1`",
+        "",
+        "## Checked Commands",
+        "",
+        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add audit synthesis", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-substantive-no-findings-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("validated_no_findings");
+    expect(codes(result)).not.toContain("audit_inconclusive");
   });
 
   it("flags mixed existing and missing unquoted root-level refs in report artifacts", () => {

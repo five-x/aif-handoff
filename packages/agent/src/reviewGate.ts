@@ -102,6 +102,17 @@ function collectDeterministicReviewGateFindings(input: ReviewGateInput): AutoRev
   });
   if (taskEvidence.ok) return [];
 
+  const inconclusiveIssues = taskEvidence.issues.filter(
+    (entry) => entry.code === "audit_inconclusive",
+  );
+  if (inconclusiveIssues.length > 0) {
+    return inconclusiveIssues.map((entry) =>
+      reviewGateFinding(
+        `Audit completion evidence blocked review gate (${entry.code}): ${entry.message}`,
+      ),
+    );
+  }
+
   const auditValidationIssues = taskEvidence.evidence.auditReportValidation.issues;
   if (auditValidationIssues.length > 0) {
     return auditValidationIssues.map((entry) =>

@@ -105,6 +105,14 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260511-audit-batch-integration-canary"
+    },
+    {
+      "taskId": "work-20260511-audit-inconclusive-synthesis-gate",
+      "title": "Audit Inconclusive Synthesis Gate",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260511-audit-inconclusive-synthesis-gate"
     }
   ]
 }

@@ -480,6 +480,8 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
 }): boolean {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  const auditArtifactRole =
+    artifact?.role === "report" || artifact?.role === "synthesis" ? artifact.role : null;
   const allowedEvidenceArtifactPaths =
     artifact?.role === "synthesis"
       ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => entry.artifactPath)
@@ -489,6 +491,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       ...input.task,
       expectedReportArtifactPath: artifact?.artifactPath ?? null,
       allowedEvidenceArtifactPaths,
+      auditArtifactRole,
     },
     projectRoot: input.projectRoot,
     requireManualReview: input.requireManualReview,
@@ -537,6 +540,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   const blockedReason = auditReworkLimitReached
     ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
     : actionableBlockedReason;
+  const terminalBlockedReason = artifact ? `${family}: ${blockedReason}` : blockedReason;
   if (shouldReturnToRework) {
     return returnAuditTaskToRework({
       task: input.task,
@@ -569,7 +573,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     input.task.id,
     "blocked_external",
     {
-      blockedReason,
+      blockedReason: terminalBlockedReason,
       blockedFromStatus: input.fromStatus,
       retryAfter: null,
       retryCount: input.task.retryCount ?? 0,
@@ -582,7 +586,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   );
   appendTaskActivityLog(
     input.task.id,
-    `[${nowIso}] Completion evidence guard blocked terminal transition: ${blockedReason}`,
+    `[${nowIso}] Completion evidence guard blocked terminal transition: ${terminalBlockedReason}`,
   );
   log.warn(
     {

@@ -495,8 +495,8 @@ describe("runImplementer rework behavior", () => {
         "",
         "| Scope | Checked evidence | Verification |",
         "| --- | --- | --- |",
-        "| `README.md` | `README.md:1` | Command `git ls-files -- README.md` output includes `README.md` |",
-        "| `src/config.ts` | `src/config.ts:1` | Command `git ls-files -- src/config.ts` output includes `src/config.ts` |",
+        '| `README.md` | `README.md:1` | Command `rg -n "Project" README.md` output includes `README.md:1:# Project` |',
+        '| `src/config.ts` | `src/config.ts:1` | Command `rg -n "timeoutMs" src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |',
         "",
         "## Checked Files",
         "",
@@ -505,13 +505,13 @@ describe("runImplementer rework behavior", () => {
         "",
         "## Checked Commands",
         "",
-        "- Command `git ls-files -- README.md` output:",
+        '- Command `rg -n "Project" README.md` output:',
         "```",
-        "README.md",
+        "README.md:1:# Project",
         "```",
-        "- Command `git ls-files -- src/config.ts` output:",
+        '- Command `rg -n "timeoutMs" src/config.ts` output:',
         "```",
-        "src/config.ts",
+        "src/config.ts:1:export const timeoutMs = 1000;",
         "```",
         "",
       ].join("\n"),
@@ -588,7 +588,8 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("## Checked Files");
     expect(summary).toContain("`README.md:1`");
     expect(summary).toContain("`src/config.ts:1`");
-    expect(summary).toContain("Command `git ls-files -- README.md` output:");
+    expect(summary).toContain('Command `rg -n "Project" README.md` output:');
+    expect(summary).toContain("Audit outcome: Validated no-findings");
     expect(summary).not.toContain("Risk:");
     expect(summary).not.toContain("Proposed fix:");
 
@@ -602,6 +603,136 @@ describe("runImplementer rework behavior", () => {
       requireProposedFix: true,
     });
     expect(validation.ok).toBe(true);
+  });
+
+  it("writes inconclusive synthesis when all source reports are inventory-only no-findings", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+
+    const reportTaskIds = Array.from(
+      { length: 6 },
+      (_, index) => `task-inventory-source-${index + 1}`,
+    );
+    const reportPaths = reportTaskIds.map((_, index) => `audit/source-${index + 1}.md`);
+    reportPaths.forEach((reportPath) => {
+      writeFileSync(
+        join(projectRoot, reportPath),
+        [
+          "# Runtime Audit",
+          "",
+          "No validated findings.",
+          "",
+          "## Evidence Register",
+          "",
+          "| Scope | Checked evidence | Verification |",
+          "| --- | --- | --- |",
+          "| `src/config.ts` | `src/config.ts:1` | Command `git ls-files -- src/config.ts` output includes `src/config.ts` |",
+          "",
+          "## Checked Files",
+          "",
+          "- `src/config.ts:1`",
+          "",
+          "## Checked Commands",
+          "",
+          "- Command `git ls-files -- src/config.ts` output:",
+          "```",
+          "src/config.ts",
+          "```",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+    });
+    execFileSync("git", ["add", "README.md", "src/config.ts", "audit"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed inventory-only reports", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    reportTaskIds.forEach((taskId, index) => {
+      db.insert(tasks)
+        .values({
+          id: taskId,
+          projectId: "project-1",
+          title: `Audit source ${index + 1}`,
+          description: `Report artifact: ${reportPaths[index]}`,
+          taskIntent: "audit",
+          status: "done",
+        })
+        .run();
+    });
+    db.insert(tasks)
+      .values({
+        id: "task-inconclusive-synthesis",
+        projectId: "project-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Synthesize validated audit reports",
+        reworkRequested: true,
+        blockedReason:
+          "invalid_artifact_content: Completion evidence guard (low_quality_report_evidence)",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-inconclusive",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: [...reportTaskIds, "task-inconclusive-synthesis"],
+      synthesisTaskId: "task-inconclusive-synthesis",
+      artifacts: [
+        ...reportTaskIds.map((taskId, index) => ({
+          taskId,
+          role: "report" as const,
+          artifactPath: reportPaths[index],
+          projectRoot,
+        })),
+        {
+          taskId: "task-inconclusive-synthesis",
+          role: "synthesis" as const,
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    reportTaskIds.forEach((taskId) => {
+      updateRoadmapBatchArtifactState({
+        taskId,
+        state: "valid",
+        failureFamily: null,
+      });
+    });
+
+    await runImplementer("task-inconclusive-synthesis", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(summary).toContain("# Audit Inconclusive");
+    expect(summary).toContain('"kind":"inconclusive_batch_evidence"');
+    expect(summary).toContain("Inventory-only no-findings source reports: 6.");
+    expect(summary).not.toContain("No validated findings.");
   });
 
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {

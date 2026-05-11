@@ -6,6 +6,7 @@ import {
   projects,
   runtimeProfiles,
   resetEnvCache,
+  formatAuditSynthesisOutcomeForArtifact,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 import { RuntimeExecutionError } from "@aif/runtime";
@@ -606,6 +607,135 @@ describe("coordinator", () => {
     expect(synthesis?.blockedReason ?? "").not.toContain("synthesis_not_ready");
   });
 
+  it("blocks audit synthesis as inconclusive from persisted source outcome", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-inconclusive-");
+    execFileSync("git", ["checkout", "-b", "feature/audit-inconclusive"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "summary.md"),
+      [
+        "# Audit Summary",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "inconclusive_batch_evidence",
+          reason: "Audit inconclusive: six source reports used inventory-only checks.",
+          sourceReportCount: 6,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 6,
+          weakReportCount: 0,
+        }),
+        "",
+        "No validated findings.",
+        "",
+        "## Checked Files",
+        "- `README.md:1`",
+        "",
+        "## Checked Commands",
+        '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add inconclusive synthesis", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-inconclusive-project", name: "Audit Inconclusive", rootPath })
+      .run();
+    const reportTaskIds = Array.from(
+      { length: 6 },
+      (_, index) => `task-inconclusive-report-${index + 1}`,
+    );
+    reportTaskIds.forEach((taskId, index) => {
+      db.insert(tasks)
+        .values({
+          id: taskId,
+          projectId: "audit-inconclusive-project",
+          title: `Audit source ${index + 1}`,
+          description: `Report artifact: audit/source-${index + 1}.md`,
+          taskIntent: "audit",
+          status: "done",
+        })
+        .run();
+    });
+    db.insert(tasks)
+      .values({
+        id: "task-inconclusive-synthesis",
+        projectId: "audit-inconclusive-project",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        agentActivityLog: [
+          "[2026-05-11T10:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-11T10:00:01.000Z] Tool: read_file audit/summary.md",
+          "[2026-05-11T10:00:02.000Z] Tool: git_commit git commit",
+          "[2026-05-11T10:00:03.000Z] Agent: implement-coordinator complete",
+          "[2026-05-11T10:00:04.000Z] Agent: review-sidecar started",
+          "[2026-05-11T10:00:05.000Z] Tool: read_file audit/summary.md",
+          "[2026-05-11T10:00:06.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-inconclusive-project",
+      roadmapAlias: "audit-inconclusive",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: [...reportTaskIds, "task-inconclusive-synthesis"],
+      synthesisTaskId: "task-inconclusive-synthesis",
+      artifacts: [
+        ...reportTaskIds.map((taskId, index) => ({
+          taskId,
+          role: "report" as const,
+          artifactPath: `audit/source-${index + 1}.md`,
+          projectRoot: rootPath,
+        })),
+        {
+          taskId: "task-inconclusive-synthesis",
+          role: "synthesis" as const,
+          artifactPath: "audit/summary.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+    reportTaskIds.forEach((taskId) => {
+      updateRoadmapBatchArtifactState({
+        taskId,
+        state: "valid",
+        failureFamily: null,
+        projectRoot: rootPath,
+      });
+    });
+
+    await pollAndProcess();
+
+    const synthesis = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-inconclusive-synthesis"))
+      .get();
+    expect(synthesis?.status).toBe("blocked_external");
+    expect(synthesis?.blockedReason).toContain("inconclusive_batch_evidence");
+    expect(synthesis?.blockedReason).toContain("audit_inconclusive");
+    const synthesisArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (artifact) => artifact.taskId === "task-inconclusive-synthesis",
+    );
+    expect(synthesisArtifact?.state).toBe("invalid");
+    expect(synthesisArtifact?.failureFamily).toBe("inconclusive_batch_evidence");
+    expect(summarizeRoadmapBatch(batch.batchId)?.failureFamily).toBe("inconclusive_batch_evidence");
+  });
+
   it("should pause synthesis when validated branch artifacts are unavailable during implementation", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -703,10 +833,21 @@ describe("coordinator", () => {
     writeFileSync(
       join(rootPath, "audit", "summary.md"),
       [
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "validated_findings_present",
+          reason: "Validated findings were present in source audit reports.",
+          sourceReportCount: 1,
+          validatedFindingCount: 1,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 0,
+          weakReportCount: 0,
+        }),
+        "",
         "## Finding 1",
-        "Evidence: `audit/source-audit.md` records the validated source audit report.",
+        "Evidence: `README.md:1` records the validated source audit report.",
         "Risk: Re-running the synthesis implementer can loop after the report is already committed.",
-        "Verification: Command `git log -1 --name-only --oneline` output included `audit/summary.md`.",
+        "Proposed fix: Keep committed synthesis rework bounded.",
+        'Verification: Command `rg -n "audit fixture" README.md` output: `README.md:1:# audit fixture`.',
         "",
       ].join("\n"),
     );

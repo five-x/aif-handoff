@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAutoReviewFindingId } from "../reviewContract.js";
+import { formatAuditSynthesisOutcomeForArtifact } from "@aif/shared";
 
 const { executeSubagentQueryMock } = vi.hoisted(() => ({
   executeSubagentQueryMock: vi.fn(),
@@ -713,6 +714,52 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       `(${issueCode})`,
     );
     expect(result.fixesMarkdown).toContain("Audit completion evidence blocked review gate");
+  });
+
+  it("blocks synthesis review when persisted source outcome is inconclusive", async () => {
+    const root = initReportRepoWithReport(
+      [
+        "# Audit Summary",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "inconclusive_batch_evidence",
+          reason: "Audit inconclusive: source reports were limited to inventory checks.",
+          sourceReportCount: 6,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 6,
+          weakReportCount: 0,
+        }),
+        "",
+        "No validated findings.",
+        "",
+        "## Checked Files",
+        "- `README.md:1`",
+        "",
+        "## Checked Commands",
+        '- Command `rg -n "reviewed" README.md` output: `README.md:1:# reviewed`',
+        "",
+      ].join("\n"),
+    );
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: structuredAdvisoryOnlyReviewComments(),
+      task: {
+        id: "audit-synthesis-task",
+        title: "Synthesize audit findings",
+        description: "Report artifact: reports/audit.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: agentActivityLog(),
+      },
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+      "(audit_inconclusive)",
+    );
   });
 
   it("allows risky structured success when the committed report artifact is substantive", async () => {

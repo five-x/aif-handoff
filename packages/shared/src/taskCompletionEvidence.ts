@@ -7,6 +7,10 @@ import {
   parseExpectedAuditReportArtifactPath,
 } from "./auditRoadmapContract.js";
 import {
+  classifyAuditSynthesisOutput,
+  type AuditSynthesisOutcome,
+} from "./auditSynthesisClassifier.js";
+import {
   validateAuditReportArtifact,
   type AuditReportValidationResult,
 } from "./auditReportValidator.js";
@@ -24,6 +28,7 @@ export type TaskCompletionIssueCode =
   | "invalid_or_missing_file_references"
   | "insufficient_report_evidence"
   | "low_quality_report_evidence"
+  | "audit_inconclusive"
   | "branch_isolation"
   | "manual_review_required";
 
@@ -42,6 +47,7 @@ export interface TaskCompletionEvidenceTask {
   manualReviewRequired?: boolean | null;
   expectedReportArtifactPath?: string | null;
   allowedEvidenceArtifactPaths?: string[] | null;
+  auditArtifactRole?: "report" | "synthesis" | null;
 }
 
 export interface TaskCompletionEvidenceIssue {
@@ -76,6 +82,7 @@ export interface TaskCompletionEvidenceResult {
     missingReportReferencedPaths: string[];
     existingReportReferencedPaths: string[];
     auditReportValidation: AuditReportValidationResult;
+    auditSynthesisOutcome: AuditSynthesisOutcome | null;
     expectedReportArtifactPath: string | null;
   };
 }
@@ -1203,6 +1210,11 @@ export function evaluateTaskCompletionEvidence(
     allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
     requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
   });
+  const auditSynthesisTask = task.auditArtifactRole === "synthesis";
+  const auditSynthesisOutcome =
+    riskyTask && auditSynthesisTask && reportText.trim()
+      ? classifyAuditSynthesisOutput({ text: reportText, projectRoot })
+      : null;
   const validatorEvidenceBlockingIssues = auditReportValidation.issues.filter(
     (entry) =>
       ["invalid_line_reference", "missing_declared_scope_root", "missing_scope_coverage"].includes(
@@ -1274,6 +1286,11 @@ export function evaluateTaskCompletionEvidence(
           "deterministic_fallback_report",
           "Audit/review/discovery completion cannot rely on the deterministic inventory fallback report as the final artifact.",
         ),
+      );
+    }
+    if (auditSynthesisOutcome?.kind === "inconclusive_batch_evidence") {
+      issues.push(
+        issue("audit_inconclusive", `Audit inconclusive: ${auditSynthesisOutcome.reason}`),
       );
     }
     if (unexpectedNonReportChangedFiles.length > 0) {
@@ -1393,6 +1410,7 @@ export function evaluateTaskCompletionEvidence(
       missingReportReferencedPaths: reportMissing,
       existingReportReferencedPaths: reportExisting,
       auditReportValidation,
+      auditSynthesisOutcome,
       expectedReportArtifactPath,
     },
   };

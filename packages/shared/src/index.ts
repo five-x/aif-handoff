@@ -205,6 +205,19 @@ export {
   type AuditReportValidationIssueCode,
   type AuditReportValidationResult,
 } from "./auditReportValidator.js";
+export {
+  AUDIT_SYNTHESIS_OUTCOME_COMMENT,
+  AUDIT_SYNTHESIS_OUTCOME_KINDS,
+  classifyAuditSynthesisOutput,
+  classifyAuditSynthesisSourceReports,
+  combineAuditSynthesisOutcomes,
+  extractAuditSynthesisCommandEvidence,
+  formatAuditSynthesisOutcomeForArtifact,
+  parseAuditSynthesisOutcomeFromText,
+  type AuditSynthesisOutcome,
+  type AuditSynthesisOutcomeKind,
+  type AuditSynthesisSourceReport,
+} from "./auditSynthesisClassifier.js";
 
 // Task completion evidence guard (Node-only)
 export {

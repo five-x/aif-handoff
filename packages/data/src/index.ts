@@ -2018,6 +2018,7 @@ export type RoadmapBatchArtifactState =
   | "external_blocked";
 export type RoadmapBatchFailureFamily =
   | "invalid_artifact_content"
+  | "inconclusive_batch_evidence"
   | "missing_artifact"
   | "missing_tool_evidence"
   | "synthesis_not_ready"

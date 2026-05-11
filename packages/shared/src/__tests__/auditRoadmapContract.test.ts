@@ -46,6 +46,7 @@ describe("auditRoadmapContract", () => {
       "missing_artifact",
       "missing_tool_evidence",
       "rework_needed",
+      "inconclusive_batch_evidence",
       "synthesis_not_ready",
       "manual_review_required",
       "external_blocker",
@@ -114,6 +115,9 @@ describe("auditRoadmapContract", () => {
     );
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("unexpected_non_report_changes")).toBe(
       "invalid_artifact_content",
+    );
+    expect(mapTaskCompletionIssueCodeToAuditFailureFamily("audit_inconclusive")).toBe(
+      "inconclusive_batch_evidence",
     );
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("manual_review_required")).toBe(
       "manual_review_required",

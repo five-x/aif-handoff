@@ -114,6 +114,14 @@ function allowedEvidenceArtifactPathsFor(auditArtifact: RoadmapBatchArtifactRow 
     : [];
 }
 
+function auditArtifactRoleFor(
+  auditArtifact: RoadmapBatchArtifactRow | undefined,
+): "report" | "synthesis" | null {
+  return auditArtifact?.role === "report" || auditArtifact?.role === "synthesis"
+    ? auditArtifact.role
+    : null;
+}
+
 function excerptComment(message: string): string {
   const normalized = message.replace(/\s+/g, " ").trim();
   return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
@@ -168,6 +176,9 @@ function blockTaskForCompletionEvidence(
   const blockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
+  const terminalBlockedReason = auditArtifact
+    ? `${failureFamily}: ${blockedReason}`
+    : blockedReason;
 
   if (auditArtifact) {
     updateRoadmapBatchArtifactState({
@@ -211,7 +222,7 @@ function blockTaskForCompletionEvidence(
 
   setTaskFields(task.id, {
     status: "blocked_external",
-    blockedReason,
+    blockedReason: terminalBlockedReason,
     blockedFromStatus: options.blockedFromStatus ?? "done",
     retryAfter: null,
     retryCount: task.retryCount ?? 0,
@@ -221,7 +232,7 @@ function blockTaskForCompletionEvidence(
   });
   appendTaskActivityLog(
     task.id,
-    `[${nowIso}] Completion evidence guard blocked ${options.action ?? "approve_done"}: ${blockedReason}`,
+    `[${nowIso}] Completion evidence guard blocked ${options.action ?? "approve_done"}: ${terminalBlockedReason}`,
   );
 
   const updated = findTaskById(task.id);
@@ -368,6 +379,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
           ...task,
           expectedReportArtifactPath: auditArtifact?.artifactPath,
           allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+          auditArtifactRole: auditArtifactRoleFor(auditArtifact),
         },
         projectRoot: executionRoot,
         branchIsolationReason: branchError.error,
@@ -386,6 +398,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         ...task,
         expectedReportArtifactPath: auditArtifact?.artifactPath,
         allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+        auditArtifactRole: auditArtifactRoleFor(auditArtifact),
       },
       projectRoot: executionRoot,
       phase: "pre_implementation",
@@ -414,6 +427,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
           ...task,
           expectedReportArtifactPath: auditArtifact?.artifactPath,
           allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+          auditArtifactRole: auditArtifactRoleFor(auditArtifact),
         },
         projectRoot: executionRoot,
         branchIsolationReason: branchError.error,
@@ -430,6 +444,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         ...task,
         expectedReportArtifactPath: auditArtifact?.artifactPath,
         allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+        auditArtifactRole: auditArtifactRoleFor(auditArtifact),
       },
       projectRoot: executionRoot,
     });

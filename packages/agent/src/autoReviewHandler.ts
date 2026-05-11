@@ -47,6 +47,10 @@ interface AutoReviewInput {
   projectRoot: string;
 }
 
+function toAuditArtifactRole(role: string | null | undefined): "report" | "synthesis" | null {
+  return role === "report" || role === "synthesis" ? role : null;
+}
+
 function buildReviewGateTaskContext(task: NonNullable<ReturnType<typeof findTaskById>>) {
   const artifact = findRoadmapBatchArtifactByTaskId(task.id);
   const allowedEvidenceArtifactPaths =
@@ -58,6 +62,7 @@ function buildReviewGateTaskContext(task: NonNullable<ReturnType<typeof findTask
     ...task,
     expectedReportArtifactPath: artifact?.artifactPath ?? null,
     allowedEvidenceArtifactPaths,
+    auditArtifactRole: toAuditArtifactRole(artifact?.role),
   };
 }
 
