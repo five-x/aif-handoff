@@ -194,6 +194,18 @@ export {
 export type { GeneratePlanPathOptions } from "./planFile.js";
 export { persistTaskPlan } from "./taskPlan.js";
 
+// Audit report validation (Node-only)
+export {
+  AUDIT_REPORT_VALIDATION_ISSUE_CODES,
+  formatAuditReportValidationIssues,
+  validateAuditReportArtifact,
+  type AuditReportScopeCoverage,
+  type AuditReportValidationInput,
+  type AuditReportValidationIssue,
+  type AuditReportValidationIssueCode,
+  type AuditReportValidationResult,
+} from "./auditReportValidator.js";
+
 // Task completion evidence guard (Node-only)
 export {
   evaluateTaskCompletionEvidence,

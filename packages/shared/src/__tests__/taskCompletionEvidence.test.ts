@@ -1611,6 +1611,79 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("low_quality_report_evidence");
   });
 
+  it("blocks observed bad audit reports through typed validator details", () => {
+    const root = initRepo();
+    writeFileSync(join(root, "AGENTS.md"), "# Working Agreements\n", "utf8");
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "AGENTS.md", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit sources", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/observed-bad-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "architecture-audit.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "## Finding: Overlap in Task/Workflow Routing",
+        "Evidence: `AGENTS.md:1` documents working agreements.",
+        "Risk: Documentation ownership can be unclear.",
+        "Proposed fix: Consolidate governance documents.",
+        "Verification: Command `git log -1 --oneline --decorate` output:",
+        "```",
+        "1234567 (HEAD -> main)",
+        "```",
+        "",
+        "## No Validated Findings",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "Checked commands:",
+        '- Command `rg -n "timeoutMs" src/config.ts` output would show the timeout.',
+        "The implementation likely uses distributed configuration and may contain unclear ownership.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/architecture-audit.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add observed bad audit", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-observed-bad-report",
+        title: "Audit architecture quality",
+        description:
+          "Report artifact: audit/architecture-audit.md. Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("low_quality_report_evidence");
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining([
+        "synthetic_git_output",
+        "contradictory_findings_and_no_findings",
+        "governance_observation_as_finding",
+        "unverified_inspection_claim",
+        "speculative_audit_claim",
+      ]),
+    );
+  });
+
   it("blocks audit reports that claim existing paths are missing", () => {
     const root = initRepo();
     mkdirSync(join(root, "docs", "ops"), { recursive: true });
@@ -2209,6 +2282,163 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.expectedReportArtifactPath).toBe("docs/security-audit.md");
     expect(result.evidence.reportArtifactFiles).toEqual(["docs/security-audit.md"]);
     expect(codes(result)).not.toContain("missing_report_artifact");
+  });
+
+  it("passes task scope into audit report validation for committed reports", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "app.ts"), "export const value = 1;\n", "utf8");
+    execFileSync("git", ["add", "src/app.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/scoped-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `src/app.ts:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "value" src` output: `src/app.ts:1:export const value = 1;`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add scoped audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-scoped-report",
+        title: "Audit source scope",
+        description: "Scope: src\nReport artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.auditReportValidation.scopeRoots).toEqual(["src"]);
+    expect(result.evidence.substantiveReportEvidence).toBe(true);
+  });
+
+  it("does not let legacy evidence fallback bypass missing scope coverage", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "app.ts"), "export const value = 1;\n", "utf8");
+    execFileSync("git", ["add", "src/app.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/scope-gap-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `README.md:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "test" README.md` output: `1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add incomplete audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-scope-gap-report",
+        title: "Audit source scope",
+        description: "Scope: src\nReport artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
+      "missing_scope_coverage",
+    );
+    expect(codes(result)).toContain("insufficient_report_evidence");
+    expect(formatTaskCompletionBlockedReason(result)).toContain("src");
+  });
+
+  it("does not let legacy evidence fallback bypass validator substantive evidence failures", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "app.ts"), "export const value = 1;\n", "utf8");
+    execFileSync("git", ["add", "src/app.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/weak-substantive-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `src/app.ts:1`",
+        "",
+        "Checked commands:",
+        "- Command `rg value src`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add weak audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-weak-substantive-report",
+        title: "Audit source scope",
+        description: "Scope: src\nReport artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
+      "missing_substantive_evidence",
+    );
+    expect(codes(result)).toContain("insufficient_report_evidence");
   });
 
   it("allows a normal simple task without risk signals or generic plan output", () => {

@@ -93,8 +93,12 @@ const { runPlanChecker } = await import("../subagents/planChecker.js");
 const { runImplementer } = await import("../subagents/implementer.js");
 const { runReviewer } = await import("../subagents/reviewer.js");
 const { handleAutoReviewGate } = await import("../autoReviewHandler.js");
-const { createRoadmapBatchContract, listRoadmapBatchArtifacts, updateRoadmapBatchArtifactState } =
-  await import("@aif/data");
+const {
+  createRoadmapBatchContract,
+  listRoadmapBatchArtifacts,
+  summarizeRoadmapBatch,
+  updateRoadmapBatchArtifactState,
+} = await import("@aif/data");
 
 function createPlanQualityError(): TaskPlanQualityError {
   return new TaskPlanQualityError(
@@ -376,6 +380,232 @@ describe("coordinator", () => {
     expect(synthesisArtifact?.state).toBe("synthesis_not_ready");
   });
 
+  it("exercises the typed audit batch lifecycle canary without live runtimes", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-batch-canary-");
+    mkdirSync(join(rootPath, "src"), { recursive: true });
+    writeFileSync(join(rootPath, "src", "index.ts"), 'export const entry = "ok";\n', "utf8");
+    writeFileSync(
+      join(rootPath, "src", "worker.ts"),
+      'export function runWorker() { return "ok"; }\n',
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/index.ts", "src/worker.ts"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add source files", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-batch-canary"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "source.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding: Documentation-only observation",
+        "Evidence: `README.md:1` identifies the fixture documentation.",
+        "Risk: Dependencies are defined but source behavior was not inspected.",
+        "Proposed fix: Review the implementation files.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) add audit report",
+        "```",
+        "",
+        "## No Validated Findings",
+        "No validated findings were found.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/source.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add weak audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-batch-canary-project", name: "Audit Batch Canary", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-canary-report",
+        projectId: "audit-batch-canary-project",
+        title: "Audit source behavior",
+        description:
+          "Scope: src. Report artifact: audit/source.md. Evidence requirements: cite source files and commands.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-batch-canary",
+        agentActivityLog: [
+          "[2026-05-11T10:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-11T10:00:01.000Z] Tool: read_file README.md",
+          "[2026-05-11T10:00:02.000Z] Tool: write_file audit/source.md",
+          "[2026-05-11T10:00:03.000Z] Tool: git_commit git commit",
+          "[2026-05-11T10:00:04.000Z] Agent: implement-coordinator complete",
+          "[2026-05-11T10:00:05.000Z] Agent: review-sidecar started",
+          "[2026-05-11T10:00:06.000Z] Tool: read_file audit/source.md",
+          "[2026-05-11T10:00:07.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-canary-synthesis",
+        projectId: "audit-batch-canary-project",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        autoMode: true,
+        paused: false,
+        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-batch-canary-project",
+      roadmapAlias: "audit-canary",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-canary-report", "task-canary-synthesis"],
+      synthesisTaskId: "task-canary-synthesis",
+      artifacts: [
+        {
+          taskId: "task-canary-report",
+          role: "report",
+          artifactPath: "audit/source.md",
+          projectRoot: rootPath,
+        },
+        {
+          taskId: "task-canary-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).not.toHaveBeenCalledWith("task-canary-synthesis", rootPath);
+    let synthesis = db.select().from(tasks).where(eq(tasks.id, "task-canary-synthesis")).get();
+    expect(synthesis?.agentActivityLog).toContain("synthesis_not_ready");
+    let report = db.select().from(tasks).where(eq(tasks.id, "task-canary-report")).get();
+    expect(report?.status).toBe("implementing");
+    expect(report?.reworkRequested).toBe(true);
+    expect(report?.blockedReason).toContain("invalid_artifact_content");
+    let artifacts = listRoadmapBatchArtifacts(batch.batchId);
+    let reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
+    expect(reportArtifact?.state).toBe("invalid");
+    expect(reportArtifact?.failureFamily).toBe("invalid_artifact_content");
+    const weakDetails = JSON.parse(reportArtifact?.validationDetailsJson ?? "{}");
+    const weakIssueCodes = weakDetails.issues?.map((entry: { code: string }) => entry.code) ?? [];
+    const validatorIssueCodes =
+      weakDetails.evidence?.auditReportValidation?.issues?.map(
+        (entry: { code: string }) => entry.code,
+      ) ?? [];
+    expect(weakIssueCodes).toContain("low_quality_report_evidence");
+    expect(validatorIssueCodes).toEqual(
+      expect.arrayContaining([
+        "synthetic_git_output",
+        "missing_scope_coverage",
+        "contradictory_findings_and_no_findings",
+      ]),
+    );
+    expect(summarizeRoadmapBatch(batch.batchId)?.synthesisReady).toBe(true);
+
+    vi.clearAllMocks();
+    writeFileSync(
+      join(rootPath, "audit", "source.md"),
+      [
+        "# Audit",
+        "",
+        "## Coverage",
+        "| Scope | Evidence | Verification |",
+        "| --- | --- | --- |",
+        '| `src` | `src/index.ts:1`, `src/worker.ts:1` | Command `git grep -n "export" -- src` output cited below. |',
+        "",
+        "## Finding: Worker output is unchecked",
+        "Evidence: `src/worker.ts:1` returns a string without downstream validation.",
+        "Risk: A caller can rely on unchecked worker output.",
+        "Proposed fix: Add validation before consuming worker output.",
+        'Verification: Command `git grep -n "export" -- src` output:',
+        "```",
+        'src/index.ts:1:export const entry = "ok";',
+        'src/worker.ts:1:export function runWorker() { return "ok"; }',
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/source.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "repair audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    db.update(tasks)
+      .set({
+        status: "implementing",
+        reworkRequested: true,
+        blockedReason: "rework_needed: manual request_changes requires fresh report evidence",
+        agentActivityLog: report?.agentActivityLog ?? "",
+      })
+      .where(eq(tasks.id, "task-canary-report"))
+      .run();
+    db.update(tasks).set({ paused: true }).where(eq(tasks.id, "task-canary-synthesis")).run();
+    updateRoadmapBatchArtifactState({
+      taskId: "task-canary-report",
+      state: "expected",
+      failureFamily: "rework_needed",
+      validationDetails: {
+        reworkBoundary: {
+          action: "request_changes",
+          requestedAt: "2026-05-11T11:00:00.000Z",
+          previousState: "valid",
+          latestHumanComment: {
+            id: "comment-canary-rework",
+            createdAt: "2026-05-11T11:00:00.000Z",
+            messageExcerpt: "Refresh the report with source evidence.",
+          },
+        },
+      },
+      projectRoot: rootPath,
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-canary-report", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-canary-report", rootPath);
+    report = db.select().from(tasks).where(eq(tasks.id, "task-canary-report")).get();
+    expect(report?.status).toBe("done");
+    expect(report?.reworkRequested).toBe(false);
+    expect(report?.agentActivityLog).not.toContain("skipping implementer and returning to review");
+    artifacts = listRoadmapBatchArtifacts(batch.batchId);
+    reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
+    expect(reportArtifact?.state).toBe("valid");
+    expect(reportArtifact?.failureFamily).toBeNull();
+
+    vi.clearAllMocks();
+    db.update(tasks)
+      .set({ status: "implementing", paused: false, blockedReason: null })
+      .where(eq(tasks.id, "task-canary-synthesis"))
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-canary-synthesis", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-canary-synthesis", rootPath);
+    synthesis = db.select().from(tasks).where(eq(tasks.id, "task-canary-synthesis")).get();
+    expect(synthesis?.paused).toBe(false);
+    expect(synthesis?.blockedReason ?? "").not.toContain("synthesis_not_ready");
+  });
+
   it("should pause synthesis when validated branch artifacts are unavailable during implementation", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -551,6 +781,90 @@ describe("coordinator", () => {
     expect(task?.status).toBe("done");
     expect(task?.reworkRequested).toBe(false);
     expect(task?.agentActivityLog).not.toContain("skipping implementer and returning to review");
+  });
+
+  it("should run report rework even when old report completion evidence is already satisfied", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-report-rework-ready-");
+    execFileSync("git", ["checkout", "-b", "feature/audit-report-rework"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "report.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository fixture heading.",
+        "Risk: A stale report can appear complete even after a human requested rework.",
+        "Proposed fix: Re-run the report implementer when reworkRequested is true.",
+        "Verification: Command `git log -1 --name-only --oneline` output included `audit/report.md`.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/report.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({
+        id: "audit-report-rework-project",
+        name: "Audit Report Rework",
+        rootPath,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-report-rework-ready",
+        projectId: "audit-report-rework-project",
+        title: "Audit report findings",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+        status: "implementing",
+        autoMode: true,
+        reworkRequested: true,
+        branchName: "feature/audit-report-rework",
+        agentActivityLog: [
+          "[2026-05-10T15:53:42.113Z] Agent: implement-coordinator started",
+          "[2026-05-10T15:54:22.699Z] Tool: write_file audit/report.md",
+          "[2026-05-10T15:54:25.610Z] Tool: git_commit git commit",
+          "[2026-05-10T15:54:33.912Z] Agent: implement-coordinator complete",
+          "[2026-05-10T15:54:33.947Z] Agent: review-sidecar started",
+          "[2026-05-10T15:54:35.784Z] Tool: read_file audit/report.md",
+          "[2026-05-10T15:54:39.896Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-report-rework-project",
+      roadmapAlias: "audit-report",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-report-rework-ready"],
+      artifacts: [
+        { taskId: "task-report-rework-ready", role: "report", artifactPath: "audit/report.md" },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-report-rework-ready",
+      state: "valid",
+      failureFamily: null,
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-report-rework-ready", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-report-rework-ready", rootPath);
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-report-rework-ready")).get();
+    expect(task?.status).toBe("done");
+    expect(task?.agentActivityLog).not.toContain("skipping implementer and returning to review");
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    expect(artifact?.state).toBe("valid");
   });
 
   it("should pick up review tasks and dispatch reviewer", async () => {

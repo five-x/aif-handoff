@@ -53,12 +53,29 @@ describe("evaluateReviewCommentsForAutoMode", () => {
   });
 
   function initReportRepo(): string {
+    return initReportRepoWithReport(
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: The audit scope depends on that documented root.",
+        "Verification: Command `rg reviewed README.md` output matched the inspected line.",
+        "",
+      ].join("\n"),
+    );
+  }
+
+  function initReportRepoWithReport(reportText: string): string {
     const root = mkdtempSync(join(tmpdir(), "aif-review-gate-"));
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
     execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
     writeFileSync(join(root, "README.md"), "# reviewed\n", "utf8");
-    execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const reviewed = true;\n", "utf8");
+    execFileSync("git", ["add", "README.md", "src/config.ts"], {
+      cwd: root,
+      stdio: "ignore",
+    });
     execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
       cwd: root,
       stdio: "ignore",
@@ -68,17 +85,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       stdio: "ignore",
     });
     mkdirSync(join(root, "reports"), { recursive: true });
-    writeFileSync(
-      join(root, "reports", "audit.md"),
-      [
-        "## Finding",
-        "Evidence: `README.md:1` contains the repository root documentation.",
-        "Risk: The audit scope depends on that documented root.",
-        "Verification: Command `rg reviewed README.md` output matched the inspected line.",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
+    writeFileSync(join(root, "reports", "audit.md"), reportText, "utf8");
     execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
       cwd: root,
@@ -86,6 +93,147 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     });
     return root;
   }
+
+  function structuredAdvisoryOnlyReviewComments(): string {
+    return [
+      "## Auto Review Metadata",
+      "- Strategy: full_re_review",
+      "- Review Iteration: 1",
+      "",
+      "## Previous Findings",
+      "- none",
+      "",
+      "## Blocking Findings",
+      "- none",
+      "",
+      "## Advisories",
+      "- code_review | The audit report was committed and reviewed.",
+    ].join("\n");
+  }
+
+  function agentActivityLog(
+    input: {
+      implementationTools?: boolean;
+      reviewTools?: boolean;
+    } = {},
+  ): string {
+    const implementationTools = input.implementationTools ?? true;
+    const reviewTools = input.reviewTools ?? true;
+    return [
+      "[2026-05-11T00:00:00.000Z] Agent: implement-coordinator started",
+      ...(implementationTools ? ["[2026-05-11T00:00:01.000Z] Tool: read_file README.md"] : []),
+      "[2026-05-11T00:00:02.000Z] Agent: implement-coordinator complete",
+      "[2026-05-11T00:00:03.000Z] Agent: review-sidecar started",
+      ...(reviewTools ? ["[2026-05-11T00:00:04.000Z] Tool: read_file README.md"] : []),
+      "[2026-05-11T00:00:05.000Z] Agent: review-sidecar complete",
+    ].join("\n");
+  }
+
+  function syntheticGitReport(): string {
+    return [
+      "## Finding",
+      "Evidence: `README.md:1` contains the repository root documentation.",
+      "Risk: Placeholder git output can make a weak audit report look verified.",
+      "Proposed fix: Replace placeholder git output with observed command output.",
+      "Verification: Command `git log -1 --oneline -- reports/audit.md` output:",
+      "```",
+      "1234567 (HEAD -> main)",
+      "```",
+      "",
+    ].join("\n");
+  }
+
+  it.each([
+    {
+      name: "synthetic git output",
+      issueCode: "synthetic_git_output",
+      description: "Report artifact: reports/audit.md",
+      reportText: syntheticGitReport,
+    },
+    {
+      name: "contradictory no-findings semantics",
+      issueCode: "contradictory_findings_and_no_findings",
+      description: "Report artifact: reports/audit.md",
+      reportText: () =>
+        [
+          "## Finding",
+          "Evidence: `README.md:1` contains the repository root documentation.",
+          "Risk: The report contradicts itself about whether findings exist.",
+          "Proposed fix: Remove the contradictory no-findings claim.",
+          "- Verification: Command `rg reviewed README.md` output: `1:# reviewed`",
+          "",
+          "No validated findings.",
+          "",
+          "Checked files:",
+          "- `README.md:1`",
+          "",
+          "Checked commands:",
+          "- Command `rg reviewed README.md` output: `1:# reviewed`",
+          "",
+        ].join("\n"),
+    },
+    {
+      name: "missing declared scope coverage",
+      issueCode: "missing_scope_coverage",
+      description: [
+        "Scope: src",
+        "Report artifact: reports/audit.md",
+        "Evidence requirements: include Evidence:, Risk:, Proposed fix:, and Verification:.",
+      ].join("\n"),
+      reportText: () =>
+        [
+          "No validated findings.",
+          "",
+          "Checked files:",
+          "- `README.md:1`",
+          "",
+          "Checked commands:",
+          "- Command `rg reviewed README.md` output: `1:# reviewed`",
+          "",
+        ].join("\n"),
+    },
+    {
+      name: "governance-only findings",
+      issueCode: "governance_observation_as_finding",
+      description: "Report artifact: reports/audit.md",
+      reportText: () =>
+        [
+          "## Finding",
+          "Evidence: `README.md:1` contains the repository root documentation.",
+          "Risk: Overlap in task/workflow routing can make ownership unclear.",
+          "Proposed fix: Add a branch naming convention and ownership policy.",
+          "- Verification: Command `rg reviewed README.md` output: `1:# reviewed`",
+          "",
+        ].join("\n"),
+    },
+  ])(
+    "converts validator rejection for $name into structured blocking findings",
+    async ({ issueCode, description, reportText }) => {
+      const root = initReportRepoWithReport(reportText());
+
+      const result = await evaluateReviewCommentsForAutoMode({
+        ...baseInput,
+        projectRoot: root,
+        reviewComments: structuredAdvisoryOnlyReviewComments(),
+        task: {
+          id: "audit-task",
+          title: "Full repository audit",
+          description,
+        },
+      });
+
+      expect(result.status).toBe("request_changes");
+      expect(result.metrics.parserMode).toBe("structured");
+      expect(result.blockingFindings.some((finding) => finding.source === "review_gate")).toBe(
+        true,
+      );
+      expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+        `(${issueCode})`,
+      );
+      expect(result.fixesMarkdown).toContain("Audit report validator blocked completion");
+      expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("returns success for structured review comments with no blocking findings", async () => {
     const result = await evaluateReviewCommentsForAutoMode(baseInput);
@@ -276,11 +424,41 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         id: "audit-task",
         title: "Full repository audit",
         description: "Report artifact: reports/audit.md",
+        agentActivityLog: agentActivityLog(),
       },
     });
 
     expect(result.status).toBe("success");
     expect(result.metrics.parserMode).toBe("fallback");
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("does not let legacy blocking-none comments accept validator-rejected reports", async () => {
+    const root = initReportRepoWithReport(syntheticGitReport());
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Looks good.",
+      ].join("\n"),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: "Report artifact: reports/audit.md",
+        agentActivityLog: agentActivityLog(),
+      },
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.metrics.parserMode).toBe("fallback");
+    expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+      "(synthetic_git_output)",
+    );
     expect(executeSubagentQueryMock).not.toHaveBeenCalled();
   });
 
@@ -309,6 +487,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         id: "audit-task",
         title: "Full repository audit",
         description: "Report artifact: reports/audit.md",
+        agentActivityLog: agentActivityLog(),
       },
     });
 
@@ -345,6 +524,43 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       "Remove unrelated source edits",
     ]);
     expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps sidecar blockers additive when deterministic validation also fails", async () => {
+    const root = initReportRepoWithReport(syntheticGitReport());
+    const blockerId = createAutoReviewFindingId("code_review", "Fix the reviewer-noted risk");
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        `- [${blockerId}] code_review | Fix the reviewer-noted risk`,
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: "Report artifact: reports/audit.md",
+      },
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.blockingFindings.map((finding) => finding.text)).toEqual(
+      expect.arrayContaining([
+        "Fix the reviewer-noted risk",
+        expect.stringContaining("(synthetic_git_output)"),
+      ]),
+    );
   });
 
   it("requires manual review when malformed rework output falls back after previous blockers exist", async () => {
@@ -404,29 +620,30 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(call.workflowSpec).toEqual(expect.objectContaining({ sessionReusePolicy: "never" }));
   });
 
-  it("requires manual review when fallback SUCCESS tries to accept risky output without evidence", async () => {
+  it("does not let fallback SUCCESS accept validator-rejected reports", async () => {
+    const root = initReportRepoWithReport(syntheticGitReport());
     executeSubagentQueryMock.mockResolvedValueOnce({ resultText: "SUCCESS" });
 
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
+      projectRoot: root,
       reviewComments: "Looks good.",
       task: {
         id: "audit-task",
         title: "Full repository audit",
-        description: "Review the generated audit report.",
+        description: "Report artifact: reports/audit.md",
       },
     });
 
-    expect(result.status).toBe("manual_review_required");
-    if (result.status !== "manual_review_required") {
-      throw new Error("expected manual_review_required");
-    }
-    expect(result.handoffReason).toBe("risky_review_without_substantive_evidence");
+    expect(result.status).toBe("request_changes");
     expect(result.metrics.parserMode).toBe("fallback");
-    expect(result.blockingFindings[0]?.source).toBe("review_gate");
+    expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+      "(synthetic_git_output)",
+    );
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(1);
   });
 
-  it("allows risky structured success when review comments contain substantive evidence", async () => {
+  it("requires a report artifact even when review comments contain substantive evidence", async () => {
     const root = mkdtempSync(join(tmpdir(), "aif-review-gate-"));
     writeFileSync(join(root, "README.md"), "# reviewed\n", "utf8");
 
@@ -458,7 +675,44 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       },
     });
 
-    expect(result.status).toBe("success");
+    expect(result.status).toBe("request_changes");
+    expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+      "(missing_report_artifact)",
+    );
+  });
+
+  it.each([
+    {
+      name: "implementation tool activity",
+      issueCode: "missing_implementation_tool_activity",
+      activity: agentActivityLog({ implementationTools: false, reviewTools: true }),
+    },
+    {
+      name: "review-stage tool activity",
+      issueCode: "missing_review_tool_activity",
+      activity: agentActivityLog({ implementationTools: true, reviewTools: false }),
+    },
+  ])("blocks risky report acceptance when $name is missing", async ({ issueCode, activity }) => {
+    const root = initReportRepo();
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: structuredAdvisoryOnlyReviewComments(),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: "Report artifact: reports/audit.md",
+        agentActivityLog: activity,
+      },
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.metrics.parserMode).toBe("structured");
+    expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+      `(${issueCode})`,
+    );
+    expect(result.fixesMarkdown).toContain("Audit completion evidence blocked review gate");
   });
 
   it("allows risky structured success when the committed report artifact is substantive", async () => {
@@ -485,6 +739,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         id: "audit-task",
         title: "Full repository audit",
         description: "Report artifact: reports/audit.md",
+        agentActivityLog: agentActivityLog(),
       },
     });
 

@@ -601,6 +601,7 @@ function reworkCompletionEvidenceAlreadySatisfied(task: TaskRow, projectRoot: st
   if (!task.reworkRequested) return false;
   const artifact = findRoadmapBatchArtifactByTaskId(task.id);
   if (!artifact) return false;
+  if (artifact.role === "report") return false;
   if (artifact.role === "synthesis") return false;
   const allowedEvidenceArtifactPaths =
     artifact.role === "synthesis"

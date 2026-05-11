@@ -423,13 +423,14 @@ describe("registry usage pipeline", () => {
 
   function createFakeAdapter(options: {
     runtimeId?: string;
+    providerId?: string;
     usageReporting: (typeof UsageReporting)[keyof typeof UsageReporting];
     returnedUsage: RuntimeUsageEvent["usage"] | null;
   }): RuntimeAdapter {
     return {
       descriptor: {
         id: options.runtimeId ?? "fake",
-        providerId: "fake-provider",
+        providerId: options.providerId ?? "fake-provider",
         displayName: "Fake",
         capabilities: {
           ...DEFAULT_RUNTIME_CAPABILITIES,
@@ -443,6 +444,62 @@ describe("registry usage pipeline", () => {
   }
 
   const sampleUsage = { inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.0042 };
+
+  it("records local partial usage without cost and external full usage with cost", async () => {
+    const sink = createCapturingSink();
+    const localUsage = { inputTokens: 3, outputTokens: 7, totalTokens: 10 };
+    const externalUsage = { inputTokens: 11, outputTokens: 13, totalTokens: 24, costUsd: 0.0123 };
+    const registry = createRuntimeRegistry({
+      usageSink: sink,
+      builtInAdapters: [
+        createFakeAdapter({
+          runtimeId: "local-partial",
+          providerId: "local",
+          usageReporting: UsageReporting.PARTIAL,
+          returnedUsage: localUsage,
+        }),
+        createFakeAdapter({
+          runtimeId: "external-full",
+          providerId: "external",
+          usageReporting: UsageReporting.FULL,
+          returnedUsage: externalUsage,
+        }),
+      ],
+    });
+
+    await registry.resolveRuntime("local-partial").run({
+      runtimeId: "local-partial",
+      prompt: "local",
+      workflowKind: "test",
+      usageContext: { source: UsageSource.TEST, projectId: "p-1", taskId: "t-local" },
+    });
+    await registry.resolveRuntime("external-full").run({
+      runtimeId: "external-full",
+      prompt: "external",
+      workflowKind: "test",
+      usageContext: { source: UsageSource.TEST, projectId: "p-1", taskId: "t-external" },
+    });
+
+    expect(sink.events).toHaveLength(2);
+    expect(sink.events[0]).toEqual(
+      expect.objectContaining({
+        runtimeId: "local-partial",
+        providerId: "local",
+        usageReporting: UsageReporting.PARTIAL,
+        usage: localUsage,
+      }),
+    );
+    expect(sink.events[0].usage).not.toHaveProperty("costUsd");
+    expect(sink.events[1]).toEqual(
+      expect.objectContaining({
+        runtimeId: "external-full",
+        providerId: "external",
+        usageReporting: UsageReporting.FULL,
+        usage: externalUsage,
+      }),
+    );
+    expect(sink.events[1].usage.costUsd).toBe(0.0123);
+  });
 
   it("forwards usage to the sink when adapter returns non-null usage", async () => {
     const sink = createCapturingSink();

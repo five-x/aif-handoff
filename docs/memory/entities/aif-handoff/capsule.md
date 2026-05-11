@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260511-harden-audit-runtime-quality-contract::entity-capsule
+memory_id: task::aif-handoff::work::work-20260511-audit-batch-integration-canary::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260511-harden-audit-runtime-quality-contract
-source_path: docs/rdpi/work/work-20260511-harden-audit-runtime-quality-contract
+task_id: work-20260511-audit-batch-integration-canary
+source_path: docs/rdpi/work/work-20260511-audit-batch-integration-canary
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -25,10 +25,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260511-harden-audit-runtime-quality-contract/research.md
-- docs/rdpi/work/work-20260511-harden-audit-runtime-quality-contract/design.md
-- docs/rdpi/work/work-20260511-harden-audit-runtime-quality-contract/plan.md
-- docs/rdpi/work/work-20260511-harden-audit-runtime-quality-contract/result.md
+- docs/rdpi/work/work-20260511-audit-batch-integration-canary/research.md
+- docs/rdpi/work/work-20260511-audit-batch-integration-canary/design.md
+- docs/rdpi/work/work-20260511-audit-batch-integration-canary/plan.md
+- docs/rdpi/work/work-20260511-audit-batch-integration-canary/result.md
   created_at: 2026-05-11
   last_verified_at: 2026-05-11
 
@@ -36,7 +36,7 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260511-harden-audit-runtime-quality-contract.
+Current capsule for entity aif-handoff, refreshed by task work-20260511-audit-batch-integration-canary.
 
 # Why it matters
 

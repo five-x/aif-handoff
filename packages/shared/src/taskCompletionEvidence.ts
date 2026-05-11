@@ -6,6 +6,10 @@ import {
   isAuditReportArtifactPath,
   parseExpectedAuditReportArtifactPath,
 } from "./auditRoadmapContract.js";
+import {
+  validateAuditReportArtifact,
+  type AuditReportValidationResult,
+} from "./auditReportValidator.js";
 import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
 
 export type TaskCompletionIssueCode =
@@ -71,6 +75,7 @@ export interface TaskCompletionEvidenceResult {
     reportReferencedPaths: string[];
     missingReportReferencedPaths: string[];
     existingReportReferencedPaths: string[];
+    auditReportValidation: AuditReportValidationResult;
     expectedReportArtifactPath: string | null;
   };
 }
@@ -1190,7 +1195,23 @@ export function evaluateTaskCompletionEvidence(
     reportReferencedPaths,
     allowedEvidenceArtifactPaths,
   );
-  const substantiveReportEvidence = hasSubstantiveReportEvidence({
+  const auditReportValidation = validateAuditReportArtifact({
+    text: reportText,
+    projectRoot,
+    taskDescription: task.description,
+    reportArtifactPaths: reportArtifactFiles,
+    allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
+    requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
+  });
+  const validatorEvidenceBlockingIssues = auditReportValidation.issues.filter(
+    (entry) =>
+      ["invalid_line_reference", "missing_declared_scope_root", "missing_scope_coverage"].includes(
+        entry.code,
+      ) ||
+      (entry.code === "missing_substantive_evidence" &&
+        auditReportValidation.scopeRoots.length > 0),
+  );
+  const legacySubstantiveReportEvidence = hasSubstantiveReportEvidence({
     text: reportText,
     projectRoot,
     existingReferencedPaths: reportExisting,
@@ -1198,7 +1219,15 @@ export function evaluateTaskCompletionEvidence(
     allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
     requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
   });
-  const reportQualityIssues = collectLowQualityReportEvidenceIssues(reportText, projectRoot);
+  const substantiveReportEvidence =
+    validatorEvidenceBlockingIssues.length === 0 &&
+    (auditReportValidation.substantiveEvidence || legacySubstantiveReportEvidence);
+  const reportQualityIssues = [
+    ...new Set([
+      ...collectLowQualityReportEvidenceIssues(reportText, projectRoot),
+      ...auditReportValidation.reportQualityIssues,
+    ]),
+  ].sort();
   const committedSubstantiveReportAvailable =
     reportArtifactFiles.length > 0 &&
     uncommittedReportArtifactFiles.length === 0 &&
@@ -1279,6 +1308,13 @@ export function evaluateTaskCompletionEvidence(
     let invalidEvidenceMessage: string | null = null;
     if (reportMissing.length > 0) {
       invalidEvidenceMessage = `Report artifact contains repository path references that do not resolve under the project root: ${formatPathExamples(reportMissing)}. Replace them with concrete existing file paths and line references, or remove unsupported citations.`;
+    } else if (
+      auditReportValidation.issues.some((entry) => entry.code === "missing_declared_scope_root")
+    ) {
+      invalidEvidenceMessage = auditReportValidation.issues
+        .filter((entry) => entry.code === "missing_declared_scope_root")
+        .map((entry) => entry.message)
+        .join(" ");
     } else if (riskyTask && reportArtifactFiles.length > 0 && reportReferencedPaths.length === 0) {
       invalidEvidenceMessage =
         "Audit/review/discovery report artifact does not cite any repository file references to validate. Add concrete existing file references such as `path/to/file.ext:line`.";
@@ -1296,10 +1332,15 @@ export function evaluateTaskCompletionEvidence(
       reportReferencedPaths.length > 0 &&
       !substantiveReportEvidence
     ) {
+      const scopeCoverageDetails = auditReportValidation.issues
+        .filter((entry) => entry.code === "missing_scope_coverage")
+        .map((entry) => entry.message)
+        .join(" ");
       issues.push(
         issue(
           "insufficient_report_evidence",
-          "Audit/review/discovery report artifact lacks substantive evidence markers such as path+line references, symbol references tied to files, command output, or structured findings with evidence/risk/verification.",
+          scopeCoverageDetails ||
+            "Audit/review/discovery report artifact lacks substantive evidence markers such as path+line references, symbol references tied to files, command output, or structured findings with evidence/risk/verification.",
         ),
       );
     }
@@ -1351,6 +1392,7 @@ export function evaluateTaskCompletionEvidence(
       reportReferencedPaths,
       missingReportReferencedPaths: reportMissing,
       existingReportReferencedPaths: reportExisting,
+      auditReportValidation,
       expectedReportArtifactPath,
     },
   };

@@ -114,6 +114,39 @@ function allowedEvidenceArtifactPathsFor(auditArtifact: RoadmapBatchArtifactRow 
     : [];
 }
 
+function excerptComment(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
+}
+
+function markReportArtifactReworkRequested(task: TaskRow, auditArtifact: RoadmapBatchArtifactRow) {
+  if (auditArtifact.role !== "report") return;
+  const latestComment = getLatestHumanComment(task.id);
+  const requestedAt = new Date().toISOString();
+  updateRoadmapBatchArtifactState({
+    taskId: task.id,
+    state: "expected",
+    failureFamily: "rework_needed",
+    validationDetails: {
+      reworkBoundary: {
+        action: "request_changes",
+        requestedAt,
+        previousState: auditArtifact.state,
+        latestHumanComment: latestComment
+          ? {
+              id: latestComment.id,
+              createdAt: latestComment.createdAt,
+              messageExcerpt: excerptComment(latestComment.message),
+            }
+          : null,
+      },
+    },
+    branchName: task.branchName ?? auditArtifact.branchName,
+    worktreePath: task.worktreePath ?? auditArtifact.worktreePath,
+    projectRoot: task.worktreePath ?? auditArtifact.projectRoot,
+  });
+}
+
 function blockTaskForCompletionEvidence(
   task: TaskRow,
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
@@ -442,6 +475,13 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
 
     if (existsSync(planFilePath)) {
       unlinkSync(planFilePath);
+    }
+  }
+
+  if (event === "request_changes") {
+    const auditArtifact = findRoadmapBatchArtifactByTaskId(task.id);
+    if (auditArtifact) {
+      markReportArtifactReworkRequested(task, auditArtifact);
     }
   }
 

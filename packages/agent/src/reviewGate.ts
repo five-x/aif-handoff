@@ -85,6 +85,39 @@ function mergeFindings(...groups: AutoReviewFinding[][]): AutoReviewFinding[] {
   return [...map.values()];
 }
 
+function reviewGateFinding(text: string): AutoReviewFinding {
+  return {
+    id: createAutoReviewFindingId("review_gate", text),
+    source: "review_gate",
+    text,
+  };
+}
+
+function collectDeterministicReviewGateFindings(input: ReviewGateInput): AutoReviewFinding[] {
+  if (!input.task || !isRiskyTask(input.task)) return [];
+
+  const taskEvidence = evaluateTaskCompletionEvidence({
+    task: { ...input.task, manualReviewRequired: false },
+    projectRoot: input.projectRoot,
+  });
+  if (taskEvidence.ok) return [];
+
+  const auditValidationIssues = taskEvidence.evidence.auditReportValidation.issues;
+  if (auditValidationIssues.length > 0) {
+    return auditValidationIssues.map((entry) =>
+      reviewGateFinding(
+        `Audit report validator blocked completion (${entry.code}): ${entry.message}`,
+      ),
+    );
+  }
+
+  return taskEvidence.issues.map((entry) =>
+    reviewGateFinding(
+      `Audit completion evidence blocked review gate (${entry.code}): ${entry.message}`,
+    ),
+  );
+}
+
 async function runLegacyFallbackExtraction(
   input: Pick<ReviewGateInput, "taskId" | "projectRoot" | "reviewComments">,
 ): Promise<AutoReviewFinding[]> {
@@ -206,148 +239,27 @@ function buildMetrics(input: {
 function buildStructuredDecision(
   input: ReviewGateInput,
   parsed: ParsedStructuredReviewComments,
+  deterministicFindings: AutoReviewFinding[],
 ): ReviewGateResult {
   const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const blockingFindings = mergeFindings(parsed.blockingFindings, deterministicFindings);
   const stillBlockingIds = new Set(
     parsed.previousFindings
       .filter((finding) => finding.status === "still_blocking")
       .map((finding) => finding.id),
   );
-  const newBlockingFindings = parsed.blockingFindings.filter(
-    (finding) => !previousIds.has(finding.id),
-  );
+  for (const finding of blockingFindings) {
+    if (previousIds.has(finding.id)) stillBlockingIds.add(finding.id);
+  }
+  const newBlockingFindings = blockingFindings.filter((finding) => !previousIds.has(finding.id));
   const metrics = buildMetrics({
     strategy: input.strategy,
     iteration: input.iteration,
     previousBlockingCount: input.previousFindings.length,
     stillBlockingCount: stillBlockingIds.size,
     newBlockingCount: newBlockingFindings.length,
-    totalBlockingCount: parsed.blockingFindings.length,
-    parserMode: "structured",
-  });
-
-  if (parsed.blockingFindings.length === 0) {
-    if (requiresSubstantiveReviewEvidence(input)) {
-      return buildSubstantiveEvidenceHandoff(input, metrics);
-    }
-    return {
-      status: "success",
-      metrics,
-      blockingFindings: [],
-      fixesMarkdown: "- none",
-      autoReviewState: null,
-    };
-  }
-
-  const autoReviewState = toAutoReviewState({
-    strategy: input.strategy,
-    iteration: input.iteration,
-    findings: parsed.blockingFindings,
-  });
-
-  if (
-    input.strategy === "closure_first" &&
-    input.previousFindings.length > 0 &&
-    stillBlockingIds.size === 0 &&
-    newBlockingFindings.length > 0
-  ) {
-    return {
-      status: "manual_review_required",
-      handoffReason: "new_blockers_after_rework",
-      metrics,
-      blockingFindings: parsed.blockingFindings,
-      fixesMarkdown: formatFixesMarkdown(parsed.blockingFindings),
-      autoReviewState,
-    };
-  }
-
-  return {
-    status: "request_changes",
-    metrics,
-    blockingFindings: parsed.blockingFindings,
-    fixesMarkdown: formatFixesMarkdown(parsed.blockingFindings),
-    autoReviewState,
-  };
-}
-
-function buildFallbackDecision(
-  input: ReviewGateInput,
-  fallbackFindings: AutoReviewFinding[],
-): ReviewGateResult {
-  // Structured output is the only path that can prove a previous blocker was
-  // actually resolved. Once we drop to legacy fallback after prior iterations,
-  // preserve all previous blockers and escalate to manual review instead of
-  // guessing that malformed output means the loop converged.
-  const mergedFindings =
-    input.previousFindings.length > 0
-      ? mergeFindings(input.previousFindings, fallbackFindings)
-      : fallbackFindings;
-  const metrics = buildMetrics({
-    strategy: input.strategy,
-    iteration: input.iteration,
-    previousBlockingCount: input.previousFindings.length,
-    stillBlockingCount: input.previousFindings.length > 0 ? input.previousFindings.length : 0,
-    newBlockingCount: fallbackFindings.length,
-    totalBlockingCount: mergedFindings.length,
-    parserMode: "fallback",
-  });
-
-  if (input.previousFindings.length > 0) {
-    return {
-      status: "manual_review_required",
-      handoffReason: "malformed_review_output_fallback",
-      metrics,
-      blockingFindings: mergedFindings,
-      fixesMarkdown: formatFixesMarkdown(mergedFindings),
-      autoReviewState: toAutoReviewState({
-        strategy: input.strategy,
-        iteration: input.iteration,
-        findings: mergedFindings,
-      }),
-    };
-  }
-
-  if (fallbackFindings.length === 0) {
-    if (requiresSubstantiveReviewEvidence(input)) {
-      return buildSubstantiveEvidenceHandoff(input, metrics);
-    }
-    return {
-      status: "success",
-      metrics,
-      blockingFindings: [],
-      fixesMarkdown: "- none",
-      autoReviewState: null,
-    };
-  }
-
-  return {
-    status: "request_changes",
-    metrics,
-    blockingFindings: fallbackFindings,
-    fixesMarkdown: formatFixesMarkdown(fallbackFindings),
-    autoReviewState: toAutoReviewState({
-      strategy: input.strategy,
-      iteration: input.iteration,
-      findings: fallbackFindings,
-    }),
-  };
-}
-
-function buildLegacyBlockingSectionDecision(
-  input: ReviewGateInput,
-  blockingFindings: AutoReviewFinding[],
-): ReviewGateResult {
-  const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
-  const stillBlockingFindings = blockingFindings.filter((finding) => previousIds.has(finding.id));
-  const newBlockingFindings = blockingFindings.filter((finding) => !previousIds.has(finding.id));
-  const metrics = buildMetrics({
-    strategy: input.strategy,
-    iteration: input.iteration,
-    previousBlockingCount: input.previousFindings.length,
-    stillBlockingCount: stillBlockingFindings.length,
-    newBlockingCount: newBlockingFindings.length,
     totalBlockingCount: blockingFindings.length,
-    parserMode: "fallback",
+    parserMode: "structured",
   });
 
   if (blockingFindings.length === 0) {
@@ -372,7 +284,7 @@ function buildLegacyBlockingSectionDecision(
   if (
     input.strategy === "closure_first" &&
     input.previousFindings.length > 0 &&
-    stillBlockingFindings.length === 0 &&
+    stillBlockingIds.size === 0 &&
     newBlockingFindings.length > 0
   ) {
     return {
@@ -390,6 +302,142 @@ function buildLegacyBlockingSectionDecision(
     metrics,
     blockingFindings,
     fixesMarkdown: formatFixesMarkdown(blockingFindings),
+    autoReviewState,
+  };
+}
+
+function buildFallbackDecision(
+  input: ReviewGateInput,
+  fallbackFindings: AutoReviewFinding[],
+  deterministicFindings: AutoReviewFinding[],
+): ReviewGateResult {
+  // Structured output is the only path that can prove a previous blocker was
+  // actually resolved. Once we drop to legacy fallback after prior iterations,
+  // preserve all previous blockers and escalate to manual review instead of
+  // guessing that malformed output means the loop converged.
+  const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const fallbackAndDeterministicFindings = mergeFindings(fallbackFindings, deterministicFindings);
+  const mergedFindings =
+    input.previousFindings.length > 0
+      ? mergeFindings(input.previousFindings, fallbackAndDeterministicFindings)
+      : fallbackAndDeterministicFindings;
+  const newBlockingFindings = fallbackAndDeterministicFindings.filter(
+    (finding) => !previousIds.has(finding.id),
+  );
+  const metrics = buildMetrics({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    previousBlockingCount: input.previousFindings.length,
+    stillBlockingCount: input.previousFindings.length > 0 ? input.previousFindings.length : 0,
+    newBlockingCount: newBlockingFindings.length,
+    totalBlockingCount: mergedFindings.length,
+    parserMode: "fallback",
+  });
+
+  if (input.previousFindings.length > 0) {
+    return {
+      status: "manual_review_required",
+      handoffReason: "malformed_review_output_fallback",
+      metrics,
+      blockingFindings: mergedFindings,
+      fixesMarkdown: formatFixesMarkdown(mergedFindings),
+      autoReviewState: toAutoReviewState({
+        strategy: input.strategy,
+        iteration: input.iteration,
+        findings: mergedFindings,
+      }),
+    };
+  }
+
+  if (fallbackAndDeterministicFindings.length === 0) {
+    if (requiresSubstantiveReviewEvidence(input)) {
+      return buildSubstantiveEvidenceHandoff(input, metrics);
+    }
+    return {
+      status: "success",
+      metrics,
+      blockingFindings: [],
+      fixesMarkdown: "- none",
+      autoReviewState: null,
+    };
+  }
+
+  return {
+    status: "request_changes",
+    metrics,
+    blockingFindings: fallbackAndDeterministicFindings,
+    fixesMarkdown: formatFixesMarkdown(fallbackAndDeterministicFindings),
+    autoReviewState: toAutoReviewState({
+      strategy: input.strategy,
+      iteration: input.iteration,
+      findings: fallbackAndDeterministicFindings,
+    }),
+  };
+}
+
+function buildLegacyBlockingSectionDecision(
+  input: ReviewGateInput,
+  blockingFindings: AutoReviewFinding[],
+  deterministicFindings: AutoReviewFinding[],
+): ReviewGateResult {
+  const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const mergedBlockingFindings = mergeFindings(blockingFindings, deterministicFindings);
+  const stillBlockingFindings = mergedBlockingFindings.filter((finding) =>
+    previousIds.has(finding.id),
+  );
+  const newBlockingFindings = mergedBlockingFindings.filter(
+    (finding) => !previousIds.has(finding.id),
+  );
+  const metrics = buildMetrics({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    previousBlockingCount: input.previousFindings.length,
+    stillBlockingCount: stillBlockingFindings.length,
+    newBlockingCount: newBlockingFindings.length,
+    totalBlockingCount: mergedBlockingFindings.length,
+    parserMode: "fallback",
+  });
+
+  if (mergedBlockingFindings.length === 0) {
+    if (requiresSubstantiveReviewEvidence(input)) {
+      return buildSubstantiveEvidenceHandoff(input, metrics);
+    }
+    return {
+      status: "success",
+      metrics,
+      blockingFindings: [],
+      fixesMarkdown: "- none",
+      autoReviewState: null,
+    };
+  }
+
+  const autoReviewState = toAutoReviewState({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    findings: mergedBlockingFindings,
+  });
+
+  if (
+    input.strategy === "closure_first" &&
+    input.previousFindings.length > 0 &&
+    stillBlockingFindings.length === 0 &&
+    newBlockingFindings.length > 0
+  ) {
+    return {
+      status: "manual_review_required",
+      handoffReason: "new_blockers_after_rework",
+      metrics,
+      blockingFindings: mergedBlockingFindings,
+      fixesMarkdown: formatFixesMarkdown(mergedBlockingFindings),
+      autoReviewState,
+    };
+  }
+
+  return {
+    status: "request_changes",
+    metrics,
+    blockingFindings: mergedBlockingFindings,
+    fixesMarkdown: formatFixesMarkdown(mergedBlockingFindings),
     autoReviewState,
   };
 }
@@ -451,16 +499,17 @@ function buildSubstantiveEvidenceHandoff(
 export async function evaluateReviewCommentsForAutoMode(
   input: ReviewGateInput,
 ): Promise<ReviewGateResult> {
+  const deterministicFindings = collectDeterministicReviewGateFindings(input);
   const parsedStructuredComments = parseStructuredReviewComments(input.reviewComments);
   if (parsedStructuredComments) {
-    return buildStructuredDecision(input, parsedStructuredComments);
+    return buildStructuredDecision(input, parsedStructuredComments, deterministicFindings);
   }
 
   const legacyBlockingFindings = parseLegacyBlockingFindings(input);
   if (legacyBlockingFindings) {
-    return buildLegacyBlockingSectionDecision(input, legacyBlockingFindings);
+    return buildLegacyBlockingSectionDecision(input, legacyBlockingFindings, deterministicFindings);
   }
 
   const fallbackFindings = await runLegacyFallbackExtraction(input);
-  return buildFallbackDecision(input, fallbackFindings);
+  return buildFallbackDecision(input, fallbackFindings, deterministicFindings);
 }

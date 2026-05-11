@@ -145,6 +145,17 @@ describe("runImplementer rework behavior", () => {
       ].join("\n"),
       "utf8",
     );
+    writeFileSync(
+      join(projectRoot, "audit", "security.md"),
+      [
+        "## Finding: Invalid source should stay out of findings",
+        "Evidence: `README.md:1` is not enough to validate this source.",
+        "Risk: INVALID_REPORT_CONTENT_SHOULD_NOT_BE_SYNTHESIZED.",
+        "Proposed fix: keep invalid reports out of validated synthesis inputs.",
+        "Verification: Command `git log -1 --oneline` output: `1234567 (HEAD -> main)`.",
+      ].join("\n"),
+      "utf8",
+    );
 
     db.insert(tasks)
       .values({
@@ -229,6 +240,7 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("--- weak_or_invalid_artifacts ---");
     expect(call.prompt).toContain("artifact: audit/security.md");
     expect(call.prompt).toContain("failureFamily: invalid_artifact_content");
+    expect(call.prompt).not.toContain("INVALID_REPORT_CONTENT_SHOULD_NOT_BE_SYNTHESIZED");
     expect(call.prompt).toContain("use those exact validated report contents");
   });
 

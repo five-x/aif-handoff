@@ -61,7 +61,8 @@ vi.mock("../services/runtime.js", () => ({
 // Import after mocks
 const { tasksRouter } = await import("../routes/tasks.js");
 const { broadcast: mockBroadcast } = await import("../ws.js");
-const { createRoadmapBatchContract, listRoadmapBatchArtifacts } = await import("@aif/data");
+const { createRoadmapBatchContract, listRoadmapBatchArtifacts, updateRoadmapBatchArtifactState } =
+  await import("@aif/data");
 
 function createApp() {
   const app = new Hono();
@@ -2239,6 +2240,83 @@ describe("tasks API", () => {
       expect(body.reworkRequested).toBe(true);
       expect(body.retryCount).toBe(0);
       expect(body.lastHeartbeatAt).toBeTruthy();
+    });
+
+    it("should mark valid audit report artifacts expected with rework details on request_changes", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-request-changes-report-"));
+      db.insert(projects)
+        .values({ id: "project-report-rework", name: "Report Rework", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-report-rework-1",
+          projectId: "project-report-rework",
+          title: "Audit report rework",
+          description: "Report artifact: audit/report.md",
+          taskIntent: "audit",
+          status: "done",
+          branchName: "feature/audit-report",
+          worktreePath: rootPath,
+        })
+        .run();
+      db.insert(taskComments)
+        .values({
+          id: "ev-report-rework-comment-1",
+          taskId: "ev-report-rework-1",
+          author: "human",
+          message: "Please refresh the report with current evidence and remove stale claims.",
+          attachments: "[]",
+          createdAt: "2026-05-11T10:00:00.000Z",
+        })
+        .run();
+      const batch = createRoadmapBatchContract({
+        projectId: "project-report-rework",
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["ev-report-rework-1"],
+        artifacts: [
+          {
+            taskId: "ev-report-rework-1",
+            role: "report",
+            artifactPath: "audit/report.md",
+            projectRoot: rootPath,
+          },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "ev-report-rework-1",
+        state: "valid",
+        failureFamily: null,
+        validationDetails: { action: "approve_done" },
+      });
+
+      const res = await app.request("/tasks/ev-report-rework-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "request_changes" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+      expect(body.reworkRequested).toBe(true);
+      const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      expect(artifact.state).toBe("expected");
+      expect(artifact.failureFamily).toBe("rework_needed");
+      const details = JSON.parse(artifact.validationDetailsJson ?? "{}");
+      expect(details.reworkBoundary).toMatchObject({
+        action: "request_changes",
+        previousState: "valid",
+        latestHumanComment: {
+          id: "ev-report-rework-comment-1",
+          createdAt: "2026-05-11T10:00:00.000Z",
+          messageExcerpt:
+            "Please refresh the report with current evidence and remove stale claims.",
+        },
+      });
+      expect(details.reworkBoundary.requestedAt).toBeTruthy();
     });
 
     it("should send plan_ready task back to planning on request_replanning", async () => {
