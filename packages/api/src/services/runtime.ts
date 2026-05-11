@@ -45,6 +45,7 @@ import {
 import { broadcast } from "../ws.js";
 
 const log = logger("api-runtime");
+const UNBOUNDED_API_RUNTIME_WORKFLOWS = new Set(["roadmap-generate", "roadmap-extract"]);
 
 let runtimeRegistryPromise: Promise<RuntimeRegistry> | null = null;
 let modelDiscoveryService: RuntimeModelDiscoveryService | null = null;
@@ -128,6 +129,10 @@ export async function getApiRuntimeModelDiscoveryService(): Promise<RuntimeModel
     });
   }
   return modelDiscoveryService;
+}
+
+function resolveApiRuntimeRunTimeoutMs(workflowKind: string, configuredTimeoutMs: number): number {
+  return UNBOUNDED_API_RUNTIME_WORKFLOWS.has(workflowKind) ? 0 : configuredTimeoutMs;
 }
 
 function broadcastRuntimeLimitUpdate(input: {
@@ -710,7 +715,10 @@ export async function runApiRuntimeOneShot(input: {
         // so start timeout is meaningless — disable it and rely on run timeout only.
         startTimeoutMs:
           context.resolvedProfile.transport === "sdk" ? env.API_RUNTIME_START_TIMEOUT_MS : 0,
-        runTimeoutMs: env.API_RUNTIME_RUN_TIMEOUT_MS,
+        runTimeoutMs: resolveApiRuntimeRunTimeoutMs(
+          workflow.workflowKind,
+          env.API_RUNTIME_RUN_TIMEOUT_MS,
+        ),
         includePartialMessages: input.includePartialMessages ?? false,
         maxTurns: input.maxTurns,
         onEvent: onRuntimeEvent,

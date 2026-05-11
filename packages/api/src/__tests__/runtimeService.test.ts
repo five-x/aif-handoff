@@ -694,6 +694,31 @@ describe("runtime service", () => {
     );
   });
 
+  it.each(["roadmap-generate", "roadmap-extract"])(
+    "disables the API run timeout for %s",
+    async (workflowKind) => {
+      const runtimeService = await loadRuntimeService();
+      const adapter = createAdapter();
+      mockRegistryResolveRuntime.mockReturnValue(adapter);
+
+      await runtimeService.runApiRuntimeOneShot({
+        projectId: "proj-1",
+        projectRoot: "/tmp/project",
+        prompt: "roadmap work",
+        workflowKind,
+        usageContext: { source: "test" },
+      });
+
+      expect(adapter.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          execution: expect.objectContaining({
+            runTimeoutMs: 0,
+          }),
+        }),
+      );
+    },
+  );
+
   it("runs one-shot query in bypass mode and omits task id in environment", async () => {
     const runtimeService = await loadRuntimeService();
     const adapter = createAdapter();
