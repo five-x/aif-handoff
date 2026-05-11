@@ -347,10 +347,23 @@ const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
   "rework_needed",
 ]);
 
+const AUDIT_EVIDENCE_REPAIR_ISSUE_CODES = new Set([
+  "insufficient_report_evidence",
+  "low_quality_report_evidence",
+]);
+
 function firstAuditFailureFamily(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
 ): AuditFailureFamily {
   return selectTaskCompletionAuditFailureFamily(result.issues.map((entry) => entry.code));
+}
+
+function auditEvidenceRepairIssueCodes(
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>,
+): string[] {
+  return result.issues
+    .map((entry) => entry.code)
+    .filter((code) => AUDIT_EVIDENCE_REPAIR_ISSUE_CODES.has(code));
 }
 
 function artifactStateForFailureFamily(
@@ -515,9 +528,15 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   const baseBlockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
+  const repairIssueCodes = auditEvidenceRepairIssueCodes(result);
+  const auditEvidenceRepairRequired =
+    shouldReturnToRework && auditReviewIteration >= 2 && repairIssueCodes.length > 0;
+  const actionableBlockedReason = auditEvidenceRepairRequired
+    ? `audit_evidence_repair_required (${repairIssueCodes.join(", ")}): ${baseBlockedReason}`
+    : baseBlockedReason;
   const blockedReason = auditReworkLimitReached
     ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
-    : baseBlockedReason;
+    : actionableBlockedReason;
   if (shouldReturnToRework) {
     return returnAuditTaskToRework({
       task: input.task,

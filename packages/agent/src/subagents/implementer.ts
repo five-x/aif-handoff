@@ -214,6 +214,8 @@ interface AuditSourceReportSummary {
   omittedFindingCount: number;
 }
 
+const AUDIT_EVIDENCE_REPAIR_MARKER = "audit_evidence_repair_required";
+
 const LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS: RegExp[] = [
   /\b(?:123abc|abc123|1234567890abcdef)\b/i,
   /\b(?:Author:\s+Your Name|your\.email@example\.com)\b/i,
@@ -285,6 +287,14 @@ function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSy
     }));
 
   return { validatedArtifacts, weakArtifacts };
+}
+
+function isAuditEvidenceRepairMode(task: TaskRow, artifactPath: string | null): boolean {
+  return Boolean(
+    task.reworkRequested &&
+    artifactPath &&
+    task.blockedReason?.includes(AUDIT_EVIDENCE_REPAIR_MARKER),
+  );
 }
 
 function formatValidatedAuditSynthesisInput(
@@ -635,6 +645,9 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   const isAuditSynthesisTask = roadmapArtifact?.role === "synthesis";
   const expectedSynthesisArtifactPath = isAuditSynthesisTask ? roadmapArtifact.artifactPath : null;
+  const expectedAuditReportArtifactPath =
+    roadmapArtifact?.role === "report" ? roadmapArtifact.artifactPath : null;
+  const auditEvidenceRepairMode = isAuditEvidenceRepairMode(task, expectedAuditReportArtifactPath);
   const auditSynthesisInputs = isAuditSynthesisTask
     ? readAuditSynthesisInputs(taskId, projectRoot)
     : { validatedArtifacts: [], weakArtifacts: [] };
@@ -746,7 +759,11 @@ Rework handling protocol:
     : "";
 
   const reworkSystemAppend = isRework
-    ? "\n\nREWORK MODE: A previously-completed task has been reopened. The rework comment inside the prompt is the primary instruction. Do not treat a fully-checked plan as 'nothing to do'."
+    ? `\n\nREWORK MODE: A previously-completed task has been reopened. The rework comment inside the prompt is the primary instruction. Do not treat a fully-checked plan as 'nothing to do'.${
+        auditEvidenceRepairMode
+          ? "\nAUDIT EVIDENCE REPAIR MODE: repair the report artifact from observed repository evidence before closing."
+          : ""
+      }`
     : "";
 
   const effectiveSystemAppend = `${scopeConstraint}${reworkSystemAppend}`;
@@ -757,6 +774,18 @@ Rework handling protocol:
   // surface the rework header inside the body instead.
   const topReworkHeader = useSubagents ? reworkHeaderBlock : "";
   const bodyReworkHeader = useSubagents ? "" : reworkHeaderBlock;
+  const auditEvidenceRepairBlock = auditEvidenceRepairMode
+    ? `Audit evidence repair mode:
+- The completion evidence guard has seen repeated weak audit evidence. This run is a focused report repair, not normal implementation.
+- Edit only the expected audit report artifact: ${expectedAuditReportArtifactPath}. Do not edit source, config, test, dependency, or runtime files.
+- Rebuild the report from observed evidence. Remove speculative claims, placeholder command output, "could not read", "would show", "likely", "may contain", and any fake commit hashes or synthetic tool output.
+- Add an "Evidence Register" section near the top with a markdown table: ID | Claim | Evidence | Verification. Each row must tie one claim to concrete existing repository file references such as \`path/to/file.ext:line\` and/or exact command output you actually observed.
+- Every finding kept in the report must include these labels: Evidence:, Risk:, Proposed fix:, Verification:. Evidence must include concrete existing file:line references. Verification must name the exact command or tool used and paste the observed output or a concise exact excerpt.
+- If a scoped file is large, inspect it with targeted commands such as \`rg -n\`, \`nl -ba | sed -n\`, \`head\`, or \`tail\`; do not write that it was too large or inaccessible unless a real command proves that limitation.
+- If no actionable finding survives this evidence check, write "No validated findings" and keep the Evidence Register with the files and commands checked.
+- Before closing, run a self-check over ${expectedAuditReportArtifactPath}: search for placeholder/speculative phrases, verify every cited repository path exists, commit the report artifact, then verify with \`git log -1 --name-only --oneline -- ${expectedAuditReportArtifactPath}\`.
+`
+    : "";
 
   const prompt = `${topReworkHeader}${useSubagents ? "Implement the task using the provided plan." : implementSlashCommand}
 
@@ -792,6 +821,8 @@ Plan path:
 ${planSection}
 
 ${isRework ? "Rework mode: true (requested from done/request_changes)." : "Rework mode: false."}
+
+${auditEvidenceRepairBlock}
 
 Execution rules:
 - Respect task dependencies and checklist state from the plan file.

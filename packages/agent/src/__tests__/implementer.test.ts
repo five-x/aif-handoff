@@ -549,6 +549,52 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toBe("Implementation done");
   });
 
+  it("adds a focused audit evidence repair contract for repeated evidence guard failures", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-audit-repair",
+        projectId: "project-1",
+        title: "Audit security",
+        description: "Report artifact: audit/security.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report evidence",
+        reworkRequested: true,
+        useSubagents: true,
+        blockedReason:
+          "invalid_artifact_content: audit_evidence_repair_required (low_quality_report_evidence): Completion evidence guard",
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-repair",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-repair", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("Audit evidence repair mode:");
+    expect(call.prompt).toContain(
+      "Edit only the expected audit report artifact: audit/security.md",
+    );
+    expect(call.prompt).toContain("Evidence Register");
+    expect(call.prompt).toContain("ID | Claim | Evidence | Verification");
+    expect(call.prompt).toContain("Do not edit source, config, test, dependency, or runtime files");
+  });
+
   it("does NOT resume a stored session when rework is requested", async () => {
     const db = testDb.current;
     db.insert(tasks)
