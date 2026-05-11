@@ -465,6 +465,145 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
+  it("writes substantive no-findings synthesis evidence when all source findings are rejected", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "audit", "runtime.md"),
+      [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "",
+        "## Evidence Register",
+        "",
+        "| Scope | Checked evidence | Verification |",
+        "| --- | --- | --- |",
+        "| `README.md` | `README.md:1` | Command `git ls-files -- README.md` output includes `README.md` |",
+        "| `src/config.ts` | `src/config.ts:1` | Command `git ls-files -- src/config.ts` output includes `src/config.ts` |",
+        "",
+        "## Checked Files",
+        "",
+        "- `README.md:1`",
+        "- `src/config.ts:1`",
+        "",
+        "## Checked Commands",
+        "",
+        "- Command `git ls-files -- README.md` output:",
+        "```",
+        "README.md",
+        "```",
+        "- Command `git ls-files -- src/config.ts` output:",
+        "```",
+        "src/config.ts",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md", "src/config.ts", "audit/runtime.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed no findings report", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-report-no-findings-source",
+        projectId: "project-1",
+        title: "Audit runtime behavior",
+        description: "Report artifact: audit/runtime.md",
+        taskIntent: "audit",
+        status: "done",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-no-findings-synthesis",
+        projectId: "project-1",
+        title: "Synthesize audit findings",
+        description:
+          "Scope: all audit/*-audit.md reports from this audit batch\nReport artifact: audit/summary.md\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Synthesize validated audit reports",
+        reworkRequested: true,
+        blockedReason:
+          "Completion evidence guard (missing_substantive_evidence): Report artifact lacks substantive evidence markers.",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-no-findings",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-report-no-findings-source", "task-no-findings-synthesis"],
+      synthesisTaskId: "task-no-findings-synthesis",
+      artifacts: [
+        {
+          taskId: "task-report-no-findings-source",
+          role: "report",
+          artifactPath: "audit/runtime.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-no-findings-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-report-no-findings-source",
+      state: "valid",
+      failureFamily: null,
+    });
+
+    await runImplementer("task-no-findings-synthesis", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(summary).toContain("No validated findings.");
+    expect(summary).toContain("## Checked Files");
+    expect(summary).toContain("`README.md:1`");
+    expect(summary).toContain("`src/config.ts:1`");
+    expect(summary).toContain("Command `git ls-files -- README.md` output:");
+    expect(summary).not.toContain("Risk:");
+    expect(summary).not.toContain("Proposed fix:");
+
+    const validation = validateAuditReportArtifact({
+      text: summary,
+      projectRoot,
+      taskDescription:
+        "Scope: all audit/*-audit.md reports from this audit batch\nReport artifact: audit/summary.md\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+      reportArtifactPaths: ["audit/summary.md"],
+      allowedEvidenceArtifactPaths: ["audit/runtime.md"],
+      requireProposedFix: true,
+    });
+    expect(validation.ok).toBe(true);
+  });
+
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {
     const db = testDb.current;
     db.insert(tasks)

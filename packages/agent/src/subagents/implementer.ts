@@ -393,6 +393,22 @@ const LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS: RegExp[] = [
   /\b(?:will be committed|created and will be committed|has been created and will be committed)\b/i,
   /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
 ];
+const SYNTHESIS_LINE_EVIDENCE_REF_PATTERN =
+  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12}):(\d+)(?::\d+)?(?=$|[\s`'"\]),.;])/gi;
+const SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS = new Set(["__pycache__", "node_modules", ".git"]);
+const SYNTHESIS_IGNORED_EVIDENCE_EXTENSIONS = new Set([
+  ".gif",
+  ".ico",
+  ".jpg",
+  ".jpeg",
+  ".pdf",
+  ".png",
+  ".pyc",
+  ".pyo",
+  ".sqlite",
+  ".sqlite3",
+  ".webp",
+]);
 
 function formatArtifactValidationDetails(raw: string | null): string | null {
   if (!raw) return null;
@@ -787,6 +803,88 @@ function hasProposedFix(section: string): boolean {
   return /\bProposed fix\s*:/i.test(section);
 }
 
+function normalizeSynthesisEvidenceRef(rawPath: string, rawLine: string): string | null {
+  const line = Number(rawLine);
+  if (!Number.isInteger(line) || line <= 0) return null;
+  const normalizedPath = rawPath
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/[),.;\]]+$/g, "");
+  if (
+    !normalizedPath ||
+    normalizedPath.startsWith("../") ||
+    normalizedPath.includes("/../") ||
+    normalizedPath.includes("*")
+  ) {
+    return null;
+  }
+  const pathParts = normalizedPath.split("/");
+  if (pathParts.some((part) => SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS.has(part))) {
+    return null;
+  }
+  const extensionMatch = normalizedPath.match(/(\.[A-Za-z0-9]+)$/);
+  if (
+    extensionMatch &&
+    SYNTHESIS_IGNORED_EVIDENCE_EXTENSIONS.has(extensionMatch[1].toLowerCase())
+  ) {
+    return null;
+  }
+  return `${normalizedPath}:${line}`;
+}
+
+function pathFromLineEvidenceRef(ref: string): string {
+  return ref.replace(/:\d+(?::\d+)?$/, "");
+}
+
+function collectSynthesisLineEvidenceRefs(input: {
+  content: string;
+  projectRoot: string;
+  limit?: number;
+}): string[] {
+  const refs = new Set<string>();
+  for (const match of input.content.matchAll(SYNTHESIS_LINE_EVIDENCE_REF_PATTERN)) {
+    const ref = normalizeSynthesisEvidenceRef(match[1] ?? "", match[2] ?? "");
+    if (!ref) continue;
+    const evidencePath = pathFromLineEvidenceRef(ref);
+    if (!existsSync(resolve(input.projectRoot, evidencePath))) continue;
+    refs.add(ref);
+    if (refs.size >= (input.limit ?? 8)) break;
+  }
+  return [...refs];
+}
+
+function collectSynthesisNoFindingsEvidence(input: {
+  artifacts: ValidatedAuditArtifactContent[];
+  projectRoot: string;
+}): Map<string, string[]> {
+  const refsByArtifact = new Map<string, string[]>();
+  for (const artifact of input.artifacts) {
+    refsByArtifact.set(
+      artifact.artifactPath,
+      collectSynthesisLineEvidenceRefs({
+        content: artifact.content,
+        projectRoot: input.projectRoot,
+      }),
+    );
+  }
+  return refsByArtifact;
+}
+
+function firstOutputLine(text: string): string {
+  return text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "<empty>";
+}
+
+function formatSynthesisCheckedCommand(projectRoot: string, evidencePath: string): string[] {
+  const output = runGitText(projectRoot, ["ls-files", "--", evidencePath]);
+  return [
+    `- Command \`git ls-files -- ${evidencePath}\` output:`,
+    "```",
+    output || "<empty>",
+    "```",
+  ];
+}
+
 function summarizeValidatedAuditArtifactsForSynthesis(
   artifacts: ValidatedAuditArtifactContent[],
 ): AuditSourceReportSummary[] {
@@ -845,6 +943,7 @@ function commitArtifactIfChanged(
 function buildDeterministicAuditSynthesisContent(
   artifacts: ValidatedAuditArtifactContent[],
   weakArtifacts: WeakAuditArtifactSummary[] = [],
+  projectRoot: string,
 ): string {
   const sourceSummaries = summarizeValidatedAuditArtifactsForSynthesis(artifacts);
   const totalIncluded = sourceSummaries.reduce(
@@ -855,6 +954,97 @@ function buildDeterministicAuditSynthesisContent(
     (sum, summary) => sum + summary.omittedFindingCount,
     0,
   );
+
+  if (totalIncluded === 0) {
+    const refsByArtifact = collectSynthesisNoFindingsEvidence({ artifacts, projectRoot });
+    const checkedRefs = [
+      ...new Set(
+        [...refsByArtifact.values()].flatMap((refs) => refs).filter((ref) => ref.length > 0),
+      ),
+    ].sort();
+    const checkedPaths = [...new Set(checkedRefs.map(pathFromLineEvidenceRef))].slice(0, 12);
+    const lines = [
+      "# Audit Summary",
+      "",
+      "No validated findings.",
+      "",
+      "Generated from terminal audit batch report artifacts. Source report findings were included only when they carried concrete path:line Evidence, Risk, Proposed fix, and Verification sections.",
+      "",
+      "## Source Reports Checked",
+      "",
+      sourceSummaries.length > 0
+        ? sourceSummaries
+            .map((summary) => {
+              return [
+                `- ${summary.artifact.artifactPath} (task ${summary.artifact.taskId})`,
+                `  - Included findings: ${summary.includedFindings.length}`,
+                `  - Omitted findings: ${summary.omittedFindingCount}`,
+              ].join("\n");
+            })
+            .join("\n")
+        : "- No validated source reports were available.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Source report | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      ...sourceSummaries.map((summary) => {
+        const refs = refsByArtifact.get(summary.artifact.artifactPath) ?? [];
+        const evidence =
+          refs.length > 0
+            ? refs.map((ref) => `\`${ref}\``).join(", ")
+            : "No concrete line evidence was available in this source report.";
+        const firstEvidencePath = refs.length > 0 ? pathFromLineEvidenceRef(refs[0]) : null;
+        const verification = firstEvidencePath
+          ? `Command \`git ls-files -- ${firstEvidencePath}\` output includes \`${firstOutputLine(
+              runGitText(projectRoot, ["ls-files", "--", firstEvidencePath]),
+            )}\``
+          : "Source report provided no concrete repository line evidence to carry forward.";
+        return `| \`${summary.artifact.artifactPath}\` | ${evidence} | ${verification} |`;
+      }),
+      "",
+      "## Checked Files",
+      "",
+      ...(checkedRefs.length > 0
+        ? checkedRefs.map((ref) => `- \`${ref}\``)
+        : ["- No checked repository files were available from the validated source reports."]),
+      "",
+      "## Checked Commands",
+      "",
+      ...(checkedPaths.length > 0
+        ? checkedPaths.flatMap((path) => formatSynthesisCheckedCommand(projectRoot, path))
+        : ["- No repository command outputs were available from the validated source reports."]),
+      "",
+      "## Weak Or Invalid Reports",
+      "",
+    ];
+
+    if (weakArtifacts.length === 0) {
+      lines.push("No weak or invalid report artifacts were present in the batch.");
+    } else {
+      weakArtifacts.forEach((artifact) => {
+        lines.push(`- ${artifact.artifactPath} (task ${artifact.taskId})`);
+        lines.push(`  - State: ${artifact.state}`);
+        lines.push(`  - Failure family: ${artifact.failureFamily ?? "none"}`);
+        if (artifact.validationDetails) {
+          lines.push(
+            `  - Validation details: ${artifact.validationDetails.replace(/\n/g, "\n    ")}`,
+          );
+        }
+      });
+    }
+
+    lines.push("");
+    lines.push("## Synthesis Quality Notes");
+    lines.push("");
+    lines.push(`Included source findings: ${totalIncluded}.`);
+    lines.push(`Omitted source findings: ${totalOmitted}.`);
+    lines.push(`Weak or invalid source reports: ${weakArtifacts.length}.`);
+    lines.push("");
+
+    return `${lines.join("\n").trim()}\n`;
+  }
+
   const lines = [
     "# Audit Summary",
     "",
@@ -946,7 +1136,11 @@ function runDeterministicAuditSynthesisRework(input: {
 }): string {
   const artifactPath = resolve(input.projectRoot, input.artifactPath);
   mkdirSync(dirname(artifactPath), { recursive: true });
-  const content = buildDeterministicAuditSynthesisContent(input.artifacts, input.weakArtifacts);
+  const content = buildDeterministicAuditSynthesisContent(
+    input.artifacts,
+    input.weakArtifacts,
+    input.projectRoot,
+  );
   writeFileSync(artifactPath, content, "utf8");
   const gitLog = commitArtifactIfChanged(input.projectRoot, input.artifactPath);
   return [
