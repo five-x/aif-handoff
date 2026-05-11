@@ -19,6 +19,7 @@ import {
   formatTaskIntentContractForPrompt,
   looksLikeFullPlanUpdate,
   getProjectConfig,
+  validateAuditReportArtifact,
 } from "@aif/shared";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import { logActivity } from "../hooks.js";
@@ -302,6 +303,20 @@ function isAuditEvidenceRepairSignal(text: string | null | undefined): boolean {
   return AUDIT_EVIDENCE_REPAIR_SIGNAL_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function extractReviewIterationFromText(text: string | null | undefined): number {
+  if (!text) return 0;
+  const iterations = [...text.matchAll(/\bReview Iteration\s*:\s*(\d+)/gi)]
+    .map((match) => Number(match[1]))
+    .filter((iteration) => Number.isInteger(iteration) && iteration > 0);
+  return iterations.length > 0 ? Math.max(...iterations) : 0;
+}
+
+function reviewCommentsDeclareNoBlockingFindings(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const section = text.match(/## Blocking Findings\s*\r?\n([\s\S]*?)(?=\r?\n## |\s*$)/i)?.[1];
+  return Boolean(section && /^\s*-\s*none\s*$/im.test(section));
+}
+
 function isAuditEvidenceRepairMode(
   task: Pick<TaskRow, "reworkRequested" | "blockedReason" | "reviewComments"> & {
     autoReviewState?: { findings: Array<{ text: string }> } | null;
@@ -321,6 +336,7 @@ function shouldUseDeterministicAuditReportRepair(
   task: Pick<TaskRow, "blockedReason" | "reviewComments"> & {
     autoReviewState?: { iteration?: number; findings: Array<{ text: string }> } | null;
   },
+  currentReportIssueCodes: string[] = [],
 ): boolean {
   const text = [
     task.blockedReason ?? "",
@@ -335,13 +351,17 @@ function shouldUseDeterministicAuditReportRepair(
     return true;
   }
 
-  const reviewIteration = task.autoReviewState?.iteration ?? 0;
+  const reviewIteration = Math.max(
+    task.autoReviewState?.iteration ?? 0,
+    extractReviewIterationFromText(task.reviewComments),
+  );
+  const validatorIssuePattern =
+    /\b(?:contradictory_findings_and_no_findings|invalid_or_missing_file_references|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim|low_quality_report_evidence|insufficient_report_evidence)\b/i;
   return (
     reviewIteration >= 2 &&
-    /\bAudit report validator blocked completion\b/i.test(text) &&
-    /\b(?:contradictory_findings_and_no_findings|invalid_or_missing_file_references|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim|low_quality_report_evidence|insufficient_report_evidence)\b/i.test(
-      text,
-    )
+    ((/\bAudit report validator blocked completion\b/i.test(text) &&
+      validatorIssuePattern.test(text)) ||
+      currentReportIssueCodes.some((code) => validatorIssuePattern.test(code)))
   );
 }
 
@@ -755,6 +775,22 @@ function runDeterministicAuditReportRepair(input: {
   ].join("\n");
 }
 
+function validateExistingAuditReportArtifact(input: {
+  projectRoot: string;
+  artifactPath: string;
+  taskDescription: string | null;
+}): ReturnType<typeof validateAuditReportArtifact> | null {
+  const artifactPath = resolve(input.projectRoot, input.artifactPath);
+  if (!existsSync(artifactPath)) return null;
+  return validateAuditReportArtifact({
+    text: readFileSync(artifactPath, "utf8"),
+    projectRoot: input.projectRoot,
+    taskDescription: input.taskDescription,
+    reportArtifactPaths: [input.artifactPath],
+    requireProposedFix: true,
+  });
+}
+
 async function runChecklistSyncQuery(input: {
   task: TaskRow;
   projectRoot: string;
@@ -877,6 +913,16 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     validatedAuditArtifacts,
     weakAuditArtifacts,
   );
+  const currentAuditReportValidation =
+    expectedAuditReportArtifactPath && task.reworkRequested
+      ? validateExistingAuditReportArtifact({
+          projectRoot,
+          artifactPath: expectedAuditReportArtifactPath,
+          taskDescription: task.description,
+        })
+      : null;
+  const currentAuditReportIssueCodes =
+    currentAuditReportValidation?.issues.map((issue) => issue.code) ?? [];
 
   if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
     const nowIso = new Date().toISOString();
@@ -898,6 +944,36 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     });
     logActivity(taskId, "Agent", `${executionName} skipped — no pending tasks in plan`);
     log.info({ taskId }, "Implementer no-op: all plan tasks already completed");
+    return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    task.reworkRequested &&
+    currentAuditReportValidation?.ok &&
+    reviewCommentsDeclareNoBlockingFindings(task.reviewComments) &&
+    (task.autoReviewState?.findings.length ?? 0) === 0
+  ) {
+    const nowIso = new Date().toISOString();
+    const resultText = [
+      "Audit report evidence already valid before rework implementation; skipped runtime repair.",
+      `Report artifact: ${expectedAuditReportArtifactPath}`,
+    ].join("\n");
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      reworkRequested: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "Audit report evidence already valid before rework implementation",
+    );
+    log.info(
+      { taskId, artifactPath: expectedAuditReportArtifactPath },
+      "Audit report rework skipped because existing artifact already validates",
+    );
     return;
   }
 
@@ -929,7 +1005,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   if (
     expectedAuditReportArtifactPath &&
     auditEvidenceRepairMode &&
-    shouldUseDeterministicAuditReportRepair(task)
+    shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)
   ) {
     const nowIso = new Date().toISOString();
     const resultText = runDeterministicAuditReportRepair({

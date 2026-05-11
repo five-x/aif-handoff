@@ -890,6 +890,126 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
   });
 
+  it("skips runtime repair when retrying an already-valid audit report after timeout", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "alpha.ts"), "export const alpha = 1;\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "beta.ts"), "export const beta = 1;\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "gamma.ts"), "export const gamma = 1;\n", "utf8");
+    const validReport = [
+      "# Audit security",
+      "",
+      "No validated findings.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Scope | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      "| `README.md` | `README.md:1` | Command `git ls-files -- README.md` output includes `README.md` |",
+      "| `src` | `src/alpha.ts:1`, `src/beta.ts:1`, `src/gamma.ts:1` | Command `git ls-files -- src` output includes `src/alpha.ts` |",
+      "",
+      "## Checked Files",
+      "",
+      "- `README.md:1`",
+      "- `src/alpha.ts:1`",
+      "- `src/beta.ts:1`",
+      "- `src/gamma.ts:1`",
+      "",
+      "## Checked Commands",
+      "",
+      "- Command `git ls-files -- README.md` output:",
+      "```",
+      "README.md",
+      "```",
+      "- Command `git ls-files -- src` output:",
+      "```",
+      "src/alpha.ts",
+      "src/beta.ts",
+      "src/gamma.ts",
+      "```",
+      "",
+    ].join("\n");
+    writeFileSync(join(projectRoot, "audit", "security.md"), validReport, "utf8");
+    execFileSync(
+      "git",
+      ["add", "README.md", "src/alpha.ts", "src/beta.ts", "src/gamma.ts", "audit/security.md"],
+      { cwd: projectRoot, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = "Scope: README.md, src\nReport artifact: audit/security.md";
+    const validation = validateAuditReportArtifact({
+      text: validReport,
+      projectRoot,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/security.md"],
+      requireProposedFix: true,
+    });
+    expect(validation.ok).toBe(true);
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-timeout-valid-report",
+        projectId: "project-1",
+        title: "Audit security",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          "- Review Iteration: 2",
+          "",
+          "## Blocking Findings",
+          "- none",
+        ].join("\n"),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-timeout-valid-report",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-timeout-valid-report"],
+      artifacts: [
+        {
+          taskId: "task-audit-timeout-valid-report",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-timeout-valid-report", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-timeout-valid-report"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain("already valid before rework");
+  });
+
   it("does NOT resume a stored session when rework is requested", async () => {
     const db = testDb.current;
     db.insert(tasks)
