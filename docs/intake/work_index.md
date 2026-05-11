@@ -10,3 +10,4 @@
 | [work-20260510-typed-task-intents](work/work-20260510-typed-task-intents.md)                                                     | next    | high     | yes  | Introduce Typed Task Intents For Decomposition And Gates |
 | [work-20260510-harden-typed-roadmap-content-validation](work/work-20260510-harden-typed-roadmap-content-validation.md)           | done    | high     | yes  | Harden Typed Roadmap Content Validation                  |
 | [work-20260510-harden-audit-roadmap-flow-contract](work/work-20260510-harden-audit-roadmap-flow-contract.md)                     | next    | high     | yes  | Harden Audit Roadmap Flow Contract                       |
+| [work-20260512-harden-audit-roadmap-generation-guardrails](work/work-20260512-harden-audit-roadmap-generation-guardrails.md)     | inbox   | high     | yes  | Harden Audit Roadmap Generation Guardrails               |

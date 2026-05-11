@@ -5,6 +5,11 @@ import {
   resolveTaskIntentDefaults,
   validateGeneratedTaskIntent,
 } from "../taskIntent.js";
+import {
+  AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
+  AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
+  AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+} from "../auditRoadmapContract.js";
 
 function completeAuditDescription() {
   return [
@@ -16,6 +21,9 @@ function completeAuditDescription() {
     "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, Proposed fix:, and Verification: Command rg config src/config.ts output matched.",
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
+    AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
+    AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
+    AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
     "Evidence: src/config.ts:1",

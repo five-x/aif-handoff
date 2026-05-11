@@ -5,6 +5,9 @@ import { z } from "zod";
 import {
   TASK_INTENT_CONTRACTS,
   TASK_INTENTS,
+  AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
+  AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
+  AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
   formatTaskIntentContractForPrompt,
   defaultsForMode,
   getEnv,
@@ -20,6 +23,7 @@ import {
   projectSupportsTaskWorktrees,
   projectUsesSharedBranchIsolation,
   resolveTaskIntentDefaults,
+  validateGeneratedAuditCard,
   validateGeneratedTaskIntent,
   type TaskIntent,
 } from "@aif/shared";
@@ -145,6 +149,62 @@ function isAuditOnlyRoadmapVision(vision: string | null | undefined): boolean {
     "\u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0443\u0434\u0438\u0442",
     "\u043d\u0435 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u044f\u0442\u044c \u043a\u043e\u0434",
   ].some((signal) => normalized.includes(signal));
+}
+
+function cleanPriorAuditContextFragment(value: string): string {
+  return value
+    .replace(/^\s*(?:[-*]\s+|\[[ xX]\]\s+|#+\s*|>\s*)+/g, "")
+    .replace(/^prior audit context\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mentionsPriorInconclusiveAudit(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return /\baudit[\w.-]*\b/.test(normalized) && /\binconclusive\b/.test(normalized);
+}
+
+function extractPriorInconclusiveAuditContext(input: {
+  roadmapAlias?: string | null;
+  vision?: string | null;
+  description?: string | null;
+  architecture?: string | null;
+  roadmapContent?: string | null;
+}): string | null {
+  const fragments: string[] = [];
+  const pushFragments = (label: string, value: string | null | undefined) => {
+    if (!value) return;
+    const parts = value.split(/\r?\n|[.!?]\s+/).map(cleanPriorAuditContextFragment);
+    for (const part of parts) {
+      if (!part || !mentionsPriorInconclusiveAudit(part)) continue;
+      const fragment = `${label}: ${part}`;
+      if (!fragments.includes(fragment)) fragments.push(fragment);
+      if (fragments.length >= 3) return;
+    }
+  };
+
+  pushFragments("roadmap alias", input.roadmapAlias);
+  pushFragments("vision", input.vision);
+  pushFragments("roadmap context", input.roadmapContent);
+  pushFragments("project description", input.description);
+  pushFragments("architecture", input.architecture);
+
+  return fragments.length > 0 ? fragments.join(" ").slice(0, 500) : null;
+}
+
+function formatPriorAuditContextLine(priorContext: string): string {
+  return `Prior audit context: ${priorContext}`;
+}
+
+function normalizeAuditContextText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function hasMatchingPriorAuditContext(text: string, priorContext: string | null): boolean {
+  if (!priorContext) return true;
+  const normalizedText = normalizeAuditContextText(text);
+  const normalizedLine = normalizeAuditContextText(formatPriorAuditContextLine(priorContext));
+  return normalizedText.includes(normalizedLine);
 }
 
 export function assertRoadmapIntentMatchesRequest(input: {
@@ -422,6 +482,60 @@ function validateAuditReportArtifactText(text: string, issues: string[], label: 
   }
 }
 
+function applyPriorAuditContextToRoadmapContent(
+  roadmapContent: string,
+  priorContext: string | null,
+): string {
+  if (!priorContext) return roadmapContent;
+
+  const lines = roadmapContent.split(/\r?\n/);
+  const output: string[] = [];
+  let current: string[] | null = null;
+
+  const flush = () => {
+    if (!current) return;
+    const text = current.join("\n");
+    if (!hasMatchingPriorAuditContext(text, priorContext)) {
+      const detailIndex = current.findIndex((line, index) => index > 0 && /^\s*[-*]\s+/.test(line));
+      const auditMandateIndex = current.findIndex((line) =>
+        /^\s*[-*]\s+audit mandate\s*:/i.test(line.trim()),
+      );
+      const insertAfter =
+        auditMandateIndex >= 0 ? auditMandateIndex : detailIndex >= 0 ? detailIndex : 0;
+      const detailPrefix =
+        detailIndex >= 0 ? current[detailIndex].match(/^\s*[-*]\s+/)?.[0] : "  - ";
+      current.splice(
+        insertAfter + 1,
+        0,
+        `${detailPrefix}${formatPriorAuditContextLine(priorContext)}`,
+      );
+    }
+    output.push(...current);
+    current = null;
+  };
+
+  for (const line of lines) {
+    if (/^\s*[-*]\s+\[\s\]\s+/.test(line)) {
+      flush();
+      current = [line];
+      continue;
+    }
+    if (/^\s*[-*]\s+\[[xX]\]\s+/.test(line)) {
+      flush();
+      output.push(line);
+      continue;
+    }
+    if (current) {
+      current.push(line);
+    } else {
+      output.push(line);
+    }
+  }
+  flush();
+
+  return output.join("\n");
+}
+
 function validateAuditRoadmapSource(roadmapContent: string): void {
   const items = extractAuditRoadmapItems(roadmapContent);
   const issues: string[] = [];
@@ -462,6 +576,14 @@ function validateAuditRoadmapSource(roadmapContent: string): void {
     if (missing.length > 0) {
       issues.push(`${label} is missing ${missing.join(", ")}`);
     }
+    const cardValidation = validateGeneratedAuditCard({
+      title: item.title,
+      description: auditDescriptionFromItem(item),
+    });
+    for (const issue of cardValidation.issues) {
+      const detail = `${label} ${issue}`;
+      if (!issues.includes(detail)) issues.push(detail);
+    }
     validateAuditReportArtifactText(item.text, issues, label);
     if (hasImplementationShapedAuditContent(`${item.title}\n${item.text}`)) {
       issues.push(`${label} describes implementation work`);
@@ -477,7 +599,10 @@ function validateAuditRoadmapSource(roadmapContent: string): void {
   }
 }
 
-function validateAuditGeneratedBatch(tasks: GeneratedTask[]): string[] {
+function validateAuditGeneratedBatch(
+  tasks: GeneratedTask[],
+  priorContext: string | null = null,
+): string[] {
   const issues: string[] = [];
   const synthesisCount = tasks.filter((task) => isAuditSynthesisTitle(task.title)).length;
   if (synthesisCount !== 1) {
@@ -495,6 +620,9 @@ function validateAuditGeneratedBatch(tasks: GeneratedTask[]): string[] {
       issues,
       `task "${task.title}"`,
     );
+    if (!hasMatchingPriorAuditContext(`${task.title}\n${task.description ?? ""}`, priorContext)) {
+      issues.push(`task "${task.title}" is missing ${formatPriorAuditContextLine(priorContext!)}`);
+    }
   }
 
   return issues;
@@ -515,17 +643,23 @@ function buildAuditRoadmapItem(
   scope: string,
   reportPath: string,
   mandate: string,
+  options: { role?: "report" | "synthesis"; priorContext?: string | null } = {},
 ): string {
+  const role = options.role ?? "report";
   return [
     `- [ ] **${title}** - Diagnostic-only audit.`,
     `  - Scope: ${scope}`,
     `  - Audit mandate: ${mandate}`,
+    ...(options.priorContext ? [`  - ${formatPriorAuditContextLine(options.priorContext)}`] : []),
     `  - Allowed changes: only create/update ${reportPath}.`,
     `  - Report artifact: ${reportPath}`,
     "  - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.",
     "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
     '  - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
     '  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
+    `  - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}`,
+    `  - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}`,
+    ...(role === "synthesis" ? [`  - ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}`] : []),
     "  - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "  - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
   ].join("\n");
@@ -715,12 +849,14 @@ function buildDeterministicAuditRoadmapContent(ctx: {
   description: string | null;
   architecture: string | null;
   vision: string | null;
+  roadmapAlias?: string | null;
 }): string {
   const reportDate = new Date().toISOString().slice(0, 10);
   const goal =
     ctx.vision?.trim().replace(/\s+/g, " ").slice(0, 180) ||
     "Audit the project for security, performance, correctness, and operational readiness";
   const areas = buildAuditAreasForProject(ctx.projectRoot);
+  const priorContext = extractPriorInconclusiveAuditContext(ctx);
 
   const tasks = areas.map((area) =>
     buildAuditRoadmapItem(
@@ -728,6 +864,7 @@ function buildDeterministicAuditRoadmapContent(ctx: {
       area.scope,
       `audit/${reportDate}-${auditSlug(area.title)}-audit.md`,
       area.mandate,
+      { priorContext },
     ),
   );
   tasks.push(
@@ -736,6 +873,7 @@ function buildDeterministicAuditRoadmapContent(ctx: {
       `all audit/${reportDate}-*-audit.md reports from this audit batch`,
       `audit/${reportDate}-summary.md`,
       "Act as the synthesis owner reviewing area reports; include only actionable findings that meet the evidence contract and call out weak reports by source.",
+      { role: "synthesis", priorContext },
     ),
   );
 
@@ -757,12 +895,18 @@ function ensureGeneratedAuditRoadmapContent(
     description: string | null;
     architecture: string | null;
     vision: string | null;
+    roadmapAlias?: string | null;
   },
   source: "file" | "output",
 ): string {
+  const priorContext = extractPriorInconclusiveAuditContext({
+    ...ctx,
+    roadmapContent: content,
+  });
+  const contentWithContext = applyPriorAuditContextToRoadmapContent(content, priorContext);
   try {
-    validateAuditRoadmapSource(content);
-    return content;
+    validateAuditRoadmapSource(contentWithContext);
+    return contentWithContext;
   } catch (err) {
     log.warn(
       {
@@ -852,6 +996,7 @@ export async function generateRoadmapFile(
       description,
       architecture,
       vision: vision ?? null,
+      roadmapAlias: roadmapAlias ?? null,
     },
     intent,
   );
@@ -887,6 +1032,7 @@ export async function generateRoadmapFile(
     description,
     architecture,
     vision: vision ?? null,
+    roadmapAlias: roadmapAlias ?? null,
   };
   if (existsSync(roadmapPath)) {
     const fileContent = readFileSync(roadmapPath, "utf8").trim();
@@ -926,6 +1072,7 @@ function buildRoadmapGenerationPrompt(
     description: string | null;
     architecture: string | null;
     vision: string | null;
+    roadmapAlias?: string | null;
   },
   intent: TaskIntent,
 ): string {
@@ -943,6 +1090,13 @@ function buildRoadmapGenerationPrompt(
 
   if (intent === "audit") {
     const reportDate = new Date().toISOString().slice(0, 10);
+    const priorContext = extractPriorInconclusiveAuditContext(ctx);
+    const priorContextRule = priorContext
+      ? `- Preserve this prior context in every audit and synthesis card: ${formatPriorAuditContextLine(priorContext)}`
+      : "- If the alias, vision, description, or roadmap context mentions a prior inconclusive audit, preserve that context in every report and synthesis card as `Prior audit context: ...`.";
+    const priorContextLine = priorContext
+      ? `  - ${formatPriorAuditContextLine(priorContext)}\n`
+      : "";
     return `You are creating an owner-grade diagnostic audit decomposition roadmap based on the project context below.
 
 ${sections.join("\n\n")}
@@ -952,6 +1106,7 @@ Operating model:
 - Decompose the audit into owner-area checks; the user should not need to provide detailed audit instructions.
 - Each owner area must produce actionable findings or a rigorous "No validated findings" report.
 - A weak area report should be rejected later, so encode the quality bar directly in every card.
+${priorContextRule}
 
 Generate a ROADMAP.md file with the following format:
 
@@ -964,24 +1119,29 @@ Generate a ROADMAP.md file with the following format:
 - [ ] **Audit: <small area name>** - Diagnostic-only audit.
   - Scope: <3-10 concrete files or directories to inspect>
   - Audit mandate: <owner role and concrete quality risks to investigate>
-  - Allowed changes: only create/update one report artifact.
+${priorContextLine}  - Allowed changes: only create/update one report artifact.
   - Report artifact: audit/${reportDate}-<short-name>-audit.md
   - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.
   - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
   - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.
   - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.
+  - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
+  - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
   - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.
   - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.
 
 - [ ] **Synthesize audit findings** - Diagnostic-only synthesis.
   - Scope: all audit/${reportDate}-*-audit.md reports from this audit batch.
   - Audit mandate: act as the synthesis owner reviewing area reports; include only actionable findings that meet the evidence contract and call out weak reports by source.
-  - Allowed changes: only create/update audit/${reportDate}-summary.md.
+${priorContextLine}  - Allowed changes: only create/update audit/${reportDate}-summary.md.
   - Report artifact: audit/${reportDate}-summary.md
   - Acceptance criteria: summarize blocking findings, advisory findings, omitted weak findings by source, and remediation backlog.
   - Evidence requirements: every summarized finding must include Evidence: <source repo path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
   - Quality bar: do not promote weak source-report observations, inventory notes, speculative risks, or findings without concrete path:line evidence.
   - No-findings rule: if no source finding meets the bar, write "No validated findings" and list source reports inspected with observed commit/output evidence.
+  - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
+  - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
+  - ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}
   - Git requirements: run git status --short; git add the summary artifact; git commit the summary artifact; verify with git log -1 --name-only --oneline.
   - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.
 
@@ -1090,9 +1250,14 @@ export async function generateRoadmapTasks(
 
   // 2. Query Agent SDK for strict JSON conversion
   if (intent === "audit") {
-    validateAuditRoadmapSource(roadmapContent);
-    const result = buildAuditRoadmapGenerationResult(roadmapContent, roadmapAlias);
-    validateRoadmapTasks(result, intent);
+    const priorContext = extractPriorInconclusiveAuditContext({ roadmapAlias, roadmapContent });
+    const auditRoadmapContent = applyPriorAuditContextToRoadmapContent(
+      roadmapContent,
+      priorContext,
+    );
+    validateAuditRoadmapSource(auditRoadmapContent);
+    const result = buildAuditRoadmapGenerationResult(auditRoadmapContent, roadmapAlias);
+    validateRoadmapTasks(result, intent, { priorContext });
     log.info(
       { projectId, roadmapAlias, taskCount: result.tasks.length, source: "deterministic-audit" },
       "Audit roadmap generation complete",
@@ -1155,6 +1320,13 @@ export async function generateRoadmapTasks(
 
 function buildExtractionPrompt(roadmapContent: string, alias: string, intent: TaskIntent): string {
   if (intent === "audit") {
+    const priorContext = extractPriorInconclusiveAuditContext({
+      roadmapAlias: alias,
+      roadmapContent,
+    });
+    const priorContextRule = priorContext
+      ? `- Preserve this prior context in every task description: ${formatPriorAuditContextLine(priorContext)}`
+      : "- Preserve any prior inconclusive audit context from the roadmap in every task description as `Prior audit context: ...`.";
     return `You are converting a diagnostic audit roadmap markdown into structured JSON for task creation.
 
 ROADMAP CONTENT:
@@ -1176,7 +1348,7 @@ Required output format (JSON only, no markdown fences):
     {
       "title": "Audit: short area name",
       "taskIntent": "audit",
-      "description": "Scope: ...\\nAudit mandate: ...\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+      "description": "Scope: ...\\nAudit mandate: ...\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\n${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\\n${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
       "phase": 1,
       "phaseName": "Audit",
       "sequence": 1
@@ -1190,6 +1362,10 @@ Rules:
 - Every task must remain diagnostic-only.
 - Every task must set "taskIntent": "audit".
 - Every task description must include Scope:, Audit mandate:, Allowed changes:, Report artifact:, Acceptance criteria:, Evidence requirements:, Quality bar:, No-findings rule:, Git requirements:, and Constraint:.
+- Every task description must include: ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
+- Every task description must include: ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
+- Synthesis task descriptions must include: ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}
+${priorContextRule}
 - Every task description must require Evidence: <path>:<line>, Risk:, Proposed fix:, Verification: Command ... output ..., git status --short, git commit, and git log -1 --name-only --oneline.
 - Return ONLY valid JSON, no explanatory text`;
   }
@@ -1379,9 +1555,12 @@ function parseAgentResponse(
 function validateRoadmapTasks(
   generation: RoadmapGenerationResult,
   requestedIntent: TaskIntent,
+  options: { priorContext?: string | null } = {},
 ): void {
   const auditBatchIssues =
-    requestedIntent === "audit" ? validateAuditGeneratedBatch(generation.tasks) : [];
+    requestedIntent === "audit"
+      ? validateAuditGeneratedBatch(generation.tasks, options.priorContext ?? null)
+      : [];
   const invalid = generation.tasks
     .map((task) => {
       const taskIntent = task.taskIntent ?? generation.taskIntent ?? "general";
@@ -1489,6 +1668,8 @@ export function importGeneratedTasks(
     throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
   }
   assertRoadmapIntentMatchesRequest({ roadmapAlias: alias, taskIntent: generation.taskIntent });
+  const priorContext =
+    importIntent === "audit" ? extractPriorInconclusiveAuditContext({ roadmapAlias: alias }) : null;
   const cfg = getProjectConfig(project.rootPath);
 
   const validationGeneration: RoadmapGenerationResult = hasExplicitTypedImportIntent
@@ -1498,7 +1679,7 @@ export function importGeneratedTasks(
         taskIntent: "general",
         tasks: generatedTasks.map((task) => ({ ...task, taskIntent: "general" as const })),
       };
-  validateRoadmapTasks(validationGeneration, importIntent);
+  validateRoadmapTasks(validationGeneration, importIntent, { priorContext });
 
   // Load existing tasks for this alias for dedupe
   const existing = findTasksByRoadmapAlias(projectId, alias);

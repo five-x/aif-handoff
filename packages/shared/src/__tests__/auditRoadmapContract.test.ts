@@ -3,6 +3,9 @@ import {
   AUDIT_ARTIFACT_ROLES,
   AUDIT_ARTIFACT_STATES,
   AUDIT_FAILURE_FAMILIES,
+  AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
+  AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
+  AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
   isAuditReportArtifactPath,
   isAuditSynthesisTitle,
   mapTaskCompletionIssueCodeToAuditFailureFamily,
@@ -21,6 +24,9 @@ function completeAuditDescription() {
     "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, Proposed fix:, and Verification: Command rg config src/config.ts output matched.",
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
+    AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
+    AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
+    AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
     "Evidence: src/config.ts:1",
@@ -100,6 +106,38 @@ describe("auditRoadmapContract", () => {
         "audit task is missing diagnostic report markers",
         "audit task title describes implementation work",
       ]),
+    );
+  });
+
+  it("rejects audit cards missing canonical no-findings guardrails", () => {
+    const invalid = validateGeneratedAuditCard({
+      title: "Audit: security configuration",
+      description: completeAuditDescription()
+        .replace(`${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\n`, "")
+        .replace(`${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\n`, ""),
+    });
+
+    expect(invalid.ok).toBe(false);
+    expect(invalid.issueDetails.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining([
+        "missing_no_findings_proof_guardrail",
+        "missing_substantive_no_findings_requirement",
+      ]),
+    );
+  });
+
+  it("rejects audit synthesis cards missing outcome requirements", () => {
+    const invalid = validateGeneratedAuditCard({
+      title: "Synthesize audit findings",
+      description: completeAuditDescription().replace(
+        `${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}\n`,
+        "",
+      ),
+    });
+
+    expect(invalid.ok).toBe(false);
+    expect(invalid.issueDetails.map((issue) => issue.code)).toContain(
+      "missing_synthesis_outcome_requirement",
     );
   });
 

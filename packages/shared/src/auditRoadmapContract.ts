@@ -28,6 +28,9 @@ export type AuditFailureFamily = (typeof AUDIT_FAILURE_FAMILIES)[number];
 
 export const AUDIT_GENERATED_CARD_ISSUE_CODES = [
   "missing_diagnostic_markers",
+  "missing_no_findings_proof_guardrail",
+  "missing_substantive_no_findings_requirement",
+  "missing_synthesis_outcome_requirement",
   "implementation_shaped_title",
   "implementation_shaped_description",
   "allowed_changes_none",
@@ -62,6 +65,7 @@ export const AUDIT_REQUIRED_GENERATED_CARD_MARKERS = [
   "git requirements:",
   "constraint:",
   "audit mandate:",
+  "diagnostic-only",
   "quality bar:",
   "no-findings rule:",
   "evidence:",
@@ -72,6 +76,15 @@ export const AUDIT_REQUIRED_GENERATED_CARD_MARKERS = [
   "git commit",
   "git log -1 --name-only --oneline",
 ] as const;
+
+export const AUDIT_NO_FINDINGS_PROOF_GUARDRAIL =
+  "No-findings proof guardrail: git ls-files, git status, directory listings, file-existence checks, and broad inventory-only observations are not sufficient proof for a no-findings conclusion.";
+
+export const AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT =
+  "Substantive no-findings requirement: support any no-findings conclusion with scoped code/config/test inspection, commands run, observed outputs, and a short explanation of why the scoped risks are absent.";
+
+export const AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT =
+  "Synthesis outcome requirement: classify the final audit as exactly one of validated findings present, validated no-findings with substantive evidence, or audit inconclusive when source reports are weak, missing, or inventory-only.";
 
 export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailureFamily> = {
   zero_delta: "rework_needed",
@@ -171,6 +184,38 @@ export function parseExpectedAuditReportArtifactPath(description: string): strin
 
 function hasAll(text: string, markers: readonly string[]): boolean {
   return markers.every((marker) => text.includes(marker));
+}
+
+function hasNoFindingsProofGuardrail(text: string): boolean {
+  return hasAll(text, [
+    "git ls-files",
+    "git status",
+    "directory listings",
+    "file-existence checks",
+    "inventory-only",
+    "not sufficient proof",
+    "no-findings conclusion",
+  ]);
+}
+
+function hasSubstantiveNoFindingsRequirement(text: string): boolean {
+  return hasAll(text, [
+    "substantive no-findings",
+    "scoped",
+    "inspection",
+    "commands run",
+    "observed outputs",
+    "scoped risks are absent",
+  ]);
+}
+
+function hasSynthesisOutcomeRequirement(text: string): boolean {
+  return hasAll(text, [
+    "synthesis outcome",
+    "validated findings present",
+    "validated no-findings with substantive evidence",
+    "audit inconclusive",
+  ]);
 }
 
 function auditTextLines(text: string): string[] {
@@ -294,6 +339,24 @@ export function validateGeneratedAuditCard(
     issueDetails.push({
       code: "missing_diagnostic_markers",
       message: "audit task is missing diagnostic report markers",
+    });
+  }
+  if (!hasNoFindingsProofGuardrail(text)) {
+    issueDetails.push({
+      code: "missing_no_findings_proof_guardrail",
+      message: "audit task is missing the no-findings proof guardrail",
+    });
+  }
+  if (!hasSubstantiveNoFindingsRequirement(text)) {
+    issueDetails.push({
+      code: "missing_substantive_no_findings_requirement",
+      message: "audit task is missing the substantive no-findings requirement",
+    });
+  }
+  if (isAuditSynthesisTitle(title) && !hasSynthesisOutcomeRequirement(text)) {
+    issueDetails.push({
+      code: "missing_synthesis_outcome_requirement",
+      message: "audit synthesis task is missing outcome requirements",
     });
   }
   if (

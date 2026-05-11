@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { generatePlanPath, projects } from "@aif/shared";
+import {
+  AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
+  AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
+  AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+  generatePlanPath,
+  projects,
+} from "@aif/shared";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@aif/shared/server";
 import { execFileSync } from "node:child_process";
@@ -88,6 +94,7 @@ function runGit(cwd: string, args: string[]) {
 }
 
 function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
+  const synthesis = /\b(?:summary|synthesis)\b/i.test(reportName);
   return [
     "Scope: src/config.ts, src/index.ts",
     "Audit mandate: Act as the area owner and find actionable technical-quality risks.",
@@ -97,6 +104,9 @@ function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
     "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
+    AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
+    AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
+    ...(synthesis ? [AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT] : []),
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
   ].join("\n");
@@ -394,6 +404,9 @@ describe("roadmapGeneration", () => {
       expect(callArgs.prompt).toContain("Proposed fix:");
       expect(callArgs.prompt).toContain("Quality bar:");
       expect(callArgs.prompt).toContain("Report artifact: audit/");
+      expect(callArgs.prompt).toContain(AUDIT_NO_FINDINGS_PROOF_GUARDRAIL);
+      expect(callArgs.prompt).toContain(AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT);
+      expect(callArgs.prompt).toContain(AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT);
       expect(callArgs.prompt).toContain(
         "every summarized finding must include Evidence: <source repo path>:<line>",
       );
@@ -439,6 +452,9 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain("Proposed fix:");
       expect(result.content).toContain("Quality bar:");
       expect(result.content).toContain("No-findings rule:");
+      expect(result.content).toContain(AUDIT_NO_FINDINGS_PROOF_GUARDRAIL);
+      expect(result.content).toContain(AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT);
+      expect(result.content).toContain(AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT);
       expect(result.content).toContain("Scope: README.md, pyproject.toml");
       expect(result.content).toContain("src/my_app");
       expect(result.content).not.toContain("packages/api/src");
@@ -446,6 +462,57 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain("Allowed changes: only create/update audit/");
       expect(result.content).not.toContain("Initial Audit & Inventory");
       expect(readFileSync(result.roadmapPath, "utf8")).toBe(result.content);
+    });
+
+    it("should preserve v8-like prior inconclusive context in generated audit task descriptions", async () => {
+      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: validAuditRoadmapContent(),
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit-v8-after-audit-v7-inconclusive",
+        taskIntent: "audit",
+        vision:
+          "Generate audit-v8 as a follow-up because audit-v7 was inconclusive and no-inventory proof was weak.",
+      });
+
+      const result = await generateRoadmapTasks({
+        projectId,
+        roadmapAlias: "audit-v8-after-audit-v7-inconclusive",
+        taskIntent: "audit",
+      });
+
+      expect(result.tasks).toHaveLength(2);
+      for (const task of result.tasks) {
+        expect(task.description).toContain("Prior audit context:");
+        expect(task.description).toContain("audit-v7");
+        expect(task.description).toContain("inconclusive");
+        expect(task.description).toContain(AUDIT_NO_FINDINGS_PROOF_GUARDRAIL);
+        expect(task.description).toContain(AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT);
+      }
+
+      const report = result.tasks.find((task) => task.title === "Audit: configuration");
+      const synthesis = result.tasks.find((task) => task.title === "Synthesize audit findings");
+      expect(report?.description).toContain("git ls-files");
+      expect(report?.description).toContain("directory listings");
+      expect(report?.description).toContain("file-existence checks");
+      expect(report?.description).toContain("inventory-only observations");
+      expect(synthesis?.description).toContain(AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT);
+      expect(synthesis?.description).toContain("validated findings present");
+      expect(synthesis?.description).toContain("validated no-findings with substantive evidence");
+      expect(synthesis?.description).toContain("audit inconclusive");
     });
   });
 
@@ -778,6 +845,17 @@ describe("roadmapGeneration", () => {
       expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
     });
 
+    it("should reject audit source roadmap missing canonical no-findings guardrails", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace(`${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\n`, ""),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("no-findings proof guardrail");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
     it("should convert valid audit source roadmap deterministically without extraction model", async () => {
       const { projectId } = createProjectWithRoadmap(validAuditRoadmapContent());
 
@@ -807,6 +885,48 @@ describe("roadmapGeneration", () => {
         phaseName: "Synthesis",
         sequence: 1,
       });
+    });
+
+    it("should preserve prior inconclusive source roadmap context in deterministic audit conversion", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace(
+          "> Audit the project",
+          "> audit-v8 follow-up because audit-v7 was inconclusive",
+        ),
+      );
+
+      const result = await generateRoadmapTasks({
+        projectId,
+        roadmapAlias: "audit-v8",
+        taskIntent: "audit",
+      });
+
+      expect(result.tasks.every((task) => task.description.includes("Prior audit context:"))).toBe(
+        true,
+      );
+      expect(result.tasks.every((task) => task.description.includes("audit-v7"))).toBe(true);
+      expect(result.tasks.every((task) => task.description.includes("inconclusive"))).toBe(true);
+    });
+
+    it("should append current prior context when source cards contain stale prior context", async () => {
+      const staleContext = "Prior audit context: audit-v6 was inconclusive.";
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent()
+          .replace("> Audit the project", "> audit-v8 follow-up because audit-v7 was inconclusive")
+          .replaceAll("Audit mandate: Act as", `${staleContext}\n  - Audit mandate: Act as`),
+      );
+
+      const result = await generateRoadmapTasks({
+        projectId,
+        roadmapAlias: "audit-v8",
+        taskIntent: "audit",
+      });
+
+      for (const task of result.tasks) {
+        expect(task.description).toContain("audit-v6 was inconclusive");
+        expect(task.description).toContain("roadmap context: audit-v8 follow-up because audit-v7");
+        expect(task.description).toContain("audit-v7");
+      }
     });
   });
 
@@ -1217,6 +1337,68 @@ describe("roadmapGeneration", () => {
         }),
       ).toThrow("report artifact must be a concrete .md report path");
       expect(findTasksByRoadmapAlias(projectId, "audit")).toHaveLength(0);
+    });
+
+    it("should reject audit import batches missing canonical no-findings guardrails", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "audit",
+          taskIntent: "audit",
+          tasks: [
+            {
+              title: "Audit: configuration",
+              taskIntent: "audit",
+              description: auditTaskDescription().replace(AUDIT_NO_FINDINGS_PROOF_GUARDRAIL, ""),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+            {
+              title: "Synthesize audit findings",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/summary.md"),
+              phase: 2,
+              phaseName: "Synthesis",
+              sequence: 1,
+            },
+          ],
+        }),
+      ).toThrow("no-findings proof guardrail");
+      expect(findTasksByRoadmapAlias(projectId, "audit")).toHaveLength(0);
+    });
+
+    it("should reject audit import batches missing prior inconclusive alias context", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      expect(() =>
+        importGeneratedTasks(projectId, {
+          alias: "audit-v8-after-audit-v7-inconclusive",
+          taskIntent: "audit",
+          tasks: [
+            {
+              title: "Audit: configuration",
+              taskIntent: "audit",
+              description: auditTaskDescription(),
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+            {
+              title: "Synthesize audit findings",
+              taskIntent: "audit",
+              description: auditTaskDescription("audit/summary.md"),
+              phase: 2,
+              phaseName: "Synthesis",
+              sequence: 1,
+            },
+          ],
+        }),
+      ).toThrow("Prior audit context");
+      expect(
+        findTasksByRoadmapAlias(projectId, "audit-v8-after-audit-v7-inconclusive"),
+      ).toHaveLength(0);
     });
 
     it("should validate a full typed batch before creating any tasks", () => {

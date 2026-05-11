@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-11",
+  "updated": "2026-05-12",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -113,6 +113,14 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260511-audit-inconclusive-synthesis-gate"
+    },
+    {
+      "taskId": "work-20260512-harden-audit-roadmap-generation-guardrails",
+      "title": "Harden Audit Roadmap Generation Guardrails",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-harden-audit-roadmap-generation-guardrails"
     }
   ]
 }
