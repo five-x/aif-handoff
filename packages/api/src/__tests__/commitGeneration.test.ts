@@ -26,7 +26,8 @@ vi.mock("@aif/shared", async (importOriginal) => {
   };
 });
 
-const { runCommitQuery, buildCommitPrompt } = await import("../services/commitGeneration.js");
+const { runCommitQuery, buildCommitPrompt, buildCommitPromptForTask } =
+  await import("../services/commitGeneration.js");
 
 function gitConfig(skipPush: boolean) {
   return {
@@ -60,6 +61,58 @@ describe("buildCommitPrompt", () => {
     expect(prompt).toContain("--no-verify");
     expect(prompt).toContain("amend");
     expect(prompt).toContain("Co-Authored-By");
+  });
+
+  it("keeps generic task prompts on broad git add -A", () => {
+    const prompt = buildCommitPromptForTask(false, {
+      id: "feature-task",
+      title: "Add checkout button",
+      description: "Update the UI and tests.",
+      taskIntent: "feature",
+    });
+
+    expect(prompt).toContain("git add -A");
+    expect(prompt).not.toContain("Stage ONLY the declared report artifact");
+  });
+
+  it("keeps spike prompts generic when they do not declare audit report artifacts", () => {
+    const prompt = buildCommitPromptForTask(false, {
+      id: "spike-task",
+      title: "Research checkout options",
+      description: "Produce a research artifact and recommendation.",
+      taskIntent: "spike",
+    });
+
+    expect(prompt).toContain("git add -A");
+    expect(prompt).not.toContain("missing report artifact declaration");
+  });
+
+  it("builds a report-only prompt for risky tasks with declared report artifacts", () => {
+    const prompt = buildCommitPromptForTask(false, {
+      id: "audit-task",
+      title: "Audit runtime quality",
+      description: "Report artifact: audit/runtime-quality.md",
+      taskIntent: "audit",
+    });
+
+    expect(prompt).toContain("Stage ONLY the declared report artifact");
+    expect(prompt).toContain("git add -- audit/runtime-quality.md");
+    expect(prompt).toContain("Leave unrelated changed files dirty and unstaged");
+    expect(prompt).toContain("Do NOT run `git add -A`");
+  });
+
+  it("does not fall back to broad staging when a risky task lacks a report artifact", () => {
+    const prompt = buildCommitPromptForTask(false, {
+      id: "audit-task-missing-report",
+      title: "Audit runtime quality",
+      description: "Inspect the runtime quality contract.",
+      taskIntent: "audit",
+    });
+
+    expect(prompt).toContain("Do not stage or commit anything");
+    expect(prompt).toContain("missing report artifact declaration");
+    expect(prompt).toContain("Do NOT run `git add -A`");
+    expect(prompt).not.toContain("Stage ALL changes");
   });
 });
 
@@ -147,6 +200,48 @@ describe("runCommitQuery", () => {
     const callArg = mockRunApiRuntimeOneShot.mock.calls[0][0];
     expect(callArg.prompt).toMatch(/Do NOT push/i);
     expect(callArg.prompt).not.toMatch(/\brun `git push`/);
+  });
+
+  it("uses report-only staging in runtime prompt for risky report tasks", async () => {
+    mockGetProjectConfig.mockReturnValue(gitConfig(true));
+    mockFindTaskById.mockReturnValue({
+      id: "t-audit",
+      title: "Audit runtime quality",
+      description: "Report artifact: audit/runtime-quality.md",
+      taskIntent: "audit",
+      branchName: null,
+      isFix: false,
+    });
+    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "ok" }, context: {} });
+
+    const res = await runCommitQuery({ projectId: "p1", taskId: "t-audit" });
+
+    expect(res.ok).toBe(true);
+    const callArg = mockRunApiRuntimeOneShot.mock.calls[0][0];
+    expect(callArg.prompt).toContain("git add -- audit/runtime-quality.md");
+    expect(callArg.prompt).toContain("Leave unrelated changed files dirty and unstaged");
+    expect(callArg.prompt).toContain("Do NOT run `git add -A`");
+  });
+
+  it("blocks broad staging in runtime prompt for risky tasks missing a report artifact", async () => {
+    mockGetProjectConfig.mockReturnValue(gitConfig(true));
+    mockFindTaskById.mockReturnValue({
+      id: "t-audit-missing-report",
+      title: "Audit runtime quality",
+      description: "Inspect runtime quality.",
+      taskIntent: "audit",
+      branchName: null,
+      isFix: false,
+    });
+    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "blocked" }, context: {} });
+
+    const res = await runCommitQuery({ projectId: "p1", taskId: "t-audit-missing-report" });
+
+    expect(res.ok).toBe(true);
+    const callArg = mockRunApiRuntimeOneShot.mock.calls[0][0];
+    expect(callArg.prompt).toContain("Do not stage or commit anything");
+    expect(callArg.prompt).not.toContain("Stage ALL changes");
+    expect(callArg.prompt).toContain("Do NOT run `git add -A`");
   });
 
   it("returns ok:false with error message when runtime throws", async () => {

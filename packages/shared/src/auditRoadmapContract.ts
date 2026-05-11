@@ -80,6 +80,7 @@ export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailure
   deterministic_fallback_report: "invalid_artifact_content",
   missing_implementation_tool_activity: "missing_tool_evidence",
   missing_review_tool_activity: "missing_tool_evidence",
+  unexpected_non_report_changes: "invalid_artifact_content",
   invalid_or_missing_file_references: "invalid_artifact_content",
   insufficient_report_evidence: "invalid_artifact_content",
   low_quality_report_evidence: "invalid_artifact_content",

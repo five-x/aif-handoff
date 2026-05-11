@@ -593,6 +593,9 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("Evidence Register");
     expect(call.prompt).toContain("ID | Claim | Evidence | Verification");
     expect(call.prompt).toContain("Do not edit source, config, test, dependency, or runtime files");
+    expect(call.prompt).toContain("exactly one bounded report-only git transaction");
+    expect(call.prompt).toContain("Do not create repeated empty commits");
+    expect(call.prompt).toContain("stage only audit/security.md");
   });
 
   it("does NOT resume a stored session when rework is requested", async () => {

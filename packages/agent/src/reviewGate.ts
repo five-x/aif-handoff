@@ -151,6 +151,38 @@ Rules:
   });
 }
 
+function parseLegacyBlockingFindings(
+  input: Pick<ReviewGateInput, "reviewComments">,
+): AutoReviewFinding[] | null {
+  const comments = input.reviewComments ?? "";
+  const lines = comments.split(/\r?\n/);
+  const blockingHeading = /^##\s+Blocking Findings\s*$/i;
+  const anyHeading = /^#{1,6}\s+\S/;
+  const findings: AutoReviewFinding[] = [];
+  let sawBlockingSection = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!blockingHeading.test(lines[index]?.trim() ?? "")) continue;
+
+    sawBlockingSection = true;
+    for (let sectionIndex = index + 1; sectionIndex < lines.length; sectionIndex += 1) {
+      const line = lines[sectionIndex]?.trim() ?? "";
+      if (anyHeading.test(line)) break;
+      if (!line.startsWith("-")) continue;
+
+      const text = line.replace(/^-\s*/, "").trim();
+      if (!text || /^none\.?$/i.test(text)) continue;
+      findings.push({
+        id: createAutoReviewFindingId("review_gate", text),
+        source: "review_gate",
+        text,
+      });
+    }
+  }
+
+  return sawBlockingSection ? findings : null;
+}
+
 function buildMetrics(input: {
   strategy: AutoReviewStrategy;
   iteration: number;
@@ -301,6 +333,67 @@ function buildFallbackDecision(
   };
 }
 
+function buildLegacyBlockingSectionDecision(
+  input: ReviewGateInput,
+  blockingFindings: AutoReviewFinding[],
+): ReviewGateResult {
+  const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const stillBlockingFindings = blockingFindings.filter((finding) => previousIds.has(finding.id));
+  const newBlockingFindings = blockingFindings.filter((finding) => !previousIds.has(finding.id));
+  const metrics = buildMetrics({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    previousBlockingCount: input.previousFindings.length,
+    stillBlockingCount: stillBlockingFindings.length,
+    newBlockingCount: newBlockingFindings.length,
+    totalBlockingCount: blockingFindings.length,
+    parserMode: "fallback",
+  });
+
+  if (blockingFindings.length === 0) {
+    if (requiresSubstantiveReviewEvidence(input)) {
+      return buildSubstantiveEvidenceHandoff(input, metrics);
+    }
+    return {
+      status: "success",
+      metrics,
+      blockingFindings: [],
+      fixesMarkdown: "- none",
+      autoReviewState: null,
+    };
+  }
+
+  const autoReviewState = toAutoReviewState({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    findings: blockingFindings,
+  });
+
+  if (
+    input.strategy === "closure_first" &&
+    input.previousFindings.length > 0 &&
+    stillBlockingFindings.length === 0 &&
+    newBlockingFindings.length > 0
+  ) {
+    return {
+      status: "manual_review_required",
+      handoffReason: "new_blockers_after_rework",
+      metrics,
+      blockingFindings,
+      fixesMarkdown: formatFixesMarkdown(blockingFindings),
+      autoReviewState,
+    };
+  }
+
+  return {
+    status: "request_changes",
+    metrics,
+    blockingFindings,
+    fixesMarkdown: formatFixesMarkdown(blockingFindings),
+    autoReviewState,
+  };
+}
+
 function requiresSubstantiveReviewEvidence(input: ReviewGateInput): boolean {
   if (!input.task || !isRiskyTask(input.task)) return false;
   if (
@@ -361,6 +454,11 @@ export async function evaluateReviewCommentsForAutoMode(
   const parsedStructuredComments = parseStructuredReviewComments(input.reviewComments);
   if (parsedStructuredComments) {
     return buildStructuredDecision(input, parsedStructuredComments);
+  }
+
+  const legacyBlockingFindings = parseLegacyBlockingFindings(input);
+  if (legacyBlockingFindings) {
+    return buildLegacyBlockingSectionDecision(input, legacyBlockingFindings);
   }
 
   const fallbackFindings = await runLegacyFallbackExtraction(input);

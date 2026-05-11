@@ -2043,6 +2043,133 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("missing_report_artifact");
   });
 
+  it("blocks committed non-report changes alongside the declared report artifact", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/report-plus-agents"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies the repository documentation.",
+        "Risk: The report-only contract could otherwise hide source-adjacent edits.",
+        "Verification: Command `git log -1 --name-only --oneline` output included reports/audit.md.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(join(root, "AGENTS.md"), "# Local instructions\n", "utf8");
+    execFileSync("git", ["add", "reports/audit.md", "AGENTS.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add audit report and agents", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-report-plus-agents",
+        title: "Audit expected report path",
+        description: "Report artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.reportArtifactFiles).toEqual(["reports/audit.md"]);
+    expect(result.evidence.unexpectedNonReportChangedFiles).toEqual(["AGENTS.md"]);
+    expect(codes(result)).toContain("unexpected_non_report_changes");
+  });
+
+  it("allows clean committed changes limited to the declared report artifact", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/report-only"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies the repository documentation.",
+        "Risk: The expected report path contract must allow report-only completion.",
+        "Verification: Command `git log -1 --name-only --oneline` output included reports/audit.md.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-report-only",
+        title: "Audit expected report path",
+        description: "Report artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.unexpectedNonReportChangedFiles).toEqual([]);
+    expect(codes(result)).not.toContain("unexpected_non_report_changes");
+  });
+
+  it("blocks dirty non-report changes alongside the declared report artifact", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/report-plus-dirty"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "## Finding",
+        "Evidence: `README.md:1` identifies the repository documentation.",
+        "Risk: Dirty side files could otherwise pass as audit completion.",
+        "Verification: Command `git log -1 --name-only --oneline` output included reports/audit.md.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    writeFileSync(join(root, "AGENTS.md"), "# Dirty instructions\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-report-plus-dirty",
+        title: "Audit expected report path",
+        description: "Report artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.dirtyChangedFiles).toContain("AGENTS.md");
+    expect(result.evidence.unexpectedNonReportChangedFiles).toEqual(["AGENTS.md"]);
+    expect(codes(result)).toContain("unexpected_non_report_changes");
+  });
+
   it("accepts expected audit report paths that match the shared audit contract", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/docs-audit-report"], {

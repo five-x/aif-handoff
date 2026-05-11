@@ -16,6 +16,7 @@ export type TaskCompletionIssueCode =
   | "deterministic_fallback_report"
   | "missing_implementation_tool_activity"
   | "missing_review_tool_activity"
+  | "unexpected_non_report_changes"
   | "invalid_or_missing_file_references"
   | "insufficient_report_evidence"
   | "low_quality_report_evidence"
@@ -55,6 +56,7 @@ export interface TaskCompletionEvidenceResult {
     dirtyChangedFiles: string[];
     committedChangedFiles: string[];
     meaningfulChangedFiles: string[];
+    unexpectedNonReportChangedFiles: string[];
     reportArtifactFiles: string[];
     committedReportRequired: boolean;
     uncommittedReportArtifactFiles: string[];
@@ -161,6 +163,15 @@ function normalizeRelativePath(path: string): string {
     .replaceAll("\\", "/")
     .replace(/^\.\/+/, "")
     .replace(/^\/+/, "");
+}
+
+function normalizePathForComparison(path: string): string {
+  const normalized = normalizeRelativePath(path);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function isSameRepositoryPath(left: string, right: string): boolean {
+  return normalizePathForComparison(left) === normalizePathForComparison(right);
 }
 
 function isInsideRoot(projectRoot: string, candidatePath: string): boolean {
@@ -1126,17 +1137,27 @@ export function evaluateTaskCompletionEvidence(
   const reportArtifactFiles = expectedReportArtifactPath
     ? gitEvidence.files.filter(
         (file) =>
-          normalizeRelativePath(file) === normalizeRelativePath(expectedReportArtifactPath) &&
+          isSameRepositoryPath(file, expectedReportArtifactPath) &&
           isReportArtifactPath(file, task),
       )
     : gitEvidence.files.filter((file) => isReportArtifactPath(file, task));
   const reportText = collectReportText(projectRoot, reportArtifactFiles);
   const committedReportRequired = riskyTask || requiresCommittedReport(task);
-  const committedFileSet = new Set(gitEvidence.committedFiles);
-  const dirtyFileSet = new Set(gitEvidence.dirtyFiles);
+  const committedFileSet = new Set(gitEvidence.committedFiles.map(normalizePathForComparison));
+  const dirtyFileSet = new Set(gitEvidence.dirtyFiles.map(normalizePathForComparison));
   const uncommittedReportArtifactFiles = committedReportRequired
-    ? reportArtifactFiles.filter((file) => !committedFileSet.has(file) || dirtyFileSet.has(file))
+    ? reportArtifactFiles.filter(
+        (file) =>
+          !committedFileSet.has(normalizePathForComparison(file)) ||
+          dirtyFileSet.has(normalizePathForComparison(file)),
+      )
     : [];
+  const unexpectedNonReportChangedFiles =
+    riskyTask && expectedReportArtifactPath
+      ? meaningfulChangedFiles.filter(
+          (file) => !isSameRepositoryPath(file, expectedReportArtifactPath),
+        )
+      : [];
   const deterministicFallbackReport =
     phase === "completion" &&
     riskyTask &&
@@ -1226,6 +1247,14 @@ export function evaluateTaskCompletionEvidence(
         ),
       );
     }
+    if (unexpectedNonReportChangedFiles.length > 0) {
+      issues.push(
+        issue(
+          "unexpected_non_report_changes",
+          `Audit/review/discovery tasks with a declared report artifact may only change that report artifact. Unexpected changed files: ${unexpectedNonReportChangedFiles.join(", ")}.`,
+        ),
+      );
+    }
     if (
       riskyTask &&
       implementationToolActivityCount === 0 &&
@@ -1307,6 +1336,7 @@ export function evaluateTaskCompletionEvidence(
       dirtyChangedFiles: gitEvidence.dirtyFiles,
       committedChangedFiles: gitEvidence.committedFiles,
       meaningfulChangedFiles,
+      unexpectedNonReportChangedFiles,
       reportArtifactFiles,
       committedReportRequired,
       uncommittedReportArtifactFiles,

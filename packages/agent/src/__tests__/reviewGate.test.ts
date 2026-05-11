@@ -259,6 +259,94 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(executeSubagentQueryMock).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts legacy blocking-none comments without model fallback when report evidence is substantive", async () => {
+    const root = initReportRepo();
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Report evidence was inspected.",
+      ].join("\n"),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: "Report artifact: reports/audit.md",
+      },
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.metrics.parserMode).toBe("fallback");
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("treats legacy blocking-none comments as resolved after previous fallback blockers when report evidence is substantive", async () => {
+    const root = initReportRepo();
+    const previous = {
+      id: createAutoReviewFindingId("review_gate", "Fix the report evidence citation"),
+      source: "review_gate" as const,
+      text: "Fix the report evidence citation",
+    };
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      strategy: "closure_first",
+      iteration: 2,
+      previousFindings: [previous],
+      reviewComments: [
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Keep the evidence register concise.",
+      ].join("\n"),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: "Report artifact: reports/audit.md",
+      },
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.metrics).toEqual(
+      expect.objectContaining({
+        previousBlockingCount: 1,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "fallback",
+      }),
+    );
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("requests changes from legacy blocking findings without model fallback", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Blocking Findings",
+        "- Fix the report evidence citation",
+        "- Remove unrelated source edits",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.metrics.parserMode).toBe("fallback");
+    expect(result.blockingFindings.map((finding) => finding.text)).toEqual([
+      "Fix the report evidence citation",
+      "Remove unrelated source edits",
+    ]);
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
   it("requires manual review when malformed rework output falls back after previous blockers exist", async () => {
     executeSubagentQueryMock.mockResolvedValueOnce({
       resultText: "- New blocker discovered during fallback",

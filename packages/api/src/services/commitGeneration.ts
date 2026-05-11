@@ -1,9 +1,13 @@
 import {
   assertCurrentBranch,
   getProjectConfig,
+  inferTaskIntent,
+  isRiskyTask,
   isBranchIsolationError,
   logger,
+  parseExpectedAuditReportArtifactPath,
   restorePersistedBranch,
+  type TaskIntent,
 } from "@aif/shared";
 import { findProjectById, findTaskById } from "@aif/data";
 import { UsageSource } from "@aif/runtime";
@@ -59,6 +63,86 @@ export function buildCommitPrompt(shouldPush: boolean): string {
   ].join("\n");
 }
 
+type CommitPromptTask = {
+  id: string;
+  title: string;
+  description?: string | null;
+  taskIntent?: TaskIntent | null;
+  tags?: string[] | string | null;
+  roadmapAlias?: string | null;
+};
+
+export function buildReportOnlyCommitPrompt(
+  shouldPush: boolean,
+  reportArtifactPath: string,
+): string {
+  const pushLine = shouldPush
+    ? "7. After committing, run `git push` on the current branch. Do not force-push."
+    : "7. Do NOT push. The project is configured with `git.skip_push_after_commit: true` - commit only.";
+
+  return [
+    "You are running the aif-commit workflow for a diagnostic audit/review/discovery report task. Follow these steps exactly:",
+    "",
+    "1. Run `git status` to see the current working tree.",
+    "2. Leave every file except the declared report artifact unstaged. If anything else is staged, unstage it without modifying the worktree.",
+    `3. Stage ONLY the declared report artifact: run \`git add -- ${reportArtifactPath}\` from the project root. Do NOT run \`git add -A\`.`,
+    "4. Analyze only the staged report diff (`git diff --cached -- <report artifact>`) and draft ONE conventional commit message.",
+    "5. Create the commit with `git commit -m ...`. Create exactly one commit. Do not amend.",
+    "6. If there are no staged changes for the report artifact after staging it, report that and stop - do NOT create an empty commit and do NOT broad-stage other files.",
+    pushLine,
+    "",
+    "Hard rules:",
+    "- Never skip git hooks (no --no-verify).",
+    "- Never rewrite history (no rebase, no reset --hard, no amend).",
+    "- Never add the `Co-Authored-By` trailer.",
+    `- The only path this commit may contain is \`${reportArtifactPath}\`.`,
+    "- Leave unrelated changed files dirty and unstaged.",
+  ].join("\n");
+}
+
+export function buildMissingReportArtifactCommitPrompt(): string {
+  return [
+    "Do not stage or commit anything.",
+    "",
+    "This audit/review/discovery task does not declare a concrete expected report artifact path, so broad staging is forbidden.",
+    "Run `git status`, report that commit generation is blocked by the missing report artifact declaration, and stop.",
+    "",
+    "Hard rules:",
+    "- Do NOT run `git add -A`.",
+    "- Do NOT stage source, config, test, dependency, runtime, or documentation side files.",
+    "- Do NOT create an empty commit.",
+  ].join("\n");
+}
+
+export function buildCommitPromptForTask(
+  shouldPush: boolean,
+  task: CommitPromptTask | null,
+): string {
+  if (!task || !isRiskyTask(task)) {
+    return buildCommitPrompt(shouldPush);
+  }
+
+  const taskIntent = inferTaskIntent({
+    taskIntent: task.taskIntent,
+    title: task.title,
+    description: task.description,
+    roadmapAlias: task.roadmapAlias,
+    tags: task.tags,
+  });
+  if (taskIntent === "spike") {
+    return buildCommitPrompt(shouldPush);
+  }
+
+  const reportArtifactPath = task.description
+    ? parseExpectedAuditReportArtifactPath(task.description)
+    : null;
+  if (!reportArtifactPath) {
+    return buildMissingReportArtifactCommitPrompt();
+  }
+
+  return buildReportOnlyCommitPrompt(shouldPush, reportArtifactPath);
+}
+
 /**
  * Fire-and-forget entry point: run the commit workflow via the shared runtime
  * in the project root. Returns a structured result so the caller can broadcast
@@ -106,7 +190,7 @@ export async function runCommitQuery(input: RunCommitQueryInput): Promise<RunCom
 
   const { git } = getProjectConfig(executionRoot);
   const shouldPush = git.enabled && !git.skip_push_after_commit;
-  const prompt = buildCommitPrompt(shouldPush);
+  const prompt = buildCommitPromptForTask(shouldPush, task ?? null);
 
   log.info(
     {
