@@ -85,6 +85,18 @@ function createApp() {
   return app;
 }
 
+function createRoadmapProject(id: string, roadmapContent?: string) {
+  const rootPath = mkdtempSync(join(tmpdir(), "aif-roadmap-route-"));
+  const aifDir = join(rootPath, ".ai-factory");
+  mkdirSync(aifDir, { recursive: true });
+  writeFileSync(join(aifDir, "DESCRIPTION.md"), "# Test Project\n");
+  if (roadmapContent !== undefined) {
+    writeFileSync(join(aifDir, "ROADMAP.md"), roadmapContent);
+  }
+  testDb.current.insert(projects).values({ id, name: "Roadmap Project", rootPath }).run();
+  return rootPath;
+}
+
 describe("projects API", () => {
   let app: ReturnType<typeof createApp>;
 
@@ -417,6 +429,95 @@ describe("projects API", () => {
     it("returns 404 for non-existent project", async () => {
       const res = await app.request("/projects/no-such-project/roadmap/status");
       expect(res.status).toBe(404);
+    });
+  });
+
+  describe("roadmap intent guards", () => {
+    it("rejects audit-shaped generate aliases without audit intent before runtime starts", async () => {
+      createRoadmapProject("roadmap-alias-mismatch");
+
+      const res = await app.request("/projects/roadmap-alias-mismatch/roadmap/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roadmapAlias: "audit-20260511",
+          taskIntent: "general",
+          vision: "Review quality",
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'Audit-shaped roadmap requests must set taskIntent: "audit".',
+        code: "ROADMAP_INTENT_MISMATCH",
+      });
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("rejects audit-only generate vision without audit intent before runtime starts", async () => {
+      createRoadmapProject("roadmap-vision-mismatch");
+
+      const res = await app.request("/projects/roadmap-vision-mismatch/roadmap/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roadmapAlias: "quality-review",
+          vision: "diagnostic audit only; do not fix code",
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("ROADMAP_INTENT_MISMATCH");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("rejects Russian audit-only generate vision without audit intent", async () => {
+      createRoadmapProject("roadmap-russian-mismatch");
+
+      const res = await app.request("/projects/roadmap-russian-mismatch/roadmap/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roadmapAlias: "quality-review",
+          vision:
+            "\u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0443\u0434\u0438\u0442; \u043d\u0435 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u044f\u0442\u044c \u043a\u043e\u0434",
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("ROADMAP_INTENT_MISMATCH");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("rejects audit-shaped import aliases without audit intent before runtime starts", async () => {
+      createRoadmapProject("roadmap-import-mismatch", "# Roadmap\n- [ ] Task\n");
+
+      const res = await app.request("/projects/roadmap-import-mismatch/roadmap/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "audit_v6" }),
+      });
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("ROADMAP_INTENT_MISMATCH");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("keeps audit-logging generate requests generic when vision asks to add audit logging", async () => {
+      createRoadmapProject("roadmap-audit-logging");
+
+      const res = await app.request("/projects/roadmap-audit-logging/roadmap/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "audit-logging", vision: "add audit logging" }),
+      });
+
+      expect(res.status).toBe(202);
+      expect(await res.json()).toMatchObject({
+        status: "started",
+        projectId: "roadmap-audit-logging",
+        roadmapAlias: "audit-logging",
+      });
     });
   });
 

@@ -321,6 +321,47 @@ describe("roadmapGeneration", () => {
       },
     );
 
+    it("should reject audit-shaped aliases without audit intent before runtime generation", async () => {
+      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+
+      await expect(
+        generateRoadmapFile({
+          projectId,
+          roadmapAlias: "audit-v6",
+          taskIntent: "general",
+          vision: "Review the project",
+        }),
+      ).rejects.toMatchObject({ code: "ROADMAP_INTENT_MISMATCH" });
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit-only vision without audit intent before runtime generation", async () => {
+      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+
+      await expect(
+        generateRoadmapFile({
+          projectId,
+          roadmapAlias: "quality-review",
+          vision: "diagnostic audit only; do not fix code",
+        }),
+      ).rejects.toMatchObject({ code: "ROADMAP_INTENT_MISMATCH" });
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject Russian audit-only vision without audit intent before runtime generation", async () => {
+      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+
+      await expect(
+        generateRoadmapFile({
+          projectId,
+          roadmapAlias: "quality-review",
+          vision:
+            "\u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0443\u0434\u0438\u0442; \u043d\u0435 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u044f\u0442\u044c \u043a\u043e\u0434",
+        }),
+      ).rejects.toMatchObject({ code: "ROADMAP_INTENT_MISMATCH" });
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
     it("should generate a diagnostic audit roadmap when audit intent is requested", async () => {
       const { projectId } = createProjectWithDescription("# My App\nA service to audit");
 
@@ -460,6 +501,15 @@ describe("roadmapGeneration", () => {
       expect(result.alias).toBe("v1");
       expect(result.tasks).toHaveLength(2);
       expect(result.tasks[0].title).toBe("Task A");
+    });
+
+    it("should reject audit-shaped aliases without audit intent before runtime extraction", async () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap\n- [ ] Task A");
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit_20260511" }),
+      ).rejects.toMatchObject({ code: "ROADMAP_INTENT_MISMATCH" });
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
     });
 
     it.each(["audit-logging", "security-review", "tests", "coverage", "build", "add-checkout"])(
@@ -830,6 +880,27 @@ describe("roadmapGeneration", () => {
       },
     );
 
+    it("should reject audit-shaped import aliases without audit intent before creating tasks", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      const importAuditShapedRoadmap = () =>
+        importGeneratedTasks(projectId, {
+          alias: "audit.6",
+          tasks: [
+            {
+              title: "Audit project",
+              description: "Review the codebase",
+              phase: 1,
+              phaseName: "Audit",
+              sequence: 1,
+            },
+          ],
+        });
+
+      expect(importAuditShapedRoadmap).toThrow(RoadmapGenerationError);
+      expect(importAuditShapedRoadmap).toThrow("Audit-shaped roadmap requests must set taskIntent");
+      expect(findTasksByRoadmapAlias(projectId, "audit.6")).toHaveLength(0);
+    });
+
     it("should import audit roadmap tasks with full planning and review enabled", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 
@@ -1183,7 +1254,7 @@ describe("roadmapGeneration", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 
       importGeneratedTasks(projectId, {
-        alias: "audit",
+        alias: "legacy-audit",
         tasks: [
           {
             title: "Audit: Critical Bug Resolution",
@@ -1197,7 +1268,7 @@ describe("roadmapGeneration", () => {
 
       expect(() =>
         importGeneratedTasks(projectId, {
-          alias: "audit",
+          alias: "legacy-audit",
           taskIntent: "audit",
           tasks: [
             {
@@ -1228,7 +1299,7 @@ describe("roadmapGeneration", () => {
         }),
       ).toThrow("audit task title describes implementation work");
 
-      const stored = findTasksByRoadmapAlias(projectId, "audit");
+      const stored = findTasksByRoadmapAlias(projectId, "legacy-audit");
       expect(stored).toHaveLength(1);
       expect(stored[0].title).toBe("Audit: Critical Bug Resolution");
     });

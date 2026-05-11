@@ -46,6 +46,7 @@ import {
   generateRoadmapTasks,
   importGeneratedTasks,
   commitGeneratedRoadmapIfNeeded,
+  assertRoadmapIntentMatchesRequest,
   RoadmapGenerationError,
 } from "../services/roadmapGeneration.js";
 import { validateProjectScopedRuntimeProfileSelections } from "../services/runtimeProfileScope.js";
@@ -335,6 +336,14 @@ projectsRouter.post("/:id/roadmap/generate", jsonValidator(roadmapGenerateSchema
   if (!project) {
     return c.json({ error: "Project not found" }, 404);
   }
+  try {
+    assertRoadmapIntentMatchesRequest({ roadmapAlias, taskIntent, vision });
+  } catch (err) {
+    if (err instanceof RoadmapGenerationError && err.code === "ROADMAP_INTENT_MISMATCH") {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    throw err;
+  }
   const aliasError = rejectReusedAuditRoadmapAlias(id, roadmapAlias, taskIntent);
   if (aliasError) {
     return c.json({ error: aliasError, code: "ROADMAP_ALIAS_EXISTS" }, 409);
@@ -361,6 +370,14 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
   const project = findProjectById(id);
   if (!project) {
     return c.json({ error: "Project not found" }, 404);
+  }
+  try {
+    assertRoadmapIntentMatchesRequest({ roadmapAlias, taskIntent });
+  } catch (err) {
+    if (err instanceof RoadmapGenerationError && err.code === "ROADMAP_INTENT_MISMATCH") {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    throw err;
   }
   const aliasError = rejectReusedAuditRoadmapAlias(id, roadmapAlias, taskIntent);
   if (aliasError) {

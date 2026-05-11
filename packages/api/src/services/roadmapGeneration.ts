@@ -129,6 +129,42 @@ function resolveExplicitRoadmapIntent(taskIntent: string | null | undefined): Ta
   return isTaskIntent(normalized) ? normalized : "general";
 }
 
+function isAuditShapedRoadmapAlias(roadmapAlias: string | null | undefined): boolean {
+  const normalized = roadmapAlias?.trim().toLowerCase();
+  return normalized ? /^audit(?:[-_]v\d+|\.\d+|[-_]\d{8})?$/.test(normalized) : false;
+}
+
+function isAuditOnlyRoadmapVision(vision: string | null | undefined): boolean {
+  const normalized = vision?.trim().toLowerCase();
+  if (!normalized) return false;
+  return [
+    "only audit",
+    "audit only",
+    "diagnostic audit",
+    "do not fix code",
+    "\u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0443\u0434\u0438\u0442",
+    "\u043d\u0435 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u044f\u0442\u044c \u043a\u043e\u0434",
+  ].some((signal) => normalized.includes(signal));
+}
+
+export function assertRoadmapIntentMatchesRequest(input: {
+  roadmapAlias?: string | null;
+  taskIntent?: string | null;
+  vision?: string | null;
+}): TaskIntent {
+  const intent = resolveExplicitRoadmapIntent(input.taskIntent);
+  if (
+    intent !== "audit" &&
+    (isAuditShapedRoadmapAlias(input.roadmapAlias) || isAuditOnlyRoadmapVision(input.vision))
+  ) {
+    throw new RoadmapGenerationError(
+      "ROADMAP_INTENT_MISMATCH",
+      'Audit-shaped roadmap requests must set taskIntent: "audit".',
+    );
+  }
+  return intent;
+}
+
 const AUDIT_ROADMAP_VALIDATION_MESSAGE =
   "Audit roadmap generation produced implementation-shaped milestones; no tasks imported.";
 
@@ -777,7 +813,7 @@ function buildAuditRoadmapGenerationResult(
 export async function generateRoadmapFile(
   input: GenerateRoadmapFileInput,
 ): Promise<GenerateRoadmapFileResult> {
-  const { projectId, taskIntent, vision } = input;
+  const { projectId, roadmapAlias, taskIntent, vision } = input;
 
   log.info({ projectId }, "Starting roadmap file generation");
 
@@ -785,6 +821,7 @@ export async function generateRoadmapFile(
   if (!project) {
     throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
   }
+  const intent = assertRoadmapIntentMatchesRequest({ roadmapAlias, taskIntent, vision });
 
   // Read project context
   const projectCfg = getProjectConfig(project.rootPath);
@@ -810,7 +847,6 @@ export async function generateRoadmapFile(
     "Project context loaded for roadmap generation",
   );
 
-  const intent = resolveExplicitRoadmapIntent(taskIntent);
   const basePrompt = buildRoadmapGenerationPrompt(
     {
       description,
@@ -1038,6 +1074,7 @@ export async function generateRoadmapTasks(
   if (!project) {
     throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
   }
+  const intent = assertRoadmapIntentMatchesRequest({ roadmapAlias, taskIntent });
 
   const tasksCfg = getProjectConfig(project.rootPath);
   const roadmapPath = join(project.rootPath, tasksCfg.paths.roadmap);
@@ -1052,7 +1089,6 @@ export async function generateRoadmapTasks(
   log.debug({ roadmapPath, contentLength: roadmapContent.length }, "Roadmap file read");
 
   // 2. Query Agent SDK for strict JSON conversion
-  const intent = resolveExplicitRoadmapIntent(taskIntent);
   if (intent === "audit") {
     validateAuditRoadmapSource(roadmapContent);
     const result = buildAuditRoadmapGenerationResult(roadmapContent, roadmapAlias);
@@ -1452,6 +1488,7 @@ export function importGeneratedTasks(
   if (!project) {
     throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
   }
+  assertRoadmapIntentMatchesRequest({ roadmapAlias: alias, taskIntent: generation.taskIntent });
   const cfg = getProjectConfig(project.rootPath);
 
   const validationGeneration: RoadmapGenerationResult = hasExplicitTypedImportIntent
