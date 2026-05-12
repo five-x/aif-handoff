@@ -15,6 +15,11 @@ const DEFAULT_MAX_SEARCH_FILE_BYTES = 256_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 12_000;
 const DEFAULT_MAX_PATCH_BYTES = 256_000;
+const PLANNER_MAX_FILE_BYTES = 8_000;
+const PLANNER_MAX_FILE_LINES = 120;
+const PLANNER_MAX_DIRECTORY_ENTRIES = 120;
+const PLANNER_MAX_SEARCH_MATCHES = 30;
+const PLANNER_MAX_OUTPUT_CHARS = 6_000;
 const SECRET_SEGMENT_PATTERNS = [
   /^\.env(?:\.|$)/i,
   /^id_(?:rsa|dsa|ecdsa|ed25519)$/i,
@@ -34,6 +39,45 @@ const SECRET_DIRECTORY_SEGMENTS = new Set([
   ".codex",
 ]);
 const VCS_CONTROL_DIRECTORY_SEGMENTS = new Set([".git", ".hg", ".svn"]);
+const SEARCH_SKIP_DIRECTORY_SEGMENTS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  ".venv",
+  "venv",
+]);
+const SEARCH_SKIP_FILE_EXTENSIONS = new Set([
+  ".7z",
+  ".bin",
+  ".bmp",
+  ".class",
+  ".db",
+  ".dll",
+  ".egg",
+  ".exe",
+  ".gif",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".lock",
+  ".pdf",
+  ".png",
+  ".pyc",
+  ".sqlite",
+  ".sqlite3",
+  ".tar",
+  ".tgz",
+  ".webp",
+  ".zip",
+]);
 const ALLOWED_ENV_KEYS = new Set([
   "PATH",
   "Path",
@@ -543,6 +587,17 @@ function readOptionalPositiveInt(value, max = Number.MAX_SAFE_INTEGER) {
   if (!Number.isFinite(raw) || raw <= 0) return null;
   return Math.min(Math.floor(raw), max);
 }
+function isPlannerLikeWorkflow(workflowKind) {
+  return workflowKind === "planner" || workflowKind === "plan-checker";
+}
+function shouldSkipSearchPath(relativePath) {
+  const normalized = normalizePathForPolicy(relativePath);
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.some((segment) => SEARCH_SKIP_DIRECTORY_SEGMENTS.has(segment))) {
+    return true;
+  }
+  return SEARCH_SKIP_FILE_EXTENSIONS.has(path.extname(normalized));
+}
 function validateStructuredShellCommand(command, args) {
   if (command === "pwd") {
     if (args.length > 0) {
@@ -774,7 +829,7 @@ async function collectSearchFiles(projectRoot, target, files, signal, limit = 50
     if (files.length >= limit) return;
     const relativePath =
       target.relativePath === "." ? entry.name : path.join(target.relativePath, entry.name);
-    if (isSecretLikePath(relativePath) || relativePath.split(/[\\/]+/).includes(".git")) {
+    if (isSecretLikePath(relativePath) || shouldSkipSearchPath(relativePath)) {
       continue;
     }
     const child = await resolveExistingPathInsideProjectRoot(
@@ -819,7 +874,11 @@ function buildSearchMatcher(args) {
 async function searchFilesTool(args, context) {
   assertNotAborted(context.signal, "search_files");
   const matcher = buildSearchMatcher(args);
-  const maxMatches = readPositiveInt(args.maxMatches, DEFAULT_MAX_SEARCH_MATCHES, 200);
+  const maxMatches = readPositiveInt(
+    args.maxMatches,
+    context.maxSearchMatches ?? DEFAULT_MAX_SEARCH_MATCHES,
+    context.maxSearchMatches ?? 200,
+  );
   const target = await resolveExistingPathInsideProjectRoot(
     context.projectRoot,
     readString(args.path),
@@ -860,11 +919,12 @@ async function searchFilesTool(args, context) {
       : skippedLargeFiles > 0
         ? `\n[skipped ${skippedLargeFiles} large files]`
         : "";
+  const output =
+    `[search_files query=${JSON.stringify(redactProviderText(matcher.query))} path=${target.relativePath.replaceAll("\\", "/")} files=${files.length} matches=${matches.length}]` +
+    `\n${matches.join("\n")}${suffix}`;
   return {
     ok: true,
-    output:
-      `[search_files query=${JSON.stringify(redactProviderText(matcher.query))} path=${target.relativePath.replaceAll("\\", "/")} files=${files.length} matches=${matches.length}]` +
-      `\n${matches.join("\n")}${suffix}`,
+    output: safeModelText(output, context.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS),
     touchedFiles: [],
   };
 }
@@ -1143,11 +1203,11 @@ export async function executeQwenLocalTool(toolName, rawArgs, context) {
     };
   }
 }
-export function qwenToolResultForModel(result) {
+export function qwenToolResultForModel(result, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
   return JSON.stringify({
     ok: result.ok,
-    output: result.output,
-    ...(result.error ? { error: result.error } : {}),
+    output: safeModelText(result.output ?? "", maxOutputChars),
+    ...(result.error ? { error: safeModelText(result.error, maxOutputChars) } : {}),
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
     touchedFiles: result.touchedFiles,
   });
@@ -1162,18 +1222,45 @@ export function createDefaultQwenToolContext(input) {
     );
   }
   const options = input.options ?? {};
+  const plannerLike = isPlannerLikeWorkflow(input.workflowKind);
+  const defaultMaxFileBytes = plannerLike ? PLANNER_MAX_FILE_BYTES : DEFAULT_MAX_FILE_BYTES;
+  const defaultMaxFileLines = plannerLike ? PLANNER_MAX_FILE_LINES : DEFAULT_MAX_FILE_LINES;
+  const defaultMaxDirectoryEntries = plannerLike
+    ? PLANNER_MAX_DIRECTORY_ENTRIES
+    : DEFAULT_MAX_DIRECTORY_ENTRIES;
+  const defaultMaxSearchMatches = plannerLike
+    ? PLANNER_MAX_SEARCH_MATCHES
+    : DEFAULT_MAX_SEARCH_MATCHES;
+  const defaultMaxOutputChars = plannerLike ? PLANNER_MAX_OUTPUT_CHARS : DEFAULT_MAX_OUTPUT_CHARS;
+  const maxFileBytesLimit = plannerLike ? PLANNER_MAX_FILE_BYTES : Number.MAX_SAFE_INTEGER;
+  const maxFileLinesLimit = plannerLike ? PLANNER_MAX_FILE_LINES : MAX_FILE_LINES;
+  const maxDirectoryEntriesLimit = plannerLike
+    ? PLANNER_MAX_DIRECTORY_ENTRIES
+    : Number.MAX_SAFE_INTEGER;
+  const maxSearchMatchesLimit = plannerLike ? PLANNER_MAX_SEARCH_MATCHES : Number.MAX_SAFE_INTEGER;
+  const maxOutputCharsLimit = plannerLike ? PLANNER_MAX_OUTPUT_CHARS : Number.MAX_SAFE_INTEGER;
   const env = { ...process.env, ...(input.environment ?? {}) };
   return {
     projectRoot: resolveProjectRoot(projectRoot),
     signal: input.signal,
     env,
-    maxFileBytes: readPositiveInt(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES),
-    maxFileLines: readPositiveInt(options.maxFileLines, DEFAULT_MAX_FILE_LINES, MAX_FILE_LINES),
+    maxFileBytes: readPositiveInt(options.maxFileBytes, defaultMaxFileBytes, maxFileBytesLimit),
+    maxFileLines: readPositiveInt(options.maxFileLines, defaultMaxFileLines, maxFileLinesLimit),
     maxDirectoryEntries: readPositiveInt(
       options.maxDirectoryEntries,
-      DEFAULT_MAX_DIRECTORY_ENTRIES,
+      defaultMaxDirectoryEntries,
+      maxDirectoryEntriesLimit,
     ),
-    maxOutputChars: readPositiveInt(options.maxOutputChars, DEFAULT_MAX_OUTPUT_CHARS),
+    maxSearchMatches: readPositiveInt(
+      options.maxSearchMatches,
+      defaultMaxSearchMatches,
+      maxSearchMatchesLimit,
+    ),
+    maxOutputChars: readPositiveInt(
+      options.maxOutputChars,
+      defaultMaxOutputChars,
+      maxOutputCharsLimit,
+    ),
     toolTimeoutMs: readPositiveInt(options.toolTimeoutMs, DEFAULT_TOOL_TIMEOUT_MS),
   };
 }

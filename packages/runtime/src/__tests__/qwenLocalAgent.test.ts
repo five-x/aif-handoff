@@ -14,8 +14,10 @@ import {
 import { createQwenLocalAgentRuntimeAdapter } from "../adapters/qwenLocalAgent/index.js";
 import {
   buildSanitizedToolEnv,
+  createDefaultQwenToolContext,
   executeQwenLocalTool,
   QWEN_LOCAL_AGENT_TOOLS,
+  qwenToolResultForModel,
   spawnProcess,
 } from "../adapters/qwenLocalAgent/tools.js";
 import { TEST_USAGE_CONTEXT } from "./helpers/usageContext.js";
@@ -540,6 +542,59 @@ describe("qwen-local-agent adapter", () => {
     expect(result.ok).toBe(true);
     expect(result.output).toContain("src/app.py:2");
     expect(result.output).not.toContain(".env");
+  });
+  it("caps planner tool budgets below profile-wide qwen defaults", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-budget-"));
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      workflowKind: "planner",
+      options: {
+        maxFileBytes: 50_000,
+        maxFileLines: 500,
+        maxDirectoryEntries: 500,
+        maxSearchMatches: 100,
+        maxOutputChars: 50_000,
+      },
+    });
+
+    expect(context.maxFileBytes).toBe(8_000);
+    expect(context.maxFileLines).toBe(120);
+    expect(context.maxDirectoryEntries).toBe(120);
+    expect(context.maxSearchMatches).toBe(30);
+    expect(context.maxOutputChars).toBe(6_000);
+  });
+  it("applies context search caps and skips binary/cache paths", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-search-cap-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, "__pycache__"), { recursive: true });
+    await writeFile(path.join(root, "__pycache__", "cached.pyc"), "needle\n", "utf8");
+    for (let index = 0; index < 12; index += 1) {
+      await writeFile(path.join(root, "src", `file-${index}.py`), `needle ${index}\n`, "utf8");
+    }
+
+    const result = await executeQwenLocalTool(
+      "search_files",
+      { query: "needle", path: ".", maxMatches: 50 },
+      { projectRoot: root, maxSearchMatches: 5, maxOutputChars: 2_000 },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("matches=5");
+    expect(result.output).toContain("[truncated after 5 matches]");
+    expect(result.output).not.toContain("__pycache__");
+  });
+  it("bounds tool result content before feeding it back to qwen", () => {
+    const serialized = qwenToolResultForModel(
+      {
+        ok: true,
+        output: "x".repeat(500),
+        touchedFiles: [],
+      },
+      100,
+    );
+    const parsed = JSON.parse(serialized);
+    expect(parsed.output.length).toBeLessThan(160);
+    expect(parsed.output).toContain("[truncated");
   });
   it("denies shell arguments that reference secret-like paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-secret-"));

@@ -372,6 +372,7 @@ export async function runQwenLocalAgentApi(input, logger) {
   const toolContext = createDefaultQwenToolContext({
     projectRoot: input.projectRoot,
     cwd: input.cwd,
+    workflowKind: input.workflowKind,
     signal,
     options: asRecord(input.options),
     environment: input.execution?.environment,
@@ -493,7 +494,7 @@ export async function runQwenLocalAgentApi(input, logger) {
           role: "tool",
           tool_call_id: toolCall.id,
           name: toolCall.function.name,
-          content: qwenToolResultForModel(result),
+          content: qwenToolResultForModel(result, toolContext.maxOutputChars),
         });
         if (repeatedToolCallSuppressions >= REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS) {
           const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
