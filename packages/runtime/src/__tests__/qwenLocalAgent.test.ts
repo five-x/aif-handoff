@@ -86,6 +86,7 @@ describe("qwen-local-agent adapter", () => {
       expect.arrayContaining([
         "list_files",
         "read_file",
+        "search_files",
         "write_file",
         "apply_patch",
         "run_shell",
@@ -497,6 +498,48 @@ describe("qwen-local-agent adapter", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("secret-like path");
     expect(result.error).not.toContain("sk-SECRET");
+  });
+  it("reads large files in bounded line windows", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-read-window-"));
+    await writeFile(
+      path.join(root, "large.py"),
+      Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"),
+      "utf8",
+    );
+    const first = await executeQwenLocalTool(
+      "read_file",
+      { path: "large.py" },
+      { projectRoot: root, maxFileLines: 5, maxFileBytes: 200, maxOutputChars: 2_000 },
+    );
+    expect(first.ok).toBe(true);
+    expect(first.output).toContain("lines 1-5 of 20");
+    expect(first.output).toContain("line 5");
+    expect(first.output).not.toContain("line 6");
+    expect(first.output).toContain("startLine=6");
+
+    const second = await executeQwenLocalTool(
+      "read_file",
+      { path: "large.py", startLine: 6, lineCount: 3 },
+      { projectRoot: root, maxFileLines: 5, maxFileBytes: 200, maxOutputChars: 2_000 },
+    );
+    expect(second.ok).toBe(true);
+    expect(second.output).toContain("lines 6-8 of 20");
+    expect(second.output).toContain("line 8");
+    expect(second.output).not.toContain("line 9");
+  });
+  it("searches non-secret files with bounded path-line previews", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-search-"));
+    await mkdir(path.join(root, "src"));
+    await writeFile(path.join(root, "src", "app.py"), "alpha\nneedle here\n", "utf8");
+    await writeFile(path.join(root, ".env"), "needle secret\n", "utf8");
+    const result = await executeQwenLocalTool(
+      "search_files",
+      { query: "needle", path: ".", maxMatches: 10 },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("src/app.py:2");
+    expect(result.output).not.toContain(".env");
   });
   it("denies shell arguments that reference secret-like paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-secret-"));

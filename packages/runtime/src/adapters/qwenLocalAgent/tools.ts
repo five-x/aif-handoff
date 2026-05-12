@@ -6,8 +6,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { redactProviderText } from "@aif/shared";
 import { RuntimeExecutionError } from "../../errors.js";
-const DEFAULT_MAX_FILE_BYTES = 128_000;
+const DEFAULT_MAX_FILE_BYTES = 16_000;
+const DEFAULT_MAX_FILE_LINES = 240;
+const MAX_FILE_LINES = 800;
 const DEFAULT_MAX_DIRECTORY_ENTRIES = 200;
+const DEFAULT_MAX_SEARCH_MATCHES = 80;
+const DEFAULT_MAX_SEARCH_FILE_BYTES = 256_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 12_000;
 const DEFAULT_MAX_PATCH_BYTES = 256_000;
@@ -75,13 +79,37 @@ export const QWEN_LOCAL_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "read_file",
-      description: "Read a non-secret file under the configured project root.",
+      description:
+        "Read a non-secret file under the configured project root. Use startLine and lineCount to inspect large files in bounded windows.",
       parameters: objectSchema(
         {
           path: { type: "string", description: "Relative file path." },
           maxBytes: { type: "number", description: "Maximum UTF-8 bytes to return." },
+          startLine: { type: "number", description: "1-based first line to read. Defaults to 1." },
+          lineCount: {
+            type: "number",
+            description: "Maximum lines to return. Defaults to a bounded window.",
+          },
         },
         ["path"],
+      ),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_files",
+      description:
+        "Search non-secret text files under a relative path and return bounded path:line previews.",
+      parameters: objectSchema(
+        {
+          query: { type: "string", description: "Literal text or regex pattern to search for." },
+          path: { type: "string", description: "Relative directory or file path. Defaults to ." },
+          regex: { type: "boolean", description: "Treat query as a JavaScript regex." },
+          caseSensitive: { type: "boolean", description: "Use case-sensitive matching." },
+          maxMatches: { type: "number", description: "Maximum matches to return." },
+        },
+        ["query"],
       ),
     },
   },
@@ -398,7 +426,8 @@ function safeModelText(value, maxChars) {
 }
 const TOOL_ARGUMENT_KEYS = {
   list_files: new Set(["path", "maxEntries"]),
-  read_file: new Set(["path", "maxBytes"]),
+  read_file: new Set(["path", "maxBytes", "startLine", "lineCount"]),
+  search_files: new Set(["query", "path", "regex", "caseSensitive", "maxMatches"]),
   write_file: new Set(["path", "content"]),
   apply_patch: new Set(["patch"]),
   run_shell: new Set(["command", "args", "cwd", "timeoutMs"]),
@@ -442,6 +471,11 @@ function summarizeToolUse(toolName, args) {
       return readString(args.path) ? ` ${redactProviderText(readString(args.path) ?? "")}` : "";
     case "list_files":
       return readString(args.path) ? ` ${redactProviderText(readString(args.path) ?? "")}` : " .";
+    case "search_files": {
+      const query = readString(args.query);
+      const targetPath = readString(args.path) ?? ".";
+      return ` ${redactProviderText(query ?? "")} in ${redactProviderText(targetPath)}`;
+    }
     case "run_shell": {
       const command = redactProviderText(readString(args.command) ?? "");
       const commandArgs = readStringArray(args.args)
@@ -497,6 +531,17 @@ function assertShellArgumentsAreSafe(args) {
       );
     }
   }
+}
+function readOptionalPositiveInt(value, max = Number.MAX_SAFE_INTEGER) {
+  if (value == null) return null;
+  const raw =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseInt(value, 10)
+        : Number.NaN;
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.min(Math.floor(raw), max);
 }
 function validateStructuredShellCommand(command, args) {
   if (command === "pwd") {
@@ -673,6 +718,11 @@ async function readFileTool(args, context) {
     context.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
     context.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
   );
+  const startLine = readOptionalPositiveInt(args.startLine) ?? 1;
+  const lineCount =
+    readOptionalPositiveInt(args.lineCount, context.maxFileLines ?? DEFAULT_MAX_FILE_LINES) ??
+    context.maxFileLines ??
+    DEFAULT_MAX_FILE_LINES;
   const target = await resolveExistingPathInsideProjectRoot(
     context.projectRoot,
     readString(args.path),
@@ -681,17 +731,140 @@ async function readFileTool(args, context) {
   if (!target.info.isFile()) {
     throw new RuntimeExecutionError("read path is not a file", undefined, "permission");
   }
-  if (target.info.size > requestedMax) {
-    throw new RuntimeExecutionError(
-      `file is too large (${target.info.size} bytes > ${requestedMax} byte limit)`,
-      undefined,
-      "permission",
-    );
-  }
   const content = await readFile(target.absolutePath, "utf8");
+  const lines = content.split(/\r?\n/);
+  const lineStartIndex = Math.min(startLine - 1, lines.length);
+  const lineEndIndex = Math.min(lineStartIndex + lineCount, lines.length);
+  const selected = lines.slice(lineStartIndex, lineEndIndex).join("\n");
+  const truncated = truncateForModel(selected, Math.floor(requestedMax));
+  const lineStart = lineStartIndex + 1;
+  const lineEnd = lineEndIndex;
+  const lineWindowTruncated = lineStart > 1 || lineEnd < lines.length;
+  const byteWindowTruncated = selected.length > requestedMax;
+  const suffix = [
+    lineWindowTruncated
+      ? `Use read_file with startLine=${Math.min(lineEnd + 1, lines.length)} lineCount=${lineCount} to continue.`
+      : "",
+    byteWindowTruncated ? `Increase maxBytes to read more of this line window.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return {
     ok: true,
-    output: truncateForModel(content, Math.floor(requestedMax)),
+    output: [
+      `[read_file ${target.relativePath} lines ${lineStart}-${lineEnd} of ${lines.length}]`,
+      truncated,
+      suffix ? `[truncated] ${suffix}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    touchedFiles: [],
+  };
+}
+async function collectSearchFiles(projectRoot, target, files, signal, limit = 500) {
+  if (files.length >= limit) return;
+  assertNotAborted(signal, "search_files");
+  if (target.info.isFile()) {
+    files.push(target);
+    return;
+  }
+  if (!target.info.isDirectory()) return;
+  const entries = await readdir(target.absolutePath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (files.length >= limit) return;
+    const relativePath =
+      target.relativePath === "." ? entry.name : path.join(target.relativePath, entry.name);
+    if (isSecretLikePath(relativePath) || relativePath.split(/[\\/]+/).includes(".git")) {
+      continue;
+    }
+    const child = await resolveExistingPathInsideProjectRoot(
+      projectRoot,
+      relativePath,
+      "search path",
+    );
+    if (child.info.isDirectory() || child.info.isFile()) {
+      await collectSearchFiles(projectRoot, child, files, signal, limit);
+    }
+  }
+}
+function buildSearchMatcher(args) {
+  const query = readString(args.query);
+  if (!query) {
+    throw new RuntimeExecutionError("search_files requires query", undefined, "permission");
+  }
+  if (args.regex === true) {
+    try {
+      const flags = args.caseSensitive === true ? "" : "i";
+      return {
+        query,
+        test: (value) => new RegExp(query, flags).test(value),
+      };
+    } catch (error) {
+      throw new RuntimeExecutionError(
+        `invalid search regex: ${error instanceof Error ? error.message : String(error)}`,
+        undefined,
+        "permission",
+      );
+    }
+  }
+  const needle = args.caseSensitive === true ? query : query.toLowerCase();
+  return {
+    query,
+    test: (value) => {
+      const haystack = args.caseSensitive === true ? value : value.toLowerCase();
+      return haystack.includes(needle);
+    },
+  };
+}
+async function searchFilesTool(args, context) {
+  assertNotAborted(context.signal, "search_files");
+  const matcher = buildSearchMatcher(args);
+  const maxMatches = readPositiveInt(args.maxMatches, DEFAULT_MAX_SEARCH_MATCHES, 200);
+  const target = await resolveExistingPathInsideProjectRoot(
+    context.projectRoot,
+    readString(args.path),
+    "search path",
+  );
+  const files = [];
+  await collectSearchFiles(context.projectRoot, target, files, context.signal);
+  const matches = [];
+  let skippedLargeFiles = 0;
+  for (const file of files) {
+    if (matches.length >= maxMatches) break;
+    if (file.info.size > DEFAULT_MAX_SEARCH_FILE_BYTES) {
+      skippedLargeFiles += 1;
+      continue;
+    }
+    let content;
+    try {
+      content = await readFile(file.absolutePath, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      if (matches.length >= maxMatches) break;
+      const line = lines[index] ?? "";
+      if (!matcher.test(line)) continue;
+      matches.push(
+        `${file.relativePath.replaceAll("\\", "/")}:${index + 1}: ${safeModelText(
+          line.trim(),
+          240,
+        )}`,
+      );
+    }
+  }
+  const suffix =
+    matches.length >= maxMatches
+      ? `\n[truncated after ${maxMatches} matches]`
+      : skippedLargeFiles > 0
+        ? `\n[skipped ${skippedLargeFiles} large files]`
+        : "";
+  return {
+    ok: true,
+    output:
+      `[search_files query=${JSON.stringify(redactProviderText(matcher.query))} path=${target.relativePath.replaceAll("\\", "/")} files=${files.length} matches=${matches.length}]` +
+      `\n${matches.join("\n")}${suffix}`,
     touchedFiles: [],
   };
 }
@@ -929,6 +1102,8 @@ export async function executeQwenLocalTool(toolName, rawArgs, context) {
         return await listFiles(args, context);
       case "read_file":
         return await readFileTool(args, context);
+      case "search_files":
+        return await searchFilesTool(args, context);
       case "write_file":
         return await writeFileTool(args, context);
       case "apply_patch":
@@ -993,6 +1168,7 @@ export function createDefaultQwenToolContext(input) {
     signal: input.signal,
     env,
     maxFileBytes: readPositiveInt(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES),
+    maxFileLines: readPositiveInt(options.maxFileLines, DEFAULT_MAX_FILE_LINES, MAX_FILE_LINES),
     maxDirectoryEntries: readPositiveInt(
       options.maxDirectoryEntries,
       DEFAULT_MAX_DIRECTORY_ENTRIES,

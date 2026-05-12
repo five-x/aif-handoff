@@ -299,6 +299,10 @@ function emitAuditEvidenceResult(input, events, toolCall, args, result) {
     evidenceKind = "search";
     evidenceGrade = "discovery";
     if (typeof args.path === "string") paths = [args.path];
+  } else if (toolName === "search_files") {
+    evidenceKind = "search";
+    evidenceGrade = "substantive";
+    if (typeof args.path === "string") paths = [args.path];
   } else if (toolName === "run_shell") {
     evidenceKind = "shell_command";
     command = {
