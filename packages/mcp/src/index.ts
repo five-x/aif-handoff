@@ -1,10 +1,11 @@
 import "./stdioEnv.js";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { logger } from "@aif/shared";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { loadMcpEnv } from "./env.js";
 import { RateLimiter } from "./middleware/rateLimit.js";
 import type { ToolContext } from "./tools/index.js";
@@ -64,15 +65,9 @@ async function startStdio(env: ReturnType<typeof loadMcpEnv>) {
 }
 
 async function startHttp(env: ReturnType<typeof loadMcpEnv>) {
-  const server = createMcpServer(env);
+  const transports = new Map<string, StreamableHTTPServerTransport>();
 
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-
-  await server.connect(transport);
-
-  const httpServer = createServer((req, res) => {
+  const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${env.httpPort}`);
 
     if (url.pathname === "/health") {
@@ -82,7 +77,24 @@ async function startHttp(env: ReturnType<typeof loadMcpEnv>) {
     }
 
     if (url.pathname === "/mcp") {
-      transport.handleRequest(req, res);
+      try {
+        await handleMcpHttpRequest(env, transports, req, res);
+      } catch (error) {
+        log.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          "Failed to handle MCP HTTP request",
+        );
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32603, message: "Internal server error" },
+              id: null,
+            }),
+          );
+        }
+      }
       return;
     }
 
@@ -105,11 +117,108 @@ async function startHttp(env: ReturnType<typeof loadMcpEnv>) {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info({ signal }, "Shutdown signal received — exiting");
+    for (const [sessionId, transport] of transports) {
+      transport.close().catch((error) => {
+        log.warn(
+          { sessionId, error: error instanceof Error ? error.message : String(error) },
+          "Failed to close MCP transport during shutdown",
+        );
+      });
+    }
     httpServer.close();
     process.exit(0);
   };
   process.on("SIGINT", () => onShutdown("SIGINT"));
   process.on("SIGTERM", () => onShutdown("SIGTERM"));
+}
+
+function getSessionId(req: IncomingMessage): string | null {
+  const raw = req.headers["mcp-session-id"];
+  if (Array.isArray(raw)) return raw[0] ?? null;
+  return raw ?? null;
+}
+
+async function parseJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const body = Buffer.concat(chunks).toString("utf-8");
+  if (!body.trim()) return undefined;
+  return JSON.parse(body);
+}
+
+async function handleMcpHttpRequest(
+  env: ReturnType<typeof loadMcpEnv>,
+  transports: Map<string, StreamableHTTPServerTransport>,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const sessionId = getSessionId(req);
+  const existingTransport = sessionId ? transports.get(sessionId) : undefined;
+
+  if (existingTransport) {
+    await existingTransport.handleRequest(req, res);
+    return;
+  }
+
+  if (sessionId) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Session not found" },
+        id: null,
+      }),
+    );
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Missing MCP session ID" },
+        id: null,
+      }),
+    );
+    return;
+  }
+
+  const parsedBody = await parseJsonBody(req);
+  if (!isInitializeRequest(parsedBody)) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+        id: null,
+      }),
+    );
+    return;
+  }
+
+  let transport: StreamableHTTPServerTransport;
+  transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (newSessionId) => {
+      transports.set(newSessionId, transport);
+      log.debug({ sessionId: newSessionId }, "MCP HTTP session initialized");
+    },
+  });
+  transport.onclose = () => {
+    const closedSessionId = transport.sessionId;
+    if (closedSessionId) {
+      transports.delete(closedSessionId);
+      log.debug({ sessionId: closedSessionId }, "MCP HTTP session closed");
+    }
+  };
+
+  const server = createMcpServer(env);
+  await server.connect(transport);
+  await transport.handleRequest(req, res, parsedBody);
 }
 
 async function main() {
