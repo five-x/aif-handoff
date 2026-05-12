@@ -478,6 +478,27 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("Included findings: 1");
     expect(summary).toContain("Omitted findings: 1");
     expect(summary).not.toContain("file is too large");
+    expect(summary).toContain("```audit-report-manifest");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-deterministic-synthesis");
+    if (!artifact) throw new Error("missing deterministic synthesis artifact");
+    const auditEvidenceUnits = listAuditEvidenceEvents({
+      taskId: "task-deterministic-synthesis",
+      auditPlanId: `batch:${artifact.batchId}:task:task-deterministic-synthesis`,
+    });
+    const validation = validateAuditReportArtifact({
+      text: summary,
+      projectRoot,
+      taskId: "task-deterministic-synthesis",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
+      taskDescription: "Report artifact: audit/summary.md",
+      reportArtifactPaths: ["audit/summary.md"],
+      allowedEvidenceArtifactPaths: ["audit/config.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits,
+      requireLedgerEvidence: true,
+    });
+    expect(validation.ok).toBe(true);
     const gitLog = execFileSync("git", ["log", "-1", "--name-only", "--oneline"], {
       cwd: projectRoot,
       encoding: "utf8",
@@ -622,15 +643,27 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("Audit outcome: Validated no-findings");
     expect(summary).not.toContain("Risk:");
     expect(summary).not.toContain("Proposed fix:");
+    expect(summary).toContain("```audit-report-manifest");
 
+    const artifact = findRoadmapBatchArtifactByTaskId("task-no-findings-synthesis");
+    if (!artifact) throw new Error("missing no-findings synthesis artifact");
+    const auditEvidenceUnits = listAuditEvidenceEvents({
+      taskId: "task-no-findings-synthesis",
+      auditPlanId: `batch:${artifact.batchId}:task:task-no-findings-synthesis`,
+    });
     const validation = validateAuditReportArtifact({
       text: summary,
       projectRoot,
+      taskId: "task-no-findings-synthesis",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
       taskDescription:
         "Scope: all audit/*-audit.md reports from this audit batch\nReport artifact: audit/summary.md\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
       reportArtifactPaths: ["audit/summary.md"],
       allowedEvidenceArtifactPaths: ["audit/runtime.md"],
       requireProposedFix: true,
+      auditEvidenceUnits,
+      requireLedgerEvidence: true,
     });
     expect(validation.ok).toBe(true);
   });
@@ -764,6 +797,7 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain('"kind":"inconclusive_batch_evidence"');
     expect(summary).toContain("Inventory-only no-findings source reports: 6.");
     expect(summary).not.toContain("No validated findings.");
+    expect(summary).toContain("```audit-report-manifest");
   });
 
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {

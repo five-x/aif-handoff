@@ -21,12 +21,14 @@ import {
   getProjectConfig,
   validateAuditReportArtifact,
   buildAuditEvidencePayload,
+  classifyAuditSourceEvidence,
   classifyAuditSynthesisSourceReports,
   computeAuditReportContentSha256,
   extractAuditSynthesisCommandEvidence,
   formatAuditSynthesisOutcomeForArtifact,
   resolveAuditPlanId,
   type AuditEvidenceUnit,
+  type AuditSourceClassification,
   type AuditReportSourceSnapshot,
 } from "@aif/shared";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
@@ -826,6 +828,74 @@ function buildAuditReportManifest(input: {
   };
 }
 
+function buildAuditSynthesisManifest(input: {
+  task: TaskRow;
+  artifactPath: string;
+  snapshot: AuditReportSourceSnapshot;
+  body: string;
+  sourceArtifacts: ValidatedAuditArtifactContent[];
+  weakArtifacts: WeakAuditArtifactSummary[];
+  evidenceUnit: AuditEvidenceUnit | null;
+  outcome: AuditSourceClassification;
+}): Record<string, unknown> {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  const evidenceRefs = input.evidenceUnit ? [input.evidenceUnit.id] : [];
+  const sourceArtifactPaths = input.sourceArtifacts
+    .map((entry) => entry.artifactPath)
+    .filter(Boolean)
+    .sort();
+  const scopeRoots =
+    sourceArtifactPaths.length > 0
+      ? sourceArtifactPaths
+      : [input.artifactPath, ...input.weakArtifacts.map((entry) => entry.artifactPath)].sort();
+  const findings =
+    input.outcome === "validated_findings_present"
+      ? splitAuditFindingSections(input.body).map((section, index) => ({
+          id: `finding-${index + 1}`,
+          evidenceRefs,
+          summary: section.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "Finding",
+        }))
+      : [];
+  const noFindingsClaims =
+    input.outcome === "validated_no_findings"
+      ? [
+          {
+            id: "nf-deterministic-synthesis",
+            scopeIds: scopeRoots,
+            evidenceRefs,
+            reasoning:
+              "Deterministic synthesis used only already-validated source audit reports and preserved substantive no-findings evidence.",
+          },
+        ]
+      : [];
+
+  return {
+    version: 1,
+    auditPlanId: resolveAuditPlanId({
+      taskId: input.task.id,
+      roadmapBatchId: artifact?.batchId ?? null,
+    }),
+    taskId: input.task.id,
+    ...(artifact?.batchId ? { batchId: artifact.batchId } : {}),
+    ...(artifact?.roadmapAlias || input.task.roadmapAlias
+      ? { roadmapAlias: artifact?.roadmapAlias ?? input.task.roadmapAlias }
+      : {}),
+    artifactPath: input.artifactPath,
+    contentSha256: computeAuditReportContentSha256(input.body),
+    sourceSnapshot: input.snapshot,
+    outcome: input.outcome,
+    scopeCoverage: scopeRoots.map((root) => ({
+      root,
+      covered: Boolean(input.evidenceUnit),
+      evidenceRefs,
+    })),
+    riskHypotheses: [],
+    findings,
+    noFindingsClaims,
+    evidenceRefs,
+  };
+}
+
 function buildDeterministicAuditReportRepairContent(input: {
   task: TaskRow;
   projectRoot: string;
@@ -1441,6 +1511,73 @@ function buildDeterministicAuditSynthesisContent(
   return `${lines.join("\n").trim()}\n`;
 }
 
+function buildDeterministicAuditSynthesisContentWithManifest(input: {
+  task: TaskRow;
+  projectRoot: string;
+  artifactPath: string;
+  artifacts: ValidatedAuditArtifactContent[];
+  weakArtifacts: WeakAuditArtifactSummary[];
+}): string {
+  const body = buildDeterministicAuditSynthesisContent(
+    input.artifacts,
+    input.weakArtifacts,
+    input.projectRoot,
+  ).trim();
+  const snapshot = currentAuditReportSourceSnapshot(input.projectRoot);
+  const sourceArtifactPaths = [
+    ...new Set(input.artifacts.map((artifact) => artifact.artifactPath).filter(Boolean)),
+  ].sort();
+  const weakArtifactPaths = [
+    ...new Set(input.weakArtifacts.map((artifact) => artifact.artifactPath).filter(Boolean)),
+  ].sort();
+  const evidenceOutput = [
+    `summaryArtifact=${input.artifactPath}`,
+    `sourceReportCount=${input.artifacts.length}`,
+    `weakOrInvalidReportCount=${input.weakArtifacts.length}`,
+    "validatedSourceReports:",
+    ...(sourceArtifactPaths.length > 0
+      ? sourceArtifactPaths.map((artifactPath) => `- ${artifactPath}`)
+      : ["- <none>"]),
+    "weakOrInvalidReports:",
+    ...(weakArtifactPaths.length > 0
+      ? weakArtifactPaths.map((artifactPath) => `- ${artifactPath}`)
+      : ["- <none>"]),
+  ].join("\n");
+  const evidenceUnit = persistAuditEvidencePayload(
+    input.task.id,
+    input.projectRoot,
+    buildAuditEvidencePayload({
+      toolName: "deterministic_audit_synthesis",
+      evidenceKind: "shell_command",
+      evidenceGrade: "substantive",
+      scopeIds: sourceArtifactPaths.length > 0 ? sourceArtifactPaths : [input.artifactPath],
+      paths: [...sourceArtifactPaths, ...weakArtifactPaths],
+      command: `deterministic-audit-synthesis --artifact ${input.artifactPath}`,
+      exitCode: 0,
+      output: evidenceOutput,
+      maxPreviewChars: 4_000,
+    }),
+  );
+  const outcome = classifyAuditSourceEvidence({
+    text: body,
+    projectRoot: input.projectRoot,
+    excludedReferencedPaths: [input.artifactPath],
+    requireProposedFix: true,
+  }).classification;
+  const manifest = buildAuditSynthesisManifest({
+    task: input.task,
+    artifactPath: input.artifactPath,
+    snapshot,
+    body,
+    sourceArtifacts: input.artifacts,
+    weakArtifacts: input.weakArtifacts,
+    evidenceUnit,
+    outcome,
+  });
+
+  return `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+}
+
 function runDeterministicAuditSynthesisRework(input: {
   task: TaskRow;
   projectRoot: string;
@@ -1450,11 +1587,7 @@ function runDeterministicAuditSynthesisRework(input: {
 }): string {
   const artifactPath = resolve(input.projectRoot, input.artifactPath);
   mkdirSync(dirname(artifactPath), { recursive: true });
-  const content = buildDeterministicAuditSynthesisContent(
-    input.artifacts,
-    input.weakArtifacts,
-    input.projectRoot,
-  );
+  const content = buildDeterministicAuditSynthesisContentWithManifest(input);
   writeFileSync(artifactPath, content, "utf8");
   const gitLog = commitArtifactIfChanged(input.projectRoot, input.artifactPath);
   return [
