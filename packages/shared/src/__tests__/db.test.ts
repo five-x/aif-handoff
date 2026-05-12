@@ -7,6 +7,8 @@ import { eq } from "drizzle-orm";
 import { chatSessions, tasks } from "../schema.js";
 import { closeDb, createTestDb, getDb } from "../db.js";
 
+const CURRENT_DB_USER_VERSION = 26;
+
 function removeSqliteArtifacts(dbPath: string): void {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
     try {
@@ -422,7 +424,7 @@ describe("db", () => {
       expect(runtimeProfileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -476,7 +478,7 @@ describe("db", () => {
       migratedSqlite.close();
 
       expect(dirtyIndex).toBeUndefined();
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -546,7 +548,7 @@ describe("db", () => {
       expect(profileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -615,7 +617,7 @@ describe("db", () => {
         ]),
       );
       expect(warmupTable?.name).toBe("runtime_warmup_sessions");
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -662,7 +664,7 @@ describe("db", () => {
         "idx_runtime_warmup_active_lookup",
         "idx_runtime_warmup_expires",
       ]);
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -722,7 +724,7 @@ describe("db", () => {
         "idx_roadmap_batch_artifacts_task",
         "idx_roadmap_batches_project_alias",
       ]);
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -837,7 +839,7 @@ describe("db", () => {
         "trg_memory_items_fts_update",
       ]);
       expect(ftsRow?.item_id).toBe("memory-1");
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -881,7 +883,7 @@ describe("db", () => {
         "memory_lifecycle_events",
         "memory_usage_events",
       ]);
-      expect(userVersion).toBe(24);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);

@@ -1,7 +1,17 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeAdapter, RuntimeCapabilities, RuntimeRunInput } from "@aif/runtime";
+import type { AuditEvidenceUnit } from "@aif/shared";
 
 const queryMock = vi.fn();
 const logActivityMock = vi.fn();
+const createAuditEvidenceLoggerMock = vi.fn(() => async () => ({}));
+const persistAuditEvidencePayloadMock = vi.fn<
+  (taskId: string, projectRoot: string, payload: unknown) => AuditEvidenceUnit | null
+>(() => null);
 const incrementTaskTokenUsageMock = vi.fn();
 const persistRuntimeProfileLimitSnapshotMock = vi.fn();
 const clearRuntimeProfileLimitSnapshotMock = vi.fn();
@@ -33,6 +43,9 @@ const findActiveReadyRuntimeWarmupSessionMock = vi.fn<
 const getAppDefaultRuntimeProfileIdMock = vi.fn<
   (mode: "task" | "plan" | "review" | "chat") => string | null
 >(() => null);
+const runtimeAdapterOverride = vi.hoisted(() => ({
+  current: null as null | { runtimeId: string; adapter: RuntimeAdapter },
+}));
 
 interface MockTaskRow {
   id: string;
@@ -79,6 +92,31 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   getSessionInfo: vi.fn(async () => null),
   getSessionMessages: vi.fn(async () => []),
 }));
+
+vi.mock("@aif/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@aif/runtime")>();
+  return {
+    ...actual,
+    bootstrapRuntimeRegistry: vi.fn(
+      async (...args: Parameters<typeof actual.bootstrapRuntimeRegistry>) => {
+        const registry = await actual.bootstrapRuntimeRegistry(...args);
+        return new Proxy(registry, {
+          get(target, prop, receiver) {
+            if (prop === "resolveRuntime") {
+              return (runtimeId: string) => {
+                const override = runtimeAdapterOverride.current;
+                if (override?.runtimeId === runtimeId) return override.adapter;
+                return target.resolveRuntime(runtimeId);
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    ),
+  };
+});
 
 vi.mock("@aif/data", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@aif/data")>();
@@ -154,7 +192,9 @@ vi.mock("@aif/shared", async (importOriginal) => {
 
 vi.mock("../hooks.js", () => ({
   createActivityLogger: () => async () => ({}),
+  createAuditEvidenceLogger: createAuditEvidenceLoggerMock,
   createSubagentLogger: () => async () => ({}),
+  persistAuditEvidencePayload: persistAuditEvidencePayloadMock,
   logActivity: logActivityMock,
   getClaudePath: () => "claude",
 }));
@@ -175,10 +215,88 @@ vi.mock("../notifier.js", () => ({
     notifyProjectRuntimeLimitBroadcastMock(...args),
 }));
 
-const { RuntimeExecutionError } = await import("@aif/runtime");
+const { RuntimeExecutionError, RuntimeTransport, UsageReporting } = await import("@aif/runtime");
+const {
+  buildAuditEvidencePayload,
+  buildAuditEvidenceUnit,
+  computeAuditReportContentSha256,
+  readAuditEvidenceRuntimePayload,
+  validateAuditReportArtifact,
+} = await import("@aif/shared");
 const { executeSubagentQuery, resolveAdapterForTask } = await import("../subagentQuery.js");
 
+function initAuditGitFixture(): string {
+  const root = mkdtempSync(join(tmpdir(), "aif-subagent-audit-ledger-"));
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
+  writeFileSync(join(root, "README.md"), "# audit fixture\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  return root;
+}
+
+function auditGitSnapshot(root: string): { id: string; commit: string; tree: string } {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  return { id: `git:${commit}:${tree}`, commit, tree };
+}
+
+function withAuditManifest(input: {
+  body: string;
+  taskId: string;
+  artifactPath: string;
+  evidenceId: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): string {
+  const manifest = {
+    version: 1,
+    auditPlanId: `task:${input.taskId}`,
+    taskId: input.taskId,
+    artifactPath: input.artifactPath,
+    contentSha256: computeAuditReportContentSha256(input.body),
+    sourceSnapshot: { ...input.snapshot, dirty: false },
+    outcome: "validated_no_findings",
+    scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: [input.evidenceId] }],
+    riskHypotheses: [],
+    findings: [],
+    noFindingsClaims: [{ id: "nf-1", evidenceRefs: [input.evidenceId] }],
+    evidenceRefs: [input.evidenceId],
+  };
+  return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+}
+
+function auditRuntimeCapabilities(): RuntimeCapabilities {
+  return {
+    supportsResume: false,
+    supportsSessionFork: false,
+    supportsSessionList: false,
+    supportsAgentDefinitions: false,
+    supportsAifSkillCommands: false,
+    supportsRepositoryTools: true,
+    supportsStreaming: true,
+    supportsModelDiscovery: false,
+    supportsApprovals: false,
+    supportsCustomEndpoint: false,
+    usageReporting: UsageReporting.NONE,
+  };
+}
+
 beforeEach(() => {
+  runtimeAdapterOverride.current = null;
+  createAuditEvidenceLoggerMock.mockClear();
+  createAuditEvidenceLoggerMock.mockImplementation(() => async () => ({}));
+  persistAuditEvidencePayloadMock.mockReset();
+  persistAuditEvidencePayloadMock.mockReturnValue(null);
   expireStaleRuntimeWarmupSessionsMock.mockReset();
   expireStaleRuntimeWarmupSessionsMock.mockReturnValue(0);
   findActiveReadyRuntimeWarmupSessionMock.mockReset();
@@ -316,6 +434,143 @@ describe("executeSubagentQuery attribution", () => {
         HANDOFF_BRANCH_PREPARED: "1",
         HANDOFF_BRANCH_NAME: "feature/task-branch",
       }),
+    );
+  });
+
+  it("persists runtime audit evidence events with IDs report manifests can cite", async () => {
+    const taskId = "task-runtime-audit";
+    const root = initAuditGitFixture();
+    const snapshot = auditGitSnapshot(root);
+    const auditPayload = buildAuditEvidencePayload({
+      toolName: "Grep",
+      evidenceKind: "search",
+      paths: ["README.md"],
+      output: "README.md:1:# audit fixture\n",
+    });
+    const evidenceId = auditPayload.id ?? "";
+    expect(evidenceId).toMatch(/^ev_/);
+
+    const persistedUnits: AuditEvidenceUnit[] = [];
+    persistAuditEvidencePayloadMock.mockImplementation((persistedTaskId, _projectRoot, payload) => {
+      const parsed = readAuditEvidenceRuntimePayload(payload);
+      if (!parsed) return null;
+      const unit = buildAuditEvidenceUnit(
+        {
+          taskId: persistedTaskId,
+          auditPlanId: `task:${persistedTaskId}`,
+          sourceSnapshotId: snapshot.id,
+          scopeIds: ["README.md"],
+          riskHypothesisIds: [],
+        },
+        parsed,
+      );
+      persistedUnits.push(unit);
+      return unit;
+    });
+
+    const capabilities = auditRuntimeCapabilities();
+    const auditEvent = {
+      type: "audit:evidence",
+      timestamp: new Date().toISOString(),
+      level: "info" as const,
+      message: "Audit evidence captured",
+      data: { auditEvidence: auditPayload },
+    };
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-audit",
+        providerId: "test",
+        displayName: "Test Audit",
+        defaultTransport: RuntimeTransport.SDK,
+        supportedTransports: [RuntimeTransport.SDK],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      async run(input: RuntimeRunInput) {
+        input.execution?.onEvent?.(auditEvent);
+        return { outputText: "done", usage: null, events: [auditEvent] };
+      },
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-audit", adapter };
+    findTaskByIdMock.mockReturnValue({
+      id: taskId,
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+    });
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test-audit",
+        runtimeId: "test-audit",
+        providerId: "test",
+        transport: RuntimeTransport.SDK,
+        defaultModel: null,
+      } as never,
+      taskRuntimeProfileId: "profile-test-audit",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    const result = await executeSubagentQuery({
+      taskId,
+      projectRoot: root,
+      agentName: "audit-coordinator",
+      prompt: "run",
+      workflowKind: "implementer",
+    });
+
+    expect(result.resultText).toBe("done");
+    expect(persistAuditEvidencePayloadMock).toHaveBeenCalledWith(taskId, root, auditPayload);
+    expect(persistedUnits).toHaveLength(1);
+    expect(persistedUnits[0]?.id).toBe(auditPayload.id);
+
+    const artifactPath = "reports/audit.md";
+    const body = [
+      "# Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `README.md:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
+      "",
+    ].join("\n");
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      withAuditManifest({
+        body,
+        taskId,
+        artifactPath,
+        evidenceId,
+        snapshot,
+      }),
+      "utf8",
+    );
+
+    const validation = validateAuditReportArtifact({
+      text: withAuditManifest({
+        body,
+        taskId,
+        artifactPath,
+        evidenceId,
+        snapshot,
+      }),
+      projectRoot: root,
+      taskId,
+      expectedReportArtifactPath: artifactPath,
+      reportArtifactPaths: [artifactPath],
+      auditEvidenceUnits: persistedUnits,
+      requireLedgerEvidence: true,
+      requireProposedFix: false,
+    });
+
+    expect(validation.ok).toBe(true);
+    expect(validation.issues.map((issue) => issue.code)).not.toContain(
+      "missing_audit_evidence_ref",
     );
   });
 

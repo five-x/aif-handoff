@@ -61,8 +61,12 @@ vi.mock("../services/runtime.js", () => ({
 // Import after mocks
 const { tasksRouter } = await import("../routes/tasks.js");
 const { broadcast: mockBroadcast } = await import("../ws.js");
-const { createRoadmapBatchContract, listRoadmapBatchArtifacts, updateRoadmapBatchArtifactState } =
-  await import("@aif/data");
+const {
+  createRoadmapBatchContract,
+  listRoadmapBatchArtifacts,
+  listRoadmapBatchArtifactAttempts,
+  updateRoadmapBatchArtifactState,
+} = await import("@aif/data");
 
 function createApp() {
   const app = new Hono();
@@ -2317,6 +2321,77 @@ describe("tasks API", () => {
         },
       });
       expect(details.reworkBoundary.requestedAt).toBeTruthy();
+    });
+
+    it("should record manual_exception with justification for blocked audit artifacts", async () => {
+      const db = testDb.current;
+      db.insert(projects)
+        .values({ id: "project-manual-exception", name: "Manual Exception", rootPath: "/tmp/test" })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-manual-exception-1",
+          projectId: "project-manual-exception",
+          title: "Audit source limitation",
+          description: "Report artifact: audit/source.md",
+          taskIntent: "audit",
+          status: "blocked_external",
+          blockedReason: "invalid_artifact_content: repeated weak evidence",
+          manualReviewRequired: true,
+        })
+        .run();
+      const batch = createRoadmapBatchContract({
+        projectId: "project-manual-exception",
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["ev-manual-exception-1"],
+        artifacts: [
+          {
+            taskId: "ev-manual-exception-1",
+            role: "report",
+            artifactPath: "audit/source.md",
+          },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "ev-manual-exception-1",
+        state: "invalid",
+        failureFamily: "invalid_artifact_content",
+        reworkStatus: "manual_review_required",
+        validationDetails: { issues: ["low_quality_report_evidence"] },
+      });
+
+      const res = await app.request("/tasks/ev-manual-exception-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event: "manual_exception",
+          manualExceptionJustification: "External evidence source is unavailable.",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.manualReviewRequired).toBe(true);
+      expect(body.blockedReason).toContain("manual_exception");
+      const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      expect(artifact.state).toBe("manual_exception");
+      expect(artifact.failureFamily).toBe("manual_exception");
+      const details = JSON.parse(artifact.validationDetailsJson ?? "{}");
+      expect(details).toMatchObject({
+        action: "manual_exception",
+        justification: "External evidence source is unavailable.",
+        previousState: "invalid",
+        previousFailureFamily: "invalid_artifact_content",
+      });
+      const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+      expect(attempts.at(-1)).toMatchObject({
+        state: "manual_exception",
+        reworkStatus: "manual_exception",
+        failureFamily: "manual_exception",
+      });
     });
 
     it("should send plan_ready task back to planning on request_replanning", async () => {

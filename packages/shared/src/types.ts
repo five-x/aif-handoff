@@ -247,6 +247,7 @@ export const TASK_EVENTS = [
   "fast_fix",
   "approve_done",
   "request_changes",
+  "manual_exception",
   "retry_from_blocked",
 ] as const;
 
@@ -257,6 +258,7 @@ export interface TaskEventInput {
   event: TaskEvent;
   deletePlanFile?: boolean;
   commitOnApprove?: boolean;
+  manualExceptionJustification?: string;
 }
 
 /** PATCH /tasks/:id/position body */

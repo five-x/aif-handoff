@@ -5,11 +5,15 @@ import {
   assertCurrentBranch,
   ensureFeatureBranch,
   evaluateTaskCompletionEvidence,
+  extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
+  buildAuditFailureSignature,
   isBranchIsolationError,
   looksLikeFullPlanUpdate,
   getProjectConfig,
+  selectAuditArtifactFailureFamily,
   selectTaskCompletionAuditFailureFamily,
+  resolveAuditPlanId,
   restorePersistedBranch,
   type AuditFailureFamily,
   type TaskEvent,
@@ -20,6 +24,8 @@ import {
   findTaskById,
   getLatestHumanComment,
   appendTaskActivityLog,
+  listAuditEvidenceEvents,
+  listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
   setTaskFields,
@@ -33,6 +39,7 @@ interface EventHandlerInput {
   taskId: string;
   event: TaskEvent;
   deletePlanFile?: boolean;
+  manualExceptionJustification?: string;
 }
 
 export type EventHandlerResult =
@@ -41,10 +48,16 @@ export type EventHandlerResult =
 
 const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
   "invalid_artifact_content",
+  "invalid_artifact_contract",
+  "invalid_artifact_integrity",
+  "invalid_inventory_only",
+  "insufficient_substantive_evidence",
+  "source_inconclusive",
   "missing_artifact",
   "missing_tool_evidence",
   "rework_needed",
 ]);
+const AUDIT_REPORT_MANIFEST_BLOCK_PATTERN = /```audit-report-manifest\b/i;
 
 function restoreTaskBranchForMutation(
   task: TaskRow,
@@ -92,18 +105,65 @@ function assertTaskBranchPostRun(task: TaskRow, projectRoot: string): EventHandl
 function firstAuditFailureFamily(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
 ): AuditFailureFamily {
-  return selectTaskCompletionAuditFailureFamily(result.issues.map((entry) => entry.code));
+  const issueCodes = result.issues.map((entry) => entry.code);
+  return (
+    selectAuditArtifactFailureFamily({
+      issueCodes,
+      validationDetails: auditValidationDetails(result),
+      fallback: selectTaskCompletionAuditFailureFamily(issueCodes),
+    }) ?? "external_blocker"
+  );
 }
 
 function artifactStateForFailureFamily(
   family: AuditFailureFamily,
-): "invalid" | "missing" | "synthesis_not_ready" | "external_blocked" {
+  options: { terminal?: boolean } = {},
+):
+  | "invalid"
+  | "missing"
+  | "synthesis_not_ready"
+  | "external_blocked"
+  | "source_inconclusive"
+  | "terminal_inconclusive"
+  | "manual_exception" {
   if (family === "missing_artifact") return "missing";
   if (family === "synthesis_not_ready") return "synthesis_not_ready";
+  if (family === "inconclusive_batch_evidence") return "terminal_inconclusive";
+  if (family === "manual_exception") return "manual_exception";
+  if (
+    options.terminal &&
+    (family === "source_inconclusive" || family === "insufficient_substantive_evidence")
+  ) {
+    return "source_inconclusive";
+  }
   if (family === "external_blocker" || family === "manual_review_required") {
     return "external_blocked";
   }
   return "invalid";
+}
+
+function auditValidationDetails(result: ReturnType<typeof evaluateTaskCompletionEvidence>) {
+  return {
+    issues: result.issues,
+    evidence: result.evidence,
+  };
+}
+
+function repeatedAuditFailureCount(input: {
+  artifact: RoadmapBatchArtifactRow;
+  family: AuditFailureFamily;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+}): number {
+  const signature = buildAuditFailureSignature({
+    role: input.artifact.role,
+    failureFamily: input.family,
+    validationDetails: auditValidationDetails(input.result),
+  });
+  if (!signature) return 0;
+  return listRoadmapBatchArtifactAttempts(input.artifact.id).filter(
+    (attempt) =>
+      attempt.failureSignature === signature && attempt.reworkStatus === "rework_requested",
+  ).length;
 }
 
 function allowedEvidenceArtifactPathsFor(auditArtifact: RoadmapBatchArtifactRow | undefined) {
@@ -122,6 +182,50 @@ function auditArtifactRoleFor(
     : null;
 }
 
+function auditEvidenceForArtifact(
+  task: TaskRow,
+  auditArtifact: RoadmapBatchArtifactRow | undefined,
+  projectRoot?: string,
+) {
+  if (!auditArtifact) return [];
+  const evidenceRefs = projectRoot
+    ? extractAuditReportManifestEvidenceRefs(
+        readAuditArtifactText(projectRoot, auditArtifact) ?? "",
+      )
+    : [];
+  return listAuditEvidenceEvents({
+    taskId: task.id,
+    auditPlanId: resolveAuditPlanId({ taskId: task.id, roadmapBatchId: auditArtifact.batchId }),
+    evidenceIds: evidenceRefs.length > 0 ? evidenceRefs : undefined,
+    limit: evidenceRefs.length > 0 ? Math.max(1, evidenceRefs.length) : undefined,
+  });
+}
+
+function readAuditArtifactText(
+  projectRoot: string,
+  auditArtifact: RoadmapBatchArtifactRow | undefined,
+): string | null {
+  if (!auditArtifact) return null;
+  try {
+    const reportPath = resolve(projectRoot, auditArtifact.artifactPath);
+    return existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+function auditArtifactRequiresLedgerEvidence(input: {
+  auditArtifact: RoadmapBatchArtifactRow | undefined;
+  projectRoot: string;
+  auditEvidenceUnits: unknown[];
+}): boolean {
+  if (!input.auditArtifact) return false;
+  if (input.auditEvidenceUnits.length > 0) return true;
+  return AUDIT_REPORT_MANIFEST_BLOCK_PATTERN.test(
+    readAuditArtifactText(input.projectRoot, input.auditArtifact) ?? "",
+  );
+}
+
 function excerptComment(message: string): string {
   const normalized = message.replace(/\s+/g, " ").trim();
   return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
@@ -135,6 +239,8 @@ function markReportArtifactReworkRequested(task: TaskRow, auditArtifact: Roadmap
     taskId: task.id,
     state: "expected",
     failureFamily: "rework_needed",
+    reworkStatus: "rework_requested",
+    createAttemptBoundary: true,
     validationDetails: {
       reworkBoundary: {
         action: "request_changes",
@@ -155,6 +261,80 @@ function markReportArtifactReworkRequested(task: TaskRow, auditArtifact: Roadmap
   });
 }
 
+function parseJsonOrRaw(raw: string | null | undefined): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+function handleManualException(input: EventHandlerInput): EventHandlerResult {
+  const task = findTaskById(input.taskId);
+  if (!task) {
+    return { ok: false, status: 404, error: "Task not found" };
+  }
+  const justification = input.manualExceptionJustification?.trim() ?? "";
+  if (!justification) {
+    return {
+      ok: false,
+      status: 400,
+      error: "manual_exception requires a non-empty justification",
+    };
+  }
+  const auditArtifact = findRoadmapBatchArtifactByTaskId(task.id);
+  if (!auditArtifact) {
+    return { ok: false, status: 409, error: "manual_exception requires an audit artifact" };
+  }
+  if (task.status !== "blocked_external" && !task.manualReviewRequired) {
+    return {
+      ok: false,
+      status: 409,
+      error: "manual_exception is only allowed for blocked or manual-review audit artifacts",
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  updateRoadmapBatchArtifactState({
+    taskId: task.id,
+    state: "manual_exception",
+    failureFamily: "manual_exception",
+    reworkStatus: "manual_exception",
+    createAttemptBoundary: true,
+    validationDetails: {
+      action: "manual_exception",
+      justification,
+      previousState: auditArtifact.state,
+      previousFailureFamily: auditArtifact.failureFamily,
+      previousValidationDetails: parseJsonOrRaw(auditArtifact.validationDetailsJson),
+    },
+    branchName: task.branchName ?? auditArtifact.branchName,
+    worktreePath: task.worktreePath ?? auditArtifact.worktreePath,
+    projectRoot: task.worktreePath ?? auditArtifact.projectRoot,
+  });
+  setTaskFields(task.id, {
+    status: "blocked_external",
+    blockedReason: `manual_exception: ${justification}`,
+    blockedFromStatus: task.blockedFromStatus ?? task.status,
+    retryAfter: null,
+    retryCount: task.retryCount ?? 0,
+    reworkRequested: false,
+    manualReviewRequired: true,
+    lastHeartbeatAt: nowIso,
+    updatedAt: nowIso,
+  });
+  appendTaskActivityLog(
+    task.id,
+    `[${nowIso}] Manual audit artifact exception recorded: ${justification}`,
+  );
+  const updated = findTaskById(task.id);
+  if (!updated) {
+    return { ok: false, status: 404, error: "Task not found after manual exception" };
+  }
+  return { ok: true, task: updated, broadcastType: "task:moved" };
+}
+
 function blockTaskForCompletionEvidence(
   task: TaskRow,
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
@@ -172,24 +352,43 @@ function blockTaskForCompletionEvidence(
   const shouldReturnToRework =
     Boolean(auditArtifact) &&
     Boolean(options.allowAuditRework) &&
-    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(failureFamily);
+    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(failureFamily) &&
+    (auditArtifact
+      ? repeatedAuditFailureCount({ artifact: auditArtifact, family: failureFamily, result }) === 0
+      : true);
+  const repeatedSameFailure =
+    Boolean(auditArtifact) &&
+    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(failureFamily) &&
+    !shouldReturnToRework;
   const blockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
   const terminalBlockedReason = auditArtifact
-    ? `${failureFamily}: ${blockedReason}`
+    ? `${failureFamily}: ${
+        repeatedSameFailure
+          ? `${blockedReason} Manual review required: repeated same audit artifact failure signature.`
+          : blockedReason
+      }`
     : blockedReason;
 
   if (auditArtifact) {
+    const state = artifactStateForFailureFamily(failureFamily, { terminal: !shouldReturnToRework });
     updateRoadmapBatchArtifactState({
       taskId: task.id,
-      state: artifactStateForFailureFamily(failureFamily),
+      state,
       failureFamily,
+      attemptBoundaryId: auditArtifact.attemptBoundaryId,
+      reworkStatus: shouldReturnToRework
+        ? "rework_requested"
+        : state === "terminal_inconclusive"
+          ? "terminal_inconclusive"
+          : "manual_review_required",
+      createAttemptBoundary: shouldReturnToRework,
       validationDetails: {
         action: options.action ?? "approve_done",
-        issues: result.issues,
-        evidence: result.evidence,
+        ...auditValidationDetails(result),
       },
+      contentSha: result.evidence.auditReportValidation.artifactSha256,
       branchName: task.branchName ?? auditArtifact.branchName,
       worktreePath: task.worktreePath ?? auditArtifact.worktreePath,
       projectRoot: options.projectRoot ?? auditArtifact.projectRoot,
@@ -380,10 +579,12 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
           expectedReportArtifactPath: auditArtifact?.artifactPath,
           allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
           auditArtifactRole: auditArtifactRoleFor(auditArtifact),
+          roadmapBatchId: auditArtifact?.batchId ?? null,
         },
         projectRoot: executionRoot,
         branchIsolationReason: branchError.error,
         phase: "pre_implementation",
+        auditEvidenceUnits: auditEvidenceForArtifact(task, auditArtifact, executionRoot),
       });
       return blockTaskForCompletionEvidence(task, result, {
         blockedFromStatus: task.status,
@@ -399,9 +600,11 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         expectedReportArtifactPath: auditArtifact?.artifactPath,
         allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
         auditArtifactRole: auditArtifactRoleFor(auditArtifact),
+        roadmapBatchId: auditArtifact?.batchId ?? null,
       },
       projectRoot: executionRoot,
       phase: "pre_implementation",
+      auditEvidenceUnits: auditEvidenceForArtifact(task, auditArtifact, executionRoot),
     });
     if (!result.ok) {
       return blockTaskForCompletionEvidence(task, result, {
@@ -420,6 +623,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     }
     const executionRoot = task.worktreePath ?? project.rootPath;
     const auditArtifact = findRoadmapBatchArtifactByTaskId(task.id);
+    const auditEvidenceUnits = auditEvidenceForArtifact(task, auditArtifact, executionRoot);
     const branchError = restoreTaskBranchForMutation(task, executionRoot);
     if (branchError && !branchError.ok) {
       const result = evaluateTaskCompletionEvidence({
@@ -428,9 +632,16 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
           expectedReportArtifactPath: auditArtifact?.artifactPath,
           allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
           auditArtifactRole: auditArtifactRoleFor(auditArtifact),
+          roadmapBatchId: auditArtifact?.batchId ?? null,
         },
         projectRoot: executionRoot,
         branchIsolationReason: branchError.error,
+        auditEvidenceUnits,
+        requireAuditLedgerEvidence: auditArtifactRequiresLedgerEvidence({
+          auditArtifact,
+          projectRoot: executionRoot,
+          auditEvidenceUnits,
+        }),
       });
       return blockTaskForCompletionEvidence(task, result, {
         auditArtifact,
@@ -445,8 +656,15 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         expectedReportArtifactPath: auditArtifact?.artifactPath,
         allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
         auditArtifactRole: auditArtifactRoleFor(auditArtifact),
+        roadmapBatchId: auditArtifact?.batchId ?? null,
       },
       projectRoot: executionRoot,
+      auditEvidenceUnits,
+      requireAuditLedgerEvidence: auditArtifactRequiresLedgerEvidence({
+        auditArtifact,
+        projectRoot: executionRoot,
+        auditEvidenceUnits,
+      }),
     });
     if (!result.ok) {
       return blockTaskForCompletionEvidence(task, result, {
@@ -460,10 +678,13 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         taskId: task.id,
         state: "valid",
         failureFamily: null,
+        reworkStatus: "accepted",
+        attemptBoundaryId: auditArtifact.attemptBoundaryId,
         validationDetails: {
           action: "approve_done",
           evidence: result.evidence,
         },
+        contentSha: result.evidence.auditReportValidation.artifactSha256,
         branchName: task.branchName ?? auditArtifact.branchName,
         worktreePath: task.worktreePath ?? auditArtifact.worktreePath,
         projectRoot: executionRoot,
@@ -608,6 +829,9 @@ function handleAcceptExistingPlan(input: EventHandlerInput): EventHandlerResult 
 }
 
 export async function handleTaskEvent(input: EventHandlerInput): Promise<EventHandlerResult> {
+  if (input.event === "manual_exception") {
+    return handleManualException(input);
+  }
   if (input.event === "fast_fix") {
     return await handleFastFix(input);
   }

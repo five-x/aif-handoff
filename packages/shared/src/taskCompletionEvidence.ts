@@ -12,8 +12,10 @@ import {
 } from "./auditSynthesisClassifier.js";
 import {
   validateAuditReportArtifact,
+  type AuditReportValidationIssueCode,
   type AuditReportValidationResult,
 } from "./auditReportValidator.js";
+import type { AuditEvidenceUnit } from "./auditEvidenceLedger.js";
 import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
 
 export type TaskCompletionIssueCode =
@@ -30,7 +32,8 @@ export type TaskCompletionIssueCode =
   | "low_quality_report_evidence"
   | "audit_inconclusive"
   | "branch_isolation"
-  | "manual_review_required";
+  | "manual_review_required"
+  | AuditReportValidationIssueCode;
 
 export interface TaskCompletionEvidenceTask {
   id: string;
@@ -48,6 +51,8 @@ export interface TaskCompletionEvidenceTask {
   expectedReportArtifactPath?: string | null;
   allowedEvidenceArtifactPaths?: string[] | null;
   auditArtifactRole?: "report" | "synthesis" | null;
+  roadmapBatchId?: string | null;
+  auditPlanId?: string | null;
 }
 
 export interface TaskCompletionEvidenceIssue {
@@ -95,6 +100,8 @@ export interface TaskCompletionEvidenceInput {
   branchIsolationReason?: string | null;
   requireManualReview?: boolean;
   phase?: TaskCompletionEvidencePhase;
+  auditEvidenceUnits?: AuditEvidenceUnit[];
+  requireAuditLedgerEvidence?: boolean;
 }
 
 const RISKY_TASK_PATTERN =
@@ -1123,6 +1130,18 @@ function issue(code: TaskCompletionIssueCode, message: string): TaskCompletionEv
   return { code, message };
 }
 
+function isLedgerOrManifestValidationIssue(code: string): boolean {
+  return (
+    code === "missing_report_manifest" ||
+    code === "invalid_report_manifest" ||
+    code === "unsupported_report_manifest_version" ||
+    code === "missing_report_manifest_fields" ||
+    code.startsWith("manifest_") ||
+    code === "missing_audit_evidence_ref" ||
+    code.startsWith("audit_evidence_")
+  );
+}
+
 function formatPathExamples(paths: string[], limit = 8): string {
   const shown = paths.slice(0, limit).map((path) => `\`${path}\``);
   const remaining = paths.length - shown.length;
@@ -1205,23 +1224,35 @@ export function evaluateTaskCompletionEvidence(
   const auditReportValidation = validateAuditReportArtifact({
     text: reportText,
     projectRoot,
+    taskId: task.id,
+    roadmapBatchId: task.roadmapBatchId,
+    roadmapAlias: task.roadmapAlias,
+    auditPlanId: task.auditPlanId,
     taskDescription: task.description,
     reportArtifactPaths: reportArtifactFiles,
+    expectedReportArtifactPath,
     allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
     requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
+    auditEvidenceUnits: input.auditEvidenceUnits,
+    requireLedgerEvidence: input.requireAuditLedgerEvidence,
   });
   const auditSynthesisTask = task.auditArtifactRole === "synthesis";
   const auditSynthesisOutcome =
     riskyTask && auditSynthesisTask && reportText.trim()
       ? classifyAuditSynthesisOutput({ text: reportText, projectRoot })
       : null;
+  const ledgerOrManifestBlockingIssues = auditReportValidation.issues.filter((entry) =>
+    isLedgerOrManifestValidationIssue(entry.code),
+  );
   const validatorEvidenceBlockingIssues = auditReportValidation.issues.filter(
     (entry) =>
       ["invalid_line_reference", "missing_declared_scope_root", "missing_scope_coverage"].includes(
         entry.code,
       ) ||
       (entry.code === "missing_substantive_evidence" &&
-        auditReportValidation.scopeRoots.length > 0),
+        (auditReportValidation.scopeRoots.length > 0 ||
+          auditReportValidation.sourceClassification === "inventory_only_invalid")) ||
+      ledgerOrManifestBlockingIssues.some((issue) => issue.code === entry.code),
   );
   const legacySubstantiveReportEvidence = hasSubstantiveReportEvidence({
     text: reportText,
@@ -1342,6 +1373,9 @@ export function evaluateTaskCompletionEvidence(
     if (invalidEvidenceMessage) {
       issues.push(issue("invalid_or_missing_file_references", invalidEvidenceMessage));
     }
+    for (const validationIssue of ledgerOrManifestBlockingIssues) {
+      issues.push(issue(validationIssue.code, validationIssue.message));
+    }
     if (
       riskyTask &&
       reportArtifactFiles.length > 0 &&
@@ -1361,11 +1395,21 @@ export function evaluateTaskCompletionEvidence(
         ),
       );
     }
-    if (riskyTask && reportQualityIssues.length > 0) {
+    if (
+      (riskyTask && reportQualityIssues.length > 0) ||
+      ledgerOrManifestBlockingIssues.length > 0
+    ) {
       issues.push(
         issue(
           "low_quality_report_evidence",
-          `Audit/review/discovery report artifact contains low-quality or unverified evidence: ${reportQualityIssues.join(" ")}`,
+          `Audit/review/discovery report artifact contains low-quality or unverified evidence: ${[
+            ...new Set([
+              ...reportQualityIssues,
+              ...ledgerOrManifestBlockingIssues.map((entry) => entry.message),
+            ]),
+          ]
+            .sort()
+            .join(" ")}`,
         ),
       );
     }

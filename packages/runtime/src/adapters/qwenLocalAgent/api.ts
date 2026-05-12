@@ -1,6 +1,11 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
-import { redactProviderText, redactProviderTextForLogs } from "@aif/shared";
+import {
+  AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
+  buildAuditEvidencePayload,
+  redactProviderText,
+  redactProviderTextForLogs,
+} from "@aif/shared";
 import { RuntimeExecutionError } from "../../errors.js";
 import { buildToolUseEvents } from "../../toolEvents.js";
 import { classifyQwenLocalAgentRuntimeError } from "./errors.js";
@@ -280,6 +285,55 @@ function emitToolResult(input, events, toolCall, result) {
     },
   });
 }
+function emitAuditEvidenceResult(input, events, toolCall, args, result) {
+  const toolName = sanitizeQwenToolNameForLog(toolCall.function.name);
+  let evidenceKind = null;
+  let evidenceGrade = undefined;
+  let paths = [];
+  let command = null;
+  if (toolName === "read_file") {
+    evidenceKind = "file_read";
+    evidenceGrade = "substantive";
+    if (typeof args.path === "string") paths = [args.path];
+  } else if (toolName === "list_files") {
+    evidenceKind = "search";
+    evidenceGrade = "discovery";
+    if (typeof args.path === "string") paths = [args.path];
+  } else if (toolName === "run_shell") {
+    evidenceKind = "shell_command";
+    command = {
+      command: typeof args.command === "string" ? args.command : "",
+      args: Array.isArray(args.args) ? args.args.filter((entry) => typeof entry === "string") : [],
+      cwd: typeof args.cwd === "string" ? args.cwd : null,
+    };
+    if (typeof args.cwd === "string") paths = [args.cwd];
+  } else if (toolName === "git_status") {
+    evidenceKind = "shell_command";
+    evidenceGrade = "discovery";
+    command = { command: "git status", args: ["--short", "--branch"], cwd: null };
+  }
+  if (!evidenceKind) return;
+  const output = [result.output, result.error ? `error:\n${result.error}` : ""]
+    .filter(Boolean)
+    .join("\n");
+  emitEvent(input, events, {
+    type: AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
+    timestamp: new Date().toISOString(),
+    level: result.ok ? "info" : "warn",
+    message: `${toolName} audit evidence captured`,
+    data: {
+      auditEvidence: buildAuditEvidencePayload({
+        toolName,
+        evidenceKind,
+        evidenceGrade,
+        paths,
+        command,
+        exitCode: result.exitCode ?? null,
+        output,
+      }),
+    },
+  });
+}
 function repeatedToolCallResult(toolName, repeatedCount, repeatedToolCallLimit) {
   const safeToolName = sanitizeQwenToolNameForLog(toolName);
   return {
@@ -392,6 +446,7 @@ export async function runQwenLocalAgentApi(input, logger) {
           };
           emitToolUse(input, events, toolCall, args);
           emitToolResult(input, events, toolCall, parseResult);
+          emitAuditEvidenceResult(input, events, toolCall, args, parseResult);
           messages.push({
             role: "tool",
             tool_call_id: toolCall.id,
@@ -429,6 +484,7 @@ export async function runQwenLocalAgentApi(input, logger) {
             : 1;
         }
         emitToolResult(input, events, toolCall, result);
+        emitAuditEvidenceResult(input, events, toolCall, args, result);
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,

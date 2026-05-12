@@ -43,6 +43,8 @@ import {
   runtimeWarmupSessions,
   roadmapBatches,
   roadmapBatchArtifacts,
+  roadmapBatchArtifactAttempts,
+  auditEvidenceEvents,
   codexSessions,
   codexSessionFiles,
   codexLimitHeads,
@@ -84,6 +86,16 @@ import {
   type ChatSessionRow,
   type ChatMessageRow,
   type ChatMessageAttachment,
+  type AuditEvidenceCommandMetadata,
+  type AuditEvidenceParsedSummary,
+  type AuditEvidenceUnit,
+  type AuditEvidenceKind,
+  type AuditEvidenceGrade,
+  type AuditEvidenceRedactionStatus,
+  buildAuditFailureSignature,
+  selectAuditArtifactFailureFamily,
+  type AuditArtifactReworkStatus,
+  type AuditFailureFamily,
 } from "@aif/shared";
 import { getDb } from "@aif/shared/server";
 
@@ -108,6 +120,8 @@ export type RuntimeProfileRow = typeof runtimeProfiles.$inferSelect;
 export type RuntimeWarmupSessionRow = typeof runtimeWarmupSessions.$inferSelect;
 export type RoadmapBatchRow = typeof roadmapBatches.$inferSelect;
 export type RoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferSelect;
+export type RoadmapBatchArtifactAttemptRow = typeof roadmapBatchArtifactAttempts.$inferSelect;
+export type AuditEvidenceEventRow = typeof auditEvidenceEvents.$inferSelect;
 export type CodexSessionIndexRow = typeof codexSessions.$inferSelect;
 export type CodexSessionFileIndexRow = typeof codexSessionFiles.$inferSelect;
 export type CodexLimitHeadIndexRow = typeof codexLimitHeads.$inferSelect;
@@ -1978,6 +1992,112 @@ export function createDbUsageSink(options: CreateDbUsageSinkOptions = {}): DbUsa
 }
 
 // ---------------------------------------------------------------------------
+// Audit evidence ledger
+// ---------------------------------------------------------------------------
+
+export interface ListAuditEvidenceEventsOptions {
+  taskId?: string | null;
+  auditPlanId?: string | null;
+  sourceSnapshotId?: string | null;
+  evidenceIds?: string[] | null;
+  limit?: number;
+}
+
+function parseJsonObject<T>(raw: string | null | undefined): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function toAuditEvidenceUnit(row: AuditEvidenceEventRow): AuditEvidenceUnit {
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    auditPlanId: row.auditPlanId,
+    sourceSnapshotId: row.sourceSnapshotId,
+    toolName: row.toolName,
+    evidenceKind: row.evidenceKind as AuditEvidenceKind,
+    evidenceGrade: row.evidenceGrade as AuditEvidenceGrade,
+    scopeIds: parseJsonStringArray(row.scopeIdsJson),
+    riskHypothesisIds: parseJsonStringArray(row.riskHypothesisIdsJson),
+    pathHashes: parseJsonStringArray(row.pathHashesJson),
+    pathRangeHashes: parseJsonStringArray(row.pathRangeHashesJson),
+    command: parseJsonObject<AuditEvidenceCommandMetadata>(row.commandJson),
+    exitCode: row.exitCode ?? null,
+    outputSha256: row.outputSha256 ?? null,
+    outputPreview: row.outputPreview ?? null,
+    outputPreviewTruncated: row.outputPreviewTruncated,
+    parsedSummary: parseJsonObject<AuditEvidenceParsedSummary>(row.parsedSummaryJson),
+    redactionStatus: row.redactionStatus as AuditEvidenceRedactionStatus,
+    createdAt: row.createdAt,
+  };
+}
+
+export function appendAuditEvidenceEvent(unit: AuditEvidenceUnit): AuditEvidenceUnit {
+  getDb()
+    .insert(auditEvidenceEvents)
+    .values({
+      id: unit.id,
+      taskId: unit.taskId,
+      auditPlanId: unit.auditPlanId,
+      sourceSnapshotId: unit.sourceSnapshotId,
+      toolName: unit.toolName,
+      evidenceKind: unit.evidenceKind,
+      evidenceGrade: unit.evidenceGrade,
+      scopeIdsJson: serializeJson(unit.scopeIds),
+      riskHypothesisIdsJson: serializeJson(unit.riskHypothesisIds),
+      pathHashesJson: serializeJson(unit.pathHashes),
+      pathRangeHashesJson: serializeJson(unit.pathRangeHashes),
+      commandJson: unit.command ? serializeJson(unit.command) : null,
+      exitCode: unit.exitCode,
+      outputSha256: unit.outputSha256,
+      outputPreview: unit.outputPreview,
+      outputPreviewTruncated: unit.outputPreviewTruncated,
+      parsedSummaryJson: unit.parsedSummary ? serializeJson(unit.parsedSummary) : null,
+      redactionStatus: unit.redactionStatus,
+      createdAt: unit.createdAt,
+    })
+    .onConflictDoNothing()
+    .run();
+
+  const row = getDb()
+    .select()
+    .from(auditEvidenceEvents)
+    .where(eq(auditEvidenceEvents.id, unit.id))
+    .get();
+  return row ? toAuditEvidenceUnit(row) : unit;
+}
+
+export function listAuditEvidenceEvents(
+  options: ListAuditEvidenceEventsOptions = {},
+): AuditEvidenceUnit[] {
+  const conditions: SQL[] = [];
+  if (options.taskId) conditions.push(eq(auditEvidenceEvents.taskId, options.taskId));
+  if (options.auditPlanId) {
+    conditions.push(eq(auditEvidenceEvents.auditPlanId, options.auditPlanId));
+  }
+  if (options.sourceSnapshotId) {
+    conditions.push(eq(auditEvidenceEvents.sourceSnapshotId, options.sourceSnapshotId));
+  }
+  const evidenceIds = [...new Set(options.evidenceIds ?? [])].filter(Boolean);
+  if (evidenceIds.length > 0) {
+    conditions.push(inArray(auditEvidenceEvents.id, evidenceIds));
+  }
+
+  return getDb()
+    .select()
+    .from(auditEvidenceEvents)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(auditEvidenceEvents.createdAt))
+    .limit(Math.max(1, Math.min(options.limit ?? 500, 1_000)))
+    .all()
+    .map(toAuditEvidenceUnit);
+}
+
+// ---------------------------------------------------------------------------
 // Server-owned memory repository
 // ---------------------------------------------------------------------------
 
@@ -2695,22 +2815,30 @@ export type RoadmapBatchArtifactState =
   | "invalid"
   | "missing"
   | "synthesis_not_ready"
-  | "external_blocked";
-export type RoadmapBatchFailureFamily =
-  | "invalid_artifact_content"
-  | "inconclusive_batch_evidence"
-  | "missing_artifact"
-  | "missing_tool_evidence"
-  | "synthesis_not_ready"
-  | "external_blocker"
-  | "manual_review_required"
-  | "rework_needed";
+  | "external_blocked"
+  | "source_inconclusive"
+  | "terminal_inconclusive"
+  | "manual_exception";
+export type RoadmapBatchFailureFamily = AuditFailureFamily;
 
 const SYNTHESIS_SOURCE_TERMINAL_STATES = new Set<string>([
   "valid",
   "invalid",
   "missing",
   "external_blocked",
+]);
+
+const SYNTHESIS_SOURCE_TERMINAL_ATTEMPT_STATES = new Set<string>([
+  "source_inconclusive",
+  "terminal_inconclusive",
+  "manual_exception",
+  "external_blocked",
+]);
+
+const SYNTHESIS_SOURCE_TERMINAL_REWORK_STATUSES = new Set<string>([
+  "manual_review_required",
+  "terminal_inconclusive",
+  "manual_exception",
 ]);
 
 export interface RoadmapBatchArtifactInput {
@@ -2770,13 +2898,119 @@ function serializeJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+const TRUSTED_AUDIT_SOURCE_CLASSIFICATIONS = new Set([
+  "validated_findings_present",
+  "validated_no_findings",
+]);
+
+function parseValidationDetails(raw: string | null | undefined): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function readAuditSourceClassification(value: unknown): string | null {
+  if (!isObjectRecord(value)) return null;
+  const direct = value.sourceClassification;
+  if (typeof direct === "string") return direct;
+  const auditReportValidation = value.auditReportValidation;
+  if (isObjectRecord(auditReportValidation)) {
+    const nested = auditReportValidation.sourceClassification;
+    if (typeof nested === "string") return nested;
+  }
+  const evidence = value.evidence;
+  if (isObjectRecord(evidence)) {
+    return readAuditSourceClassification(evidence);
+  }
+  return null;
+}
+
+function hasValidAuditManifestStatus(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  const auditReportValidation = value.auditReportValidation;
+  if (
+    isObjectRecord(auditReportValidation) &&
+    auditReportValidation.manifestStatus === "valid"
+  ) {
+    return true;
+  }
+  if (value.manifestStatus === "valid") return true;
+  const evidence = value.evidence;
+  if (isObjectRecord(evidence)) return hasValidAuditManifestStatus(evidence);
+  return false;
+}
+
+function hasTrustedAuditSourceClassification(artifact: RoadmapBatchArtifactRow): boolean {
+  const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
+  const classification = readAuditSourceClassification(validationDetails);
+  if (!classification || !TRUSTED_AUDIT_SOURCE_CLASSIFICATIONS.has(classification)) return false;
+  if (classification === "validated_findings_present") return true;
+  return hasValidAuditManifestStatus(validationDetails);
+}
+
+function roadmapArtifactCountsAsValid(artifact: RoadmapBatchArtifactRow): boolean {
+  if (artifact.state !== "valid") return false;
+  if (artifact.role === "synthesis") return true;
+  if (artifact.role === "report") return hasTrustedAuditSourceClassification(artifact);
+  return false;
+}
+
+function roadmapArtifactHasAttemptHistory(artifact: RoadmapBatchArtifactRow): boolean {
+  return (
+    (artifact.attemptNumber ?? 0) > 0 ||
+    artifact.attemptBoundaryId != null ||
+    artifact.failureSignature != null
+  );
+}
+
+function latestRoadmapArtifactAttempt(
+  artifact: RoadmapBatchArtifactRow,
+): RoadmapBatchArtifactAttemptRow | undefined {
+  return getDb()
+    .select()
+    .from(roadmapBatchArtifactAttempts)
+    .where(eq(roadmapBatchArtifactAttempts.artifactId, artifact.id))
+    .orderBy(desc(roadmapBatchArtifactAttempts.attemptNumber))
+    .limit(1)
+    .get();
+}
+
+function roadmapArtifactHasCurrentTerminalAttempt(artifact: RoadmapBatchArtifactRow): boolean {
+  const attempt = latestRoadmapArtifactAttempt(artifact);
+  if (!attempt) return false;
+  if (!SYNTHESIS_SOURCE_TERMINAL_REWORK_STATUSES.has(attempt.reworkStatus)) return false;
+  return (
+    attempt.state === artifact.state &&
+    attempt.attemptBoundaryId === artifact.attemptBoundaryId &&
+    attempt.failureSignature === artifact.failureSignature
+  );
+}
+
+function roadmapSourceArtifactReadyForSynthesis(artifact: RoadmapBatchArtifactRow): boolean {
+  if (artifact.role === "synthesis") return true;
+  if (!roadmapArtifactHasAttemptHistory(artifact)) {
+    return SYNTHESIS_SOURCE_TERMINAL_STATES.has(artifact.state);
+  }
+  if (roadmapArtifactCountsAsValid(artifact)) return true;
+  if (SYNTHESIS_SOURCE_TERMINAL_ATTEMPT_STATES.has(artifact.state)) return true;
+  if (roadmapArtifactHasCurrentTerminalAttempt(artifact)) return true;
+  return (
+    artifact.state === "invalid" &&
+    (artifact.failureFamily === "manual_review_required" ||
+      artifact.failureFamily === "external_blocker")
+  );
+}
+
 function summarizeRoadmapArtifacts(
   batch: RoadmapBatchRow,
   artifacts: RoadmapBatchArtifactRow[],
 ): RoadmapBatchSummary {
   const counts = {
     expected: artifacts.filter((artifact) => artifact.state === "expected").length,
-    valid: artifacts.filter((artifact) => artifact.state === "valid").length,
+    valid: artifacts.filter(roadmapArtifactCountsAsValid).length,
     invalid: artifacts.filter((artifact) => artifact.state === "invalid").length,
     missing: artifacts.filter((artifact) => artifact.state === "missing").length,
     synthesisNotReady: artifacts.filter((artifact) => artifact.state === "synthesis_not_ready")
@@ -2787,7 +3021,7 @@ function summarizeRoadmapArtifacts(
   const nonSynthesis = artifacts.filter((artifact) => artifact.role !== "synthesis");
   const synthesisReady =
     nonSynthesis.length > 0 &&
-    nonSynthesis.every((artifact) => SYNTHESIS_SOURCE_TERMINAL_STATES.has(artifact.state));
+    nonSynthesis.every((artifact) => roadmapSourceArtifactReadyForSynthesis(artifact));
   const artifactFailureFamily = synthesisReady
     ? artifacts.find(
         (artifact) =>
@@ -2829,7 +3063,7 @@ function computeRoadmapBatchStatus(input: {
 }): { status: string; failureFamily: string | null } {
   const { artifacts, synthesisReady } = input;
   const synthesisArtifact = artifacts.find((artifact) => artifact.role === "synthesis");
-  if (synthesisReady && synthesisArtifact?.state === "valid") {
+  if (synthesisReady && synthesisArtifact && roadmapArtifactCountsAsValid(synthesisArtifact)) {
     return { status: "complete", failureFamily: null };
   }
   if (
@@ -2843,13 +3077,19 @@ function computeRoadmapBatchStatus(input: {
     return { status: "external_blocked", failureFamily: "external_blocker" };
   }
   const firstFailure = artifacts.find((artifact) => artifact.failureFamily)?.failureFamily ?? null;
+  if (artifacts.some((artifact) => artifact.state === "terminal_inconclusive")) {
+    return {
+      status: "rework_needed",
+      failureFamily: firstFailure ?? "inconclusive_batch_evidence",
+    };
+  }
   if (artifacts.some((artifact) => artifact.state === "invalid")) {
     return { status: "rework_needed", failureFamily: firstFailure ?? "invalid_artifact_content" };
   }
   if (artifacts.some((artifact) => artifact.state === "missing")) {
     return { status: "rework_needed", failureFamily: firstFailure ?? "missing_artifact" };
   }
-  if (artifacts.length > 0 && artifacts.every((artifact) => artifact.state === "valid")) {
+  if (artifacts.length > 0 && artifacts.every(roadmapArtifactCountsAsValid)) {
     return { status: "complete", failureFamily: null };
   }
   if (artifacts.some((artifact) => artifact.state === "synthesis_not_ready")) {
@@ -2979,8 +3219,17 @@ export function refreshRoadmapBatchSummary(batchId: string): RoadmapBatchSummary
   if (summary.synthesisReady && batch.synthesisTaskId) {
     db.update(tasks)
       .set({
-        paused: false,
+        paused: sql`CASE WHEN ${tasks.blockedReason} IS NULL OR ${tasks.blockedReason} LIKE 'synthesis_not_ready:%' THEN 0 ELSE ${tasks.paused} END`,
         blockedReason: sql`CASE WHEN ${tasks.blockedReason} LIKE 'synthesis_not_ready:%' THEN NULL ELSE ${tasks.blockedReason} END`,
+        updatedAt: nowIso,
+      })
+      .where(eq(tasks.id, batch.synthesisTaskId))
+      .run();
+  } else if (!summary.synthesisReady && batch.synthesisTaskId) {
+    db.update(tasks)
+      .set({
+        paused: true,
+        blockedReason: sql`CASE WHEN ${tasks.blockedReason} IS NULL OR ${tasks.blockedReason} LIKE 'synthesis_not_ready:%' THEN 'synthesis_not_ready: waiting for validated audit batch artifacts' ELSE ${tasks.blockedReason} END`,
         updatedAt: nowIso,
       })
       .where(eq(tasks.id, batch.synthesisTaskId))
@@ -2994,6 +3243,12 @@ export function updateRoadmapBatchArtifactState(input: {
   taskId: string;
   state: RoadmapBatchArtifactState;
   failureFamily?: RoadmapBatchFailureFamily | null;
+  classification?: string | null;
+  reworkStatus?: AuditArtifactReworkStatus;
+  failureSignature?: string | null;
+  attemptBoundaryId?: string | null;
+  createAttemptBoundary?: boolean;
+  sourceSnapshotId?: string | null;
   validationDetails?: unknown;
   branchName?: string | null;
   worktreePath?: string | null;
@@ -3004,25 +3259,107 @@ export function updateRoadmapBatchArtifactState(input: {
   const artifact = findRoadmapBatchArtifactByTaskId(input.taskId);
   if (!artifact) return null;
   const nowIso = new Date().toISOString();
-  getDb()
-    .update(roadmapBatchArtifacts)
-    .set({
-      state: input.state,
-      failureFamily: input.failureFamily ?? null,
-      validationDetailsJson:
-        input.validationDetails === undefined
-          ? artifact.validationDetailsJson
-          : serializeJson(input.validationDetails),
-      branchName: input.branchName ?? artifact.branchName,
-      worktreePath: input.worktreePath ?? artifact.worktreePath,
-      projectRoot: input.projectRoot ?? artifact.projectRoot,
-      contentSha: input.contentSha ?? artifact.contentSha,
-      validatedAt: input.validatedAt ?? (input.state === "valid" ? nowIso : null),
-      updatedAt: nowIso,
-    })
-    .where(eq(roadmapBatchArtifacts.id, artifact.id))
-    .run();
+  const db = getDb();
+  const nextAttemptNumber =
+    (db
+      .select({ value: max(roadmapBatchArtifactAttempts.attemptNumber) })
+      .from(roadmapBatchArtifactAttempts)
+      .where(eq(roadmapBatchArtifactAttempts.artifactId, artifact.id))
+      .get()?.value ?? 0) + 1;
+  const validationDetailsJson =
+    input.validationDetails === undefined
+      ? artifact.validationDetailsJson
+      : serializeJson(input.validationDetails);
+  if (input.state === "manual_exception") {
+    const justification = isObjectRecord(input.validationDetails)
+      ? input.validationDetails.justification
+      : null;
+    if (typeof justification !== "string" || justification.trim().length === 0) {
+      throw new Error("manual_exception requires a non-empty justification");
+    }
+  }
+  const classification =
+    input.classification ?? readAuditSourceClassification(input.validationDetails);
+  const failureFamily =
+    input.failureFamily ??
+    selectAuditArtifactFailureFamily({
+      sourceClassification: classification,
+      validationDetails: input.validationDetails,
+      fallback: null,
+    });
+  const failureSignature =
+    input.failureSignature ??
+    buildAuditFailureSignature({
+      role: artifact.role,
+      classification,
+      failureFamily,
+      validationDetails: input.validationDetails,
+    });
+  const attemptBoundaryId = input.createAttemptBoundary
+    ? (input.attemptBoundaryId ?? crypto.randomUUID())
+    : (input.attemptBoundaryId ?? artifact.attemptBoundaryId);
+  const staleBoundary =
+    input.createAttemptBoundary !== true &&
+    artifact.attemptBoundaryId != null &&
+    input.attemptBoundaryId !== artifact.attemptBoundaryId;
+
+  db.transaction((tx) => {
+    tx.insert(roadmapBatchArtifactAttempts)
+      .values({
+        id: crypto.randomUUID(),
+        artifactId: artifact.id,
+        batchId: artifact.batchId,
+        projectId: artifact.projectId,
+        roadmapAlias: artifact.roadmapAlias,
+        taskId: artifact.taskId,
+        role: artifact.role,
+        artifactPath: artifact.artifactPath,
+        attemptNumber: nextAttemptNumber,
+        attemptBoundaryId,
+        state: input.state,
+        classification,
+        failureFamily,
+        failureSignature,
+        contentSha: input.contentSha ?? artifact.contentSha,
+        reworkStatus: input.reworkStatus ?? (input.state === "valid" ? "accepted" : "not_applicable"),
+        validationDetailsJson,
+        sourceSnapshotId: input.sourceSnapshotId ?? null,
+        createdAt: nowIso,
+      })
+      .run();
+
+    if (!staleBoundary) {
+      tx.update(roadmapBatchArtifacts)
+        .set({
+          state: input.state,
+          failureFamily,
+          validationDetailsJson,
+          branchName: input.branchName ?? artifact.branchName,
+          worktreePath: input.worktreePath ?? artifact.worktreePath,
+          projectRoot: input.projectRoot ?? artifact.projectRoot,
+          contentSha: input.contentSha ?? artifact.contentSha,
+          attemptNumber: nextAttemptNumber,
+          attemptBoundaryId,
+          failureSignature,
+          validatedAt: input.validatedAt ?? (input.state === "valid" ? nowIso : null),
+          updatedAt: nowIso,
+        })
+        .where(eq(roadmapBatchArtifacts.id, artifact.id))
+        .run();
+    }
+  });
   return refreshRoadmapBatchSummary(artifact.batchId);
+}
+
+export function listRoadmapBatchArtifactAttempts(
+  artifactId: string,
+): RoadmapBatchArtifactAttemptRow[] {
+  return getDb()
+    .select()
+    .from(roadmapBatchArtifactAttempts)
+    .where(eq(roadmapBatchArtifactAttempts.artifactId, artifactId))
+    .orderBy(asc(roadmapBatchArtifactAttempts.attemptNumber))
+    .all();
 }
 
 export function listValidatedRoadmapReportArtifacts(batchId: string): RoadmapBatchArtifactRow[] {
@@ -3037,7 +3374,8 @@ export function listValidatedRoadmapReportArtifacts(batchId: string): RoadmapBat
       ),
     )
     .orderBy(asc(roadmapBatchArtifacts.createdAt))
-    .all();
+    .all()
+    .filter(hasTrustedAuditSourceClassification);
 }
 
 export function listRoadmapReportArtifactsForSynthesis(
@@ -3050,11 +3388,24 @@ export function listRoadmapReportArtifactsForSynthesis(
       and(
         eq(roadmapBatchArtifacts.batchId, batchId),
         eq(roadmapBatchArtifacts.role, "report"),
-        inArray(roadmapBatchArtifacts.state, ["valid", "invalid", "missing", "external_blocked"]),
+        inArray(roadmapBatchArtifacts.state, [
+          "valid",
+          "invalid",
+          "missing",
+          "external_blocked",
+          "source_inconclusive",
+          "terminal_inconclusive",
+          "manual_exception",
+        ]),
       ),
     )
     .orderBy(asc(roadmapBatchArtifacts.createdAt))
-    .all();
+    .all()
+    .filter((artifact) =>
+      artifact.state === "valid"
+        ? hasTrustedAuditSourceClassification(artifact)
+        : roadmapSourceArtifactReadyForSynthesis(artifact),
+    );
 }
 
 export function getRoadmapBatchCreatedTaskIds(batch: RoadmapBatchRow): string[] {

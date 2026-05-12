@@ -15,6 +15,9 @@ const mockToChatSessionResponse = vi.fn((row: Record<string, unknown>) => row);
 const mockToChatMessageResponse = vi.fn((row: Record<string, unknown>) => row);
 const mockFindProjectById = vi.fn();
 const mockFindRuntimeProfileById = vi.fn();
+const mockRetrieveApprovedMemoryForPrompt = vi.fn((_input: unknown) => []);
+const mockFormatMemoryContextForPrompt = vi.fn((_items: unknown) => "");
+const mockRecordMemoryUsageEvents = vi.fn();
 const mockToRuntimeProfileResponse = vi.fn((row: Record<string, unknown>) => ({
   ...row,
   headers: row.headersJson ? JSON.parse(row.headersJson as string) : {},
@@ -72,6 +75,9 @@ vi.mock("@aif/data", () => ({
   findProjectById: (id: string) => mockFindProjectById(id),
   findTaskById: vi.fn(),
   toTaskResponse: vi.fn(),
+  retrieveApprovedMemoryForPrompt: (input: unknown) => mockRetrieveApprovedMemoryForPrompt(input),
+  formatMemoryContextForPrompt: (items: unknown) => mockFormatMemoryContextForPrompt(items),
+  recordMemoryUsageEvents: (...args: unknown[]) => mockRecordMemoryUsageEvents(...args),
   createChatMessage: (...args: unknown[]) => mockCreateChatMessage(...args),
   updateChatSessionTimestamp: vi.fn(),
   findRuntimeProfileById: (id: string) => mockFindRuntimeProfileById(id),

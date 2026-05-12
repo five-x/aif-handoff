@@ -1,5 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
+import {
+  classifyAuditSourceEvidence,
+  extractSubstantiveAuditCommandEvidence,
+  type AuditSourceClassification,
+} from "./auditSourceEvidence.js";
+import type { AuditEvidenceUnit } from "./auditEvidenceLedger.js";
 
 export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "synthetic_git_output",
@@ -17,6 +25,20 @@ export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "missing_substantive_evidence",
   "missing_declared_scope_root",
   "missing_scope_coverage",
+  "missing_report_manifest",
+  "invalid_report_manifest",
+  "unsupported_report_manifest_version",
+  "missing_report_manifest_fields",
+  "manifest_identity_mismatch",
+  "manifest_content_hash_mismatch",
+  "manifest_outcome_mismatch",
+  "manifest_source_snapshot_mismatch",
+  "missing_audit_evidence_ref",
+  "audit_evidence_identity_mismatch",
+  "audit_evidence_source_snapshot_mismatch",
+  "audit_evidence_scope_mismatch",
+  "audit_evidence_risk_mismatch",
+  "audit_evidence_discovery_only",
 ] as const;
 
 export type AuditReportValidationIssueCode = (typeof AUDIT_REPORT_VALIDATION_ISSUE_CODES)[number];
@@ -30,11 +52,46 @@ export interface AuditReportValidationIssue {
 export interface AuditReportValidationInput {
   text: string;
   projectRoot: string;
+  taskId?: string | null;
+  roadmapBatchId?: string | null;
+  roadmapAlias?: string | null;
+  auditPlanId?: string | null;
   taskDescription?: string | null;
   scopeRoots?: string[];
   reportArtifactPaths?: string[];
+  expectedReportArtifactPath?: string | null;
   allowedEvidenceArtifactPaths?: string[];
   requireProposedFix?: boolean;
+  expectedSourceSnapshot?: AuditReportSourceSnapshot | null;
+  auditEvidenceUnits?: AuditEvidenceUnit[];
+  requireLedgerEvidence?: boolean;
+}
+
+export type AuditReportManifestStatus = "missing" | "valid" | "invalid";
+
+export interface AuditReportSourceSnapshot {
+  id?: string | null;
+  commit?: string | null;
+  tree?: string | null;
+  branch?: string | null;
+  dirty?: boolean | null;
+}
+
+export interface AuditReportManifest {
+  version: number;
+  auditPlanId: string;
+  taskId?: string | null;
+  batchId?: string | null;
+  roadmapAlias?: string | null;
+  artifactPath: string;
+  contentSha256: string;
+  sourceSnapshot: AuditReportSourceSnapshot;
+  outcome: AuditSourceClassification;
+  scopeCoverage: unknown[];
+  riskHypotheses: unknown[];
+  findings: unknown[];
+  noFindingsClaims: unknown[];
+  evidenceRefs: string[];
 }
 
 export interface AuditReportScopeCoverage {
@@ -51,12 +108,19 @@ export interface AuditReportScopeCoverage {
 export interface AuditReportValidationResult {
   ok: boolean;
   issues: AuditReportValidationIssue[];
+  artifactSha256: string;
+  contentSha256: string;
+  manifest: AuditReportManifest | null;
+  manifestVersion: number | null;
+  manifestStatus: AuditReportManifestStatus;
+  sourceSnapshot: AuditReportSourceSnapshot | null;
   referencedPaths: string[];
   missingReferencedPaths: string[];
   existingReferencedPaths: string[];
   reportArtifactPaths: string[];
   allowedEvidenceArtifactPaths: string[];
   substantiveEvidence: boolean;
+  sourceClassification: AuditSourceClassification;
   reportQualityIssues: string[];
   parsedScopeRoots: string[];
   scopeRoots: string[];
@@ -126,6 +190,23 @@ const ROOT_FILE_TOKEN_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.env(?:\.[\w-]+)+)|[\w.-]+\.(?:jsonc|json|jsx|tsx|yaml|yml|mdx|mjs|cjs|bat|cmd|cpp|css|env|hpp|html|ini|java|lock|md|ps1|py|rs|scss|sh|sql|toml|txt|xml|js|ts|go|kt|cs|c|h))(?::\d+(?:(?::|[-\u2013])\d+)?)?(?=$|[\s`'"\]),.;])/gi;
 const DIRECTORY_LINE_REFERENCE_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+\d(?:[\d-]*))(?=$|[\s`'"\]),.;])/g;
+const MANIFEST_BLOCK_PATTERN = /(?:^|\n)```audit-report-manifest\s*\r?\n([\s\S]*?)\r?\n```/gi;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
+
+type SourcePathKind = "file" | "directory" | "missing" | "other";
+
+interface AuditReportSourceReader {
+  pathExists(path: string): boolean;
+  pathKind(path: string): SourcePathKind;
+  fileLineCount(path: string): number | null;
+  collectRepresentativeFiles(directory: string, limit?: number): string[];
+}
+
+interface ParsedManifestBlock {
+  manifest: AuditReportManifest | null;
+  duplicate: boolean;
+  parseError: string | null;
+}
 
 function normalizeRelativePath(path: string): string {
   return path
@@ -137,6 +218,273 @@ function normalizeRelativePath(path: string): string {
 function normalizePathForComparison(path: string): string {
   const normalized = normalizeRelativePath(path);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+export function stripAuditReportManifestBlocks(text: string): string {
+  return text.replace(MANIFEST_BLOCK_PATTERN, "\n").trim();
+}
+
+export function computeAuditReportArtifactSha256(text: string): string {
+  return sha256(text);
+}
+
+export function computeAuditReportContentSha256(text: string): string {
+  return sha256(stripAuditReportManifestBlocks(text));
+}
+
+function parseAuditReportManifestBlock(text: string): ParsedManifestBlock {
+  const matches = [...text.matchAll(MANIFEST_BLOCK_PATTERN)];
+  if (matches.length === 0) {
+    return { manifest: null, duplicate: false, parseError: null };
+  }
+  if (matches.length > 1) {
+    return {
+      manifest: null,
+      duplicate: true,
+      parseError: "Report contains multiple audit-report-manifest blocks.",
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(matches[0]?.[1] ?? "") as unknown;
+    return {
+      manifest: isObjectRecord(parsed) ? normalizeManifestCandidate(parsed) : null,
+      duplicate: false,
+      parseError: isObjectRecord(parsed) ? null : "Audit report manifest root must be an object.",
+    };
+  } catch (error) {
+    return {
+      manifest: null,
+      duplicate: false,
+      parseError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export function extractAuditReportManifestEvidenceRefs(text: string): string[] {
+  return parseAuditReportManifestBlock(text).manifest?.evidenceRefs ?? [];
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function optionalString(value: unknown): string | null | undefined {
+  if (value == null) return null;
+  return typeof value === "string" ? value : undefined;
+}
+
+function normalizeEvidenceRefs(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function normalizeUnknownArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeSourceSnapshotCandidate(value: unknown): AuditReportSourceSnapshot | null {
+  if (!isObjectRecord(value)) return null;
+  const id = optionalString(value.id);
+  const commit = optionalString(value.commit);
+  const tree = optionalString(value.tree);
+  const branch = optionalString(value.branch);
+  const dirty =
+    typeof value.dirty === "boolean" ? value.dirty : value.dirty == null ? null : undefined;
+  if ([id, commit, tree, branch, dirty].some((entry) => entry === undefined)) return null;
+  return { id, commit, tree, branch, dirty };
+}
+
+function normalizeManifestCandidate(
+  candidate: Record<string, unknown>,
+): AuditReportManifest | null {
+  const sourceSnapshot = normalizeSourceSnapshotCandidate(candidate.sourceSnapshot);
+  const outcome = candidate.outcome;
+  if (
+    !sourceSnapshot ||
+    typeof outcome !== "string" ||
+    !AUDIT_SOURCE_CLASSIFICATION_SET.has(outcome)
+  ) {
+    return null;
+  }
+  return {
+    version: typeof candidate.version === "number" ? candidate.version : Number.NaN,
+    auditPlanId: typeof candidate.auditPlanId === "string" ? candidate.auditPlanId : "",
+    taskId: optionalString(candidate.taskId) ?? null,
+    batchId: optionalString(candidate.batchId) ?? null,
+    roadmapAlias: optionalString(candidate.roadmapAlias) ?? null,
+    artifactPath: typeof candidate.artifactPath === "string" ? candidate.artifactPath : "",
+    contentSha256: typeof candidate.contentSha256 === "string" ? candidate.contentSha256 : "",
+    sourceSnapshot,
+    outcome: outcome as AuditSourceClassification,
+    scopeCoverage: normalizeUnknownArray(candidate.scopeCoverage),
+    riskHypotheses: normalizeUnknownArray(candidate.riskHypotheses),
+    findings: normalizeUnknownArray(candidate.findings),
+    noFindingsClaims: normalizeUnknownArray(candidate.noFindingsClaims),
+    evidenceRefs: normalizeEvidenceRefs(candidate.evidenceRefs),
+  };
+}
+
+const AUDIT_SOURCE_CLASSIFICATION_SET = new Set<string>([
+  "validated_findings_present",
+  "validated_no_findings",
+  "inventory_only_invalid",
+  "insufficient_substantive_evidence",
+  "source_inconclusive",
+]);
+
+function safeGitObjectPath(path: string): string | null {
+  const normalized = normalizeRelativePath(path);
+  if (
+    !normalized ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../") ||
+    normalized.includes("\0")
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function runGit(projectRoot: string, args: string[]): string | null {
+  try {
+    return execFileSync("git", ["-c", `safe.directory=${projectRoot}`, ...args], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function createLiveSourceReader(projectRoot: string): AuditReportSourceReader {
+  return {
+    pathExists(path: string): boolean {
+      const absPath = resolve(projectRoot, path);
+      return isInsideRoot(projectRoot, absPath) && existsSync(absPath);
+    },
+    pathKind(path: string): SourcePathKind {
+      const absPath = resolve(projectRoot, path);
+      if (!isInsideRoot(projectRoot, absPath) || !existsSync(absPath)) return "missing";
+      try {
+        const stat = statSync(absPath);
+        if (stat.isFile()) return "file";
+        if (stat.isDirectory()) return "directory";
+        return "other";
+      } catch {
+        return "missing";
+      }
+    },
+    fileLineCount(path: string): number | null {
+      return fileLineCount(projectRoot, path);
+    },
+    collectRepresentativeFiles(directory: string, limit = 1_000): string[] {
+      return collectRepresentativeFilesUnderDirectory(projectRoot, directory, limit);
+    },
+  };
+}
+
+function createGitSnapshotSourceReader(
+  projectRoot: string,
+  snapshot: AuditReportSourceSnapshot,
+): AuditReportSourceReader {
+  const treeish = snapshot.tree || snapshot.commit || "HEAD";
+  const objectFor = (path: string): string | null => {
+    const gitPath = safeGitObjectPath(path);
+    return gitPath ? `${treeish}:${gitPath}` : null;
+  };
+  const kindFor = (path: string): SourcePathKind => {
+    const object = objectFor(path);
+    if (!object) return "missing";
+    const type = runGit(projectRoot, ["cat-file", "-t", object]);
+    if (type === "blob") return "file";
+    if (type === "tree") return "directory";
+    return type ? "other" : "missing";
+  };
+  return {
+    pathExists(path: string): boolean {
+      return kindFor(path) !== "missing";
+    },
+    pathKind(path: string): SourcePathKind {
+      return kindFor(path);
+    },
+    fileLineCount(path: string): number | null {
+      if (kindFor(path) !== "file") return null;
+      const object = objectFor(path);
+      if (!object) return null;
+      const content = runGit(projectRoot, ["show", object]);
+      if (content == null) return null;
+      if (content.length === 0) return 0;
+      return content.split(/\r?\n/).length;
+    },
+    collectRepresentativeFiles(directory: string, limit = 1_000): string[] {
+      const gitPath = safeGitObjectPath(directory);
+      if (!gitPath || kindFor(gitPath) !== "directory") return [];
+      const output = runGit(projectRoot, ["ls-tree", "-r", "--name-only", treeish, gitPath]);
+      if (!output) return [];
+      return output
+        .split(/\r?\n/)
+        .map(normalizeRelativePath)
+        .filter(Boolean)
+        .filter((path) => !path.split("/").some((part) => IGNORED_SCOPE_DIRECTORY_NAMES.has(part)))
+        .slice(0, limit)
+        .sort();
+    },
+  };
+}
+
+function deriveCurrentGitSnapshot(projectRoot: string): AuditReportSourceSnapshot | null {
+  const commit = runGit(projectRoot, ["rev-parse", "HEAD"]);
+  const tree = runGit(projectRoot, ["rev-parse", "HEAD^{tree}"]);
+  if (!commit || !tree) return null;
+  const branch = runGit(projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  return {
+    id: `git:${commit}:${tree}`,
+    commit,
+    tree,
+    branch: branch && branch !== "HEAD" ? branch : null,
+    dirty: null,
+  };
+}
+
+function expectedAuditPlanId(input: AuditReportValidationInput): string | null {
+  if (input.auditPlanId) return input.auditPlanId;
+  if (input.roadmapBatchId && input.taskId) {
+    return `batch:${input.roadmapBatchId}:task:${input.taskId}`;
+  }
+  return input.taskId ? `task:${input.taskId}` : null;
+}
+
+function normalizeExpectedSnapshot(
+  input: AuditReportValidationInput,
+): AuditReportSourceSnapshot | null {
+  return input.expectedSourceSnapshot ?? deriveCurrentGitSnapshot(input.projectRoot);
+}
+
+function expectedSnapshotId(snapshot: AuditReportSourceSnapshot): string | null {
+  if (snapshot.id) return snapshot.id;
+  return snapshot.commit && snapshot.tree ? `git:${snapshot.commit}:${snapshot.tree}` : null;
+}
+
+function hasManifestIssue(issues: AuditReportValidationIssue[]): boolean {
+  return issues.some(
+    (entry) =>
+      entry.code.startsWith("manifest_") ||
+      entry.code.startsWith("audit_evidence_") ||
+      entry.code === "missing_report_manifest" ||
+      entry.code === "invalid_report_manifest" ||
+      entry.code === "unsupported_report_manifest_version" ||
+      entry.code === "missing_report_manifest_fields" ||
+      entry.code === "missing_audit_evidence_ref",
+  );
 }
 
 function isInsideRoot(projectRoot: string, candidatePath: string): boolean {
@@ -153,6 +501,167 @@ function issue(
   paths?: string[],
 ): AuditReportValidationIssue {
   return paths && paths.length > 0 ? { code, message, paths } : { code, message };
+}
+
+function collectManifestIds(
+  values: unknown[],
+  keys: string[],
+  nestedKeys: string[] = [],
+): string[] {
+  const ids = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (typeof value === "string" && value.trim().length > 0) {
+      ids.add(normalizeRelativePath(value.trim()));
+      return;
+    }
+    if (!isObjectRecord(value)) return;
+    for (const key of keys) {
+      const entry = value[key];
+      if (typeof entry === "string" && entry.trim().length > 0) {
+        ids.add(normalizeRelativePath(entry.trim()));
+      }
+      if (Array.isArray(entry)) {
+        for (const child of entry) visit(child);
+      }
+    }
+    for (const nestedKey of nestedKeys) {
+      const nested = value[nestedKey];
+      if (Array.isArray(nested)) {
+        for (const child of nested) visit(child);
+      }
+    }
+  };
+  for (const value of values) visit(value);
+  return [...ids].filter(Boolean).sort();
+}
+
+function manifestScopeIds(manifest: AuditReportManifest): string[] {
+  return [
+    ...new Set([
+      ...collectManifestIds(
+        manifest.scopeCoverage,
+        ["id", "scopeId", "scope", "root"],
+        ["scopeIds", "scopes", "scopeCoverage"],
+      ),
+      ...collectManifestIds(
+        [...manifest.findings, ...manifest.noFindingsClaims],
+        ["scopeId", "scope", "root"],
+        ["scopeIds", "scopes", "scopeCoverage"],
+      ),
+    ]),
+  ].sort();
+}
+
+function manifestRiskHypothesisIds(manifest: AuditReportManifest): string[] {
+  return [
+    ...new Set([
+      ...collectManifestIds(
+        manifest.riskHypotheses,
+        ["id", "riskId", "riskHypothesisId"],
+        ["riskIds", "riskHypothesisIds", "risks"],
+      ),
+      ...collectManifestIds(
+        [...manifest.findings, ...manifest.noFindingsClaims],
+        ["riskId", "riskHypothesisId"],
+        ["riskIds", "riskHypothesisIds", "risks"],
+      ),
+    ]),
+  ].sort();
+}
+
+function hasAllIds(actual: string[], expected: string[]): boolean {
+  if (expected.length === 0) return true;
+  const actualSet = new Set(actual);
+  return expected.every((id) => actualSet.has(id));
+}
+
+function validateManifestEvidenceRefs(input: {
+  manifest: AuditReportManifest;
+  expectedPlanId: string | null;
+  expectedSnapshot: AuditReportSourceSnapshot | null;
+  taskId?: string | null;
+  evidenceUnits: AuditEvidenceUnit[];
+  requireLedgerEvidence: boolean;
+}): AuditReportValidationIssue[] {
+  const shouldValidate =
+    input.requireLedgerEvidence ||
+    input.evidenceUnits.length > 0 ||
+    input.manifest.evidenceRefs.length > 0;
+  if (!shouldValidate) return [];
+
+  const issues: AuditReportValidationIssue[] = [];
+  const byId = new Map(input.evidenceUnits.map((entry) => [entry.id, entry]));
+  const citedUnits: AuditEvidenceUnit[] = [];
+  for (const evidenceRef of input.manifest.evidenceRefs) {
+    const unit = byId.get(evidenceRef);
+    if (!unit) {
+      issues.push(
+        issue(
+          "missing_audit_evidence_ref",
+          `Audit report manifest cites evidence id ${evidenceRef}, but no matching runtime-captured evidence unit was provided.`,
+        ),
+      );
+      continue;
+    }
+    citedUnits.push(unit);
+    const identityMismatches: string[] = [];
+    if (input.taskId && unit.taskId !== input.taskId) {
+      identityMismatches.push(`taskId expected ${input.taskId}`);
+    }
+    if (input.expectedPlanId && unit.auditPlanId !== input.expectedPlanId) {
+      identityMismatches.push(`auditPlanId expected ${input.expectedPlanId}`);
+    }
+    if (identityMismatches.length > 0) {
+      issues.push(
+        issue(
+          "audit_evidence_identity_mismatch",
+          `Audit evidence ${unit.id} does not match validation context: ${identityMismatches.join("; ")}.`,
+        ),
+      );
+    }
+    const manifestSnapshotIdValue = expectedSnapshotId(input.manifest.sourceSnapshot);
+    if (manifestSnapshotIdValue && unit.sourceSnapshotId !== manifestSnapshotIdValue) {
+      issues.push(
+        issue(
+          "audit_evidence_source_snapshot_mismatch",
+          `Audit evidence ${unit.id} is bound to source snapshot ${unit.sourceSnapshotId}, expected manifest source snapshot ${manifestSnapshotIdValue}.`,
+        ),
+      );
+    }
+  }
+
+  if (input.manifest.outcome === "validated_no_findings") {
+    if (!citedUnits.some((unit) => unit.evidenceGrade === "substantive")) {
+      issues.push(
+        issue(
+          "audit_evidence_discovery_only",
+          "Audit report manifest claims validated no-findings but cited runtime evidence is discovery-only.",
+        ),
+      );
+    }
+    const citedScopeIds = [...new Set(citedUnits.flatMap((unit) => unit.scopeIds))].sort();
+    const requiredScopeIds = manifestScopeIds(input.manifest);
+    if (!hasAllIds(citedScopeIds, requiredScopeIds)) {
+      issues.push(
+        issue(
+          "audit_evidence_scope_mismatch",
+          `Audit report manifest claims scope coverage not covered by cited evidence IDs: ${requiredScopeIds.filter((id) => !citedScopeIds.includes(id)).join(", ")}.`,
+        ),
+      );
+    }
+    const citedRiskIds = [...new Set(citedUnits.flatMap((unit) => unit.riskHypothesisIds))].sort();
+    const requiredRiskIds = manifestRiskHypothesisIds(input.manifest);
+    if (!hasAllIds(citedRiskIds, requiredRiskIds)) {
+      issues.push(
+        issue(
+          "audit_evidence_risk_mismatch",
+          `Audit report manifest claims risk hypotheses not covered by cited evidence IDs: ${requiredRiskIds.filter((id) => !citedRiskIds.includes(id)).join(", ")}.`,
+        ),
+      );
+    }
+  }
+
+  return issues;
 }
 
 function formatPathExamples(paths: string[], limit = 8): string {
@@ -270,7 +779,11 @@ function isInReferenceSentence(text: string, match: RegExpMatchArray): boolean {
   );
 }
 
-function extractReferencedPaths(text: string, projectRoot: string): string[] {
+function extractReferencedPaths(
+  text: string,
+  projectRoot: string,
+  sourceReader: AuditReportSourceReader,
+): string[] {
   const refs = new Set<string>();
   for (const match of text.matchAll(SLASH_PATH_TOKEN_PATTERN)) {
     addReferencedPath(refs, projectRoot, match[1]?.trim());
@@ -279,9 +792,8 @@ function extractReferencedPaths(text: string, projectRoot: string): string[] {
     const raw = match[1]?.trim();
     if (!raw || raw.includes("/") || raw.includes("\\")) continue;
     const normalized = normalizeRelativePath(raw.replace(/[),.;\]]+$/g, ""));
-    const absPath = resolve(projectRoot, normalized);
     if (
-      !existsSync(absPath) &&
+      !sourceReader.pathExists(normalized) &&
       !isDelimitedReference(text, match, raw) &&
       !isInReferenceSentence(text, match)
     ) {
@@ -296,9 +808,9 @@ function extractReferencedPaths(text: string, projectRoot: string): string[] {
 }
 
 function classifyReferencedPaths(
-  projectRoot: string,
   refs: string[],
   allowedEvidenceArtifactPaths: Set<string>,
+  sourceReader: AuditReportSourceReader,
 ): { existing: string[]; missing: string[] } {
   const existing: string[] = [];
   const missing: string[] = [];
@@ -307,8 +819,7 @@ function classifyReferencedPaths(
       existing.push(ref);
       continue;
     }
-    const absPath = resolve(projectRoot, ref);
-    if (existsSync(absPath)) {
+    if (sourceReader.pathExists(ref)) {
       existing.push(ref);
     } else {
       missing.push(ref);
@@ -349,6 +860,7 @@ function hasInvalidExistingLineReference(
   text: string,
   projectRoot: string,
   excludedPaths: Set<string>,
+  sourceReader: AuditReportSourceReader,
 ): boolean {
   const patterns = [SLASH_PATH_TOKEN_PATTERN, ROOT_FILE_TOKEN_PATTERN];
   for (const pattern of patterns) {
@@ -360,7 +872,7 @@ function hasInvalidExistingLineReference(
       if (!reference) continue;
       const normalized = normalizeRelativePath(raw);
       if (excludedPaths.has(normalizePathForComparison(normalized))) continue;
-      const lineCount = fileLineCount(projectRoot, normalized);
+      const lineCount = sourceReader.fileLineCount(normalized);
       if (
         lineCount !== null &&
         (reference.start < 1 || reference.end < reference.start || reference.end > lineCount)
@@ -376,6 +888,7 @@ function collectExistingRefsWithLineNumbers(
   text: string,
   projectRoot: string,
   excludedPaths: Set<string>,
+  sourceReader: AuditReportSourceReader,
 ): string[] {
   const refs = new Set<string>();
   const patterns = [SLASH_PATH_TOKEN_PATTERN, ROOT_FILE_TOKEN_PATTERN];
@@ -388,7 +901,7 @@ function collectExistingRefsWithLineNumbers(
       if (!reference) continue;
       const normalized = normalizeRelativePath(raw);
       if (excludedPaths.has(normalizePathForComparison(normalized))) continue;
-      const lineCount = fileLineCount(projectRoot, normalized);
+      const lineCount = sourceReader.fileLineCount(normalized);
       if (
         lineCount !== null &&
         reference.start >= 1 &&
@@ -472,16 +985,18 @@ function collectScopeCoverage(input: {
   projectRoot: string;
   scopeRoots: string[];
   excludedPaths: Set<string>;
+  sourceReader: AuditReportSourceReader;
 }): AuditReportScopeCoverage[] {
   const lineEvidenceFiles = collectExistingRefsWithLineNumbers(
     input.text,
     input.projectRoot,
     input.excludedPaths,
+    input.sourceReader,
   );
 
   return input.scopeRoots.map((root) => {
-    const absPath = resolve(input.projectRoot, root);
-    if (!isInsideRoot(input.projectRoot, absPath) || !existsSync(absPath)) {
+    const kind = input.sourceReader.pathKind(root);
+    if (kind === "missing") {
       return {
         root,
         exists: false,
@@ -494,8 +1009,7 @@ function collectScopeCoverage(input: {
       };
     }
 
-    const stat = statSync(absPath);
-    if (stat.isFile()) {
+    if (kind === "file") {
       const coveredFiles = lineEvidenceFiles.filter((path) => isSameRepositoryPath(path, root));
       return {
         root,
@@ -509,7 +1023,7 @@ function collectScopeCoverage(input: {
       };
     }
 
-    if (!stat.isDirectory()) {
+    if (kind !== "directory") {
       return {
         root,
         exists: true,
@@ -522,7 +1036,7 @@ function collectScopeCoverage(input: {
       };
     }
 
-    const representativeFiles = collectRepresentativeFilesUnderDirectory(input.projectRoot, root);
+    const representativeFiles = input.sourceReader.collectRepresentativeFiles(root);
     const requiredEvidenceCount =
       representativeFiles.length === 0 ? 0 : Math.min(3, representativeFiles.length);
     const coveredFiles = lineEvidenceFiles.filter((path) => isPathUnderDirectory(path, root));
@@ -554,6 +1068,10 @@ function hasCommandOutputEvidence(text: string): boolean {
   ).test(text);
 }
 
+function hasSubstantiveCommandOutputEvidence(text: string): boolean {
+  return extractSubstantiveAuditCommandEvidence(text).length > 0;
+}
+
 function hasContradictoryFindings(text: string): boolean {
   if (!/\bNo validated findings\b/i.test(text)) return false;
   return (
@@ -566,18 +1084,16 @@ function hasValidatedNoFindingsEvidence(
   text: string,
   projectRoot: string,
   excludedPaths: Set<string>,
+  sourceReader: AuditReportSourceReader,
 ): boolean {
-  if (!/\bNo validated findings\b/i.test(text)) return false;
-  if (
-    !/\b(?:Checked files|Checked commands|Inspection matrix|Commands run|Files inspected)\b/i.test(
-      text,
-    )
-  ) {
-    return false;
-  }
   return (
-    collectExistingRefsWithLineNumbers(text, projectRoot, excludedPaths).length > 0 &&
-    hasCommandOutputEvidence(text)
+    classifyAuditSourceEvidence({
+      text,
+      projectRoot,
+      excludedReferencedPaths: [...excludedPaths],
+      requireProposedFix: false,
+      sourceReader,
+    }).classification === "validated_no_findings"
   );
 }
 
@@ -587,6 +1103,7 @@ function hasStructuredFindingEvidence(
   excludedPaths: Set<string>,
   allowedArtifactPaths: string[],
   requireProposedFix: boolean,
+  sourceReader: AuditReportSourceReader,
 ): boolean {
   const findingSections = text.split(/(?:^|\n)#{2,4}\s+|\n(?=-\s+(?:finding|issue|risk)\b)/i);
   return findingSections.some((section) => {
@@ -599,7 +1116,8 @@ function hasStructuredFindingEvidence(
       return new RegExp(escaped, "i").test(section);
     });
     return (
-      (collectExistingRefsWithLineNumbers(section, projectRoot, excludedPaths).length > 0 ||
+      (collectExistingRefsWithLineNumbers(section, projectRoot, excludedPaths, sourceReader)
+        .length > 0 ||
         hasAllowedArtifact) &&
       hasCommandOutputEvidence(section)
     );
@@ -612,19 +1130,26 @@ function hasSubstantiveReportEvidenceInternal(input: {
   excludedReferencedPaths?: string[];
   allowedEvidenceArtifactPaths?: string[];
   requireProposedFix?: boolean;
+  sourceReader?: AuditReportSourceReader;
 }): boolean {
+  const sourceReader = input.sourceReader ?? createLiveSourceReader(input.projectRoot);
   const excludedPaths = new Set(
     (input.excludedReferencedPaths ?? []).map((path) => normalizePathForComparison(path)),
   );
-  if (hasInvalidExistingLineReference(input.text, input.projectRoot, excludedPaths)) return false;
+  if (hasInvalidExistingLineReference(input.text, input.projectRoot, excludedPaths, sourceReader)) {
+    return false;
+  }
   if (hasContradictoryFindings(input.text)) return false;
-  if (hasValidatedNoFindingsEvidence(input.text, input.projectRoot, excludedPaths)) return true;
+  if (hasValidatedNoFindingsEvidence(input.text, input.projectRoot, excludedPaths, sourceReader)) {
+    return true;
+  }
   return hasStructuredFindingEvidence(
     input.text,
     input.projectRoot,
     excludedPaths,
     input.allowedEvidenceArtifactPaths ?? [],
     input.requireProposedFix ?? false,
+    sourceReader,
   );
 }
 
@@ -638,7 +1163,10 @@ export function hasSubstantiveReportEvidence(input: {
   return hasSubstantiveReportEvidenceInternal(input);
 }
 
-function collectFalseMissingPathClaims(text: string, projectRoot: string): string[] {
+function collectFalseMissingPathClaims(
+  text: string,
+  sourceReader: AuditReportSourceReader,
+): string[] {
   const claimedMissingPaths = new Set<string>();
   const patterns = [
     /`([^`\r\n]+)`\s+(?:directory\s+|file\s+)?does not exist/gi,
@@ -652,8 +1180,7 @@ function collectFalseMissingPathClaims(text: string, projectRoot: string): strin
       const rawPath = match[1]?.trim();
       if (!rawPath || rawPath.includes("*")) continue;
       const normalized = normalizeRelativePath(rawPath);
-      const absPath = resolve(projectRoot, normalized);
-      if (isInsideRoot(projectRoot, absPath) && existsSync(absPath)) {
+      if (sourceReader.pathExists(normalized)) {
         claimedMissingPaths.add(normalized);
       }
     }
@@ -666,6 +1193,17 @@ export function validateAuditReportArtifact(
   input: AuditReportValidationInput,
 ): AuditReportValidationResult {
   const text = input.text;
+  const artifactSha256 = computeAuditReportArtifactSha256(text);
+  const contentSha256 = computeAuditReportContentSha256(text);
+  const parsedManifest = parseAuditReportManifestBlock(text);
+  const manifestBlockPresent = Boolean(text.match(MANIFEST_BLOCK_PATTERN));
+  const manifest = parsedManifest.manifest;
+  const expectedSnapshot = normalizeExpectedSnapshot(input);
+  const sourceSnapshot = manifest?.sourceSnapshot ?? expectedSnapshot;
+  const sourceReader =
+    manifest?.sourceSnapshot?.tree || manifest?.sourceSnapshot?.commit
+      ? createGitSnapshotSourceReader(input.projectRoot, manifest.sourceSnapshot)
+      : createLiveSourceReader(input.projectRoot);
   const { parsedScopeRoots, scopeRoots } = resolveScopeRoots(input);
   const reportArtifactPaths = [
     ...new Set((input.reportArtifactPaths ?? []).map(normalizeRelativePath)),
@@ -674,20 +1212,188 @@ export function validateAuditReportArtifact(
     ...new Set((input.allowedEvidenceArtifactPaths ?? []).map(normalizeRelativePath)),
   ].sort();
   const excludedPaths = new Set(reportArtifactPaths.map(normalizePathForComparison));
-  const allowedPathSet = new Set(allowedEvidenceArtifactPaths.map(normalizePathForComparison));
-  const referencedPaths = extractReferencedPaths(text, input.projectRoot);
+  const allowedPathSet = new Set(
+    [...allowedEvidenceArtifactPaths, ...reportArtifactPaths].map(normalizePathForComparison),
+  );
+  const referencedPaths = extractReferencedPaths(text, input.projectRoot, sourceReader);
   const { existing, missing } = classifyReferencedPaths(
-    input.projectRoot,
     referencedPaths,
     allowedPathSet,
+    sourceReader,
   );
   const scopeCoverage = collectScopeCoverage({
     text,
     projectRoot: input.projectRoot,
     scopeRoots,
     excludedPaths,
+    sourceReader,
   });
+  const sourceEvidenceClassification = classifyAuditSourceEvidence({
+    text,
+    projectRoot: input.projectRoot,
+    excludedReferencedPaths: reportArtifactPaths,
+    requireProposedFix: input.requireProposedFix,
+    sourceReader,
+  });
+  const sourceClassification = sourceEvidenceClassification.classification;
   const issues: AuditReportValidationIssue[] = [];
+
+  if (
+    parsedManifest.parseError ||
+    parsedManifest.duplicate ||
+    (manifestBlockPresent && !manifest)
+  ) {
+    issues.push(
+      issue(
+        "invalid_report_manifest",
+        parsedManifest.parseError
+          ? `Audit report manifest is invalid: ${parsedManifest.parseError}`
+          : "Audit report manifest is invalid.",
+      ),
+    );
+  }
+
+  if (
+    ((input.requireLedgerEvidence ?? false) || (input.auditEvidenceUnits?.length ?? 0) > 0) &&
+    !manifest
+  ) {
+    issues.push(
+      issue(
+        "missing_report_manifest",
+        "Runtime audit evidence validation requires a valid audit report manifest with evidenceRefs bound to captured ledger evidence.",
+      ),
+    );
+  }
+
+  if (manifest) {
+    const expectedPlanId = expectedAuditPlanId(input);
+    const expectedArtifactPath = normalizeRelativePath(
+      input.expectedReportArtifactPath ?? reportArtifactPaths[0] ?? manifest.artifactPath,
+    );
+    const missingFields: string[] = [];
+    if (manifest.version !== 1) {
+      issues.push(
+        issue(
+          "unsupported_report_manifest_version",
+          `Audit report manifest version ${String(manifest.version)} is not supported.`,
+        ),
+      );
+    }
+    if (!manifest.auditPlanId) missingFields.push("auditPlanId");
+    if (input.taskId && !manifest.taskId) missingFields.push("taskId");
+    if (input.roadmapBatchId && !manifest.batchId) missingFields.push("batchId");
+    if (input.roadmapAlias && !manifest.roadmapAlias) missingFields.push("roadmapAlias");
+    if (!manifest.artifactPath) missingFields.push("artifactPath");
+    if (!SHA256_PATTERN.test(manifest.contentSha256)) missingFields.push("contentSha256");
+    if (!manifest.sourceSnapshot.commit) missingFields.push("sourceSnapshot.commit");
+    if (!manifest.sourceSnapshot.tree) missingFields.push("sourceSnapshot.tree");
+    if (!manifest.sourceSnapshot.id) missingFields.push("sourceSnapshot.id");
+    if (manifest.outcome === "validated_no_findings" && manifest.noFindingsClaims.length === 0) {
+      missingFields.push("noFindingsClaims");
+    }
+    if (manifest.outcome === "validated_findings_present" && manifest.findings.length === 0) {
+      missingFields.push("findings");
+    }
+    if (manifest.evidenceRefs.length === 0) missingFields.push("evidenceRefs");
+    if (missingFields.length > 0) {
+      issues.push(
+        issue(
+          "missing_report_manifest_fields",
+          `Audit report manifest is missing required fields: ${missingFields.join(", ")}.`,
+        ),
+      );
+    }
+    const identityMismatches: string[] = [];
+    if (expectedPlanId && manifest.auditPlanId !== expectedPlanId) {
+      identityMismatches.push(`auditPlanId expected ${expectedPlanId}`);
+    }
+    if (input.taskId && manifest.taskId && manifest.taskId !== input.taskId) {
+      identityMismatches.push(`taskId expected ${input.taskId}`);
+    }
+    if (input.roadmapBatchId && manifest.batchId && manifest.batchId !== input.roadmapBatchId) {
+      identityMismatches.push(`batchId expected ${input.roadmapBatchId}`);
+    }
+    if (
+      input.roadmapAlias &&
+      manifest.roadmapAlias &&
+      manifest.roadmapAlias !== input.roadmapAlias
+    ) {
+      identityMismatches.push(`roadmapAlias expected ${input.roadmapAlias}`);
+    }
+    if (!isSameRepositoryPath(manifest.artifactPath, expectedArtifactPath)) {
+      identityMismatches.push(`artifactPath expected ${expectedArtifactPath}`);
+    }
+    if (identityMismatches.length > 0) {
+      issues.push(
+        issue(
+          "manifest_identity_mismatch",
+          `Audit report manifest identity does not match validation context: ${identityMismatches.join("; ")}.`,
+        ),
+      );
+    }
+    if (SHA256_PATTERN.test(manifest.contentSha256) && manifest.contentSha256 !== contentSha256) {
+      issues.push(
+        issue(
+          "manifest_content_hash_mismatch",
+          "Audit report manifest contentSha256 does not match the report body with manifest blocks removed.",
+        ),
+      );
+    }
+    if (manifest.outcome !== sourceClassification) {
+      issues.push(
+        issue(
+          "manifest_outcome_mismatch",
+          `Audit report manifest outcome ${manifest.outcome} does not match validator source classification ${sourceClassification}.`,
+        ),
+      );
+    }
+    const snapshotMismatches: string[] = [];
+    const expectedId = expectedSnapshot ? expectedSnapshotId(expectedSnapshot) : null;
+    const manifestId = expectedSnapshotId(manifest.sourceSnapshot);
+    if (!expectedSnapshot) {
+      snapshotMismatches.push("expected source snapshot could not be derived");
+    } else {
+      if (expectedSnapshot.commit && manifest.sourceSnapshot.commit !== expectedSnapshot.commit) {
+        snapshotMismatches.push(`commit expected ${expectedSnapshot.commit}`);
+      }
+      if (expectedSnapshot.tree && manifest.sourceSnapshot.tree !== expectedSnapshot.tree) {
+        snapshotMismatches.push(`tree expected ${expectedSnapshot.tree}`);
+      }
+      if (expectedId && manifestId !== expectedId) {
+        snapshotMismatches.push(`id expected ${expectedId}`);
+      }
+    }
+    if (manifest.sourceSnapshot.commit && manifest.sourceSnapshot.tree) {
+      const actualTree = runGit(input.projectRoot, [
+        "rev-parse",
+        `${manifest.sourceSnapshot.commit}^{tree}`,
+      ]);
+      if (actualTree !== manifest.sourceSnapshot.tree) {
+        snapshotMismatches.push("manifest commit does not resolve to manifest tree");
+      }
+    }
+    if (manifest.sourceSnapshot.id && manifestId && manifest.sourceSnapshot.id !== manifestId) {
+      snapshotMismatches.push(`sourceSnapshot.id must be ${manifestId}`);
+    }
+    if (snapshotMismatches.length > 0) {
+      issues.push(
+        issue(
+          "manifest_source_snapshot_mismatch",
+          `Audit report manifest source snapshot does not match validation context: ${snapshotMismatches.join("; ")}.`,
+        ),
+      );
+    }
+    issues.push(
+      ...validateManifestEvidenceRefs({
+        manifest,
+        expectedPlanId,
+        expectedSnapshot,
+        taskId: input.taskId,
+        evidenceUnits: input.auditEvidenceUnits ?? [],
+        requireLedgerEvidence: input.requireLedgerEvidence ?? false,
+      }),
+    );
+  }
 
   if (text.trim()) {
     for (const { code, pattern, message } of LOW_QUALITY_REPORT_PATTERNS) {
@@ -695,7 +1401,7 @@ export function validateAuditReportArtifact(
     }
   }
 
-  const falseMissingPaths = collectFalseMissingPathClaims(text, input.projectRoot);
+  const falseMissingPaths = collectFalseMissingPathClaims(text, sourceReader);
   if (falseMissingPaths.length > 0) {
     issues.push(
       issue(
@@ -715,7 +1421,7 @@ export function validateAuditReportArtifact(
     );
   }
 
-  if (hasInvalidExistingLineReference(text, input.projectRoot, excludedPaths)) {
+  if (hasInvalidExistingLineReference(text, input.projectRoot, excludedPaths, sourceReader)) {
     issues.push(
       issue(
         "invalid_line_reference",
@@ -789,19 +1495,24 @@ export function validateAuditReportArtifact(
 
   const substantiveEvidence =
     missing.length === 0 &&
+    sourceClassification !== "inventory_only_invalid" &&
     hasSubstantiveReportEvidenceInternal({
       text,
       projectRoot: input.projectRoot,
       excludedReferencedPaths: reportArtifactPaths,
       allowedEvidenceArtifactPaths,
       requireProposedFix: input.requireProposedFix,
+      sourceReader,
     });
 
   if (text.trim() && missing.length === 0 && referencedPaths.length > 0 && !substantiveEvidence) {
     issues.push(
       issue(
         "missing_substantive_evidence",
-        "Report artifact lacks substantive evidence markers such as path+line references, command output, or structured findings with evidence/risk/verification.",
+        sourceClassification === "inventory_only_invalid" &&
+          !hasSubstantiveCommandOutputEvidence(text)
+          ? "Report artifact claims No validated findings but only provides inventory or file-existence evidence. Add scoped inspection command output such as rg/grep results tied to existing path+line citations."
+          : "Report artifact lacks substantive evidence markers such as path+line references, command output, or structured findings with evidence/risk/verification.",
       ),
     );
   }
@@ -823,12 +1534,25 @@ export function validateAuditReportArtifact(
   return {
     ok: issues.length === 0,
     issues,
+    artifactSha256,
+    contentSha256,
+    manifest,
+    manifestVersion: manifest?.version ?? null,
+    manifestStatus: manifest
+      ? hasManifestIssue(issues)
+        ? "invalid"
+        : "valid"
+      : manifestBlockPresent
+        ? "invalid"
+        : "missing",
+    sourceSnapshot,
     referencedPaths,
     missingReferencedPaths: missing,
     existingReferencedPaths: existing,
     reportArtifactPaths,
     allowedEvidenceArtifactPaths,
     substantiveEvidence,
+    sourceClassification,
     reportQualityIssues,
     parsedScopeRoots,
     scopeRoots,

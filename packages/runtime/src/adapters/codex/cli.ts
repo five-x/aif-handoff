@@ -18,6 +18,7 @@ import {
   type CodexApprovalPolicy,
   type CodexSandboxMode,
 } from "./permissions.js";
+import { buildCodexAuditEvidenceEvent } from "./auditEvidence.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -425,6 +426,7 @@ function displayNameForCodexTool(itemType: string): string {
   switch (itemType) {
     case "command_execution":
       return "Bash";
+    case "fileRead":
     case "file_read":
       return "Read";
     case "file_write":
@@ -551,6 +553,10 @@ function processCodexJsonLine(
         message: item.text,
         data: { text: item.text },
       });
+    }
+    const auditEvidenceEvent = buildCodexAuditEvidenceEvent(item, nowIso);
+    if (auditEvidenceEvent) {
+      emitCodexEvent(state, execution, auditEvidenceEvent);
     }
     // Tool-complete events are intentionally not re-surfaced — the
     // `item.started` already emitted tool:use, and re-emitting on completion

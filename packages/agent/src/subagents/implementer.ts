@@ -653,11 +653,16 @@ function buildDeterministicAuditReportRepairContent(input: {
 }): string {
   const scopeRoots = parseAuditScopeRoots(input.task.description);
   const roots = scopeRoots.length > 0 ? scopeRoots : ["."];
-  const evidenceByRoot = roots.map((root) => ({
-    root,
-    files: collectAuditRepairEvidenceFiles(input.projectRoot, root),
-    gitLsFilesOutput: runGitText(input.projectRoot, ["ls-files", "--", root]),
-  }));
+  const evidenceByRoot = roots.map((root) => {
+    const files = collectAuditRepairEvidenceFiles(input.projectRoot, root);
+    const inspectionTarget = files[0] ?? root;
+    return {
+      root,
+      files,
+      inspectionTarget,
+      inspectionOutput: runGitText(input.projectRoot, ["grep", "-n", ".", "--", inspectionTarget]),
+    };
+  });
   const checkedFiles = [...new Set(evidenceByRoot.flatMap((entry) => entry.files))].sort();
   const lines = [
     `# ${input.task.title}`,
@@ -675,8 +680,8 @@ function buildDeterministicAuditReportRepairContent(input: {
         entry.files.length > 0
           ? entry.files.map((file) => `\`${file}:1\``).join(", ")
           : "No tracked file evidence found";
-      const firstOutputLine = entry.gitLsFilesOutput.split(/\r?\n/).find(Boolean) ?? "<empty>";
-      return `| \`${entry.root}\` | ${evidence} | Command \`git ls-files -- ${entry.root}\` output includes \`${firstOutputLine}\` |`;
+      const firstOutputLine = entry.inspectionOutput.split(/\r?\n/).find(Boolean) ?? "<empty>";
+      return `| \`${entry.root}\` | ${evidence} | Command \`git grep -n "." -- ${entry.inspectionTarget}\` output includes \`${firstOutputLine}\` |`;
     }),
     "",
     "## Checked Files",
@@ -688,9 +693,9 @@ function buildDeterministicAuditReportRepairContent(input: {
     "## Checked Commands",
     "",
     ...evidenceByRoot.flatMap((entry) => [
-      `- Command \`git ls-files -- ${entry.root}\` output:`,
+      `- Command \`git grep -n "." -- ${entry.inspectionTarget}\` output:`,
       "```",
-      entry.gitLsFilesOutput || "<empty>",
+      entry.inspectionOutput || "<empty>",
       "```",
     ]),
     "",

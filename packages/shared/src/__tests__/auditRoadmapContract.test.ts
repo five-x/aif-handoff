@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   AUDIT_ARTIFACT_ROLES,
+  AUDIT_ARTIFACT_REWORK_STATUSES,
   AUDIT_ARTIFACT_STATES,
   AUDIT_FAILURE_FAMILIES,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+  buildAuditFailureSignature,
   isAuditReportArtifactPath,
   isAuditSynthesisTitle,
   mapTaskCompletionIssueCodeToAuditFailureFamily,
   parseExpectedAuditReportArtifactPath,
+  selectAuditArtifactFailureFamily,
   selectTaskCompletionAuditFailureFamily,
   validateGeneratedAuditCard,
 } from "../auditRoadmapContract.js";
@@ -46,9 +49,18 @@ describe("auditRoadmapContract", () => {
       "missing",
       "synthesis_not_ready",
       "external_blocked",
+      "source_inconclusive",
+      "terminal_inconclusive",
+      "manual_exception",
     ]);
     expect(AUDIT_FAILURE_FAMILIES).toEqual([
       "invalid_artifact_content",
+      "invalid_artifact_contract",
+      "invalid_artifact_integrity",
+      "invalid_inventory_only",
+      "insufficient_substantive_evidence",
+      "source_inconclusive",
+      "manual_exception",
       "missing_artifact",
       "missing_tool_evidence",
       "rework_needed",
@@ -56,6 +68,14 @@ describe("auditRoadmapContract", () => {
       "synthesis_not_ready",
       "manual_review_required",
       "external_blocker",
+    ]);
+    expect(AUDIT_ARTIFACT_REWORK_STATUSES).toEqual([
+      "accepted",
+      "rework_requested",
+      "manual_review_required",
+      "terminal_inconclusive",
+      "manual_exception",
+      "not_applicable",
     ]);
   });
 
@@ -154,6 +174,12 @@ describe("auditRoadmapContract", () => {
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("unexpected_non_report_changes")).toBe(
       "invalid_artifact_content",
     );
+    expect(mapTaskCompletionIssueCodeToAuditFailureFamily("missing_report_manifest")).toBe(
+      "invalid_artifact_contract",
+    );
+    expect(
+      mapTaskCompletionIssueCodeToAuditFailureFamily("audit_evidence_source_snapshot_mismatch"),
+    ).toBe("invalid_artifact_integrity");
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("audit_inconclusive")).toBe(
       "inconclusive_batch_evidence",
     );
@@ -181,5 +207,74 @@ describe("auditRoadmapContract", () => {
     expect(selectTaskCompletionAuditFailureFamily(["manual_review_required"])).toBe(
       "manual_review_required",
     );
+  });
+
+  it("selects granular source report failure families", () => {
+    expect(
+      selectAuditArtifactFailureFamily({
+        validationDetails: {
+          auditReportValidation: { sourceClassification: "inventory_only_invalid" },
+        },
+      }),
+    ).toBe("invalid_inventory_only");
+    expect(
+      selectAuditArtifactFailureFamily({
+        validationDetails: {
+          auditReportValidation: { sourceClassification: "insufficient_substantive_evidence" },
+        },
+      }),
+    ).toBe("insufficient_substantive_evidence");
+    expect(
+      selectAuditArtifactFailureFamily({
+        validationDetails: {
+          auditReportValidation: { sourceClassification: "insufficient_substantive_evidence" },
+          issues: [{ code: "missing_report_artifact" }],
+        },
+      }),
+    ).toBe("missing_artifact");
+    expect(
+      selectAuditArtifactFailureFamily({
+        validationDetails: {
+          auditReportValidation: { sourceClassification: "inventory_only_invalid" },
+          issues: [{ code: "missing_substantive_evidence" }],
+        },
+      }),
+    ).toBe("invalid_inventory_only");
+    expect(
+      selectAuditArtifactFailureFamily({ issueCodes: ["manifest_content_hash_mismatch"] }),
+    ).toBe("invalid_artifact_integrity");
+  });
+
+  it("builds stable failure signatures without content hashes", () => {
+    const first = buildAuditFailureSignature({
+      role: "report",
+      classification: "inventory_only_invalid",
+      failureFamily: "invalid_inventory_only",
+      validationDetails: {
+        contentSha: "sha-a",
+        issues: [{ code: "missing_substantive_evidence", message: "first text" }],
+      },
+    });
+    const second = buildAuditFailureSignature({
+      role: "report",
+      classification: "inventory_only_invalid",
+      failureFamily: "invalid_inventory_only",
+      validationDetails: {
+        contentSha: "sha-b",
+        issues: [{ code: "missing_substantive_evidence", message: "different text" }],
+      },
+    });
+
+    expect(first).toBe(second);
+    expect(first).not.toContain("sha-a");
+    expect(first).not.toContain("first text");
+    expect(
+      buildAuditFailureSignature({
+        role: "report",
+        classification: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        validationDetails: { issues: [{ code: "manifest_source_snapshot_mismatch" }] },
+      }),
+    ).not.toBe(first);
   });
 });

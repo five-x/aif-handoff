@@ -1,12 +1,17 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import {
   evaluateTaskCompletionEvidence,
+  extractAuditReportManifestEvidenceRefs,
   hasSubstantiveReportEvidence,
   isRiskyTask,
+  resolveAuditPlanId,
   type AutoReviewFinding,
   type AutoReviewStrategy,
   type TaskCompletionEvidenceTask,
 } from "@aif/shared";
+import { findRoadmapBatchArtifactByTaskId, listAuditEvidenceEvents } from "@aif/data";
 import {
   createAutoReviewFindingId,
   parseStructuredReviewComments,
@@ -14,6 +19,8 @@ import {
   type ParsedStructuredReviewComments,
 } from "./reviewContract.js";
 import { executeSubagentQuery } from "./subagentQuery.js";
+
+const AUDIT_REPORT_MANIFEST_BLOCK_PATTERN = /```audit-report-manifest\b/i;
 
 export type ReviewGateParserMode = "structured" | "fallback";
 
@@ -95,10 +102,34 @@ function reviewGateFinding(text: string): AutoReviewFinding {
 
 function collectDeterministicReviewGateFindings(input: ReviewGateInput): AutoReviewFinding[] {
   if (!input.task || !isRiskyTask(input.task)) return [];
+  const artifact = findRoadmapBatchArtifactByTaskId(input.taskId);
+  const evidenceRefs = artifact
+    ? extractAuditReportManifestEvidenceRefs(
+        readAuditArtifactText(input.projectRoot, artifact) ?? "",
+      )
+    : [];
+  const auditEvidenceUnits = artifact
+    ? listAuditEvidenceEvents({
+        taskId: input.taskId,
+        auditPlanId: resolveAuditPlanId({
+          taskId: input.taskId,
+          roadmapBatchId: artifact.batchId,
+        }),
+        evidenceIds: evidenceRefs.length > 0 ? evidenceRefs : undefined,
+        limit: evidenceRefs.length > 0 ? Math.max(1, evidenceRefs.length) : undefined,
+      })
+    : [];
+  const requireAuditLedgerEvidence = auditArtifactRequiresLedgerEvidence({
+    artifact,
+    projectRoot: input.projectRoot,
+    auditEvidenceUnits,
+  });
 
   const taskEvidence = evaluateTaskCompletionEvidence({
     task: { ...input.task, manualReviewRequired: false },
     projectRoot: input.projectRoot,
+    auditEvidenceUnits,
+    requireAuditLedgerEvidence,
   });
   if (taskEvidence.ok) return [];
 
@@ -127,6 +158,31 @@ function collectDeterministicReviewGateFindings(input: ReviewGateInput): AutoRev
       `Audit completion evidence blocked review gate (${entry.code}): ${entry.message}`,
     ),
   );
+}
+
+function auditArtifactRequiresLedgerEvidence(input: {
+  artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>;
+  projectRoot: string;
+  auditEvidenceUnits: unknown[];
+}): boolean {
+  if (!input.artifact) return false;
+  if (input.auditEvidenceUnits.length > 0) return true;
+  return AUDIT_REPORT_MANIFEST_BLOCK_PATTERN.test(
+    readAuditArtifactText(input.projectRoot, input.artifact) ?? "",
+  );
+}
+
+function readAuditArtifactText(
+  projectRoot: string,
+  artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>,
+): string | null {
+  if (!artifact) return null;
+  try {
+    const reportPath = resolve(projectRoot, artifact.artifactPath);
+    return existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
+  } catch {
+    return null;
+  }
 }
 
 async function runLegacyFallbackExtraction(
@@ -464,9 +520,32 @@ function requiresSubstantiveReviewEvidence(input: ReviewGateInput): boolean {
     return false;
   }
 
+  const artifact = findRoadmapBatchArtifactByTaskId(input.taskId);
+  const evidenceRefs = artifact
+    ? extractAuditReportManifestEvidenceRefs(
+        readAuditArtifactText(input.projectRoot, artifact) ?? "",
+      )
+    : [];
+  const auditEvidenceUnits = artifact
+    ? listAuditEvidenceEvents({
+        taskId: input.taskId,
+        auditPlanId: resolveAuditPlanId({
+          taskId: input.taskId,
+          roadmapBatchId: artifact.batchId,
+        }),
+        evidenceIds: evidenceRefs.length > 0 ? evidenceRefs : undefined,
+        limit: evidenceRefs.length > 0 ? Math.max(1, evidenceRefs.length) : undefined,
+      })
+    : [];
   const taskEvidence = evaluateTaskCompletionEvidence({
     task: { ...input.task, manualReviewRequired: false },
     projectRoot: input.projectRoot,
+    auditEvidenceUnits,
+    requireAuditLedgerEvidence: auditArtifactRequiresLedgerEvidence({
+      artifact,
+      projectRoot: input.projectRoot,
+      auditEvidenceUnits,
+    }),
   });
   return !(
     taskEvidence.evidence.reportArtifactFiles.length > 0 &&

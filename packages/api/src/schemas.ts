@@ -120,6 +120,7 @@ export const taskEventSchema = z.object({
   event: z.enum(TASK_EVENTS),
   deletePlanFile: z.boolean().optional(),
   commitOnApprove: z.boolean().optional(),
+  manualExceptionJustification: z.string().min(1).max(20_000).optional(),
 });
 
 export const createTaskCommentSchema = z.object({

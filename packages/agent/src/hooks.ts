@@ -1,5 +1,25 @@
-import { appendTaskActivityLog } from "@aif/data";
-import { logger, findMonorepoRootFromUrl, getEnv } from "@aif/shared";
+import {
+  appendAuditEvidenceEvent,
+  appendTaskActivityLog,
+  findRoadmapBatchArtifactByTaskId,
+  findTaskById,
+} from "@aif/data";
+import {
+  AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
+  buildAuditEvidencePayload,
+  buildAuditEvidenceUnit,
+  deriveAuditSourceSnapshotId,
+  extractAuditRiskHypothesisIds,
+  extractAuditScopeIdsFromText,
+  logger,
+  findMonorepoRootFromUrl,
+  getEnv,
+  readAuditEvidenceRuntimePayload,
+  resolveAuditPlanId,
+  type AuditEvidenceKind,
+  type AuditEvidenceRuntimePayload,
+  type AuditEvidenceUnit,
+} from "@aif/shared";
 import { notifyTaskBroadcast } from "./notifier.js";
 
 const log = logger("agent-hooks");
@@ -255,6 +275,105 @@ function buildHookLogContext(data: Record<string, unknown>): Record<string, unkn
   };
 }
 
+function toolResponseText(toolResponse: Record<string, unknown> | undefined): string | null {
+  if (!toolResponse) return null;
+  if (typeof toolResponse.content === "string") return toolResponse.content;
+  if (typeof toolResponse.stdout === "string" || typeof toolResponse.stderr === "string") {
+    return [toolResponse.stdout, toolResponse.stderr].filter(Boolean).join("\n");
+  }
+  const file = isRecord(toolResponse.file) ? toolResponse.file : null;
+  if (file && typeof file.content === "string") return file.content;
+  return null;
+}
+
+function toolPaths(toolName: string, toolInput: Record<string, unknown> | undefined): string[] {
+  if (!toolInput) return [];
+  const paths = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim().length > 0) paths.add(value.trim());
+  };
+  add(toolInput.file_path);
+  add(toolInput.path);
+  add(toolInput.cwd);
+  if (toolName === "Grep") add(toolInput.glob);
+  return [...paths];
+}
+
+function evidenceKindForTool(toolName: string): AuditEvidenceKind | null {
+  switch (toolName) {
+    case "Read":
+      return "file_read";
+    case "Grep":
+    case "Glob":
+      return "search";
+    case "Bash":
+      return "shell_command";
+    default:
+      return null;
+  }
+}
+
+function buildHookAuditEvidencePayload(
+  data: Record<string, unknown>,
+): AuditEvidenceRuntimePayload | null {
+  const toolName = String(data.tool_name ?? "unknown");
+  const evidenceKind = evidenceKindForTool(toolName);
+  if (!evidenceKind) return null;
+  const toolInput = isRecord(data.tool_input) ? data.tool_input : undefined;
+  const toolResponse = isRecord(data.tool_response) ? data.tool_response : undefined;
+  const command =
+    toolName === "Bash" && typeof toolInput?.command === "string" ? toolInput.command : null;
+  return buildAuditEvidencePayload({
+    toolName,
+    evidenceKind,
+    evidenceGrade: toolName === "Glob" ? "discovery" : "substantive",
+    paths: toolPaths(toolName, toolInput),
+    command,
+    exitCode:
+      typeof toolResponse?.exit_code === "number"
+        ? toolResponse.exit_code
+        : typeof toolResponse?.exitCode === "number"
+          ? toolResponse.exitCode
+          : null,
+    output: toolResponseText(toolResponse),
+  });
+}
+
+function auditEvidenceContext(taskId: string, projectRoot: string) {
+  const task = findTaskById(taskId);
+  const artifact = findRoadmapBatchArtifactByTaskId(taskId);
+  const taskDescription = task?.description ?? "";
+  return {
+    taskId,
+    auditPlanId: resolveAuditPlanId({ taskId, roadmapBatchId: artifact?.batchId ?? null }),
+    sourceSnapshotId: deriveAuditSourceSnapshotId(projectRoot),
+    scopeIds: extractAuditScopeIdsFromText(taskDescription),
+    riskHypothesisIds: extractAuditRiskHypothesisIds(taskDescription),
+  };
+}
+
+export function persistAuditEvidencePayload(
+  taskId: string,
+  projectRoot: string,
+  payload: AuditEvidenceRuntimePayload | unknown,
+): AuditEvidenceUnit | null {
+  const parsed = readAuditEvidenceRuntimePayload(payload) ?? null;
+  if (!parsed) return null;
+  try {
+    const unit = appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(auditEvidenceContext(taskId, projectRoot), parsed),
+    );
+    appendActivityLogToDb(
+      taskId,
+      `[${new Date().toISOString()}] Agent: AuditEvidence ${unit.id} ${unit.evidenceKind}/${unit.evidenceGrade} tool=${sanitizeForActivityLog(unit.toolName, 80)} redaction=${unit.redactionStatus}`,
+    );
+    return unit;
+  } catch (err) {
+    log.error({ err, taskId }, "Failed to persist audit evidence event");
+    return null;
+  }
+}
+
 /**
  * Creates a PostToolUse hook callback that logs tool activity.
  */
@@ -269,6 +388,27 @@ export function createActivityLogger(taskId: string): RuntimeHookCallback {
     log.debug({ taskId, toolName, hookInput: buildHookLogContext(data) }, "Agent tool use logged");
 
     logActivity(taskId, "Tool", `${toolName}${detail}`);
+    return {};
+  };
+}
+
+/**
+ * Creates a PostToolUse hook callback that extracts bounded audit evidence.
+ */
+export function createAuditEvidenceLogger(
+  taskId: string,
+  projectRoot: string,
+): RuntimeHookCallback {
+  return async (input, _toolUseId, _options) => {
+    if (!isRecord(input)) return {};
+    const payload = buildHookAuditEvidencePayload(input);
+    if (payload) {
+      persistAuditEvidencePayload(taskId, projectRoot, payload);
+      log.debug(
+        { taskId, toolName: payload.toolName, eventType: AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE },
+        "Audit evidence event persisted from tool hook",
+      );
+    }
     return {};
   };
 }

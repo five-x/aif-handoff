@@ -118,6 +118,36 @@ describe("codex app-server event mapper", () => {
     });
     mapper.handleNotification("item/completed", {
       item: {
+        type: "mcpToolCall",
+        server: "filesystem",
+        tool: "read_file",
+        arguments: {
+          path: "src/config.ts",
+        },
+        result: "export const timeoutMs = 1000;",
+      },
+    });
+    mapper.handleNotification("item/completed", {
+      item: {
+        type: "fileRead",
+        path: "src/native.ts",
+        content: "export const nativeRead = true;",
+      },
+    });
+    mapper.handleNotification("item/completed", {
+      item: {
+        type: "mcpToolCall",
+        server: "filesystem",
+        tool: "grep",
+        arguments: {
+          path: "src",
+          pattern: "timeoutMs",
+        },
+        result: "src/config.ts:1:export const timeoutMs = 1000;",
+      },
+    });
+    mapper.handleNotification("item/completed", {
+      item: {
         type: "webSearch",
         query: "codex app-server",
       },
@@ -130,7 +160,64 @@ describe("codex app-server event mapper", () => {
     expect(onToolUse).toHaveBeenCalledWith("Bash", expect.stringContaining("echo hello"));
     expect(onToolUse).toHaveBeenCalledWith("FileChange", expect.stringContaining("src/file.ts"));
     expect(onToolUse).toHaveBeenCalledWith("MCP:notion/search", expect.stringContaining("status"));
+    expect(onToolUse).toHaveBeenCalledWith(
+      "MCP:filesystem/read_file",
+      expect.stringContaining("src/config.ts"),
+    );
+    expect(onToolUse).toHaveBeenCalledWith("Read", "src/native.ts");
+    expect(onToolUse).toHaveBeenCalledWith(
+      "MCP:filesystem/grep",
+      expect.stringContaining("timeoutMs"),
+    );
     expect(onToolUse).toHaveBeenCalledWith("WebSearch", "codex app-server");
+    const auditEvents = onEvent.mock.calls
+      .map(
+        (c) =>
+          c[0] as {
+            type: string;
+            data?: {
+              auditEvidence?: {
+                id?: string;
+                evidenceKind?: string;
+                outputPreview?: string | null;
+              };
+            };
+          },
+      )
+      .filter((event) => event.type === "audit:evidence");
+    expect(auditEvents.every((event) => /^ev_/.test(event.data?.auditEvidence?.id ?? ""))).toBe(
+      true,
+    );
+    expect(auditEvents.map((event) => event.data?.auditEvidence?.evidenceKind).sort()).toEqual([
+      "file_read",
+      "file_read",
+      "search",
+      "shell_command",
+    ]);
+    expect(auditEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            auditEvidence: expect.objectContaining({
+              evidenceKind: "file_read",
+              outputPreview: expect.stringContaining("timeoutMs"),
+            }),
+          }),
+        }),
+      ]),
+    );
+    expect(auditEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            auditEvidence: expect.objectContaining({
+              evidenceKind: "file_read",
+              outputPreview: expect.stringContaining("nativeRead"),
+            }),
+          }),
+        }),
+      ]),
+    );
   });
 
   it("preserves whitespace-only agent message deltas", () => {

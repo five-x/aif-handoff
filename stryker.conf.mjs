@@ -87,6 +87,11 @@ const PACKAGE_CONFIGS = {
     ],
     testFiles: [
       "packages/shared/src/__tests__/attachments.test.ts",
+      "packages/shared/src/__tests__/auditContractCorpus.test.ts",
+      "packages/shared/src/__tests__/auditEvidenceLedger.test.ts",
+      "packages/shared/src/__tests__/auditReportValidator.test.ts",
+      "packages/shared/src/__tests__/auditRoadmapContract.test.ts",
+      "packages/shared/src/__tests__/auditSynthesisClassifier.test.ts",
       "packages/shared/src/__tests__/env.test.ts",
       "packages/shared/src/__tests__/gitIsolation.test.ts",
       "packages/shared/src/__tests__/loadEnv.test.ts",

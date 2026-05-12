@@ -45,8 +45,14 @@ import {
   type RuntimeTransport,
   type RuntimeWorkflowSpec,
 } from "@aif/runtime";
-import { getEnv, isWarmupWorkflowKind, logger, redactProviderTextForLogs } from "@aif/shared";
-import { logActivity } from "./hooks.js";
+import {
+  AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
+  getEnv,
+  isWarmupWorkflowKind,
+  logger,
+  redactProviderTextForLogs,
+} from "@aif/shared";
+import { createAuditEvidenceLogger, logActivity, persistAuditEvidencePayload } from "./hooks.js";
 import { PROJECT_SCOPE_SYSTEM_APPEND, REVIEW_DIFF_SCOPE_SYSTEM_APPEND } from "./constants.js";
 import { createStderrCollector } from "./stderrCollector.js";
 import { writeQueryAudit } from "./queryAudit.js";
@@ -711,6 +717,7 @@ function buildExecutionIntent(
       _trustToken: RUNTIME_TRUST_TOKEN,
       settings: { attribution: { commit: "", pr: "" } },
       settingSources: ["project"],
+      postToolUseHooks: [createAuditEvidenceLogger(options.taskId, options.projectRoot)],
     },
   };
 }
@@ -931,6 +938,9 @@ export async function executeSubagentQuery(
       const originalOnSubagentStart = executionIntent.onSubagentStart;
       executionIntent.onEvent = (event) => {
         wd.markActivity();
+        if (event.type === AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE) {
+          persistAuditEvidencePayload(taskId, projectRoot, event.data?.auditEvidence);
+        }
         if (runtimeUsageLimitsEnabled) {
           latestLimitSnapshot = observeRuntimeLimitEvent(event, latestLimitSnapshot, {
             logger: log,

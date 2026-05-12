@@ -3,7 +3,12 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { validateAuditReportArtifact } from "../auditReportValidator.js";
+import {
+  computeAuditReportContentSha256,
+  validateAuditReportArtifact,
+  type AuditReportSourceSnapshot,
+} from "../auditReportValidator.js";
+import type { AuditEvidenceUnit } from "../auditEvidenceLedger.js";
 
 function initRepo(): string {
   const root = mkdtempSync(join(tmpdir(), "aif-audit-validator-"));
@@ -28,6 +33,104 @@ function initRepo(): string {
 
 function issueCodes(result: ReturnType<typeof validateAuditReportArtifact>): string[] {
   return result.issues.map((issue) => issue.code);
+}
+
+function gitSnapshot(
+  root: string,
+): Required<Pick<AuditReportSourceSnapshot, "id" | "commit" | "tree">> {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  return { id: `git:${commit}:${tree}`, commit, tree };
+}
+
+function withManifest(input: {
+  body: string;
+  taskId?: string;
+  batchId?: string;
+  roadmapAlias?: string;
+  artifactPath?: string;
+  snapshot: Required<Pick<AuditReportSourceSnapshot, "id" | "commit" | "tree">>;
+  outcome?: string;
+  contentSha256?: string;
+  omitTaskId?: boolean;
+  omitBatchId?: boolean;
+  omitRoadmapAlias?: boolean;
+}): string {
+  const taskId = input.taskId ?? "task-audit";
+  const manifest = {
+    version: 1,
+    auditPlanId: input.batchId ? `batch:${input.batchId}:task:${taskId}` : `task:${taskId}`,
+    ...(input.omitTaskId ? {} : { taskId }),
+    ...(input.batchId && !input.omitBatchId ? { batchId: input.batchId } : {}),
+    ...(input.roadmapAlias && !input.omitRoadmapAlias ? { roadmapAlias: input.roadmapAlias } : {}),
+    artifactPath: input.artifactPath ?? "audit/runtime-audit.md",
+    contentSha256: input.contentSha256 ?? computeAuditReportContentSha256(input.body),
+    sourceSnapshot: { ...input.snapshot, dirty: false },
+    outcome: input.outcome ?? "validated_no_findings",
+    scopeCoverage: [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
+    riskHypotheses: [
+      { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
+    ],
+    findings:
+      input.outcome === "validated_findings_present"
+        ? [{ id: "finding-1", evidenceRefs: ["ev-1"] }]
+        : [],
+    noFindingsClaims:
+      input.outcome === "validated_findings_present"
+        ? []
+        : [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+    evidenceRefs: ["ev-1"],
+  };
+  return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+}
+
+function manifestEvidenceUnit(input: {
+  snapshot: Required<Pick<AuditReportSourceSnapshot, "id" | "commit" | "tree">>;
+  id?: string;
+  taskId?: string;
+  auditPlanId?: string;
+  sourceSnapshotId?: string;
+  evidenceGrade?: AuditEvidenceUnit["evidenceGrade"];
+  scopeIds?: string[];
+  riskHypothesisIds?: string[];
+}): AuditEvidenceUnit {
+  const taskId = input.taskId ?? "task-audit";
+  const outputPreview = "src/config.ts:1:export const timeoutMs = 1000;";
+  return {
+    id: input.id ?? "ev-1",
+    taskId,
+    auditPlanId: input.auditPlanId ?? `task:${taskId}`,
+    sourceSnapshotId:
+      input.sourceSnapshotId ??
+      input.snapshot.id ??
+      `git:${input.snapshot.commit}:${input.snapshot.tree}`,
+    toolName: "Grep",
+    evidenceKind: "search",
+    evidenceGrade: input.evidenceGrade ?? "substantive",
+    scopeIds: input.scopeIds ?? ["src"],
+    riskHypothesisIds: input.riskHypothesisIds ?? ["risk-1"],
+    pathHashes: ["0".repeat(64)],
+    pathRangeHashes: [],
+    command: { command: "rg timeoutMs src/config.ts", args: [], cwd: null },
+    exitCode: 0,
+    outputSha256: "1".repeat(64),
+    outputPreview,
+    outputPreviewTruncated: false,
+    parsedSummary: {
+      outputBytes: outputPreview.length,
+      outputLineCount: 1,
+      previewChars: outputPreview.length,
+      exitCode: 0,
+    },
+    redactionStatus: "clean",
+    createdAt: "2026-05-12T00:00:00.000Z",
+  };
 }
 
 describe("auditReportValidator", () => {
@@ -102,7 +205,57 @@ describe("auditReportValidator", () => {
 
     expect(result.ok).toBe(true);
     expect(result.substantiveEvidence).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
     expect(result.existingReferencedPaths).toContain("src/config.ts");
+  });
+
+  it.each([
+    [
+      "git ls-files",
+      [
+        "- Command `git ls-files -- src/config.ts README.md` output:",
+        "```",
+        "README.md",
+        "src/config.ts",
+        "```",
+      ],
+    ],
+    ["git status", ["- Command `git status --short` output:", "```", "M src/config.ts", "```"]],
+    ["ls", ["- Command `ls src` output: `src/config.ts`"]],
+    ["find", ["- Command `find src -maxdepth 1 -type f` output: `src/config.ts`"]],
+    [
+      "Get-ChildItem",
+      ["- Command `Get-ChildItem src` output: `Mode LastWriteTime Length Name config.ts`"],
+    ],
+    ["file-existence check", ["- Command `test -f src/config.ts` returned exit code 0."]],
+    ["mass line-one citations", ["Checked commands:", "- `src/config.ts:1`", "- `README.md:1`"]],
+  ])("rejects inventory-only no-findings reports with %s evidence", (_label, commandLines) => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `README.md:1`",
+      "",
+      "Checked commands:",
+      ...commandLines,
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.substantiveEvidence).toBe(false);
+    expect(result.sourceClassification).toBe("inventory_only_invalid");
+    expect(issueCodes(result)).toContain("missing_substantive_evidence");
   });
 
   it("accepts valid findings with path line evidence, risk, proposed fix, and verification", () => {
@@ -125,6 +278,7 @@ describe("auditReportValidator", () => {
 
     expect(result.ok).toBe(true);
     expect(result.substantiveEvidence).toBe(true);
+    expect(result.sourceClassification).toBe("validated_findings_present");
   });
 
   it("accepts path line ranges as evidence coverage", () => {
@@ -467,5 +621,513 @@ describe("auditReportValidator", () => {
 
     expect(result.ok).toBe(false);
     expect(issueCodes(result)).toContain("contradictory_findings_and_no_findings");
+  });
+
+  it("accepts manifest-backed no-findings reports and exposes hash and snapshot binding", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot })],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.manifestStatus).toBe("valid");
+    expect(result.manifestVersion).toBe(1);
+    expect(result.contentSha256).toBe(computeAuditReportContentSha256(body));
+    expect(result.artifactSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.sourceSnapshot).toEqual(expect.objectContaining(snapshot));
+    expect(result.sourceClassification).toBe("validated_no_findings");
+  });
+
+  it("accepts manifest evidence refs backed by matching runtime ledger units", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot })],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.manifestStatus).toBe("valid");
+    expect(issueCodes(result)).not.toContain("missing_audit_evidence_ref");
+  });
+
+  it("rejects ledger-required reports without a valid manifest", () => {
+    const root = initRepo();
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: body,
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.manifestStatus).toBe("missing");
+    expect(issueCodes(result)).toContain("missing_report_manifest");
+  });
+
+  it("rejects manifest evidence refs without matching runtime ledger units", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.manifestStatus).toBe("invalid");
+    expect(issueCodes(result)).toContain("missing_audit_evidence_ref");
+  });
+
+  it("rejects runtime ledger refs bound to a different task plan or source snapshot", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [
+        manifestEvidenceUnit({
+          snapshot,
+          taskId: "wrong-task",
+          auditPlanId: "task:wrong-task",
+          sourceSnapshotId: `git:${"1".repeat(40)}:${"2".repeat(40)}`,
+        }),
+      ],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "audit_evidence_identity_mismatch",
+        "audit_evidence_source_snapshot_mismatch",
+      ]),
+    );
+  });
+
+  it("rejects runtime ledger refs not bound to the manifest source snapshot", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [
+        manifestEvidenceUnit({
+          snapshot,
+          sourceSnapshotId: `git:${"1".repeat(40)}:${"2".repeat(40)}`,
+        }),
+      ],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("audit_evidence_source_snapshot_mismatch");
+    expect(result.issues.map((issue) => issue.message).join(" ")).toContain(
+      `expected manifest source snapshot ${snapshot.id}`,
+    );
+  });
+
+  it("rejects no-findings manifests backed only by discovery-grade runtime evidence", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot, evidenceGrade: "discovery" })],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("audit_evidence_discovery_only");
+  });
+
+  it("rejects manifest scope and risk claims not covered by cited runtime evidence", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [
+        manifestEvidenceUnit({
+          snapshot,
+          scopeIds: ["docs"],
+          riskHypothesisIds: ["risk-2"],
+        }),
+      ],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["audit_evidence_scope_mismatch", "audit_evidence_risk_mismatch"]),
+    );
+  });
+
+  it("fails closed when manifest content hash mismatches the report body", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        contentSha256: "0".repeat(64),
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.manifestStatus).toBe("invalid");
+    expect(issueCodes(result)).toContain("manifest_content_hash_mismatch");
+  });
+
+  it("reports malformed manifest blocks as invalid rather than missing", () => {
+    const root = initRepo();
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: `${body}\n\n\`\`\`audit-report-manifest\n{not json}\n\`\`\`\n`,
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.manifestStatus).toBe("invalid");
+    expect(issueCodes(result)).toContain("invalid_report_manifest");
+  });
+
+  it("fails closed when manifest task batch and artifact identity contradict validation context", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "wrong-task",
+        batchId: "wrong-batch",
+        roadmapAlias: "wrong-roadmap",
+        artifactPath: "audit/wrong.md",
+        snapshot,
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      roadmapBatchId: "batch-a",
+      roadmapAlias: "audit-v1",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("manifest_identity_mismatch");
+  });
+
+  it("accepts source_inconclusive as a manifest outcome vocabulary value", () => {
+    const root = mkdtempSync(join(tmpdir(), "aif-audit-validator-vocab-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    const body = [
+      "Audit inconclusive.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId: "task:task-audit",
+      taskId: "task-audit",
+      artifactPath: "audit/runtime-audit.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot: { id: "snapshot:source-inconclusive", dirty: false },
+      outcome: "source_inconclusive",
+      scopeCoverage: [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
+      riskHypotheses: [
+        { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
+      ],
+      findings: [],
+      noFindingsClaims: [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+      evidenceRefs: ["ev-1"],
+    };
+
+    const result = validateAuditReportArtifact({
+      text: `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.manifest?.outcome).toBe("source_inconclusive");
+    expect(issueCodes(result)).not.toContain("invalid_report_manifest");
+  });
+
+  it("fails closed when required manifest identity fields are omitted", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const missingTask = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot, omitTaskId: true }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+    const missingBatch = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        batchId: "batch-a",
+        snapshot,
+        omitBatchId: true,
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      roadmapBatchId: "batch-a",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+    const missingAlias = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        roadmapAlias: "audit-v1",
+        snapshot,
+        omitRoadmapAlias: true,
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      roadmapAlias: "audit-v1",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    for (const result of [missingTask, missingBatch, missingAlias]) {
+      expect(result.ok).toBe(false);
+      expect(result.manifestStatus).toBe("invalid");
+      expect(issueCodes(result)).toContain("missing_report_manifest_fields");
+    }
+  }, 10_000);
+
+  it("validates source line references against the declared snapshot instead of current worktree", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      ["export const timeoutMs = 1000;", "export const retries = 3;", ""].join("\n"),
+      "utf8",
+    );
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:2`",
+      "Checked commands:",
+      '- Command `rg -n "retries" src/config.ts` output: `2:export const retries = 3;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      expectedSourceSnapshot: snapshot,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["invalid_line_reference", "missing_substantive_evidence"]),
+    );
+    expect(result.sourceClassification).toBe("insufficient_substantive_evidence");
+  });
+
+  it("fails closed when manifest source snapshot contradicts the expected snapshot", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot: {
+          ...snapshot,
+          id: `git:${snapshot.commit}:${"1".repeat(40)}`,
+          tree: "1".repeat(40),
+        },
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      expectedSourceSnapshot: snapshot,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("manifest_source_snapshot_mismatch");
   });
 });

@@ -164,6 +164,84 @@ describe("qwen-local-agent adapter", () => {
     const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1].body));
     expect(secondBody.messages.some((message) => message.role === "tool")).toBe(true);
   });
+  it("emits bounded audit evidence events for read search and shell tools", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-evidence-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const token = 'sk-SECRETSECRETSECRETSECRET';\n",
+      "utf8",
+    );
+    const events = [];
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-evidence",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "src/config.ts" }),
+                    },
+                  },
+                  {
+                    id: "call-list",
+                    type: "function",
+                    function: {
+                      name: "list_files",
+                      arguments: JSON.stringify({ path: "src" }),
+                    },
+                  },
+                  {
+                    id: "call-shell",
+                    type: "function",
+                    function: {
+                      name: "run_shell",
+                      arguments: JSON.stringify({ command: "pwd", cwd: "src" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-evidence",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    await runQwenLocalAgentApi(
+      createRunInput(root, {
+        execution: {
+          onEvent: (event) => events.push(event),
+        },
+      }),
+    );
+
+    const auditEvents = events.filter((event) => event.type === "audit:evidence");
+    const evidence = auditEvents.map((event) => event.data.auditEvidence);
+    expect(evidence).toHaveLength(3);
+    expect(evidence.every((entry) => /^ev_/.test(entry.id))).toBe(true);
+    expect(evidence.map((entry) => entry.evidenceKind)).toEqual(
+      expect.arrayContaining(["file_read", "search", "shell_command"]),
+    );
+    expect(evidence.find((entry) => entry.toolName === "list_files").evidenceGrade).toBe(
+      "discovery",
+    );
+    expect(evidence.every((entry) => /^[a-f0-9]{64}$/.test(entry.outputSha256))).toBe(true);
+    expect(JSON.stringify(auditEvents)).toContain("[REDACTED]");
+    expect(JSON.stringify(auditEvents)).not.toContain("sk-SECRETSECRETSECRETSECRET");
+  });
   it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));
     const repeatedToolCall = {

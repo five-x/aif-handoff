@@ -27,6 +27,26 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 const { runImplementer } = await import("../subagents/implementer.js");
 const { createRoadmapBatchContract, updateRoadmapBatchArtifactState } = await import("@aif/data");
 
+function trustedFindingsValidationDetails(): Record<string, unknown> {
+  return {
+    evidence: {
+      auditReportValidation: { sourceClassification: "validated_findings_present" },
+    },
+  };
+}
+
+function trustedNoFindingsValidationDetails(): Record<string, unknown> {
+  return {
+    evidence: {
+      auditReportValidation: {
+        sourceClassification: "validated_no_findings",
+        manifestStatus: "valid",
+        manifestVersion: 1,
+      },
+    },
+  };
+}
+
 function streamSuccess(result: string): AsyncIterable<{
   type: "result";
   subtype: "success";
@@ -222,11 +242,13 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-synthesis-report",
       state: "valid",
       failureFamily: null,
+      validationDetails: trustedFindingsValidationDetails(),
     });
     updateRoadmapBatchArtifactState({
       taskId: "task-weak-report",
       state: "invalid",
       failureFamily: "invalid_artifact_content",
+      reworkStatus: "manual_review_required",
       validationDetails: { issues: ["low_quality_report_evidence"] },
     });
 
@@ -336,6 +358,7 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-branch-report",
       state: "valid",
       failureFamily: null,
+      validationDetails: trustedFindingsValidationDetails(),
     });
 
     await runImplementer("task-branch-synthesis", projectRoot);
@@ -436,6 +459,7 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-report-for-deterministic-synthesis",
       state: "valid",
       failureFamily: null,
+      validationDetails: trustedFindingsValidationDetails(),
     });
 
     await runImplementer("task-deterministic-synthesis", projectRoot);
@@ -578,6 +602,7 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-report-no-findings-source",
       state: "valid",
       failureFamily: null,
+      validationDetails: trustedNoFindingsValidationDetails(),
     });
 
     await runImplementer("task-no-findings-synthesis", projectRoot);
@@ -722,6 +747,7 @@ describe("runImplementer rework behavior", () => {
         taskId,
         state: "valid",
         failureFamily: null,
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
     });
 
@@ -1231,8 +1257,8 @@ describe("runImplementer rework behavior", () => {
       "",
       "| Scope | Checked evidence | Verification |",
       "| --- | --- | --- |",
-      "| `README.md` | `README.md:1` | Command `git ls-files -- README.md` output includes `README.md` |",
-      "| `src` | `src/alpha.ts:1`, `src/beta.ts:1`, `src/gamma.ts:1` | Command `git ls-files -- src` output includes `src/alpha.ts` |",
+      '| `README.md` | `README.md:1` | Command `git grep -n "." -- README.md` output includes `README.md:1:# Project` |',
+      '| `src` | `src/alpha.ts:1`, `src/beta.ts:1`, `src/gamma.ts:1` | Command `git grep -n "." -- src/alpha.ts` output includes `src/alpha.ts:1:export const alpha = 1;` |',
       "",
       "## Checked Files",
       "",
@@ -1243,15 +1269,13 @@ describe("runImplementer rework behavior", () => {
       "",
       "## Checked Commands",
       "",
-      "- Command `git ls-files -- README.md` output:",
+      '- Command `git grep -n "." -- README.md` output:',
       "```",
-      "README.md",
+      "README.md:1:# Project",
       "```",
-      "- Command `git ls-files -- src` output:",
+      '- Command `git grep -n "." -- src/alpha.ts` output:',
       "```",
-      "src/alpha.ts",
-      "src/beta.ts",
-      "src/gamma.ts",
+      "src/alpha.ts:1:export const alpha = 1;",
       "```",
       "",
     ].join("\n");

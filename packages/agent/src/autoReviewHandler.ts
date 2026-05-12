@@ -63,6 +63,7 @@ function buildReviewGateTaskContext(task: NonNullable<ReturnType<typeof findTask
     expectedReportArtifactPath: artifact?.artifactPath ?? null,
     allowedEvidenceArtifactPaths,
     auditArtifactRole: toAuditArtifactRole(artifact?.role),
+    roadmapBatchId: artifact?.batchId ?? null,
   };
 }
 

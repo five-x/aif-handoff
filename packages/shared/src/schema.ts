@@ -10,6 +10,11 @@ import type {
   TaskStatus,
 } from "./types.js";
 import type { TaskIntent } from "./taskIntent.js";
+import type {
+  AuditEvidenceGrade,
+  AuditEvidenceKind,
+  AuditEvidenceRedactionStatus,
+} from "./auditEvidenceLedger.js";
 
 export const projects = sqliteTable("projects", {
   id: text("id")
@@ -188,6 +193,9 @@ export const roadmapBatchArtifacts = sqliteTable("roadmap_batch_artifacts", {
   worktreePath: text("worktree_path"),
   projectRoot: text("project_root"),
   contentSha: text("content_sha"),
+  attemptNumber: integer("attempt_number").notNull().default(0),
+  attemptBoundaryId: text("attempt_boundary_id"),
+  failureSignature: text("failure_signature"),
   validatedAt: text("validated_at"),
   createdAt: text("created_at")
     .notNull()
@@ -199,6 +207,67 @@ export const roadmapBatchArtifacts = sqliteTable("roadmap_batch_artifacts", {
 
 export type RoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferSelect;
 export type NewRoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferInsert;
+
+export const roadmapBatchArtifactAttempts = sqliteTable("roadmap_batch_artifact_attempts", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  artifactId: text("artifact_id").notNull(),
+  batchId: text("batch_id").notNull(),
+  projectId: text("project_id").notNull(),
+  roadmapAlias: text("roadmap_alias").notNull(),
+  taskId: text("task_id").notNull(),
+  role: text("role").notNull().default("report"),
+  artifactPath: text("artifact_path").notNull(),
+  attemptNumber: integer("attempt_number").notNull(),
+  attemptBoundaryId: text("attempt_boundary_id"),
+  state: text("state").notNull(),
+  classification: text("classification"),
+  failureFamily: text("failure_family"),
+  failureSignature: text("failure_signature"),
+  contentSha: text("content_sha"),
+  reworkStatus: text("rework_status").notNull().default("not_applicable"),
+  validationDetailsJson: text("validation_details_json"),
+  sourceSnapshotId: text("source_snapshot_id"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type RoadmapBatchArtifactAttemptRow = typeof roadmapBatchArtifactAttempts.$inferSelect;
+export type NewRoadmapBatchArtifactAttemptRow = typeof roadmapBatchArtifactAttempts.$inferInsert;
+
+export const auditEvidenceEvents = sqliteTable("audit_evidence_events", {
+  id: text("id").primaryKey(),
+  taskId: text("task_id").notNull(),
+  auditPlanId: text("audit_plan_id").notNull(),
+  sourceSnapshotId: text("source_snapshot_id").notNull(),
+  toolName: text("tool_name").notNull(),
+  evidenceKind: text("evidence_kind").$type<AuditEvidenceKind>().notNull(),
+  evidenceGrade: text("evidence_grade").$type<AuditEvidenceGrade>().notNull(),
+  scopeIdsJson: text("scope_ids_json").notNull().default("[]"),
+  riskHypothesisIdsJson: text("risk_hypothesis_ids_json").notNull().default("[]"),
+  pathHashesJson: text("path_hashes_json").notNull().default("[]"),
+  pathRangeHashesJson: text("path_range_hashes_json").notNull().default("[]"),
+  commandJson: text("command_json"),
+  exitCode: integer("exit_code"),
+  outputSha256: text("output_sha256"),
+  outputPreview: text("output_preview"),
+  outputPreviewTruncated: integer("output_preview_truncated", { mode: "boolean" })
+    .notNull()
+    .default(false),
+  parsedSummaryJson: text("parsed_summary_json"),
+  redactionStatus: text("redaction_status")
+    .$type<AuditEvidenceRedactionStatus>()
+    .notNull()
+    .default("clean"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type AuditEvidenceEventRow = typeof auditEvidenceEvents.$inferSelect;
+export type NewAuditEvidenceEventRow = typeof auditEvidenceEvents.$inferInsert;
 
 export const runtimeProfiles = sqliteTable("runtime_profiles", {
   id: text("id")

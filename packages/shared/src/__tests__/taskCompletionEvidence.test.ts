@@ -8,6 +8,7 @@ import {
   formatTaskCompletionBlockedReason,
 } from "../taskCompletionEvidence.js";
 import { formatAuditSynthesisOutcomeForArtifact } from "../auditSynthesisClassifier.js";
+import { computeAuditReportContentSha256 } from "../auditReportValidator.js";
 
 function initRepo(): string {
   const root = mkdtempSync(join(tmpdir(), "aif-evidence-"));
@@ -65,6 +66,44 @@ function commitAuditSynthesisWithMetadata(
     cwd: root,
     stdio: "ignore",
   });
+}
+
+function gitSnapshot(root: string): { id: string; commit: string; tree: string } {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  return { id: `git:${commit}:${tree}`, commit, tree };
+}
+
+function withAuditManifest(input: {
+  body: string;
+  taskId: string;
+  artifactPath: string;
+  snapshot: { id: string; commit: string; tree: string };
+  contentSha256?: string;
+}): string {
+  const manifest = {
+    version: 1,
+    auditPlanId: `task:${input.taskId}`,
+    taskId: input.taskId,
+    artifactPath: input.artifactPath,
+    contentSha256: input.contentSha256 ?? computeAuditReportContentSha256(input.body),
+    sourceSnapshot: { ...input.snapshot, dirty: false },
+    outcome: "validated_no_findings",
+    scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: ["ev-1"] }],
+    riskHypotheses: [
+      { id: "risk-1", description: "Runtime evidence can be forged", status: "covered" },
+    ],
+    findings: [],
+    noFindingsClaims: [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+    evidenceRefs: ["ev-1"],
+  };
+  return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
 }
 
 const IMPLEMENTATION_TOOL_ACTIVITY = [
@@ -2671,6 +2710,221 @@ describe("taskCompletionEvidence", () => {
       "missing_substantive_evidence",
     );
     expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks inventory-only no-findings before synthesis classification", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "app.ts"), "export const value = 1;\n", "utf8");
+    execFileSync("git", ["add", "src/app.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/inventory-only-source-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `src/app.ts:1`",
+        "",
+        "Checked commands:",
+        "- Command `git ls-files -- src/app.ts` output:",
+        "```",
+        "src/app.ts",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add inventory audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-inventory-only-source-report",
+        title: "Audit source report",
+        description:
+          "Report artifact: reports/audit.md. Evidence requirements: support no-findings with checked files and commands.",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(result.evidence.auditSynthesisOutcome).toBeNull();
+    expect(result.evidence.auditReportValidation.sourceClassification).toBe(
+      "inventory_only_invalid",
+    );
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
+      "missing_substantive_evidence",
+    );
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks audit reports that cite manifest evidence without runtime ledger evidence", () => {
+    const root = initRepo();
+    const taskId = "audit-ledger-required";
+    const artifactPath = "reports/audit.md";
+    const body = [
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `README.md:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+      "",
+    ].join("\n");
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      withAuditManifest({ body, taskId, artifactPath, snapshot: gitSnapshot(root) }),
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditEvidenceUnits: [],
+      task: {
+        id: taskId,
+        title: "Audit runtime evidence",
+        description: `Report artifact: ${artifactPath}`,
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
+      "missing_audit_evidence_ref",
+    );
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("missing_audit_evidence_ref");
+    expect(codes(result)).toContain("insufficient_report_evidence");
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
+  it("surfaces manifest and audit evidence validation failures as top-level completion codes", () => {
+    const root = initRepo();
+    const taskId = "audit-ledger-mismatch";
+    const artifactPath = "reports/audit.md";
+    const body = [
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `README.md:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+      "",
+    ].join("\n");
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      withAuditManifest({
+        body,
+        taskId,
+        artifactPath,
+        snapshot: gitSnapshot(root),
+        contentSha256: "0".repeat(64),
+      }),
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [
+        {
+          id: "ev-1",
+          taskId,
+          auditPlanId: `task:${taskId}`,
+          sourceSnapshotId: `git:${"1".repeat(40)}:${"2".repeat(40)}`,
+          toolName: "Grep",
+          evidenceKind: "search",
+          evidenceGrade: "substantive",
+          scopeIds: ["README.md"],
+          riskHypothesisIds: ["risk-1"],
+          pathHashes: [],
+          pathRangeHashes: [],
+          command: null,
+          exitCode: 0,
+          outputSha256: null,
+          outputPreview: "README.md:1:# test",
+          outputPreviewTruncated: false,
+          parsedSummary: null,
+          redactionStatus: "clean",
+          createdAt: "2026-05-12T00:00:00.000Z",
+        },
+      ],
+      task: {
+        id: taskId,
+        title: "Audit runtime evidence",
+        description: `Report artifact: ${artifactPath}`,
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("manifest_content_hash_mismatch");
+    expect(codes(result)).toContain("audit_evidence_source_snapshot_mismatch");
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("blocks ledger-required audit reports that omit the runtime evidence manifest", () => {
+    const root = initRepo();
+    const taskId = "audit-ledger-manifest-required";
+    const artifactPath = "reports/audit.md";
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `README.md:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [],
+      task: {
+        id: taskId,
+        title: "Audit runtime evidence",
+        description: `Report artifact: ${artifactPath}`,
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
+      "missing_report_manifest",
+    );
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("missing_report_manifest");
+    expect(codes(result)).toContain("insufficient_report_evidence");
+    expect(codes(result)).toContain("low_quality_report_evidence");
   });
 
   it("allows a normal simple task without risk signals or generic plan output", () => {

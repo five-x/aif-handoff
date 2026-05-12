@@ -493,7 +493,8 @@ tasksRouter.delete("/:id", (c) => {
 // POST /tasks/:id/events — apply a human action through state machine
 tasksRouter.post("/:id/events", jsonValidator(taskEventSchema), async (c) => {
   const { id } = c.req.param();
-  const { event, deletePlanFile, commitOnApprove } = c.req.valid("json");
+  const { event, deletePlanFile, commitOnApprove, manualExceptionJustification } =
+    c.req.valid("json");
   const existing = findTaskById(id);
   if (!existing) {
     return c.json({ error: "Task not found" }, 404);
@@ -503,6 +504,7 @@ tasksRouter.post("/:id/events", jsonValidator(taskEventSchema), async (c) => {
       taskId: id,
       event,
       deletePlanFile,
+      manualExceptionJustification,
     });
     if (!handled.ok) {
       return c.json({ error: handled.error }, handled.status as ContentfulStatusCode);

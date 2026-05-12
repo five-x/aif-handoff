@@ -1,6 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { tasks, projects } from "@aif/shared";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  computeAuditReportContentSha256,
+  evaluateTaskCompletionEvidence,
+  tasks,
+  projects,
+} from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -27,7 +36,9 @@ const {
   flushAllActivityQueues,
   disposeActivityQueue,
   sanitizeForActivityLog,
+  createAuditEvidenceLogger,
 } = await import("../hooks.js");
+const { listAuditEvidenceEvents } = await import("@aif/data");
 
 const PROJECT_ID = "test-project";
 const TASK_ID = "test-task-1";
@@ -100,6 +111,66 @@ function getTaskLog(taskId: string = TASK_ID): string {
   const task = testDb.current.select().from(tasks).where(eq(tasks.id, taskId)).get();
   return task?.agentActivityLog ?? "";
 }
+
+function initGitFixture(): string {
+  const root = mkdtempSync(join(tmpdir(), "aif-hooks-audit-ledger-"));
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
+  writeFileSync(join(root, "README.md"), "# audit fixture\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  return root;
+}
+
+function gitSnapshot(root: string): { id: string; commit: string; tree: string } {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  return { id: `git:${commit}:${tree}`, commit, tree };
+}
+
+function withAuditManifest(input: {
+  body: string;
+  taskId: string;
+  artifactPath: string;
+  evidenceId: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): string {
+  const manifest = {
+    version: 1,
+    auditPlanId: `task:${input.taskId}`,
+    taskId: input.taskId,
+    artifactPath: input.artifactPath,
+    contentSha256: computeAuditReportContentSha256(input.body),
+    sourceSnapshot: { ...input.snapshot, dirty: false },
+    outcome: "validated_no_findings",
+    scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: [input.evidenceId] }],
+    riskHypotheses: [],
+    findings: [],
+    noFindingsClaims: [{ id: "nf-1", evidenceRefs: [input.evidenceId] }],
+    evidenceRefs: [input.evidenceId],
+  };
+  return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+}
+
+const RISKY_COMPLETION_ACTIVITY = [
+  "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started",
+  "[2026-05-09T00:00:01.000Z] Tool: read_file README.md",
+  "[2026-05-09T00:00:02.000Z] Tool: write_file reports/audit.md",
+  "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator complete",
+  "[2026-05-09T00:00:04.000Z] Agent: review-gate started",
+  "[2026-05-09T00:00:05.000Z] Tool: read_file reports/audit.md",
+  "[2026-05-09T00:00:06.000Z] Agent: review-gate complete",
+].join("\n");
 
 describe("hooks - activity logging", () => {
   beforeEach(() => {
@@ -246,6 +317,126 @@ describe("hooks - activity logging", () => {
 
       // Further flush should be a no-op (queue cleared)
       flushActivityQueue(TASK_ID);
+    });
+  });
+
+  describe("audit evidence logger", () => {
+    beforeEach(() => {
+      mockedGetEnv.mockReturnValue(makeEnv({ ACTIVITY_LOG_MODE: "sync" }));
+    });
+
+    it("persists bounded redacted evidence for read tool responses", async () => {
+      const logger = createAuditEvidenceLogger(TASK_ID, "/tmp/test");
+
+      await logger(
+        {
+          tool_name: "Read",
+          tool_input: { file_path: "src/config.ts" },
+          tool_response: {
+            content: "src/config.ts:1:OPENAI_API_KEY=sk-SECRETSECRETSECRETSECRET\n",
+          },
+        },
+        "tool-use-1",
+        {},
+      );
+
+      const events = listAuditEvidenceEvents({ taskId: TASK_ID });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual(
+        expect.objectContaining({
+          taskId: TASK_ID,
+          auditPlanId: `task:${TASK_ID}`,
+          evidenceKind: "file_read",
+          evidenceGrade: "substantive",
+          redactionStatus: "redacted",
+        }),
+      );
+      expect(events[0]?.scopeIds).toEqual(expect.arrayContaining(["src", "src/config.ts"]));
+      expect(events[0]?.outputPreview).toContain("[REDACTED]");
+      expect(JSON.stringify(events[0])).not.toContain("sk-SECRETSECRETSECRETSECRET");
+      expect(getTaskLog()).toContain(`AuditEvidence ${events[0]?.id}`);
+      expect(getTaskLog()).not.toContain("sk-SECRETSECRETSECRETSECRET");
+    });
+
+    it("allows a report manifest to cite the actual persisted runtime evidence id", async () => {
+      const root = initGitFixture();
+      testDb.current
+        .update(projects)
+        .set({ rootPath: root })
+        .where(eq(projects.id, PROJECT_ID))
+        .run();
+      testDb.current
+        .update(tasks)
+        .set({
+          description: "Scope: README.md\nReport artifact: reports/audit.md",
+          taskIntent: "general",
+          agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        })
+        .where(eq(tasks.id, TASK_ID))
+        .run();
+
+      const logger = createAuditEvidenceLogger(TASK_ID, root);
+      await logger(
+        {
+          tool_name: "Grep",
+          tool_input: { pattern: "audit", path: "README.md" },
+          tool_response: {
+            content: "README.md:1:# audit fixture\n",
+          },
+        },
+        "tool-use-grep",
+        {},
+      );
+
+      const events = listAuditEvidenceEvents({ taskId: TASK_ID });
+      expect(events).toHaveLength(1);
+      const evidenceId = events[0]?.id;
+      expect(evidenceId).toMatch(/^ev_/);
+      expect(getTaskLog()).toContain(`AuditEvidence ${evidenceId}`);
+
+      const artifactPath = "reports/audit.md";
+      const body = [
+        "# Audit",
+        "",
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `README.md:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
+        "",
+      ].join("\n");
+      mkdirSync(join(root, "reports"), { recursive: true });
+      writeFileSync(
+        join(root, artifactPath),
+        withAuditManifest({
+          body,
+          taskId: TASK_ID,
+          artifactPath,
+          evidenceId: evidenceId ?? "",
+          snapshot: gitSnapshot(root),
+        }),
+        "utf8",
+      );
+
+      const result = evaluateTaskCompletionEvidence({
+        projectRoot: root,
+        auditEvidenceUnits: events,
+        requireAuditLedgerEvidence: true,
+        task: {
+          id: TASK_ID,
+          title: "Runtime evidence report",
+          description: `Scope: README.md\nReport artifact: ${artifactPath}`,
+          taskIntent: "general",
+          agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).not.toContain(
+        "missing_audit_evidence_ref",
+      );
     });
   });
 });

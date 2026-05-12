@@ -828,7 +828,50 @@ describe("codex cli transport", () => {
       "data",
       JSON.stringify({
         type: "item.completed",
-        item: { id: "item_2", type: "agent_message", text: "Listed files." },
+        item: {
+          id: "item_native_read",
+          type: "file_read",
+          path: "src/native.ts",
+          content: "export const nativeRead = true;",
+          status: "completed",
+        },
+      }) + "\n",
+    );
+    child.stdout.emit(
+      "data",
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_2",
+          type: "mcp_tool_call",
+          server: "filesystem",
+          tool: "read_file",
+          arguments: { path: "src/config.ts" },
+          output: "export const timeoutMs = 1000;",
+          status: "completed",
+        },
+      }) + "\n",
+    );
+    child.stdout.emit(
+      "data",
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_3",
+          type: "mcp_tool_call",
+          server: "filesystem",
+          tool: "grep",
+          arguments: { path: "src", pattern: "timeoutMs" },
+          result: "src/config.ts:1:export const timeoutMs = 1000;",
+          status: "completed",
+        },
+      }) + "\n",
+    );
+    child.stdout.emit(
+      "data",
+      JSON.stringify({
+        type: "item.completed",
+        item: { id: "item_4", type: "agent_message", text: "Listed files." },
       }) + "\n",
     );
     child.stdout.emit(
@@ -854,6 +897,55 @@ describe("codex cli transport", () => {
       .filter((e) => e.type === "tool:use");
     expect(toolEvents).toHaveLength(1);
     expect(toolEvents[0]?.data?.name).toBe("Bash");
+    const auditEvents = onEvent.mock.calls
+      .map(
+        (c) =>
+          c[0] as {
+            type: string;
+            data?: {
+              auditEvidence?: {
+                id?: string;
+                evidenceKind?: string;
+                outputPreview?: string | null;
+                command?: { command?: string } | null;
+              };
+            };
+          },
+      )
+      .filter((e) => e.type === "audit:evidence");
+    expect(auditEvents.every((event) => /^ev_/.test(event.data?.auditEvidence?.id ?? ""))).toBe(
+      true,
+    );
+    expect(auditEvents.map((event) => event.data?.auditEvidence?.evidenceKind).sort()).toEqual([
+      "file_read",
+      "file_read",
+      "search",
+      "shell_command",
+    ]);
+    expect(
+      auditEvents.find((event) => event.data?.auditEvidence?.outputPreview?.includes("nativeRead")),
+    ).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          auditEvidence: expect.objectContaining({
+            evidenceKind: "file_read",
+            outputPreview: expect.stringContaining("nativeRead"),
+          }),
+        }),
+      }),
+    );
+    expect(
+      auditEvents.find((event) => event.data?.auditEvidence?.evidenceKind === "shell_command"),
+    ).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          auditEvidence: expect.objectContaining({
+            command: expect.objectContaining({ command: "/bin/zsh -lc ls" }),
+            outputPreview: expect.stringContaining("file1"),
+          }),
+        }),
+      }),
+    );
   });
 
   it("handles JSONL lines split across multiple stdout chunks", async () => {

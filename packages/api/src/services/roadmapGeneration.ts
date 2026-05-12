@@ -655,6 +655,7 @@ function buildAuditRoadmapItem(
     `  - Report artifact: ${reportPath}`,
     "  - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.",
     "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+    "  - Manifest requirements: include a fenced `audit-report-manifest` JSON block with version 1, auditPlanId `task:<task-id>` or `batch:<batch-id>:task:<task-id>`, taskId, batchId when assigned, roadmapAlias when assigned, artifactPath, contentSha256 for the markdown body without the manifest block, sourceSnapshot commit/tree/id, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
     '  - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
     '  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     `  - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}`,

@@ -84,6 +84,9 @@ export function applyHumanTaskEvent(
         patch: { ...CLEAN_STATE_RESET, status: "implementing", reworkRequested: true },
       };
     }
+    case "manual_exception": {
+      return { ok: false, error: "manual_exception is handled by the audit artifact service" };
+    }
     case "retry_from_blocked": {
       if (task.status !== "blocked_external") {
         return { ok: false, error: "retry_from_blocked is only allowed from blocked_external" };

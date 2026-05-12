@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   clearTaskRuntimeLimitSnapshot,
   blockTaskForRuntimeGateIfEligible,
@@ -20,7 +22,9 @@ import {
   persistTaskRuntimeLimitSnapshot,
   resolveEffectiveRuntimeProfile,
   findRoadmapBatchArtifactByTaskId,
+  listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
+  listAuditEvidenceEvents,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
   setTaskFields,
@@ -34,8 +38,12 @@ import {
   getEnv,
   CLEAN_STATE_RESET,
   evaluateTaskCompletionEvidence,
+  extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
+  buildAuditFailureSignature,
+  selectAuditArtifactFailureFamily,
   selectTaskCompletionAuditFailureFamily,
+  resolveAuditPlanId,
   TaskPlanQualityError,
   withTimeout,
   type AuditFailureFamily,
@@ -342,6 +350,11 @@ function proactivelyBlockTaskForRuntimeGate(
 
 const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
   "invalid_artifact_content",
+  "invalid_artifact_contract",
+  "invalid_artifact_integrity",
+  "invalid_inventory_only",
+  "insufficient_substantive_evidence",
+  "source_inconclusive",
   "missing_artifact",
   "missing_tool_evidence",
   "rework_needed",
@@ -350,12 +363,28 @@ const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
 const AUDIT_EVIDENCE_REPAIR_ISSUE_CODES = new Set([
   "insufficient_report_evidence",
   "low_quality_report_evidence",
+  "missing_report_manifest",
+  "invalid_report_manifest",
+  "unsupported_report_manifest_version",
+  "missing_report_manifest_fields",
+  "missing_audit_evidence_ref",
 ]);
+const AUDIT_REPORT_MANIFEST_BLOCK_PATTERN = /```audit-report-manifest\b/i;
 
 function firstAuditFailureFamily(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
 ): AuditFailureFamily {
-  return selectTaskCompletionAuditFailureFamily(result.issues.map((entry) => entry.code));
+  const issueCodes = result.issues.map((entry) => entry.code);
+  return (
+    selectAuditArtifactFailureFamily({
+      issueCodes,
+      validationDetails: {
+        issues: result.issues,
+        evidence: result.evidence,
+      },
+      fallback: selectTaskCompletionAuditFailureFamily(issueCodes),
+    }) ?? "external_blocker"
+  );
 }
 
 function auditEvidenceRepairIssueCodes(
@@ -363,20 +392,66 @@ function auditEvidenceRepairIssueCodes(
 ): string[] {
   return result.issues
     .map((entry) => entry.code)
-    .filter((code) => AUDIT_EVIDENCE_REPAIR_ISSUE_CODES.has(code));
+    .filter(
+      (code) =>
+        AUDIT_EVIDENCE_REPAIR_ISSUE_CODES.has(code) ||
+        code.startsWith("manifest_") ||
+        code.startsWith("audit_evidence_"),
+    );
 }
 
 function artifactStateForFailureFamily(
   family: AuditFailureFamily,
-): "invalid" | "missing" | "synthesis_not_ready" | "external_blocked" {
+  options: { terminal?: boolean } = {},
+):
+  | "invalid"
+  | "missing"
+  | "synthesis_not_ready"
+  | "external_blocked"
+  | "source_inconclusive"
+  | "terminal_inconclusive"
+  | "manual_exception" {
   if (family === "missing_artifact") return "missing";
   if (family === "synthesis_not_ready") return "synthesis_not_ready";
+  if (family === "inconclusive_batch_evidence") return "terminal_inconclusive";
+  if (family === "manual_exception") return "manual_exception";
+  if (
+    options.terminal &&
+    (family === "source_inconclusive" || family === "insufficient_substantive_evidence")
+  ) {
+    return "source_inconclusive";
+  }
   if (family === "external_blocker") return "external_blocked";
   return "invalid";
 }
 
+function auditValidationDetails(result: ReturnType<typeof evaluateTaskCompletionEvidence>) {
+  return {
+    issues: result.issues,
+    evidence: result.evidence,
+  };
+}
+
+function repeatedAuditFailureCount(input: {
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
+  family: AuditFailureFamily;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+}): number {
+  const signature = buildAuditFailureSignature({
+    role: input.artifact.role,
+    failureFamily: input.family,
+    validationDetails: auditValidationDetails(input.result),
+  });
+  if (!signature) return 0;
+  return listRoadmapBatchArtifactAttempts(input.artifact.id).filter(
+    (attempt) =>
+      attempt.failureSignature === signature && attempt.reworkStatus === "rework_requested",
+  ).length;
+}
+
 function returnAuditTaskToRework(input: {
   task: TaskRow;
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
   fromStatus: TaskStatus;
   title: string;
   blockedReason: string;
@@ -389,10 +464,10 @@ function returnAuditTaskToRework(input: {
     taskId: input.task.id,
     state: artifactStateForFailureFamily(input.family),
     failureFamily: input.family,
-    validationDetails: {
-      issues: input.result.issues,
-      evidence: input.result.evidence,
-    },
+    reworkStatus: "rework_requested",
+    createAttemptBoundary: true,
+    validationDetails: auditValidationDetails(input.result),
+    contentSha: input.result.evidence.auditReportValidation.artifactSha256,
     branchName: input.task.branchName,
     worktreePath: input.task.worktreePath,
     projectRoot: input.projectRoot,
@@ -470,6 +545,48 @@ function isSynthesisNotReadyError(err: unknown): err is Error {
   return err instanceof Error && err.message.startsWith("synthesis_not_ready:");
 }
 
+function auditEvidenceForArtifact(
+  task: TaskRow,
+  artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>,
+  projectRoot?: string,
+) {
+  if (!artifact) return [];
+  const evidenceRefs = projectRoot
+    ? extractAuditReportManifestEvidenceRefs(readAuditArtifactText(projectRoot, artifact) ?? "")
+    : [];
+  return listAuditEvidenceEvents({
+    taskId: task.id,
+    auditPlanId: resolveAuditPlanId({ taskId: task.id, roadmapBatchId: artifact.batchId }),
+    evidenceIds: evidenceRefs.length > 0 ? evidenceRefs : undefined,
+    limit: evidenceRefs.length > 0 ? Math.max(1, evidenceRefs.length) : undefined,
+  });
+}
+
+function readAuditArtifactText(
+  projectRoot: string,
+  artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>,
+): string | null {
+  if (!artifact) return null;
+  try {
+    const reportPath = resolve(projectRoot, artifact.artifactPath);
+    return existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+function auditArtifactRequiresLedgerEvidence(input: {
+  artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>;
+  projectRoot: string;
+  auditEvidenceUnits: unknown[];
+}): boolean {
+  if (!input.artifact) return false;
+  if (input.auditEvidenceUnits.length > 0) return true;
+  return AUDIT_REPORT_MANIFEST_BLOCK_PATTERN.test(
+    readAuditArtifactText(input.projectRoot, input.artifact) ?? "",
+  );
+}
+
 function blockTaskForCompletionEvidenceIfNeeded(input: {
   task: TaskRow;
   projectRoot: string;
@@ -486,16 +603,25 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     artifact?.role === "synthesis"
       ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => entry.artifactPath)
       : [];
+  const auditEvidenceUnits = auditEvidenceForArtifact(input.task, artifact, input.projectRoot);
+  const requireAuditLedgerEvidence = auditArtifactRequiresLedgerEvidence({
+    artifact,
+    projectRoot: input.projectRoot,
+    auditEvidenceUnits,
+  });
   const result = evaluateTaskCompletionEvidence({
     task: {
       ...input.task,
       expectedReportArtifactPath: artifact?.artifactPath ?? null,
       allowedEvidenceArtifactPaths,
       auditArtifactRole,
+      roadmapBatchId: artifact?.batchId ?? null,
     },
     projectRoot: input.projectRoot,
     requireManualReview: input.requireManualReview,
     phase: input.phase,
+    auditEvidenceUnits,
+    requireAuditLedgerEvidence: input.phase !== "pre_implementation" && requireAuditLedgerEvidence,
   });
   if (result.ok) {
     if (artifact && input.phase !== "pre_implementation") {
@@ -503,9 +629,12 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
         taskId: input.task.id,
         state: "valid",
         failureFamily: null,
+        reworkStatus: "accepted",
+        attemptBoundaryId: artifact.attemptBoundaryId,
         validationDetails: {
           evidence: result.evidence,
         },
+        contentSha: result.evidence.auditReportValidation.artifactSha256,
         branchName: input.task.branchName,
         worktreePath: input.task.worktreePath,
         projectRoot: input.projectRoot,
@@ -525,8 +654,14 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     Boolean(artifact) &&
     input.phase !== "pre_implementation" &&
     RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(family);
+  const repeatedSameFailure =
+    recoverableAuditArtifactFailure && artifact
+      ? repeatedAuditFailureCount({ artifact, family, result }) > 0
+      : false;
   const shouldReturnToRework =
-    recoverableAuditArtifactFailure && auditReviewIteration < auditMaxReviewIterations;
+    recoverableAuditArtifactFailure &&
+    !repeatedSameFailure &&
+    auditReviewIteration < auditMaxReviewIterations;
   const auditReworkLimitReached = recoverableAuditArtifactFailure && !shouldReturnToRework;
   const baseBlockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
@@ -537,13 +672,16 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   const actionableBlockedReason = auditEvidenceRepairRequired
     ? `audit_evidence_repair_required (${repairIssueCodes.join(", ")}): ${baseBlockedReason}`
     : baseBlockedReason;
-  const blockedReason = auditReworkLimitReached
-    ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
-    : actionableBlockedReason;
+  const blockedReason = repeatedSameFailure
+    ? `${baseBlockedReason} Manual review required: repeated same audit artifact failure signature.`
+    : auditReworkLimitReached
+      ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
+      : actionableBlockedReason;
   const terminalBlockedReason = artifact ? `${family}: ${blockedReason}` : blockedReason;
-  if (shouldReturnToRework) {
+  if (shouldReturnToRework && artifact) {
     return returnAuditTaskToRework({
       task: input.task,
+      artifact,
       fromStatus: input.fromStatus,
       title: input.title,
       blockedReason,
@@ -556,12 +694,16 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   if (artifact) {
     updateRoadmapBatchArtifactState({
       taskId: input.task.id,
-      state: artifactStateForFailureFamily(family),
+      state: artifactStateForFailureFamily(family, { terminal: auditReworkLimitReached }),
       failureFamily: family,
-      validationDetails: {
-        issues: result.issues,
-        evidence: result.evidence,
-      },
+      attemptBoundaryId: artifact.attemptBoundaryId,
+      reworkStatus:
+        artifactStateForFailureFamily(family, { terminal: auditReworkLimitReached }) ===
+        "terminal_inconclusive"
+          ? "terminal_inconclusive"
+          : "manual_review_required",
+      validationDetails: auditValidationDetails(result),
+      contentSha: result.evidence.auditReportValidation.artifactSha256,
       branchName: input.task.branchName,
       worktreePath: input.task.worktreePath,
       projectRoot: input.projectRoot,
@@ -611,13 +753,25 @@ function reworkCompletionEvidenceAlreadySatisfied(task: TaskRow, projectRoot: st
     artifact.role === "synthesis"
       ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => entry.artifactPath)
       : [];
+  const auditArtifactRole =
+    artifact.role === "report" || artifact.role === "synthesis" ? artifact.role : null;
+  const auditEvidenceUnits = auditEvidenceForArtifact(task, artifact, projectRoot);
+  const requireAuditLedgerEvidence = auditArtifactRequiresLedgerEvidence({
+    artifact,
+    projectRoot,
+    auditEvidenceUnits,
+  });
   const result = evaluateTaskCompletionEvidence({
     task: {
       ...task,
       expectedReportArtifactPath: artifact.artifactPath,
       allowedEvidenceArtifactPaths,
+      auditArtifactRole,
+      roadmapBatchId: artifact.batchId,
     },
     projectRoot,
+    auditEvidenceUnits,
+    requireAuditLedgerEvidence,
   });
   return result.ok;
 }

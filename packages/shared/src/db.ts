@@ -173,9 +173,58 @@ function ensureTables(sqlite: Database.Database): void {
       worktree_path TEXT,
       project_root TEXT,
       content_sha TEXT,
+      attempt_number INTEGER NOT NULL DEFAULT 0,
+      attempt_boundary_id TEXT,
+      failure_signature TEXT,
       validated_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS roadmap_batch_artifact_attempts (
+      id TEXT PRIMARY KEY,
+      artifact_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      roadmap_alias TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'report',
+      artifact_path TEXT NOT NULL,
+      attempt_number INTEGER NOT NULL,
+      attempt_boundary_id TEXT,
+      state TEXT NOT NULL,
+      classification TEXT,
+      failure_family TEXT,
+      failure_signature TEXT,
+      content_sha TEXT,
+      rework_status TEXT NOT NULL DEFAULT 'not_applicable',
+      validation_details_json TEXT,
+      source_snapshot_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS audit_evidence_events (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      audit_plan_id TEXT NOT NULL,
+      source_snapshot_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      evidence_kind TEXT NOT NULL,
+      evidence_grade TEXT NOT NULL,
+      scope_ids_json TEXT NOT NULL DEFAULT '[]',
+      risk_hypothesis_ids_json TEXT NOT NULL DEFAULT '[]',
+      path_hashes_json TEXT NOT NULL DEFAULT '[]',
+      path_range_hashes_json TEXT NOT NULL DEFAULT '[]',
+      command_json TEXT,
+      exit_code INTEGER,
+      output_sha256 TEXT,
+      output_preview TEXT,
+      output_preview_truncated INTEGER NOT NULL DEFAULT 0,
+      parsed_summary_json TEXT,
+      redaction_status TEXT NOT NULL DEFAULT 'clean',
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
   `);
   sqlite.exec(`
@@ -894,6 +943,63 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 25,
+    description: "Add append-only audit evidence ledger events",
+    sql: `
+      CREATE TABLE IF NOT EXISTS audit_evidence_events (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        audit_plan_id TEXT NOT NULL,
+        source_snapshot_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        evidence_kind TEXT NOT NULL,
+        evidence_grade TEXT NOT NULL,
+        scope_ids_json TEXT NOT NULL DEFAULT '[]',
+        risk_hypothesis_ids_json TEXT NOT NULL DEFAULT '[]',
+        path_hashes_json TEXT NOT NULL DEFAULT '[]',
+        path_range_hashes_json TEXT NOT NULL DEFAULT '[]',
+        command_json TEXT,
+        exit_code INTEGER,
+        output_sha256 TEXT,
+        output_preview TEXT,
+        output_preview_truncated INTEGER NOT NULL DEFAULT 0,
+        parsed_summary_json TEXT,
+        redaction_status TEXT NOT NULL DEFAULT 'clean',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
+  {
+    version: 26,
+    description: "Add audit roadmap artifact attempt lifecycle",
+    sql: `
+      ALTER TABLE roadmap_batch_artifacts ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE roadmap_batch_artifacts ADD COLUMN attempt_boundary_id TEXT;
+      ALTER TABLE roadmap_batch_artifacts ADD COLUMN failure_signature TEXT;
+      CREATE TABLE IF NOT EXISTS roadmap_batch_artifact_attempts (
+        id TEXT PRIMARY KEY,
+        artifact_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        roadmap_alias TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'report',
+        artifact_path TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        attempt_boundary_id TEXT,
+        state TEXT NOT NULL,
+        classification TEXT,
+        failure_family TEXT,
+        failure_signature TEXT,
+        content_sha TEXT,
+        rework_status TEXT NOT NULL DEFAULT 'not_applicable',
+        validation_details_json TEXT,
+        source_snapshot_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -1223,6 +1329,12 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifacts_batch ON roadmap_batch_artifacts(batch_id, role, state)",
     "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifacts_task ON roadmap_batch_artifacts(task_id)",
     "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifacts_project_alias ON roadmap_batch_artifacts(project_id, roadmap_alias)",
+    "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifact_attempts_artifact ON roadmap_batch_artifact_attempts(artifact_id, attempt_number)",
+    "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifact_attempts_batch ON roadmap_batch_artifact_attempts(batch_id, role, state)",
+    "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifact_attempts_signature ON roadmap_batch_artifact_attempts(artifact_id, failure_signature)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_evidence_task ON audit_evidence_events(task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_evidence_plan_snapshot ON audit_evidence_events(audit_plan_id, source_snapshot_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_evidence_kind_grade ON audit_evidence_events(evidence_kind, evidence_grade, created_at)",
     // Usage event scope lookups for per-entity aggregation queries and dashboards
     "CREATE INDEX IF NOT EXISTS idx_usage_events_project ON usage_events(project_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_task ON usage_events(task_id, created_at)",

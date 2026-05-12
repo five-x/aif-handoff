@@ -129,6 +129,54 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260512-server-side-memory-loop"
+    },
+    {
+      "taskId": "work-20260512-audit-evidence-provenance-contract",
+      "title": "Define Audit Evidence Provenance Contract",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-audit-evidence-provenance-contract"
+    },
+    {
+      "taskId": "work-20260512-align-source-report-classification",
+      "title": "Align Source Audit Report Classification",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-align-source-report-classification"
+    },
+    {
+      "taskId": "work-20260512-structured-audit-report-manifest",
+      "title": "Add Structured Audit Report Manifest And Snapshot Binding",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-structured-audit-report-manifest"
+    },
+    {
+      "taskId": "work-20260512-audit-evidence-ledger",
+      "title": "Add Audit Evidence Ledger For Runtime Evidence",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-audit-evidence-ledger"
+    },
+    {
+      "taskId": "work-20260512-audit-artifact-lifecycle",
+      "title": "Model Audit Artifact Attempts And Inconclusive Outcomes",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-audit-artifact-lifecycle"
+    },
+    {
+      "taskId": "work-20260512-audit-contract-corpus",
+      "title": "Build Audit Contract Corpus And Mutation Tests",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-audit-contract-corpus"
     }
   ]
 }

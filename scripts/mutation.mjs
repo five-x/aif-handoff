@@ -34,8 +34,10 @@ for (const packageName of selectedPackages) {
 
 function run(command, args, env) {
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      env,
+    const spawnCommand = process.platform === "win32" ? "cmd.exe" : command;
+    const spawnArgs = process.platform === "win32" ? ["/d", "/s", "/c", command, ...args] : args;
+    const child = spawn(spawnCommand, spawnArgs, {
+      env: sanitizeSpawnEnv(env),
       stdio: "inherit",
     });
 
@@ -54,4 +56,17 @@ function run(command, args, env) {
       resolve(1);
     });
   });
+}
+
+function sanitizeSpawnEnv(env) {
+  return Object.fromEntries(
+    Object.entries(env)
+      .filter(([key, value]) => {
+        if (value == null) return false;
+        // Windows can expose internal drive-current-directory variables such
+        // as "=C:"; Node's spawn rejects them with EINVAL on recent releases.
+        return process.platform !== "win32" || !key.startsWith("=");
+      })
+      .map(([key, value]) => [key, String(value)]),
+  );
 }

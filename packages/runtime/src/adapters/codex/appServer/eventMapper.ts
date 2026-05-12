@@ -1,5 +1,6 @@
 import type { RuntimeEvent, RuntimeRunInput, RuntimeUsage } from "../../../types.js";
 import { classifyCodexAppServerError } from "./errors.js";
+import { buildCodexAuditEvidenceEvent } from "../auditEvidence.js";
 
 export interface CodexAppServerEventMapperLogger {
   debug?(context: Record<string, unknown>, message: string): void;
@@ -200,6 +201,10 @@ export class CodexAppServerEventMapper {
             itemType,
           },
         });
+        const auditEvidenceEvent = buildCodexAuditEvidenceEvent(item, nowIso);
+        if (auditEvidenceEvent) {
+          this.emit(auditEvidenceEvent);
+        }
         return;
       }
 
@@ -572,6 +577,19 @@ function summarizeToolUse(
       return {
         name: "Bash",
         detail: shortenString(readString(item.command) ?? ""),
+      };
+    case "fileRead":
+    case "file_read":
+      return {
+        name: "Read",
+        detail: shortenString(
+          readString(item.path) ??
+            readString(item.filePath) ??
+            readString(item.file_path) ??
+            readString(item.filename) ??
+            readString(item.file) ??
+            safeJson(item.input ?? item.arguments),
+        ),
       };
     case "fileChange":
     case "file_change":

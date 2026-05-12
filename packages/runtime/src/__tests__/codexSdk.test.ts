@@ -236,6 +236,116 @@ describe("runCodexSdk", () => {
     expect(onToolUse).toHaveBeenCalledWith("Bash", "npm test");
   });
 
+  it("emits audit evidence for completed shell file-read and search items", async () => {
+    const onEvent = vi.fn();
+    const onToolUse = vi.fn();
+    mockRunStreamed.mockResolvedValue({
+      events: createMockEvents([
+        { type: "thread.started", thread_id: "thread-audit-evidence" },
+        {
+          type: "item.completed",
+          item: {
+            id: "cmd-1",
+            type: "command_execution",
+            command: "rg -n timeoutMs src/config.ts",
+            aggregated_output: "src/config.ts:1:export const timeoutMs = 1000;",
+            status: "completed",
+          },
+        },
+        {
+          type: "item.completed",
+          item: {
+            id: "read-1",
+            type: "mcp_tool_call",
+            server: "filesystem",
+            tool: "read_file",
+            arguments: { path: "src/config.ts" },
+            result: "export const timeoutMs = 1000;",
+            status: "completed",
+          },
+        },
+        {
+          type: "item.completed",
+          item: {
+            id: "native-read-1",
+            type: "fileRead",
+            path: "src/native.ts",
+            content: "export const nativeRead = true;",
+            status: "completed",
+          },
+        },
+        {
+          type: "item.completed",
+          item: {
+            id: "search-1",
+            type: "mcp_tool_call",
+            server: "filesystem",
+            tool: "grep",
+            arguments: { path: "src", pattern: "timeoutMs" },
+            result: "src/config.ts:1:export const timeoutMs = 1000;",
+            status: "completed",
+          },
+        },
+        {
+          type: "turn.completed",
+          usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0 },
+        },
+      ]),
+    });
+
+    await runCodexSdk(createRunInput({ execution: { onEvent, onToolUse } }));
+    expect(onToolUse).toHaveBeenCalledWith("Read", "src/native.ts");
+
+    const auditEvents = onEvent.mock.calls
+      .map(
+        (c) =>
+          c[0] as {
+            type: string;
+            data?: {
+              auditEvidence?: {
+                id?: string;
+                evidenceKind?: string;
+                outputPreview?: string | null;
+              };
+            };
+          },
+      )
+      .filter((event) => event.type === "audit:evidence");
+    expect(auditEvents.every((event) => /^ev_/.test(event.data?.auditEvidence?.id ?? ""))).toBe(
+      true,
+    );
+    expect(auditEvents.map((event) => event.data?.auditEvidence?.evidenceKind).sort()).toEqual([
+      "file_read",
+      "file_read",
+      "search",
+      "shell_command",
+    ]);
+    expect(auditEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            auditEvidence: expect.objectContaining({
+              evidenceKind: "search",
+              outputPreview: expect.stringContaining("src/config.ts:1"),
+            }),
+          }),
+        }),
+      ]),
+    );
+    expect(auditEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            auditEvidence: expect.objectContaining({
+              evidenceKind: "file_read",
+              outputPreview: expect.stringContaining("nativeRead"),
+            }),
+          }),
+        }),
+      ]),
+    );
+  });
+
   it("invokes onEvent callback for each runtime event", async () => {
     const onEvent = vi.fn();
     mockRunStreamed.mockResolvedValue({

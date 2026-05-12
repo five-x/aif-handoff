@@ -7,6 +7,7 @@ import {
   runtimeProfiles,
   resetEnvCache,
   formatAuditSynthesisOutcomeForArtifact,
+  computeAuditReportContentSha256,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 import { RuntimeExecutionError } from "@aif/runtime";
@@ -125,6 +126,53 @@ function initGitFixture(prefix: string): string {
     stdio: "ignore",
   });
   return rootPath;
+}
+
+function currentGitSnapshot(rootPath: string): { id: string; commit: string; tree: string } {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: rootPath,
+    encoding: "utf8",
+  }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: rootPath,
+    encoding: "utf8",
+  }).trim();
+  return { id: `git:${commit}:${tree}`, commit, tree };
+}
+
+function withAuditManifest(input: {
+  body: string;
+  taskId: string;
+  batchId: string;
+  artifactPath: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): string {
+  const manifest = {
+    version: 1,
+    auditPlanId: `batch:${input.batchId}:task:${input.taskId}`,
+    taskId: input.taskId,
+    batchId: input.batchId,
+    artifactPath: input.artifactPath,
+    contentSha256: computeAuditReportContentSha256(input.body),
+    sourceSnapshot: { ...input.snapshot, dirty: false },
+    outcome: "validated_no_findings",
+    scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: ["ev-1"] }],
+    riskHypotheses: [
+      { id: "risk-1", description: "Runtime evidence refs must be captured", status: "covered" },
+    ],
+    findings: [],
+    noFindingsClaims: [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+    evidenceRefs: ["ev-1"],
+  };
+  return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+}
+
+function trustedFindingsValidationDetails(): Record<string, unknown> {
+  return {
+    evidence: {
+      auditReportValidation: { sourceClassification: "validated_findings_present" },
+    },
+  };
 }
 
 describe("coordinator", () => {
@@ -378,7 +426,8 @@ describe("coordinator", () => {
     const synthesisArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
       (artifact) => artifact.taskId === "task-audit-synthesis",
     );
-    expect(synthesisArtifact?.state).toBe("synthesis_not_ready");
+    expect(synthesisArtifact?.state).toBe("expected");
+    expect(summarizeRoadmapBatch(batch.batchId)?.synthesisReady).toBe(false);
   });
 
   it("exercises the typed audit batch lifecycle canary without live runtimes", async () => {
@@ -496,7 +545,8 @@ describe("coordinator", () => {
 
     expect(runImplementer).not.toHaveBeenCalledWith("task-canary-synthesis", rootPath);
     let synthesis = db.select().from(tasks).where(eq(tasks.id, "task-canary-synthesis")).get();
-    expect(synthesis?.agentActivityLog).toContain("synthesis_not_ready");
+    expect(synthesis?.paused).toBe(true);
+    expect(synthesis?.blockedReason).toContain("synthesis_not_ready");
     let report = db.select().from(tasks).where(eq(tasks.id, "task-canary-report")).get();
     expect(report?.status).toBe("implementing");
     expect(report?.reworkRequested).toBe(true);
@@ -506,6 +556,10 @@ describe("coordinator", () => {
     expect(reportArtifact?.state).toBe("invalid");
     expect(reportArtifact?.failureFamily).toBe("invalid_artifact_content");
     const weakDetails = JSON.parse(reportArtifact?.validationDetailsJson ?? "{}");
+    expect(reportArtifact?.contentSha).toMatch(/^[a-f0-9]{64}$/);
+    expect(reportArtifact?.contentSha).toBe(
+      weakDetails.evidence?.auditReportValidation?.artifactSha256,
+    );
     const weakIssueCodes = weakDetails.issues?.map((entry: { code: string }) => entry.code) ?? [];
     const validatorIssueCodes =
       weakDetails.evidence?.auditReportValidation?.issues?.map(
@@ -519,7 +573,7 @@ describe("coordinator", () => {
         "contradictory_findings_and_no_findings",
       ]),
     );
-    expect(summarizeRoadmapBatch(batch.batchId)?.synthesisReady).toBe(true);
+    expect(summarizeRoadmapBatch(batch.batchId)?.synthesisReady).toBe(false);
 
     vi.clearAllMocks();
     writeFileSync(
@@ -714,6 +768,15 @@ describe("coordinator", () => {
         taskId,
         state: "valid",
         failureFamily: null,
+        validationDetails: {
+          evidence: {
+            auditReportValidation: {
+              sourceClassification: "validated_no_findings",
+              manifestStatus: "valid",
+              manifestVersion: 1,
+            },
+          },
+        },
         projectRoot: rootPath,
       });
     });
@@ -731,7 +794,7 @@ describe("coordinator", () => {
     const synthesisArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
       (artifact) => artifact.taskId === "task-inconclusive-synthesis",
     );
-    expect(synthesisArtifact?.state).toBe("invalid");
+    expect(synthesisArtifact?.state).toBe("terminal_inconclusive");
     expect(synthesisArtifact?.failureFamily).toBe("inconclusive_batch_evidence");
     expect(summarizeRoadmapBatch(batch.batchId)?.failureFamily).toBe("inconclusive_batch_evidence");
   });
@@ -784,6 +847,7 @@ describe("coordinator", () => {
       taskId: "task-audit-report-ready",
       state: "valid",
       failureFamily: null,
+      validationDetails: trustedFindingsValidationDetails(),
     });
     vi.mocked(runImplementer).mockRejectedValueOnce(
       new Error(
@@ -912,6 +976,7 @@ describe("coordinator", () => {
       taskId: "task-source-audit",
       state: "valid",
       failureFamily: null,
+      validationDetails: trustedFindingsValidationDetails(),
     });
 
     await pollAndProcess();
@@ -995,6 +1060,7 @@ describe("coordinator", () => {
       taskId: "task-report-rework-ready",
       state: "valid",
       failureFamily: null,
+      validationDetails: trustedFindingsValidationDetails(),
     });
 
     await pollAndProcess();
@@ -1318,6 +1384,118 @@ describe("coordinator", () => {
     const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
     expect(artifact?.state).toBe("invalid");
     expect(artifact?.failureFamily).toBe("invalid_artifact_content");
+  });
+
+  it("should surface missing runtime ledger refs for manifest-backed audit artifacts", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-ledger-missing-ref-");
+    execFileSync("git", ["checkout", "-b", "feature/audit-ledger-missing-ref"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-ledger-missing-ref-project", name: "Audit Ledger", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-ledger-missing-ref",
+        projectId: "audit-ledger-missing-ref-project",
+        title: "Audit runtime evidence ledger",
+        description:
+          "Scope: README.md\nReport artifact: audit/security.md\nEvidence requirements: every no-findings claim must cite runtime ledger evidence.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-ledger-missing-ref",
+        reviewIterationCount: 2,
+        maxReviewIterations: 3,
+        agentActivityLog: [
+          "[2026-05-10T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-10T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-10T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-10T15:54:03.000Z] Tool: git_commit git commit",
+          "[2026-05-10T15:54:04.000Z] Agent: implement-coordinator complete",
+          "[2026-05-10T15:54:05.000Z] Agent: review-sidecar started",
+          "[2026-05-10T15:54:06.000Z] Tool: read_file audit/security.md",
+          "[2026-05-10T15:54:07.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-ledger-missing-ref-project",
+      roadmapAlias: "audit-ledger",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-ledger-missing-ref"],
+      artifacts: [
+        {
+          taskId: "task-audit-ledger-missing-ref",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    const artifactPath = "audit/security.md";
+    const body = [
+      "# Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `README.md:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
+      "",
+    ].join("\n");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, artifactPath),
+      withAuditManifest({
+        body,
+        taskId: "task-audit-ledger-missing-ref",
+        batchId: batch.batchId,
+        artifactPath,
+        snapshot: currentGitSnapshot(rootPath),
+      }),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add manifest audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "accepted",
+      currentIteration: 3,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 3,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      autoReviewState: null,
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-audit-ledger-missing-ref")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedReason).toContain("missing_audit_evidence_ref");
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    expect(artifact?.state).toBe("invalid");
+    expect(artifact?.failureFamily).toBe("invalid_artifact_integrity");
+    const details = JSON.parse(artifact?.validationDetailsJson ?? "{}") as {
+      issues?: Array<{ code: string }>;
+    };
+    expect(details.issues?.map((issue) => issue.code)).toContain("missing_audit_evidence_ref");
   });
 
   it("should auto-recover stale implementing task to blocked_external", async () => {

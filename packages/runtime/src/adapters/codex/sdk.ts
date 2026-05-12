@@ -28,6 +28,7 @@ import {
   warnOnInvalidCodexPermissionOverride,
 } from "./permissions.js";
 import { getCodexSessionLimitSnapshot } from "./sessions.js";
+import { buildCodexAuditEvidenceEvent } from "./auditEvidence.js";
 
 export interface CodexSdkLogger {
   debug?(context: Record<string, unknown>, message: string): void;
@@ -364,22 +365,50 @@ function normalizeUsage(usage: Usage | null): RuntimeUsage | null {
 // Item → RuntimeEvent / callback mapping
 // ---------------------------------------------------------------------------
 
+function nativeFileReadDetail(item: Record<string, unknown>): string {
+  return formatToolDetail(
+    readString(item.path) ??
+      readString(item.filePath) ??
+      readString(item.file_path) ??
+      readString(item.filename) ??
+      readString(item.file) ??
+      item.input ??
+      item.arguments,
+  );
+}
+
 function itemToToolUseSummary(item: ThreadItem): { toolName: string; detail: string } | null {
-  switch (item.type) {
+  const itemRecord = item as unknown as Record<string, unknown>;
+  switch (readString(itemRecord.type)) {
+    case "commandExecution":
     case "command_execution":
-      return { toolName: "Bash", detail: formatToolDetail(item.command) };
-    case "file_change":
+      return { toolName: "Bash", detail: formatToolDetail(itemRecord.command) };
+    case "file_read":
+    case "fileRead":
+      return { toolName: "Read", detail: nativeFileReadDetail(itemRecord) };
+    case "fileChange":
+    case "file_change": {
+      const changes = Array.isArray(itemRecord.changes) ? itemRecord.changes : [];
       return {
         toolName: "FileChange",
-        detail: formatToolDetail(item.changes.map((c) => `${c.kind} ${c.path}`).join(", ")),
+        detail: formatToolDetail(
+          changes
+            .map((change) => asRecord(change))
+            .map((change) => `${String(change.kind ?? "")} ${String(change.path ?? "")}`.trim())
+            .filter(Boolean)
+            .join(", "),
+        ),
       };
+    }
+    case "mcpToolCall":
     case "mcp_tool_call":
       return {
-        toolName: `MCP:${item.server}/${item.tool}`,
-        detail: formatToolDetail(item.arguments),
+        toolName: `MCP:${readString(itemRecord.server) ?? "unknown"}/${readString(itemRecord.tool) ?? "unknown"}`,
+        detail: formatToolDetail(itemRecord.arguments),
       };
+    case "webSearch":
     case "web_search":
-      return { toolName: "WebSearch", detail: formatToolDetail(item.query) };
+      return { toolName: "WebSearch", detail: formatToolDetail(itemRecord.query) };
     default:
       return null;
   }
@@ -660,6 +689,13 @@ async function runCodexSdkAttempt(
     if (runtimeEvent) {
       runtimeEvents.push(runtimeEvent);
       execution?.onEvent?.(runtimeEvent);
+    }
+    if (event.type === "item.completed") {
+      const auditEvidenceEvent = buildCodexAuditEvidenceEvent(event.item);
+      if (auditEvidenceEvent) {
+        runtimeEvents.push(auditEvidenceEvent);
+        execution?.onEvent?.(auditEvidenceEvent);
+      }
     }
 
     await maybeEmitCodexSessionLimitEvent({

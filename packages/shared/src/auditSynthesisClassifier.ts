@@ -1,5 +1,8 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  classifyAuditSourceEvidence,
+  countValidatedAuditFindings,
+  extractSubstantiveAuditCommandEvidence,
+} from "./auditSourceEvidence.js";
 
 export const AUDIT_SYNTHESIS_OUTCOME_KINDS = [
   "validated_findings_present",
@@ -38,114 +41,26 @@ export interface ClassifyAuditSynthesisOutputInput {
 
 export const AUDIT_SYNTHESIS_OUTCOME_COMMENT = "audit-synthesis-outcome";
 
-const LINE_REF_PATTERN =
-  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12}):(\d+)(?::\d+)?(?=$|[\s`'"\]),.;])/gi;
-
-const LOW_QUALITY_SYNTHESIS_PATTERNS = [
-  /\b(?:123abc|abc123|1234567890abcdef|deadbeef|cafebabe)\b/i,
-  /\b(?:root-commit|Date:\s+Mon May 10 12:34:56 2026|Author:\s+qwen-local-agent\s+<>|Signed-off-by:\s+qwen-local-agent\s+<>|commit\s+[0-9a-f]*0c0c[0-9a-f]*\b)/i,
-  /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|could not (?:read|inspect|access)|would show|should show|expected to show)\b/i,
-  /\b(?:may contain|likely used|likely indicates|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
-];
-
-const INVENTORY_COMMAND_PATTERNS = [
-  /^\s*git\s+ls-files\b/i,
-  /^\s*git\s+status\b/i,
-  /^\s*git\s+log\b/i,
-  /^\s*ls\b/i,
-  /^\s*dir\b/i,
-  /^\s*find\b/i,
-  /^\s*test\s+-e\b/i,
-  /^\s*get-childitem\b/i,
-];
-
-function normalizePath(rawPath: string): string | null {
-  const normalized = rawPath
-    .replaceAll("\\", "/")
-    .replace(/^\.\/+/, "")
-    .replace(/^\/+/, "")
-    .replace(/[),.;\]]+$/g, "");
-  if (
-    !normalized ||
-    normalized.startsWith("../") ||
-    normalized.includes("/../") ||
-    normalized.includes("*")
-  ) {
-    return null;
-  }
-  return normalized;
-}
-
-function collectExistingLineEvidenceRefs(text: string, projectRoot: string): string[] {
-  const refs = new Set<string>();
-  for (const match of text.matchAll(LINE_REF_PATTERN)) {
-    const path = normalizePath(match[1] ?? "");
-    const line = Number(match[2]);
-    if (!path || !Number.isInteger(line) || line <= 0) continue;
-    if (!existsSync(resolve(projectRoot, path))) continue;
-    refs.add(`${path}:${line}`);
-  }
-  return [...refs].sort();
-}
-
-function splitFindingSections(text: string): string[] {
-  return text
-    .split(/\n(?=#{2,4}\s+|\s*[-*]\s+(?:finding|issue|risk)\b)/i)
-    .map((section) => section.trim())
-    .filter((section) => /\b(?:finding|issue)\b/i.test(section));
-}
-
-function isInventoryCommand(command: string): boolean {
-  return INVENTORY_COMMAND_PATTERNS.some((pattern) => pattern.test(command.trim()));
-}
-
 export function extractAuditSynthesisCommandEvidence(text: string): string[] {
-  const evidence: string[] = [];
-  const commandPattern =
-    /(?:^|\n)\s*-?\s*(?:Verification:\s*)?Command\s+`([^`\r\n]+)`\s+(?:output|returned|matched|included)[^\n]*(?:(?:\n```[\s\S]*?```)|(?:\n\s{0,4}[-|][^\n]*)|[^\n]*)/gi;
-  for (const match of text.matchAll(commandPattern)) {
-    const command = match[1]?.trim() ?? "";
-    const full = match[0]?.trim() ?? "";
-    if (!command || !full) continue;
-    if (isInventoryCommand(command)) continue;
-    evidence.push(full);
-  }
-  return [...new Set(evidence)].sort();
+  return extractSubstantiveAuditCommandEvidence(text).map((entry) => entry.evidence);
 }
 
 function hasSubstantiveNoFindingsEvidence(text: string, projectRoot: string): boolean {
-  if (!/\bNo validated findings\b/i.test(text)) return false;
-  if (
-    !/\b(?:Checked files|Checked commands|Inspection matrix|Commands run|Files inspected|Evidence Register)\b/i.test(
-      text,
-    )
-  ) {
-    return false;
-  }
   return (
-    collectExistingLineEvidenceRefs(text, projectRoot).length > 0 &&
-    extractAuditSynthesisCommandEvidence(text).length > 0
+    classifyAuditSourceEvidence({ text, projectRoot, requireProposedFix: true }).classification ===
+    "validated_no_findings"
   );
 }
 
 function hasInventoryOnlyNoFindingsEvidence(text: string, projectRoot: string): boolean {
-  if (!/\bNo validated findings\b/i.test(text)) return false;
   return (
-    collectExistingLineEvidenceRefs(text, projectRoot).length > 0 &&
-    extractAuditSynthesisCommandEvidence(text).length === 0
+    classifyAuditSourceEvidence({ text, projectRoot, requireProposedFix: true }).classification ===
+    "inventory_only_invalid"
   );
 }
 
 function countValidatedFindings(text: string, projectRoot: string): number {
-  return splitFindingSections(text).filter((section) => {
-    if (!/\bEvidence\s*:/i.test(section)) return false;
-    if (!/\bRisk\s*:/i.test(section)) return false;
-    if (!/\bProposed fix\s*:/i.test(section)) return false;
-    if (!/\bVerification\s*:/i.test(section)) return false;
-    if (LOW_QUALITY_SYNTHESIS_PATTERNS.some((pattern) => pattern.test(section))) return false;
-    if (collectExistingLineEvidenceRefs(section, projectRoot).length === 0) return false;
-    return true;
-  }).length;
+  return countValidatedAuditFindings({ text, projectRoot, requireProposedFix: true });
 }
 
 function inconclusive(
