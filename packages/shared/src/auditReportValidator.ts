@@ -466,7 +466,7 @@ function expectedAuditPlanId(input: AuditReportValidationInput): string | null {
 function normalizeExpectedSnapshot(
   input: AuditReportValidationInput,
 ): AuditReportSourceSnapshot | null {
-  return input.expectedSourceSnapshot ?? deriveCurrentGitSnapshot(input.projectRoot);
+  return input.expectedSourceSnapshot ?? null;
 }
 
 function expectedSnapshotId(snapshot: AuditReportSourceSnapshot): string | null {
@@ -1199,7 +1199,8 @@ export function validateAuditReportArtifact(
   const manifestBlockPresent = Boolean(text.match(MANIFEST_BLOCK_PATTERN));
   const manifest = parsedManifest.manifest;
   const expectedSnapshot = normalizeExpectedSnapshot(input);
-  const sourceSnapshot = manifest?.sourceSnapshot ?? expectedSnapshot;
+  const fallbackSnapshot = expectedSnapshot ?? deriveCurrentGitSnapshot(input.projectRoot);
+  const sourceSnapshot = manifest?.sourceSnapshot ?? fallbackSnapshot;
   const sourceReader =
     manifest?.sourceSnapshot?.tree || manifest?.sourceSnapshot?.commit
       ? createGitSnapshotSourceReader(input.projectRoot, manifest.sourceSnapshot)
@@ -1350,9 +1351,7 @@ export function validateAuditReportArtifact(
     const snapshotMismatches: string[] = [];
     const expectedId = expectedSnapshot ? expectedSnapshotId(expectedSnapshot) : null;
     const manifestId = expectedSnapshotId(manifest.sourceSnapshot);
-    if (!expectedSnapshot) {
-      snapshotMismatches.push("expected source snapshot could not be derived");
-    } else {
+    if (expectedSnapshot) {
       if (expectedSnapshot.commit && manifest.sourceSnapshot.commit !== expectedSnapshot.commit) {
         snapshotMismatches.push(`commit expected ${expectedSnapshot.commit}`);
       }

@@ -20,12 +20,17 @@ import {
   looksLikeFullPlanUpdate,
   getProjectConfig,
   validateAuditReportArtifact,
+  buildAuditEvidencePayload,
   classifyAuditSynthesisSourceReports,
+  computeAuditReportContentSha256,
   extractAuditSynthesisCommandEvidence,
   formatAuditSynthesisOutcomeForArtifact,
+  resolveAuditPlanId,
+  type AuditEvidenceUnit,
+  type AuditReportSourceSnapshot,
 } from "@aif/shared";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
-import { logActivity } from "../hooks.js";
+import { logActivity, persistAuditEvidencePayload } from "../hooks.js";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import { computePendingPlanLayers, computePlanLayers } from "../planLayers.js";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
@@ -591,7 +596,62 @@ function parseAuditScopeRoots(description: string | null): string[] {
   return [...roots].sort();
 }
 
-const AUDIT_REPAIR_IGNORED_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage"]);
+const AUDIT_REPAIR_IGNORED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  "__pycache__",
+]);
+const AUDIT_REPAIR_IGNORED_FILE_EXTENSIONS = new Set([
+  ".bmp",
+  ".class",
+  ".dll",
+  ".exe",
+  ".gif",
+  ".ico",
+  ".jpg",
+  ".jpeg",
+  ".pdf",
+  ".png",
+  ".pyc",
+  ".so",
+  ".wasm",
+  ".webp",
+  ".zip",
+]);
+const AUDIT_REPAIR_OUTPUT_LINE_LIMIT = 24;
+
+interface GitCaptureResult {
+  args: string[];
+  command: string;
+  exitCode: number;
+  output: string;
+}
+
+interface AuditRepairEvidenceByRoot {
+  root: string;
+  files: string[];
+  command: GitCaptureResult;
+  evidenceUnit: AuditEvidenceUnit | null;
+}
+
+function isAuditRepairIgnoredFile(path: string): boolean {
+  const lower = path.toLowerCase();
+  if (lower.includes("/.git/") || lower.includes("/__pycache__/")) return true;
+  if (/(^|\/)\.env(?:\.|$)/i.test(path)) return true;
+  return [...AUDIT_REPAIR_IGNORED_FILE_EXTENSIONS].some((extension) => lower.endsWith(extension));
+}
+
+function fileHasLineEvidence(projectRoot: string, path: string): boolean {
+  try {
+    const content = readFileSync(resolve(projectRoot, path), "utf8");
+    return content.split(/\r?\n/).some((line) => line.trim().length > 0);
+  } catch {
+    return false;
+  }
+}
 
 function collectAuditRepairEvidenceFiles(
   projectRoot: string,
@@ -617,17 +677,72 @@ function collectAuditRepairEvidenceFiles(
         continue;
       }
       if (entry.isFile()) {
-        files.push(
-          child
-            .replace(projectRoot, "")
-            .replace(/^[/\\]+/, "")
-            .replaceAll("\\", "/"),
-        );
+        const relativePath = child
+          .replace(projectRoot, "")
+          .replace(/^[/\\]+/, "")
+          .replaceAll("\\", "/");
+        if (
+          isAuditRepairIgnoredFile(relativePath) ||
+          !fileHasLineEvidence(projectRoot, relativePath)
+        ) {
+          continue;
+        }
+        files.push(relativePath);
       }
     }
   };
   visit(absPath);
   return files;
+}
+
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:@=-]+$/.test(value)
+    ? value
+    : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+function boundedCommandOutput(output: string): string {
+  const lines = output.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length <= AUDIT_REPAIR_OUTPUT_LINE_LIMIT) return lines.join("\n");
+  return [
+    ...lines.slice(0, AUDIT_REPAIR_OUTPUT_LINE_LIMIT),
+    `[... truncated ${lines.length - AUDIT_REPAIR_OUTPUT_LINE_LIMIT} additional line(s) ...]`,
+  ].join("\n");
+}
+
+function runGitCapture(projectRoot: string, args: string[]): GitCaptureResult {
+  let exitCode = 0;
+  let output = "";
+  try {
+    output = execFileSync("git", args, {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    exitCode =
+      err &&
+      typeof err === "object" &&
+      "status" in err &&
+      Number.isInteger((err as { status?: unknown }).status)
+        ? Number((err as { status?: unknown }).status)
+        : 1;
+    const stdout =
+      err && typeof err === "object" && "stdout" in err
+        ? String((err as { stdout?: unknown }).stdout ?? "")
+        : "";
+    const stderr =
+      err && typeof err === "object" && "stderr" in err
+        ? String((err as { stderr?: unknown }).stderr ?? "")
+        : "";
+    output = stdout || stderr;
+  }
+  return {
+    args,
+    command: `git ${args.map(shellQuote).join(" ")}`,
+    exitCode,
+    output: boundedCommandOutput(output || "command produced no output"),
+  };
 }
 
 function runGitText(projectRoot: string, args: string[]): string {
@@ -646,6 +761,71 @@ function runGitText(projectRoot: string, args: string[]): string {
   }
 }
 
+function currentAuditReportSourceSnapshot(projectRoot: string): AuditReportSourceSnapshot {
+  const commit = runGitText(projectRoot, ["rev-parse", "HEAD"]);
+  const tree = runGitText(projectRoot, ["rev-parse", "HEAD^{tree}"]);
+  const branch = runGitText(projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  return {
+    id: commit && tree ? `git:${commit}:${tree}` : `workspace:${projectRoot}`,
+    commit,
+    tree,
+    branch: branch && branch !== "HEAD" ? branch : null,
+    dirty: false,
+  };
+}
+
+function firstAuditRepairOutputLine(output: string): string {
+  return output.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "<empty>";
+}
+
+function buildAuditReportManifest(input: {
+  task: TaskRow;
+  artifactPath: string;
+  snapshot: AuditReportSourceSnapshot;
+  body: string;
+  roots: string[];
+  evidenceByRoot: AuditRepairEvidenceByRoot[];
+}): Record<string, unknown> {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  const evidenceRefs = input.evidenceByRoot
+    .flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : []))
+    .sort();
+  const scopeCoverage = input.evidenceByRoot.map((entry) => ({
+    root: entry.root,
+    covered: entry.files.length > 0 && Boolean(entry.evidenceUnit),
+    evidenceRefs: entry.evidenceUnit ? [entry.evidenceUnit.id] : [],
+  }));
+  return {
+    version: 1,
+    auditPlanId: resolveAuditPlanId({
+      taskId: input.task.id,
+      roadmapBatchId: artifact?.batchId ?? null,
+    }),
+    taskId: input.task.id,
+    ...(artifact?.batchId ? { batchId: artifact.batchId } : {}),
+    ...(artifact?.roadmapAlias || input.task.roadmapAlias
+      ? { roadmapAlias: artifact?.roadmapAlias ?? input.task.roadmapAlias }
+      : {}),
+    artifactPath: input.artifactPath,
+    contentSha256: computeAuditReportContentSha256(input.body),
+    sourceSnapshot: input.snapshot,
+    outcome: "validated_no_findings",
+    scopeCoverage,
+    riskHypotheses: [],
+    findings: [],
+    noFindingsClaims: [
+      {
+        id: "nf-deterministic-repair",
+        scopeIds: input.roots,
+        evidenceRefs,
+        reasoning:
+          "Deterministic repair preserved only scoped source inspections and removed unvalidated candidate findings.",
+      },
+    ],
+    evidenceRefs,
+  };
+}
+
 function buildDeterministicAuditReportRepairContent(input: {
   task: TaskRow;
   projectRoot: string;
@@ -653,18 +833,39 @@ function buildDeterministicAuditReportRepairContent(input: {
 }): string {
   const scopeRoots = parseAuditScopeRoots(input.task.description);
   const roots = scopeRoots.length > 0 ? scopeRoots : ["."];
+  const sourceSnapshot = currentAuditReportSourceSnapshot(input.projectRoot);
   const evidenceByRoot = roots.map((root) => {
     const files = collectAuditRepairEvidenceFiles(input.projectRoot, root);
-    const inspectionTarget = files[0] ?? root;
+    const inspectionTargets = files.slice(0, 3);
+    const gitArgs =
+      inspectionTargets.length > 0
+        ? ["grep", "-n", "-m", "5", ".", "--", ...inspectionTargets]
+        : ["grep", "-n", "-m", "5", ".", "--", root];
+    const command = runGitCapture(input.projectRoot, gitArgs);
+    const evidenceUnit = persistAuditEvidencePayload(
+      input.task.id,
+      input.projectRoot,
+      buildAuditEvidencePayload({
+        toolName: "deterministic_audit_report_repair",
+        evidenceKind: "shell_command",
+        evidenceGrade: "substantive",
+        scopeIds: [root],
+        paths: inspectionTargets,
+        command: command.command,
+        exitCode: command.exitCode,
+        output: command.output,
+        maxPreviewChars: 2_000,
+      }),
+    );
     return {
       root,
       files,
-      inspectionTarget,
-      inspectionOutput: runGitText(input.projectRoot, ["grep", "-n", ".", "--", inspectionTarget]),
+      command,
+      evidenceUnit,
     };
   });
   const checkedFiles = [...new Set(evidenceByRoot.flatMap((entry) => entry.files))].sort();
-  const lines = [
+  const body = [
     `# ${input.task.title}`,
     "",
     "No validated findings.",
@@ -680,8 +881,7 @@ function buildDeterministicAuditReportRepairContent(input: {
         entry.files.length > 0
           ? entry.files.map((file) => `\`${file}:1\``).join(", ")
           : "No tracked file evidence found";
-      const firstOutputLine = entry.inspectionOutput.split(/\r?\n/).find(Boolean) ?? "<empty>";
-      return `| \`${entry.root}\` | ${evidence} | Command \`git grep -n "." -- ${entry.inspectionTarget}\` output includes \`${firstOutputLine}\` |`;
+      return `| \`${entry.root}\` | ${evidence} | Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\` |`;
     }),
     "",
     "## Checked Files",
@@ -693,15 +893,25 @@ function buildDeterministicAuditReportRepairContent(input: {
     "## Checked Commands",
     "",
     ...evidenceByRoot.flatMap((entry) => [
-      `- Command \`git grep -n "." -- ${entry.inspectionTarget}\` output:`,
+      `- Command \`${entry.command.command}\` output:`,
       "```",
-      entry.inspectionOutput || "<empty>",
+      entry.command.output || "<empty>",
       "```",
     ]),
     "",
-  ];
+  ]
+    .join("\n")
+    .trim();
+  const manifest = buildAuditReportManifest({
+    task: input.task,
+    artifactPath: input.artifactPath,
+    snapshot: sourceSnapshot,
+    body,
+    roots,
+    evidenceByRoot,
+  });
 
-  return `${lines.join("\n").trim()}\n`;
+  return `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
 }
 
 function formatValidatedAuditSynthesisInput(

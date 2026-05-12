@@ -25,7 +25,12 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 const { runImplementer } = await import("../subagents/implementer.js");
-const { createRoadmapBatchContract, updateRoadmapBatchArtifactState } = await import("@aif/data");
+const {
+  createRoadmapBatchContract,
+  findRoadmapBatchArtifactByTaskId,
+  listAuditEvidenceEvents,
+  updateRoadmapBatchArtifactState,
+} = await import("@aif/data");
 
 function trustedFindingsValidationDetails(): Record<string, unknown> {
   return {
@@ -1107,12 +1112,24 @@ describe("runImplementer rework behavior", () => {
     expect(repaired).toContain("`src/config.py:1`");
     expect(repaired).not.toContain("Missing Ownership Clarity");
     expect(repaired).not.toContain("1234567");
+    expect(repaired).toContain("```audit-report-manifest");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-deterministic-repair");
+    if (!artifact) throw new Error("missing deterministic repair artifact");
+    const auditEvidenceUnits = listAuditEvidenceEvents({
+      taskId: "task-audit-deterministic-repair",
+      auditPlanId: `batch:${artifact.batchId}:task:task-audit-deterministic-repair`,
+    });
     const validation = validateAuditReportArtifact({
       text: repaired,
       projectRoot,
+      taskId: "task-audit-deterministic-repair",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
       taskDescription: description,
       reportArtifactPaths: ["audit/architecture.md"],
       requireProposedFix: true,
+      auditEvidenceUnits,
+      requireLedgerEvidence: true,
     });
     expect(validation.ok).toBe(true);
     const updatedTask = db
@@ -1214,12 +1231,24 @@ describe("runImplementer rework behavior", () => {
     expect(repaired).toContain("`src/gamma.ts:1`");
     expect(repaired).not.toContain("Candidate");
     expect(repaired).not.toContain("would show");
+    expect(repaired).toContain("```audit-report-manifest");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-validator-repair");
+    if (!artifact) throw new Error("missing repeated validator repair artifact");
+    const auditEvidenceUnits = listAuditEvidenceEvents({
+      taskId: "task-audit-repeated-validator-repair",
+      auditPlanId: `batch:${artifact.batchId}:task:task-audit-repeated-validator-repair`,
+    });
     const validation = validateAuditReportArtifact({
       text: repaired,
       projectRoot,
+      taskId: "task-audit-repeated-validator-repair",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
       taskDescription: description,
       reportArtifactPaths: ["audit/security.md"],
       requireProposedFix: true,
+      auditEvidenceUnits,
+      requireLedgerEvidence: true,
     });
     expect(validation.ok).toBe(true);
     const updatedTask = db

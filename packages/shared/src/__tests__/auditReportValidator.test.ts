@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -688,6 +688,48 @@ describe("auditReportValidator", () => {
     expect(result.ok).toBe(true);
     expect(result.manifestStatus).toBe("valid");
     expect(issueCodes(result)).not.toContain("missing_audit_evidence_ref");
+  });
+
+  it("does not require committed report manifests to self-reference the report commit", () => {
+    const root = initRepo();
+    const sourceSnapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime-audit.md"),
+      withManifest({ body, taskId: "task-audit", snapshot: sourceSnapshot }),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = validateAuditReportArtifact({
+      text: readFileSync(join(root, "audit", "runtime-audit.md"), "utf8"),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot: sourceSnapshot })],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(issueCodes(result)).not.toContain("manifest_source_snapshot_mismatch");
   });
 
   it("rejects ledger-required reports without a valid manifest", () => {
