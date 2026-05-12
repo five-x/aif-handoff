@@ -541,9 +541,9 @@ function shouldUseDeterministicAuditReportRepair(
     extractReviewIterationFromText(task.reviewComments),
   );
   const validatorIssuePattern =
-    /\b(?:contradictory_findings_and_no_findings|invalid_or_missing_file_references|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim|low_quality_report_evidence|insufficient_report_evidence)\b/i;
+    /\b(?:audit_evidence_|contradictory_findings_and_no_findings|invalid_or_missing_file_references|invalid_report_manifest|manifest_|missing_audit_evidence_ref|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|unsupported_report_manifest_version|unverified_inspection_claim|low_quality_report_evidence|insufficient_report_evidence)\b/i;
   const deterministicReportIssuePattern =
-    /\b(?:contradictory_findings_and_no_findings|invalid_line_reference|missing_declared_scope_root|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim)\b/i;
+    /\b(?:audit_evidence_|contradictory_findings_and_no_findings|invalid_line_reference|invalid_report_manifest|manifest_|missing_audit_evidence_ref|missing_declared_scope_root|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|unsupported_report_manifest_version|unverified_inspection_claim)\b/i;
   if (
     reviewIteration >= 1 &&
     currentReportIssueCodes.some((code) => deterministicReportIssuePattern.test(code))
@@ -1657,7 +1657,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const currentAuditReportIssueCodes =
     currentAuditReportValidation?.issues.map((issue) => issue.code) ?? [];
   const currentReportNeedsDeterministicRepair = currentAuditReportIssueCodes.some((code) =>
-    /\b(?:contradictory_findings_and_no_findings|invalid_line_reference|missing_declared_scope_root|missing_report_file_references|missing_scope_coverage|missing_substantive_evidence|unverified_inspection_claim)\b/i.test(
+    /\b(?:audit_evidence_discovery_only|audit_evidence_identity_mismatch|audit_evidence_risk_mismatch|audit_evidence_scope_mismatch|audit_evidence_source_snapshot_mismatch|contradictory_findings_and_no_findings|invalid_line_reference|invalid_report_manifest|manifest_content_hash_mismatch|manifest_identity_mismatch|manifest_outcome_mismatch|manifest_source_snapshot_mismatch|missing_audit_evidence_ref|missing_declared_scope_root|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|unsupported_report_manifest_version|unverified_inspection_claim)\b/i.test(
       code,
     ),
   );
