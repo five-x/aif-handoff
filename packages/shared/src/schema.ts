@@ -1,6 +1,14 @@
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
-import type { TaskStatus } from "./types.js";
+import type {
+  MemoryLifecycleAction,
+  MemoryItemStatus,
+  MemoryRedactionStatus,
+  MemoryScope,
+  MemorySourceKind,
+  MemoryWorkflowKind,
+  TaskStatus,
+} from "./types.js";
 import type { TaskIntent } from "./taskIntent.js";
 
 export const projects = sqliteTable("projects", {
@@ -294,6 +302,75 @@ export const usageEvents = sqliteTable("usage_events", {
 
 export type UsageEventRow = typeof usageEvents.$inferSelect;
 export type NewUsageEventRow = typeof usageEvents.$inferInsert;
+
+export const memoryItems = sqliteTable("memory_items", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  projectId: text("project_id"),
+  scope: text("scope").$type<MemoryScope>().notNull().default("project"),
+  sourceTaskId: text("source_task_id"),
+  sourceKind: text("source_kind").$type<MemorySourceKind>().notNull().default("task"),
+  sourceRef: text("source_ref"),
+  status: text("status").$type<MemoryItemStatus>().notNull().default("pending"),
+  redactionStatus: text("redaction_status")
+    .$type<MemoryRedactionStatus>()
+    .notNull()
+    .default("clean"),
+  publishBlockReason: text("publish_block_reason"),
+  reviewNote: text("review_note"),
+  title: text("title").notNull(),
+  summary: text("summary").notNull(),
+  content: text("content").notNull(),
+  tagsJson: text("tags_json").notNull().default("[]"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  approvedAt: text("approved_at"),
+  rejectedAt: text("rejected_at"),
+  expiredAt: text("expired_at"),
+  expiresAt: text("expires_at"),
+});
+
+export type MemoryItemRow = typeof memoryItems.$inferSelect;
+export type NewMemoryItemRow = typeof memoryItems.$inferInsert;
+
+export const memoryUsageEvents = sqliteTable("memory_usage_events", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  memoryItemId: text("memory_item_id").notNull(),
+  projectId: text("project_id"),
+  taskId: text("task_id"),
+  chatSessionId: text("chat_session_id"),
+  workflowKind: text("workflow_kind").$type<MemoryWorkflowKind>().notNull(),
+  source: text("source").notNull(),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type MemoryUsageEventRow = typeof memoryUsageEvents.$inferSelect;
+export type NewMemoryUsageEventRow = typeof memoryUsageEvents.$inferInsert;
+
+export const memoryLifecycleEvents = sqliteTable("memory_lifecycle_events", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  memoryItemId: text("memory_item_id").notNull(),
+  action: text("action").$type<MemoryLifecycleAction>().notNull(),
+  actor: text("actor"),
+  note: text("note"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type MemoryLifecycleEventRow = typeof memoryLifecycleEvents.$inferSelect;
+export type NewMemoryLifecycleEventRow = typeof memoryLifecycleEvents.$inferInsert;
 
 export type RuntimeWarmupSessionStatus = "creating" | "ready" | "failed" | "cleared" | "expired";
 

@@ -72,6 +72,9 @@ vi.mock("@aif/data", () => ({
   deleteChatSession: vi.fn(),
   findRuntimeProfileById: vi.fn(() => null),
   createDbUsageSink: () => ({ record: vi.fn() }),
+  retrieveApprovedMemoryForPrompt: vi.fn(() => []),
+  formatMemoryContextForPrompt: vi.fn(() => ""),
+  recordMemoryUsageEvents: vi.fn(() => []),
 }));
 
 vi.mock("../services/runtime.js", () => ({

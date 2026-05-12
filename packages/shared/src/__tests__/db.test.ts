@@ -422,7 +422,7 @@ describe("db", () => {
       expect(runtimeProfileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(23);
+      expect(userVersion).toBe(24);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -476,7 +476,7 @@ describe("db", () => {
       migratedSqlite.close();
 
       expect(dirtyIndex).toBeUndefined();
-      expect(userVersion).toBe(23);
+      expect(userVersion).toBe(24);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -546,7 +546,7 @@ describe("db", () => {
       expect(profileColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(["runtime_limit_snapshot_json", "runtime_limit_updated_at"]),
       );
-      expect(userVersion).toBe(23);
+      expect(userVersion).toBe(24);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -615,7 +615,7 @@ describe("db", () => {
         ]),
       );
       expect(warmupTable?.name).toBe("runtime_warmup_sessions");
-      expect(userVersion).toBe(23);
+      expect(userVersion).toBe(24);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -662,7 +662,7 @@ describe("db", () => {
         "idx_runtime_warmup_active_lookup",
         "idx_runtime_warmup_expires",
       ]);
-      expect(userVersion).toBe(23);
+      expect(userVersion).toBe(24);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);
@@ -722,7 +722,166 @@ describe("db", () => {
         "idx_roadmap_batch_artifacts_task",
         "idx_roadmap_batches_project_alias",
       ]);
-      expect(userVersion).toBe(23);
+      expect(userVersion).toBe(24);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
+  });
+
+  it("creates memory domain tables, indexes, and FTS bootstrap for fresh databases", () => {
+    closeDb();
+    const dbPath = join(tmpdir(), `aif-shared-memory-${Date.now()}-${Math.random()}.sqlite`);
+
+    try {
+      getDb(dbPath);
+      closeDb();
+
+      const sqlite = new Database(dbPath);
+      const tables = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (
+              'memory_items',
+              'memory_usage_events',
+              'memory_lifecycle_events',
+              'memory_items_fts'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const indexes = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (
+              'idx_memory_items_project_status',
+              'idx_memory_items_scope_status',
+              'idx_memory_items_source_task_unique',
+              'idx_memory_items_expires',
+              'idx_memory_usage_events_item',
+              'idx_memory_usage_events_project',
+              'idx_memory_usage_events_task',
+              'idx_memory_usage_events_chat_session',
+              'idx_memory_lifecycle_events_item'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const triggers = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'trigger'
+            AND name IN (
+              'trg_memory_items_fts_insert',
+              'trg_memory_items_fts_update',
+              'trg_memory_items_fts_delete'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+
+      sqlite
+        .prepare(
+          `
+          INSERT INTO memory_items (
+            id, project_id, scope, source_task_id, source_kind, title, summary, content, tags_json
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        )
+        .run(
+          "memory-1",
+          "project-1",
+          "project",
+          "task-1",
+          "task",
+          "Memory title",
+          "Memory summary",
+          "Use lane-aware task ids",
+          '["rdpi"]',
+        );
+      const ftsRow = sqlite
+        .prepare(`SELECT item_id FROM memory_items_fts WHERE memory_items_fts MATCH ?`)
+        .get("lane") as { item_id: string } | undefined;
+      const userVersion = sqlite.pragma("user_version", { simple: true }) as number;
+      sqlite.close();
+
+      expect(tables.map((row) => row.name).sort()).toEqual([
+        "memory_items",
+        "memory_items_fts",
+        "memory_lifecycle_events",
+        "memory_usage_events",
+      ]);
+      expect(indexes.map((row) => row.name).sort()).toEqual([
+        "idx_memory_items_expires",
+        "idx_memory_items_project_status",
+        "idx_memory_items_scope_status",
+        "idx_memory_items_source_task_unique",
+        "idx_memory_lifecycle_events_item",
+        "idx_memory_usage_events_chat_session",
+        "idx_memory_usage_events_item",
+        "idx_memory_usage_events_project",
+        "idx_memory_usage_events_task",
+      ]);
+      expect(triggers.map((row) => row.name).sort()).toEqual([
+        "trg_memory_items_fts_delete",
+        "trg_memory_items_fts_insert",
+        "trg_memory_items_fts_update",
+      ]);
+      expect(ftsRow?.item_id).toBe("memory-1");
+      expect(userVersion).toBe(24);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
+  });
+
+  it("upgrades a v23 schema with memory domain tables", () => {
+    closeDb();
+    const dbPath = join(tmpdir(), `aif-shared-v23-memory-${Date.now()}-${Math.random()}.sqlite`);
+    const sqlite = new Database(dbPath);
+
+    sqlite.pragma("user_version = 23");
+    sqlite.close();
+
+    try {
+      getDb(dbPath);
+      closeDb();
+
+      const migratedSqlite = new Database(dbPath, { readonly: true });
+      const tables = migratedSqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (
+              'memory_items',
+              'memory_usage_events',
+              'memory_lifecycle_events',
+              'memory_items_fts'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const userVersion = migratedSqlite.pragma("user_version", { simple: true }) as number;
+      migratedSqlite.close();
+
+      expect(tables.map((row) => row.name).sort()).toEqual([
+        "memory_items",
+        "memory_items_fts",
+        "memory_lifecycle_events",
+        "memory_usage_events",
+      ]);
+      expect(userVersion).toBe(24);
     } finally {
       closeDb();
       removeSqliteArtifacts(dbPath);

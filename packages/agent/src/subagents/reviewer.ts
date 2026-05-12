@@ -9,6 +9,7 @@ import { createRuntimeWorkflowSpec, type RuntimeWorkflowSpec } from "@aif/runtim
 import { getEnv, logger, formatAttachmentsForPrompt } from "@aif/shared";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
 import { logActivity } from "../hooks.js";
+import { buildTaskMemoryContext } from "../memoryContext.js";
 import { executeSubagentQuery, startHeartbeat } from "../subagentQuery.js";
 import {
   buildStructuredReviewComments,
@@ -101,6 +102,20 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
 
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
 All file reads, searches, and analysis must stay within this directory. Do NOT navigate to parent directories or other projects.`;
+  const reviewMemoryContext = buildTaskMemoryContext({
+    task,
+    workflowKind: "reviewer",
+    source: "agent:reviewer",
+    queryParts: [auditSynthesisContext, reviewPreviousFindings],
+  });
+  const securityMemoryContext = buildTaskMemoryContext({
+    task,
+    workflowKind: "security_review",
+    source: "agent:security-review",
+    queryParts: [auditSynthesisContext, securityPreviousFindings],
+  });
+  const reviewMemoryBlock = reviewMemoryContext ? `\n\n${reviewMemoryContext}\n` : "";
+  const securityMemoryBlock = securityMemoryContext ? `\n\n${securityMemoryContext}\n` : "";
 
   const reviewOutputContract = `Output contract:
 Return markdown only with these exact sections, in this exact order:
@@ -136,6 +151,7 @@ Rules:
   const reviewPromptBase = `Review the implementation for this task:
 
 ${scopeConstraint}
+${reviewMemoryBlock}
 
 Title: ${task.title}
 Description: ${task.description}
@@ -160,6 +176,7 @@ ${reviewOutputContract}`;
   const securityPromptBase = `Audit the implementation for security risks:
 
 ${scopeConstraint}
+${securityMemoryBlock}
 
 Title: ${task.title}
 Description: ${task.description}

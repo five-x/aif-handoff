@@ -264,6 +264,114 @@ export interface ReorderTaskInput {
   position: number;
 }
 
+export const MEMORY_ITEM_STATUSES = ["pending", "approved", "rejected", "expired"] as const;
+
+export type MemoryItemStatus = (typeof MEMORY_ITEM_STATUSES)[number];
+
+export const MEMORY_SCOPES = ["project", "global"] as const;
+
+export type MemoryScope = (typeof MEMORY_SCOPES)[number];
+
+export const MEMORY_REDACTION_STATUSES = ["clean", "blocked"] as const;
+
+export type MemoryRedactionStatus = (typeof MEMORY_REDACTION_STATUSES)[number];
+
+export const MEMORY_SOURCE_KINDS = ["task", "manual"] as const;
+
+export type MemorySourceKind = (typeof MEMORY_SOURCE_KINDS)[number];
+
+export const MEMORY_WORKFLOW_KINDS = [
+  "planner",
+  "implementer",
+  "reviewer",
+  "security_review",
+  "chat",
+] as const;
+
+export type MemoryWorkflowKind = (typeof MEMORY_WORKFLOW_KINDS)[number];
+
+export const MEMORY_LIFECYCLE_ACTIONS = [
+  "created",
+  "edited",
+  "approved",
+  "rejected",
+  "expired",
+] as const;
+
+export type MemoryLifecycleAction = (typeof MEMORY_LIFECYCLE_ACTIONS)[number];
+
+export interface MemoryItem {
+  id: string;
+  projectId: string | null;
+  scope: MemoryScope;
+  sourceTaskId: string | null;
+  sourceKind: MemorySourceKind;
+  sourceRef: string | null;
+  status: MemoryItemStatus;
+  redactionStatus: MemoryRedactionStatus;
+  publishBlockReason: string | null;
+  reviewNote: string | null;
+  title: string;
+  summary: string;
+  content: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+  expiredAt: string | null;
+  expiresAt: string | null;
+}
+
+export interface CreateMemoryItemInput {
+  projectId?: string | null;
+  scope: MemoryScope;
+  sourceTaskId?: string | null;
+  sourceKind?: MemorySourceKind;
+  sourceRef?: string | null;
+  title: string;
+  summary: string;
+  content: string;
+  tags?: string[];
+  expiresAt?: string | null;
+}
+
+export interface UpdateMemoryItemInput {
+  scope?: MemoryScope;
+  title?: string;
+  summary?: string;
+  content?: string;
+  tags?: string[];
+  reviewNote?: string | null;
+  expiresAt?: string | null;
+}
+
+export interface MemoryUsageEvent {
+  id: string;
+  memoryItemId: string;
+  projectId: string | null;
+  taskId: string | null;
+  chatSessionId: string | null;
+  workflowKind: MemoryWorkflowKind;
+  source: string;
+  createdAt: string;
+}
+
+export interface MemoryLifecycleEvent {
+  id: string;
+  memoryItemId: string;
+  action: MemoryLifecycleAction;
+  actor: string | null;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface MemoryItemBroadcastPayload {
+  id: string;
+  projectId: string | null;
+  status: MemoryItemStatus;
+}
+
 /** WebSocket event types */
 export type WsEventType =
   | "project:created"
@@ -301,7 +409,11 @@ export type WsEventType =
   | "project:warmup_updated"
   | "task:commit_started"
   | "task:commit_done"
-  | "task:commit_failed";
+  | "task:commit_failed"
+  | "memory:item_created"
+  | "memory:item_updated"
+  | "memory:item_deleted"
+  | "memory:usage_recorded";
 
 export interface RoadmapCompletePayload {
   projectId: string;
@@ -403,7 +515,8 @@ export interface WsEvent {
     | ChatSession
     | TaskCommitPayload
     | RuntimeLimitBroadcastPayload
-    | WarmupBroadcastPayload;
+    | WarmupBroadcastPayload
+    | MemoryItemBroadcastPayload;
 }
 
 export const RuntimeTransport = {

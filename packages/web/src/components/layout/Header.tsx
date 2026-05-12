@@ -10,6 +10,7 @@ import {
   Settings,
   Activity,
   Flame,
+  Brain,
 } from "lucide-react";
 import { useTheme } from "@/hooks/useTheme";
 import { useEffectiveChatRuntime } from "@/hooks/useRuntimeProfiles";
@@ -47,6 +48,8 @@ interface Props {
   aggregateTotals?: AggregateProjectTotals | null;
   runtimeProfilesOpen: boolean;
   onToggleRuntimeProfiles: () => void;
+  memoryOpen: boolean;
+  onToggleMemory: () => void;
   onRoadmapImportComplete?: (result: RoadmapImportResult) => void;
 }
 
@@ -63,6 +66,8 @@ export function Header({
   aggregateTotals,
   runtimeProfilesOpen,
   onToggleRuntimeProfiles,
+  memoryOpen,
+  onToggleMemory,
   onRoadmapImportComplete,
 }: Props) {
   const { theme, toggleTheme } = useTheme();
@@ -212,6 +217,21 @@ export function Header({
           >
             <Map className="h-3.5 w-3.5" />
             <span className="hidden md:inline">ROADMAP</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onToggleMemory}
+            disabled={!selectedProject}
+            className={cn(
+              "gap-1 font-mono text-3xs",
+              memoryOpen && "border-primary/70 bg-primary/10",
+            )}
+            aria-label="Memory review"
+            title={selectedProject ? "Open memory review" : "Select project first"}
+          >
+            <Brain className="h-3.5 w-3.5" />
+            <span className="hidden md:inline">MEMORY</span>
           </Button>
           {showWarmupButton && (
             <Button

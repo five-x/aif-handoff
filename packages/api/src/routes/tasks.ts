@@ -44,6 +44,7 @@ import {
 } from "../repositories/tasks.js";
 import {
   findProjectById,
+  createMemoryCandidateForVerifiedTask,
   getAppDefaultRuntimeProfileId,
   resolveEffectiveRuntimeProfile,
   resolveEffectiveRuntimeProfilesForTasks,
@@ -518,6 +519,27 @@ tasksRouter.post("/:id/events", jsonValidator(taskEventSchema), async (c) => {
     // Wake coordinator when task transitions may require agent processing
     if (handled.broadcastType === "task:moved") {
       broadcast({ type: "agent:wake", payload: { id: handled.task.id } });
+    }
+
+    if (event === "approve_done" && handled.task.status === "verified") {
+      try {
+        const memoryItem = createMemoryCandidateForVerifiedTask(handled.task.id);
+        if (memoryItem) {
+          broadcast({
+            type: "memory:item_updated",
+            payload: {
+              id: memoryItem.id,
+              projectId: memoryItem.projectId,
+              status: memoryItem.status,
+            },
+          });
+        }
+      } catch (memoryError) {
+        log.warn(
+          { taskId: handled.task.id, memoryError },
+          "Verified task memory candidate extraction failed",
+        );
+      }
     }
 
     // Fire-and-forget: run /aif-commit when approved with commit checkbox.

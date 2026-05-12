@@ -121,6 +121,14 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260512-harden-audit-roadmap-generation-guardrails"
+    },
+    {
+      "taskId": "work-20260512-server-side-memory-loop",
+      "title": "Implement Server-Side Memory Loop For AIF Handoff",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260512-server-side-memory-loop"
     }
   ]
 }

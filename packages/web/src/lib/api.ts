@@ -20,6 +20,13 @@ import type {
   UpdateRuntimeProfileInput,
   RuntimeLimitSnapshot,
   TaskIntent,
+  MemoryItem,
+  CreateMemoryItemInput,
+  UpdateMemoryItemInput,
+  MemoryItemStatus,
+  MemoryScope,
+  MemoryUsageEvent,
+  MemoryLifecycleEvent,
 } from "@aif/shared/browser";
 
 export class ApiError extends Error {
@@ -585,6 +592,67 @@ export const api = {
   deleteChatSession(id: string): Promise<void> {
     console.debug("[api] DELETE /chat/sessions/%s", id);
     return request(`/chat/sessions/${id}`, { method: "DELETE" });
+  },
+
+  // Memory
+  listMemoryItems(params?: {
+    projectId?: string;
+    status?: MemoryItemStatus;
+    scope?: MemoryScope;
+    includeGlobal?: boolean;
+    limit?: number;
+  }): Promise<MemoryItem[]> {
+    const qs = new URLSearchParams();
+    if (params?.projectId) qs.set("projectId", params.projectId);
+    if (params?.status) qs.set("status", params.status);
+    if (params?.scope) qs.set("scope", params.scope);
+    if (params?.includeGlobal !== undefined) qs.set("includeGlobal", String(params.includeGlobal));
+    if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<MemoryItem[]>(`/memory${suffix}`);
+  },
+
+  createMemoryItem(input: CreateMemoryItemInput): Promise<MemoryItem> {
+    return request<MemoryItem>("/memory", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateMemoryItem(id: string, input: UpdateMemoryItemInput): Promise<MemoryItem> {
+    return request<MemoryItem>(`/memory/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  approveMemoryItem(id: string, note?: string | null): Promise<MemoryItem> {
+    return request<MemoryItem>(`/memory/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    });
+  },
+
+  rejectMemoryItem(id: string, note?: string | null): Promise<MemoryItem> {
+    return request<MemoryItem>(`/memory/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    });
+  },
+
+  expireMemoryItem(id: string, note?: string | null): Promise<MemoryItem> {
+    return request<MemoryItem>(`/memory/${id}/expire`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    });
+  },
+
+  listMemoryUsageEvents(id: string): Promise<MemoryUsageEvent[]> {
+    return request<MemoryUsageEvent[]>(`/memory/${id}/usage`);
+  },
+
+  listMemoryLifecycleEvents(id: string): Promise<MemoryLifecycleEvent[]> {
+    return request<MemoryLifecycleEvent[]>(`/memory/${id}/lifecycle`);
   },
 
   // Runtime profiles

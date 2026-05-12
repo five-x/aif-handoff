@@ -165,6 +165,33 @@ describe("useWebSocket", () => {
     unmount();
   });
 
+  it("invalidates memory queries for memory broadcasts", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const listener = vi.fn();
+    window.addEventListener("memory:item_updated", listener);
+
+    const { unmount } = renderHook(() => useWebSocket(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    act(() => {
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "memory:item_updated",
+          payload: { id: "memory-1", projectId: "project-1", status: "pending" },
+        }),
+      });
+    });
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "memory:item_updated" }));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["memory"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["memory", "project-1"] });
+
+    window.removeEventListener("memory:item_updated", listener);
+    unmount();
+  });
+
   it("invalidates settings and task comment queries for typed broadcasts", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

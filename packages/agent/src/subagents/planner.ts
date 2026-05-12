@@ -24,6 +24,7 @@ import {
   restorePersistedBranch,
 } from "../gitBranch.js";
 import { logActivity } from "../hooks.js";
+import { buildTaskMemoryContext } from "../memoryContext.js";
 
 const log = logger("planner");
 const AGENT_NAME = "plan-coordinator";
@@ -288,9 +289,16 @@ ${diagnosticPlanningConstraint}`;
   const handoffContext = `HANDOFF_MODE: 1\nHANDOFF_TASK_ID: ${taskId}${handoffBranchLines}`;
   const scopeConstraint = `IMPORTANT: Your working directory is ${executionRoot}\nAll files must be created and modified inside this directory. Do NOT navigate to parent directories or other projects.`;
   const plannerSlashCommand = `/aif-plan ${plannerMode} @${planPath} docs:${planDocs} tests:${planTests}`;
+  const memoryContext = buildTaskMemoryContext({
+    task,
+    workflowKind: "planner",
+    source: "agent:planner",
+    queryParts: [taskContext, commentsForPrompt, planningFeedback],
+  });
+  const memoryBlock = memoryContext ? `\n\n${memoryContext}\n` : "";
 
   if (task.isFix) {
-    prompt = `${handoffContext}\n${scopeConstraint}\n\n${buildFixCommandText(taskContext)}`;
+    prompt = `${handoffContext}\n${scopeConstraint}${memoryBlock}\n\n${buildFixCommandText(taskContext)}`;
     workflowSpec = createRuntimeWorkflowSpec({
       workflowKind: "planner",
       prompt,
@@ -303,6 +311,7 @@ ${diagnosticPlanningConstraint}`;
 
 ${handoffContext}
 ${scopeConstraint}
+${memoryBlock}
 
 Mode: ${plannerMode}, tests: ${planTests}, docs: ${planDocs}.
 Plan file reference: @${planPath}
@@ -329,7 +338,7 @@ Planning stage must not create report artifacts, edit source/config/test files, 
       },
     });
   } else {
-    prompt = `${handoffContext}\n${scopeConstraint}\n\n${plannerSlashCommand}
+    prompt = `${handoffContext}\n${scopeConstraint}${memoryBlock}\n\n${plannerSlashCommand}
 
 ${taskContext}`;
     workflowSpec = createRuntimeWorkflowSpec({

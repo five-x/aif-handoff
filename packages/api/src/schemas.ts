@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { TASK_EVENTS, TASK_INTENTS, TASK_STATUSES, getEnv } from "@aif/shared";
+import {
+  MEMORY_ITEM_STATUSES,
+  MEMORY_SCOPES,
+  TASK_EVENTS,
+  TASK_INTENTS,
+  TASK_STATUSES,
+  getEnv,
+} from "@aif/shared";
 
 /**
  * ISO-8601 datetime accepted with any offset, but **normalized to UTC `Z`**
@@ -262,4 +269,51 @@ export const runtimeProfileListQuerySchema = z.object({
   includeGlobal: z.string().optional(),
   enabledOnly: z.string().optional(),
   scope: z.enum(["global", "project", "visible"]).optional(),
+});
+
+export const memoryListQuerySchema = z.object({
+  projectId: z.string().min(1).optional(),
+  status: z.enum(MEMORY_ITEM_STATUSES).optional(),
+  scope: z.enum(MEMORY_SCOPES).optional(),
+  includeGlobal: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === "true")),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+
+export const createMemoryItemSchema = z
+  .object({
+    projectId: z.string().min(1).nullable().optional(),
+    scope: z.enum(MEMORY_SCOPES),
+    sourceTaskId: z.string().min(1).nullable().optional(),
+    sourceKind: z.enum(["task", "manual"]).optional(),
+    sourceRef: z.string().max(500).nullable().optional(),
+    title: z.string().min(1).max(500),
+    summary: z.string().min(1).max(5_000),
+    content: z.string().min(1).max(50_000),
+    tags: z.array(z.string().max(100)).max(50).optional(),
+    expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .refine((payload) => payload.scope === "global" || Boolean(payload.projectId), {
+    message: "projectId is required for project-scoped memory",
+    path: ["projectId"],
+  });
+
+export const updateMemoryItemSchema = z
+  .object({
+    scope: z.enum(MEMORY_SCOPES).optional(),
+    title: z.string().min(1).max(500).optional(),
+    summary: z.string().min(1).max(5_000).optional(),
+    content: z.string().min(1).max(50_000).optional(),
+    tags: z.array(z.string().max(100)).max(50).optional(),
+    reviewNote: z.string().max(5_000).nullable().optional(),
+    expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .refine((payload) => Object.keys(payload).length > 0, {
+    message: "At least one field is required",
+  });
+
+export const memoryActionSchema = z.object({
+  note: z.string().max(5_000).nullable().optional(),
 });

@@ -1,20 +1,20 @@
-<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
+﻿<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260512-harden-audit-roadmap-generation-guardrails::project-capsule
+memory_id: task::aif-handoff::work::work-20260512-server-side-memory-loop::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260512-harden-audit-roadmap-generation-guardrails
-source_path: docs/rdpi/work/work-20260512-harden-audit-roadmap-generation-guardrails
+task_id: work-20260512-server-side-memory-loop
+source_path: docs/rdpi/work/work-20260512-server-side-memory-loop
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-05-11
+updated_at: 2026-05-12
 supersedes:
 expires_at:
 tags:
@@ -24,18 +24,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260512-harden-audit-roadmap-generation-guardrails/research.md
-- docs/rdpi/work/work-20260512-harden-audit-roadmap-generation-guardrails/design.md
-- docs/rdpi/work/work-20260512-harden-audit-roadmap-generation-guardrails/plan.md
-- docs/rdpi/work/work-20260512-harden-audit-roadmap-generation-guardrails/result.md
-  created_at: 2026-05-11
-  last_verified_at: 2026-05-11
+- docs/rdpi/work/work-20260512-server-side-memory-loop/research.md
+- docs/rdpi/work/work-20260512-server-side-memory-loop/design.md
+- docs/rdpi/work/work-20260512-server-side-memory-loop/plan.md
+- docs/rdpi/work/work-20260512-server-side-memory-loop/result.md
+  created_at: 2026-05-12
+  last_verified_at: 2026-05-12
 
 ---
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260512-harden-audit-roadmap-generation-guardrails.
+Current capsule for project aif-handoff, refreshed by task work-20260512-server-side-memory-loop.
 
 # Why it matters
 

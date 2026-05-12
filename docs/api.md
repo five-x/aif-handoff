@@ -115,6 +115,65 @@ Rules:
 
 **WebSocket event:** `settings:runtime_defaults_updated` with the frontend-visible app settings object.
 
+## Memory
+
+Server-side memory is stored in SQLite and is independent of local Codex shared-memory files or MCP configuration. Approved memory is retrieved as reference-only context for planner, implementer, reviewer/security, and chat runs. Candidate extraction runs after `approve_done` moves a task to `verified`.
+
+### List Memory Items
+
+```
+GET /memory?projectId=:id&status=pending&includeGlobal=true
+```
+
+Query fields:
+
+| Field           | Type                                         | Description                                |
+| --------------- | -------------------------------------------- | ------------------------------------------ |
+| `projectId`     | string                                       | Optional project scope filter              |
+| `status`        | `pending`\|`approved`\|`rejected`\|`expired` | Optional lifecycle filter                  |
+| `scope`         | `project`\|`global`                          | Optional scope filter                      |
+| `includeGlobal` | boolean                                      | Include global memory with project results |
+
+### Create Or Update Memory
+
+```
+POST /memory
+PUT /memory/:id
+```
+
+Create body fields: `scope`, `projectId` for project scope, `title`, `summary`, `content`, optional `tags`, `sourceTaskId`, `sourceRef`, and `expiresAt`.
+
+Update body fields: `scope`, `title`, `summary`, `content`, `tags`, `reviewNote`, and `expiresAt`.
+
+Secret-like text is redacted before storage and blocks approval until edited.
+
+### Review Actions
+
+```
+POST /memory/:id/approve
+POST /memory/:id/reject
+POST /memory/:id/expire
+```
+
+Body:
+
+```json
+{ "note": "review note" }
+```
+
+Approval fails with `400` while `redactionStatus` is `blocked`.
+
+### Audit Trails
+
+```
+GET /memory/:id/usage
+GET /memory/:id/lifecycle
+```
+
+Usage rows record the memory item, project/task/chat scope, workflow kind, source, and timestamp. Lifecycle rows record create/edit/approve/reject/expire actions.
+
+**WebSocket events:** `memory:item_created`, `memory:item_updated`, `memory:item_deleted`, `memory:usage_recorded`.
+
 ## Projects
 
 ### List Projects

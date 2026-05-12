@@ -126,6 +126,8 @@ function renderHeader() {
       aggregateTotals={null}
       runtimeProfilesOpen={false}
       onToggleRuntimeProfiles={vi.fn()}
+      memoryOpen={false}
+      onToggleMemory={vi.fn()}
     />,
   );
 }

@@ -38,9 +38,12 @@ import {
   findProjectById,
   findRuntimeProfileById,
   findTaskById,
+  formatMemoryContextForPrompt,
   listChatMessages,
   listChatSessions,
   listCodexSessionsByProjectRoot,
+  recordMemoryUsageEvents,
+  retrieveApprovedMemoryForPrompt,
   toChatMessageResponse,
   toChatSessionResponse,
   toRuntimeProfileResponse,
@@ -202,10 +205,11 @@ function redactTaskContextForRuntimePrompt(text: string): string {
 function buildContextAppend(
   projectName: string,
   task: Task | null,
-  options: { interactiveQuestions?: boolean } = {},
+  options: { interactiveQuestions?: boolean; memoryContext?: string } = {},
 ): string {
   const parts = [PROJECT_SCOPE_SYSTEM_APPEND];
   if (options.interactiveQuestions) parts.push(CHAT_ASKUSERQUESTION_HINT);
+  if (options.memoryContext) parts.push(options.memoryContext);
 
   parts.push(`\nCurrent project: "${projectName}"`);
 
@@ -1372,9 +1376,6 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
       adapter,
       runtimeContext.resolvedProfile.transport,
     );
-    const systemAppend = buildContextAppend(project.name, currentTask, {
-      interactiveQuestions: chatRuntimeCaps.supportsInteractiveQuestions === true,
-    });
 
     // Resolve or auto-create a chat session. Existing DB sessions are loaded
     // before runtime resolution so their saved runtimeProfileId stays pinned.
@@ -1420,6 +1421,41 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
         });
       }
     }
+
+    const memoryItems = retrieveApprovedMemoryForPrompt({
+      projectId,
+      query: [
+        message,
+        currentTask?.title,
+        currentTask?.description,
+        currentTask?.plan,
+        currentTask?.implementationLog,
+        currentTask?.reviewComments,
+      ]
+        .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+        .join("\n\n"),
+    });
+    if (memoryItems.length > 0) {
+      try {
+        recordMemoryUsageEvents({
+          items: memoryItems,
+          projectId,
+          taskId: currentTask?.id ?? null,
+          chatSessionId,
+          workflowKind: "chat",
+          source: "api:chat",
+        });
+      } catch (memoryUsageError) {
+        log.warn(
+          { memoryUsageError, projectId, chatSessionId },
+          "Failed to record chat memory use",
+        );
+      }
+    }
+    const systemAppend = buildContextAppend(project.name, currentTask, {
+      interactiveQuestions: chatRuntimeCaps.supportsInteractiveQuestions === true,
+      memoryContext: formatMemoryContextForPrompt(memoryItems),
+    });
 
     log.info(
       {

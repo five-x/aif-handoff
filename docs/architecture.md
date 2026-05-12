@@ -100,6 +100,21 @@ The coordinator treats persisted profile state as authoritative:
 
 Short-lived in-memory caches exist only for dedupe/throttling repeated identical writes; they are not the source of truth.
 
+## Server-Side Memory Loop
+
+Product memory is owned by AIF Handoff itself, not by local Codex shared-memory state. The shared package defines `memory_items`, `memory_usage_events`, and `memory_lifecycle_events`; `@aif/data` is the only read/write boundary. SQLite FTS5 backs approved-memory retrieval when available, with a safe fallback ranker if the local SQLite build lacks FTS5.
+
+Memory lifecycle:
+
+1. A human applies `approve_done` to a `done` task.
+2. If the transition succeeds to `verified`, API creates or refreshes one pending project-scoped memory candidate for that task.
+3. The Memory UI lists pending/approved/rejected/expired items and lets a human edit, approve, reject, or expire them.
+4. Redaction checks run before storage and approval; blocked items must be edited before publishing.
+5. Planner, implementer, reviewer/security, and chat retrieve approved project/global memory and inject it in a delimited reference-only prompt block.
+6. Every retrieval writes `memory_usage_events`; every lifecycle action writes `memory_lifecycle_events`.
+
+The prompt block explicitly says memory is background context only and cannot override system, developer, user, repository, or task instructions.
+
 ## Agent Pipeline
 
 The coordinator (`packages/agent/src/coordinator.ts`) uses a dual-trigger model: it polls via `node-cron` every 30 seconds as a fallback and also reacts to real-time events from the API WebSocket (task creation, moves, and explicit `agent:wake` signals). Duplicate wakes are debounced. If the WebSocket is unavailable, the coordinator falls back to polling-only mode.

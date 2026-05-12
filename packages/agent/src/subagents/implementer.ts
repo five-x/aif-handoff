@@ -29,6 +29,7 @@ import { logActivity } from "../hooks.js";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import { computePendingPlanLayers, computePlanLayers } from "../planLayers.js";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
+import { buildTaskMemoryContext } from "../memoryContext.js";
 
 const log = logger("implementer");
 const AGENT_NAME = "implement-coordinator";
@@ -1552,6 +1553,18 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
 All files must be created and modified inside this directory. Do NOT create files outside of it.`;
   const implementSlashCommand = `/aif-implement ${planSection}`;
+  const memoryContext = buildTaskMemoryContext({
+    task,
+    workflowKind: "implementer",
+    source: "agent:implementer",
+    queryParts: [
+      selectedPlan,
+      taskDescriptionForPrompt,
+      reviewCommentsForPrompt,
+      reworkBlockedReasonForPrompt,
+    ],
+  });
+  const memoryBlock = memoryContext ? `\n\n${memoryContext}\n` : "";
 
   const isRework = task.reworkRequested;
 
@@ -1637,6 +1650,7 @@ Rework handling protocol:
   const rawPrompt = `${topReworkHeader}${useSubagents ? "Implement the task using the provided plan." : implementSlashCommand}
 
 ${scopeConstraint}
+${memoryBlock}
 
 ${bodyReworkHeader}Title: ${task.title}
 Task intent contract:

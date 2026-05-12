@@ -222,6 +222,20 @@ export function useWebSocket() {
         return;
       }
 
+      if (
+        raw.type === "memory:item_created" ||
+        raw.type === "memory:item_updated" ||
+        raw.type === "memory:item_deleted" ||
+        raw.type === "memory:usage_recorded"
+      ) {
+        window.dispatchEvent(new CustomEvent(raw.type, { detail: raw.payload }));
+        queryClient.invalidateQueries({ queryKey: ["memory"] });
+        if (hasProjectScopedIdPayload(raw.payload)) {
+          queryClient.invalidateQueries({ queryKey: ["memory", raw.payload.projectId] });
+        }
+        return;
+      }
+
       // Commit lifecycle (approve-done auto-commit): surface to any listener
       // via custom DOM events; global toast + modal spinner subscribe to these.
       if (

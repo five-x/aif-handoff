@@ -241,6 +241,52 @@ function ensureTables(sqlite: Database.Database): void {
     )
   `);
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS memory_items (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      scope TEXT NOT NULL DEFAULT 'project',
+      source_task_id TEXT,
+      source_kind TEXT NOT NULL DEFAULT 'task',
+      source_ref TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      redaction_status TEXT NOT NULL DEFAULT 'clean',
+      publish_block_reason TEXT,
+      review_note TEXT,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      content TEXT NOT NULL,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      approved_at TEXT,
+      rejected_at TEXT,
+      expired_at TEXT,
+      expires_at TEXT
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS memory_usage_events (
+      id TEXT PRIMARY KEY,
+      memory_item_id TEXT NOT NULL,
+      project_id TEXT,
+      task_id TEXT,
+      chat_session_id TEXT,
+      workflow_kind TEXT NOT NULL,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS memory_lifecycle_events (
+      id TEXT PRIMARY KEY,
+      memory_item_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      actor TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runtime_warmup_sessions (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -333,6 +379,7 @@ function ensureTables(sqlite: Database.Database): void {
   `);
 
   runMigrations(sqlite);
+  ensureMemoryFts(sqlite);
   ensureTriggers(sqlite);
   runRuntimeBackfills(sqlite);
   ensureIndexes(sqlite);
@@ -801,6 +848,52 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 24,
+    description: "Add server-owned memory item and audit tables",
+    sql: `
+      CREATE TABLE IF NOT EXISTS memory_items (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        source_task_id TEXT,
+        source_kind TEXT NOT NULL DEFAULT 'task',
+        source_ref TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        redaction_status TEXT NOT NULL DEFAULT 'clean',
+        publish_block_reason TEXT,
+        review_note TEXT,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        content TEXT NOT NULL,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        approved_at TEXT,
+        rejected_at TEXT,
+        expired_at TEXT,
+        expires_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS memory_usage_events (
+        id TEXT PRIMARY KEY,
+        memory_item_id TEXT NOT NULL,
+        project_id TEXT,
+        task_id TEXT,
+        chat_session_id TEXT,
+        workflow_kind TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      CREATE TABLE IF NOT EXISTS memory_lifecycle_events (
+        id TEXT PRIMARY KEY,
+        memory_item_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -1026,6 +1119,62 @@ function runRuntimeBackfills(sqlite: Database.Database): void {
   }
 }
 
+/** Best-effort FTS5 bootstrap for memory retrieval. */
+function ensureMemoryFts(sqlite: Database.Database): void {
+  try {
+    sqlite.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts USING fts5(
+        item_id UNINDEXED,
+        scope,
+        project_id UNINDEXED,
+        title,
+        summary,
+        content,
+        tags
+      )
+    `);
+    sqlite.exec(`
+      INSERT INTO memory_items_fts (item_id, scope, project_id, title, summary, content, tags)
+      SELECT id, scope, project_id, title, summary, content, tags_json
+      FROM memory_items
+      WHERE id NOT IN (SELECT item_id FROM memory_items_fts)
+    `);
+    sqlite.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_memory_items_fts_insert
+      AFTER INSERT ON memory_items
+      FOR EACH ROW
+      BEGIN
+        INSERT INTO memory_items_fts (item_id, scope, project_id, title, summary, content, tags)
+        VALUES (NEW.id, NEW.scope, NEW.project_id, NEW.title, NEW.summary, NEW.content, NEW.tags_json);
+      END
+    `);
+    sqlite.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_memory_items_fts_update
+      AFTER UPDATE ON memory_items
+      FOR EACH ROW
+      BEGIN
+        DELETE FROM memory_items_fts WHERE item_id = OLD.id;
+        INSERT INTO memory_items_fts (item_id, scope, project_id, title, summary, content, tags)
+        VALUES (NEW.id, NEW.scope, NEW.project_id, NEW.title, NEW.summary, NEW.content, NEW.tags_json);
+      END
+    `);
+    sqlite.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_memory_items_fts_delete
+      AFTER DELETE ON memory_items
+      FOR EACH ROW
+      BEGIN
+        DELETE FROM memory_items_fts WHERE item_id = OLD.id;
+      END
+    `);
+    log.debug("Memory FTS bootstrap complete");
+  } catch (err) {
+    log.warn(
+      { err },
+      "Memory FTS5 bootstrap unavailable; continuing without memory full-text search",
+    );
+  }
+}
+
 /** Idempotent trigger bootstrap — ensures cascade cleanup triggers exist on every startup. */
 function ensureTriggers(sqlite: Database.Database): void {
   const allTriggers = MIGRATIONS.flatMap((m) => m.triggers ?? []);
@@ -1080,6 +1229,16 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_usage_events_chat_session ON usage_events(chat_session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_source ON usage_events(source, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_runtime ON usage_events(runtime_id, provider_id, created_at)",
+    // Memory item review/retrieval and audit lookups.
+    "CREATE INDEX IF NOT EXISTS idx_memory_items_project_status ON memory_items(project_id, status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_items_scope_status ON memory_items(scope, status, updated_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_source_task_unique ON memory_items(source_task_id) WHERE source_task_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_memory_items_expires ON memory_items(status, expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_usage_events_item ON memory_usage_events(memory_item_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_usage_events_project ON memory_usage_events(project_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_usage_events_task ON memory_usage_events(task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_usage_events_chat_session ON memory_usage_events(chat_session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_lifecycle_events_item ON memory_lifecycle_events(memory_item_id, created_at)",
     // Runtime warmup lookup and lifecycle scans.
     "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_active_lookup ON runtime_warmup_sessions(project_id, runtime_profile_id, runtime_id, provider_id, transport, model, status, expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_expires ON runtime_warmup_sessions(status, expires_at)",

@@ -19,6 +19,7 @@ import { api } from "./lib/api";
 import type { Project, Task } from "@aif/shared/browser";
 import { ProjectRuntimeSettings } from "./components/project/ProjectRuntimeSettings";
 import { ProjectsOverview } from "./components/project/ProjectsOverview";
+import { MemoryDialog } from "./components/memory/MemoryDialog";
 import { ToastProvider } from "./components/ui/toast";
 
 const queryClient = new QueryClient({
@@ -40,6 +41,7 @@ function AppContent() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [runtimeSettingsOpen, setRuntimeSettingsOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const [density, setDensity] = useState<"comfortable" | "compact">(() => {
     const saved = readStorage(STORAGE_KEYS.DENSITY);
     return saved === "compact" ? "compact" : "comfortable";
@@ -146,6 +148,7 @@ function AppContent() {
   const handleSelectProject = useCallback((p: Project) => {
     setSelectedProjectId(p.id);
     setRuntimeSettingsOpen(false);
+    setMemoryOpen(false);
     writeStorage(STORAGE_KEYS.SELECTED_PROJECT, p.id);
     window.history.pushState(null, "", `/project/${p.id}`);
   }, []);
@@ -173,6 +176,7 @@ function AppContent() {
           setSelectedProjectId(null);
           setSelectedTaskId(null);
           setRuntimeSettingsOpen(false);
+          setMemoryOpen(false);
           removeStorage(STORAGE_KEYS.SELECTED_PROJECT);
           window.history.pushState(null, "", "/");
         }}
@@ -185,6 +189,8 @@ function AppContent() {
         aggregateTotals={aggregateProjectTotals}
         runtimeProfilesOpen={runtimeSettingsOpen}
         onToggleRuntimeProfiles={() => setRuntimeSettingsOpen((value) => !value)}
+        memoryOpen={memoryOpen}
+        onToggleMemory={() => setMemoryOpen((value) => !value)}
       />
 
       <main className={`mx-auto w-full ${density === "compact" ? "p-4 md:p-5" : "p-6 md:p-8"}`}>
@@ -197,6 +203,11 @@ function AppContent() {
             hideTrigger
           />
         )}
+        <MemoryDialog
+          projectId={project?.id ?? null}
+          open={memoryOpen && Boolean(project)}
+          onOpenChange={setMemoryOpen}
+        />
         {project ? (
           <Board
             projectId={project.id}
