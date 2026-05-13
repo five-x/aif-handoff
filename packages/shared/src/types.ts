@@ -31,12 +31,23 @@ export interface AutoReviewFinding {
   id: string;
   text: string;
   source: AutoReviewFindingSource;
+  firstSeenIteration?: number;
+  lastSeenIteration?: number;
+  streak?: number;
+}
+
+export interface AutoReviewReworkSnapshot {
+  iteration: number;
+  artifactPath: string;
+  artifactContentSha: string | null;
+  findingIds: string[];
 }
 
 export interface AutoReviewState {
   strategy: AutoReviewStrategy;
   iteration: number;
   findings: AutoReviewFinding[];
+  reworkSnapshot?: AutoReviewReworkSnapshot;
 }
 
 export interface Project {

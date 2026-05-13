@@ -579,7 +579,12 @@ describe("tasks API", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: "Audit project configuration",
+          title: "Audit src/config.ts",
+          description: [
+            "Scope: src/config.ts",
+            "Audit mandate: Inspect configuration defaults for unsafe runtime behavior.",
+            "Report artifact: audit/config-audit.md",
+          ].join("\n"),
           projectId: "test-project",
           taskIntent: "audit",
         }),
@@ -594,6 +599,79 @@ describe("tasks API", () => {
       expect(body.skipReview).toBe(false);
       expect(body.useSubagents).toBe(true);
       expect(body.isFix).toBe(false);
+    });
+
+    it("should reject broad direct audit tasks before create", async () => {
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Audit entire repository",
+          description:
+            "Audit security, performance, correctness, and operations readiness across the whole project.",
+          projectId: "test-project",
+          taskIntent: "audit",
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("AUDIT_DECOMPOSITION_REQUIRED");
+      expect(body.decomposition).toMatchObject({
+        mode: "decomposed_report_batch",
+        requiresDecomposition: true,
+      });
+      expect(testDb.current.select().from(tasks).all()).toEqual([]);
+    });
+
+    it("should reject broad direct audit tasks even with concrete report markers", async () => {
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Audit entire repository",
+          description: [
+            "Scope: src, packages, tests, docs",
+            "Audit mandate: Audit security, performance, correctness, and operations readiness across the whole project.",
+            "Report artifact: audit/full.md",
+          ].join("\n"),
+          projectId: "test-project",
+          taskIntent: "audit",
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("AUDIT_DECOMPOSITION_REQUIRED");
+      expect(body.decomposition.reasonCodes).toEqual(
+        expect.arrayContaining(["broad_repository_scope", "multi_domain_audit_scope"]),
+      );
+      expect(testDb.current.select().from(tasks).all()).toEqual([]);
+    });
+
+    it("should reject bare repository audit targets with concrete report markers", async () => {
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Audit repository",
+          description: [
+            "Scope: src, packages, tests, docs",
+            "Audit mandate: Inspect repository quality risks.",
+            "Report artifact: audit/full.md",
+          ].join("\n"),
+          projectId: "test-project",
+          taskIntent: "audit",
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("AUDIT_DECOMPOSITION_REQUIRED");
+      expect(body.decomposition.reasonCodes).toEqual(
+        expect.arrayContaining(["broad_repository_scope"]),
+      );
+      expect(testDb.current.select().from(tasks).all()).toEqual([]);
     });
 
     it("should create a task with paused=true", async () => {

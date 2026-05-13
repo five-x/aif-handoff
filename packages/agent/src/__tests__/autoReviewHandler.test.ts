@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const mockFindTaskById = vi.fn();
 const mockCreateTaskComment = vi.fn();
@@ -25,6 +29,10 @@ const { evaluateReviewCommentsForAutoMode } = await import("../reviewGate.js");
 
 describe("handleAutoReviewGate", () => {
   const baseInput = { taskId: "task-1", projectRoot: "/tmp/test" };
+
+  function sha256(text: string): string {
+    return createHash("sha256").update(text).digest("hex");
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -142,6 +150,142 @@ describe("handleAutoReviewGate", () => {
     expect(mockCreateTaskComment.mock.calls[0][0].message).toContain(
       "Still-blocking previous findings: 1",
     );
+  });
+
+  it("adds a rework snapshot for roadmap audit artifacts", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-auto-review-snapshot-"));
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    const reportText = "# Audit\n\nNeeds evidence.\n";
+    writeFileSync(join(projectRoot, "audit", "report.md"), reportText, "utf8");
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      reviewComments: "needs fixes",
+      reviewIterationCount: 0,
+      maxReviewIterations: 10,
+      autoReviewState: null,
+    });
+    mockFindRoadmapBatchArtifactByTaskId.mockReturnValue({
+      taskId: "task-1",
+      batchId: "batch-1",
+      role: "report",
+      artifactPath: "audit/report.md",
+      contentSha: "row-sha",
+    });
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "request_changes",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      blockingFindings: [
+        { id: "finding-1", source: "code_review", text: "Replace stale evidence", streak: 1 },
+      ],
+      fixesMarkdown: "- [finding-1] code_review | Replace stale evidence",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 1,
+        findings: [
+          { id: "finding-1", source: "code_review", text: "Replace stale evidence", streak: 1 },
+        ],
+      },
+    });
+
+    const result = await handleAutoReviewGate({ taskId: "task-1", projectRoot });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: "rework_requested",
+        autoReviewState: expect.objectContaining({
+          reworkSnapshot: {
+            iteration: 1,
+            artifactPath: "audit/report.md",
+            artifactContentSha: sha256(reportText),
+            findingIds: ["finding-1"],
+          },
+        }),
+      }),
+    );
+  });
+
+  it("terminalizes repeated same-blocker loops before max iterations", async () => {
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      reviewComments: "still failing",
+      reviewIterationCount: 2,
+      maxReviewIterations: 100,
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 2,
+        findings: [
+          {
+            id: "finding-1",
+            source: "code_review",
+            text: "Fix missing audit evidence",
+            firstSeenIteration: 1,
+            lastSeenIteration: 2,
+            streak: 2,
+          },
+        ],
+      },
+    });
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "request_changes",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 3,
+        previousBlockingCount: 1,
+        stillBlockingCount: 1,
+        newBlockingCount: 0,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      blockingFindings: [
+        {
+          id: "finding-1",
+          source: "code_review",
+          text: "Fix missing audit evidence",
+          firstSeenIteration: 1,
+          lastSeenIteration: 3,
+          streak: 3,
+        },
+      ],
+      fixesMarkdown: "- [finding-1] code_review | Fix missing audit evidence",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 3,
+        findings: [
+          {
+            id: "finding-1",
+            source: "code_review",
+            text: "Fix missing audit evidence",
+            firstSeenIteration: 1,
+            lastSeenIteration: 3,
+            streak: 3,
+          },
+        ],
+      },
+    });
+
+    const result = await handleAutoReviewGate(baseInput);
+
+    expect(result).toEqual({
+      status: "manual_review_required",
+      currentIteration: 3,
+      handoffReason: "stalled_rework_loop",
+      metrics: expect.objectContaining({ totalBlockingCount: 1 }),
+      autoReviewState: expect.objectContaining({ iteration: 3 }),
+    });
+    const message = mockCreateTaskComment.mock.calls[0][0].message;
+    expect(message).toContain("Handoff reason: stalled_rework_loop");
+    expect(message).toContain("Stall threshold: 3");
+    expect(message).toContain("## Stalled Findings");
   });
 
   it("converts unresolved request_changes at max iterations into manual_review_required", async () => {

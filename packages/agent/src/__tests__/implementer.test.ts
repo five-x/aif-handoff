@@ -625,6 +625,8 @@ describe("runImplementer rework behavior", () => {
     expect(queryMock).not.toHaveBeenCalled();
     const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
     expect(summary).toContain("No validated findings.");
+    expect(summary).toContain("## Child Report Status");
+    expect(summary).toContain("| `audit/runtime.md` | `task-report-no-findings-source` | passed |");
     expect(summary).toContain("## Checked Files");
     expect(summary).toContain("`README.md:2`");
     expect(summary).toContain("`src/config.ts:1`");
@@ -784,6 +786,8 @@ describe("runImplementer rework behavior", () => {
     const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
     expect(summary).toContain("# Audit Inconclusive");
     expect(summary).toContain('"kind":"inconclusive_batch_evidence"');
+    expect(summary).toContain("## Child Report Status");
+    expect(summary).toContain("| `audit/source-1.md` | `task-inventory-source-1` | passed |");
     expect(summary).toContain("Inventory-only no-findings source reports: 6.");
     expect(summary).not.toContain("No validated findings.");
     expect(summary).toContain("```audit-report-manifest");
@@ -1498,7 +1502,7 @@ describe("runImplementer rework behavior", () => {
     expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
   });
 
-  it("keeps all-hidden broad audit repairs from releasing batch synthesis", async () => {
+  it("releases all-hidden broad audit repairs to final inconclusive synthesis", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -1682,23 +1686,51 @@ describe("runImplementer rework behavior", () => {
     const batch = summarizeRoadmapBatch(summary.batchId);
     expect(batch?.counts.valid).toBe(0);
     expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
-    expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
-    expect(batch?.synthesisReady).toBe(false);
+    expect(
+      listRoadmapReportArtifactsForSynthesis(summary.batchId).map((artifact) => ({
+        taskId: artifact.taskId,
+        state: artifact.state,
+      })),
+    ).toEqual([
+      { taskId: "task-audit-hidden-source-a", state: "source_inconclusive" },
+      { taskId: "task-audit-hidden-source-b", state: "source_inconclusive" },
+    ]);
+    expect(batch?.synthesisReady).toBe(true);
     expect(
       db.select().from(tasks).where(eq(tasks.id, "task-audit-hidden-synthesis")).get(),
     ).toEqual(
       expect.objectContaining({
-        paused: true,
-        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+        paused: false,
+        blockedReason: null,
       }),
     );
-    expect(claimBacklogTaskForAdvance("task-audit-hidden-synthesis")).toBe(false);
+    expect(claimBacklogTaskForAdvance("task-audit-hidden-synthesis")).toBe(true);
     expect(
       listRoadmapBatchArtifacts(summary.batchId).find(
         (artifact) => artifact.taskId === "task-audit-hidden-synthesis",
       ),
     ).toEqual(expect.objectContaining({ state: "expected" }));
-    expect(existsSync(join(projectRoot, "audit", "summary.md"))).toBe(false);
+    db.update(tasks)
+      .set({
+        status: "implementing",
+        reworkRequested: true,
+        plan: "## Plan\n- [ ] Synthesize terminal source outcomes",
+        blockedReason: "invalid_artifact_content: previous synthesis was too strong",
+      })
+      .where(eq(tasks.id, "task-audit-hidden-synthesis"))
+      .run();
+
+    await runImplementer("task-audit-hidden-synthesis", projectRoot);
+
+    const synthesis = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(synthesis).toContain("# Audit Inconclusive");
+    expect(synthesis).toContain("## Child Report Status");
+    expect(synthesis).toContain(
+      "| `audit/source-a.md` | `task-audit-hidden-source-a` | inconclusive |",
+    );
+    expect(synthesis).toContain(
+      "| `audit/source-b.md` | `task-audit-hidden-source-b` | inconclusive |",
+    );
   });
 
   it("keeps explicit product scope with only generic evidence source_inconclusive", async () => {

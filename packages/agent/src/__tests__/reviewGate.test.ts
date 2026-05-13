@@ -334,9 +334,103 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         id: blockerId,
         source: "code_review",
         text: "Add null guard before plan sync",
+        firstSeenIteration: 1,
+        lastSeenIteration: 1,
+        streak: 1,
       },
     ]);
     expect(result.fixesMarkdown).toContain(blockerId);
+  });
+
+  it("increments streak metadata when the same blocker survives rework", async () => {
+    const blockerId = createAutoReviewFindingId("code_review", "Keep the audit report scoped");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Keep the audit report scoped",
+          firstSeenIteration: 1,
+          lastSeenIteration: 1,
+          streak: 1,
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] code_review | still_blocking | Keep the audit report scoped`,
+        "",
+        "## Blocking Findings",
+        `- [${blockerId}] code_review | Keep the audit report scoped`,
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
+    }
+    expect(result.autoReviewState.findings[0]).toEqual(
+      expect.objectContaining({
+        id: blockerId,
+        firstSeenIteration: 1,
+        lastSeenIteration: 2,
+        streak: 2,
+      }),
+    );
+  });
+
+  it("starts a fresh streak for a new blocker", async () => {
+    const oldId = createAutoReviewFindingId("code_review", "Remove stale evidence");
+    const newId = createAutoReviewFindingId("code_review", "Add current verification output");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: oldId,
+          source: "code_review",
+          text: "Remove stale evidence",
+          firstSeenIteration: 1,
+          lastSeenIteration: 1,
+          streak: 1,
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${oldId}] code_review | resolved | Stale evidence removed`,
+        "",
+        "## Blocking Findings",
+        `- [${newId}] code_review | Add current verification output`,
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
+    }
+    expect(result.autoReviewState.findings[0]).toEqual(
+      expect.objectContaining({
+        id: newId,
+        firstSeenIteration: 2,
+        lastSeenIteration: 2,
+        streak: 1,
+      }),
+    );
   });
 
   it("returns manual_review_required in closure_first when previous blockers are resolved but new blockers appear", async () => {

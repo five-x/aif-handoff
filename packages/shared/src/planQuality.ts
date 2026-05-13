@@ -1,7 +1,9 @@
 import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
 import {
+  classifyAuditDecompositionRequest,
   isAuditReportArtifactPath,
   parseExpectedAuditReportArtifactPath,
+  parseAuditScopeRoots,
 } from "./auditRoadmapContract.js";
 
 export const TASK_PLAN_QUALITY_ISSUE_CODES = [
@@ -15,6 +17,12 @@ export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "missing_diagnostic_report_constraints",
   "diagnostic_report_artifact_mismatch",
   "diagnostic_scope_violation",
+  "missing_audit_evidence_targets",
+  "missing_audit_exclusions",
+  "missing_audit_report_structure",
+  "missing_child_audit_report_decision",
+  "missing_audit_decomposition",
+  "audit_without_concrete_boundaries",
 ] as const;
 
 export type TaskPlanQualityIssueCode = (typeof TASK_PLAN_QUALITY_ISSUE_CODES)[number];
@@ -68,6 +76,22 @@ const DIAGNOSTIC_ONLY_PATTERN =
   /\b(?:diagnostic[-\s]?only|report[-\s]?only|audit[-\s]?only|review[-\s]?only|do not implement|must not implement|no implementation|do not create child|must not create child)\b/i;
 const DIAGNOSTIC_SCOPE_VIOLATION_PATTERN =
   /\b(?:implement fixes?|fix findings?|patch code|modify source|create child implementation task|queue child implementation task)\b/i;
+const AUDIT_EVIDENCE_TARGETS_PATTERN =
+  /\b(?:scope|scoped evidence targets?|evidence targets?|source targets?|target paths?|authorized source boundaries)\s*:/i;
+const AUDIT_EXCLUSIONS_PATTERN =
+  /^\s*(?:excluded areas?|exclusions?|out of scope)\s*:[^\S\r\n]*(?:none\b|no\b|\S[^\r\n]*)/im;
+const AUDIT_NO_CHILD_REPORTS_PATTERN =
+  /\b(?:(?:child audit reports?|child reports?|source reports?)\s*:\s*(?:not required|not needed|none|no)|no child audit reports?\s+(?:are\s+)?(?:required|needed))\b/i;
+const AUDIT_CHILD_REPORTS_PATTERN =
+  /\b(?:child audit reports?|child reports?|source reports?)\s*:\s*(?:required|yes|create|produce|needed)|\b(?:required|produce|create)\s+(?:child audit reports?|child reports?|source reports?)\b/i;
+const AUDIT_SYNTHESIS_PATTERN = /\b(?:synthesis|synthesi[sz]e|summary|final audit report)\b/i;
+const AUDIT_EXISTING_CHILD_REPORTS_PATTERN =
+  /\b(?:existing|prior|previous|already generated|completed)\b[^\r\n.]{0,80}\b(?:child|source)?\s*audit reports?\b|\b(?:child|source)\s+audit reports?\b[^\r\n.]{0,80}\b(?:existing|prior|previous|already generated|completed)\b/i;
+const AUDIT_BOUNDARY_LINE_PATTERN =
+  /^\s*(?:scope|scoped evidence targets?|evidence targets?|source targets?|target paths?|authorized source boundaries)\s*:\s*(.+)$/gim;
+const REPORT_ARTIFACT_LINE_PATTERN = /^\s*report artifact\s*:\s*(.+)$/gim;
+const CONCRETE_SOURCE_ROOT_PATTERN =
+  /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:(?:packages|apps)\/[\w.@-]+(?:\/(?:src|test|tests|__tests__|config)(?:\/[\w.@-]+)*)?|(?:src|test|tests|__tests__|config|docs|scripts|lib|migrations|data)(?:\/[\w.@-]+)*))(?:[\s`'"),.;\]]|$)/gi;
 
 function parseTags(tags: TaskPlanQualityTask["tags"]): string[] {
   if (Array.isArray(tags)) return tags.filter((tag) => typeof tag === "string");
@@ -108,6 +132,17 @@ function extractRepoPaths(text: string): string[] {
   return [...paths].sort();
 }
 
+function extractConcreteSourceRoots(text: string): string[] {
+  const paths = new Set<string>();
+  for (const match of text.matchAll(CONCRETE_SOURCE_ROOT_PATTERN)) {
+    const raw = match[1]?.trim();
+    if (!raw) continue;
+    const normalized = normalizePath(raw).replace(/\/+$/g, "");
+    if (normalized && !isAuditReportArtifactPath(normalized)) paths.add(normalized);
+  }
+  return [...paths].sort();
+}
+
 function extractReportArtifactPaths(text: string): string[] {
   const paths = new Set<string>();
   for (const match of text.matchAll(REPORT_ARTIFACT_PATTERN)) {
@@ -123,6 +158,41 @@ function extractReportArtifactPaths(text: string): string[] {
 
 function formatInlinePaths(paths: string[]): string {
   return paths.map((path) => `\`${path}\``).join(", ");
+}
+
+function auditBoundaryText(text: string): string {
+  return [...text.matchAll(AUDIT_BOUNDARY_LINE_PATTERN)].map((match) => match[1] ?? "").join("\n");
+}
+
+function declaredReportArtifactPaths(text: string): string[] {
+  return [
+    ...new Set(
+      [...text.matchAll(REPORT_ARTIFACT_LINE_PATTERN)].flatMap((match) =>
+        extractReportArtifactPaths(match[1] ?? ""),
+      ),
+    ),
+  ].sort();
+}
+
+function isConcreteAuditBoundaryPath(path: string): boolean {
+  const normalized = normalizePath(path).replace(/\/+$/g, "");
+  if (!normalized || isAuditReportArtifactPath(normalized)) return false;
+  return (
+    extractRepoPaths(` ${normalized}`).includes(normalized) ||
+    extractConcreteSourceRoots(` ${normalized}`).includes(normalized)
+  );
+}
+
+function concreteAuditBoundariesFromText(text: string): string[] {
+  const boundaryText = auditBoundaryText(text);
+  const source = boundaryText.length > 0 ? boundaryText : text;
+  return [
+    ...new Set([
+      ...extractRepoPaths(source).filter((path) => !isAuditReportArtifactPath(path)),
+      ...extractConcreteSourceRoots(source),
+      ...parseAuditScopeRoots(text).filter(isConcreteAuditBoundaryPath),
+    ]),
+  ].sort();
 }
 
 function combinedDiagnosticSourceText(input: DeterministicDiagnosticPlanInput): string {
@@ -161,26 +231,42 @@ export function buildDeterministicDiagnosticPlan(
   input: DeterministicDiagnosticPlanInput,
 ): string | null {
   const taskText = combinedTaskText(input.task);
+  const sourceText = combinedDiagnosticSourceText(input);
+  const decomposition = classifyAuditDecompositionRequest(sourceText);
+  const broadDecompositionReasons = decomposition.reasonCodes.filter(
+    (reason) => reason !== "audit_without_concrete_boundaries",
+  );
+  if (decomposition.requiresDecomposition && broadDecompositionReasons.length > 0) return null;
+
   const reportPath = findDeterministicDiagnosticReportPath(input);
   if (!reportPath) return null;
 
-  const taskPaths = [...new Set([...extractRepoPaths(taskText), reportPath])].sort();
+  const taskPaths = concreteAuditBoundariesFromText(taskText);
+  if (taskPaths.length === 0) return null;
+
+  const evidenceTargets = taskPaths;
   const taskPathText = formatInlinePaths(taskPaths);
+  const evidenceTargetsText = formatInlinePaths(evidenceTargets);
   const evidenceStep =
-    taskPaths.length > 1
-      ? `- [ ] Inspect the task-specific repository paths ${taskPathText} and cite exact existing file paths for every finding.`
-      : `- [ ] Inspect the repository evidence needed for \`${reportPath}\` and cite exact existing file paths for every finding.`;
+    taskPaths.length > 0
+      ? `- [ ] Inspect the task-specific paths ${taskPathText} and cite exact existing file paths for every finding.`
+      : `- [ ] Inspect the scoped evidence needed for \`${reportPath}\` and cite exact existing file paths for every finding.`;
 
   const plan = [
     "## Diagnostic-only plan",
     "",
     `Report artifact: \`${reportPath}\``,
+    `Scope: ${evidenceTargetsText}`,
+    `Scoped evidence targets: ${evidenceTargetsText}`,
+    "Excluded areas: generated files, build output, dependency caches, and vendor directories unless explicitly named by the task.",
+    "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+    "Child audit reports: not required for this narrow source report.",
     "",
     "- [ ] Keep the run diagnostic-only: do not implement fixes; do not patch code; do not modify source files; do not create child implementation tasks.",
     evidenceStep,
     `- [ ] Create or update \`${reportPath}\` with finding id, severity, evidence, risk, proposed fix, confidence, and verification command or manual check.`,
     `- [ ] If no issue is found, state that explicitly in \`${reportPath}\` with the evidence checked.`,
-    `- [ ] Verify every repository path referenced in \`${reportPath}\` exists under the project root before closing the audit.`,
+    `- [ ] Verify every scoped path referenced in \`${reportPath}\` exists under the project root before closing the audit.`,
   ].join("\n");
 
   const quality = evaluateTaskPlanQuality({ task: input.task, plan });
@@ -213,6 +299,51 @@ function hasAnyPlanPath(planPaths: string[], plan: string): boolean {
 
 function uniqueCategories(issues: TaskPlanQualityIssue[]): TaskPlanQualityIssueCode[] {
   return [...new Set(issues.map((entry) => entry.code))];
+}
+
+function hasAuditReportStructure(plan: string): boolean {
+  return (
+    /\bfinding\s+id\b/i.test(plan) &&
+    /\b(?:severity|confidence)\b/i.test(plan) &&
+    /\bevidence\b/i.test(plan) &&
+    /\brisk\b/i.test(plan) &&
+    /\bproposed\s+fix\b/i.test(plan) &&
+    /\bverification\b/i.test(plan)
+  );
+}
+
+function hasDecomposedAuditStructure(plan: string, reportPaths: string[]): boolean {
+  const hasChildReports = AUDIT_CHILD_REPORTS_PATTERN.test(plan);
+  const hasSynthesis = AUDIT_SYNTHESIS_PATTERN.test(plan);
+  const hasMultipleReports = reportPaths.length >= 2;
+  const namesSourceAndSynthesisReports =
+    /\b(?:source reports?|child reports?)\b/i.test(plan) &&
+    /\b(?:synthesis|final report)\b/i.test(plan);
+  return hasChildReports && hasSynthesis && (hasMultipleReports || namesSourceAndSynthesisReports);
+}
+
+function hasSynthesisOnlyReportEvidenceTarget(plan: string): boolean {
+  if (!AUDIT_SYNTHESIS_PATTERN.test(plan) || !AUDIT_EXISTING_CHILD_REPORTS_PATTERN.test(plan)) {
+    return false;
+  }
+
+  const finalReportPaths = new Set(declaredReportArtifactPaths(plan));
+  if (finalReportPaths.size === 0) return false;
+
+  const boundaryText = auditBoundaryText(plan);
+  if (!boundaryText) return false;
+
+  const childReportPaths = extractReportArtifactPaths(boundaryText).filter(
+    (path) => !finalReportPaths.has(path),
+  );
+  if (childReportPaths.length === 0) return false;
+
+  const nonReportPaths = [
+    ...extractRepoPaths(boundaryText).filter((path) => !isAuditReportArtifactPath(path)),
+    ...extractConcreteSourceRoots(boundaryText),
+    ...parseAuditScopeRoots(plan).filter(isConcreteAuditBoundaryPath),
+  ];
+  return nonReportPaths.length === 0;
 }
 
 export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQualityResult {
@@ -318,6 +449,80 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
         issue(
           "diagnostic_scope_violation",
           "Diagnostic task plan appears to implement fixes or child implementation work in the same run.",
+        ),
+      );
+    }
+
+    const missingEvidenceTargets = !AUDIT_EVIDENCE_TARGETS_PATTERN.test(plan);
+    const missingExclusions = !AUDIT_EXCLUSIONS_PATTERN.test(plan);
+    const missingReportStructure = !hasAuditReportStructure(plan);
+    const hasNoChildDecision = AUDIT_NO_CHILD_REPORTS_PATTERN.test(plan);
+    const hasDecompositionDecision = hasDecomposedAuditStructure(plan, reportPaths);
+    const concreteAuditBoundaries = concreteAuditBoundariesFromText(
+      [taskText, plan].filter(Boolean).join("\n"),
+    );
+    const hasSynthesisOnlyException = hasSynthesisOnlyReportEvidenceTarget(plan);
+    const missingConcreteAuditBoundaries =
+      concreteAuditBoundaries.length === 0 && !hasSynthesisOnlyException;
+    const missingChildDecision = !hasNoChildDecision && !hasDecompositionDecision;
+    const decomposition = classifyAuditDecompositionRequest({
+      title: input.task.title,
+      description: [input.task.description ?? "", plan].filter(Boolean).join("\n"),
+    });
+
+    if (missingEvidenceTargets) {
+      issues.push(
+        issue(
+          "missing_audit_evidence_targets",
+          "Audit task plan must declare scoped evidence targets or source boundaries.",
+        ),
+      );
+    }
+
+    if (missingExclusions) {
+      issues.push(
+        issue(
+          "missing_audit_exclusions",
+          "Audit task plan must declare excluded areas or explicit out-of-scope boundaries.",
+        ),
+      );
+    }
+
+    if (missingReportStructure) {
+      issues.push(
+        issue(
+          "missing_audit_report_structure",
+          "Audit task plan must declare expected report fields: finding ID, severity or confidence, evidence, risk, proposed fix, and verification.",
+        ),
+      );
+    }
+
+    if (missingConcreteAuditBoundaries) {
+      issues.push(
+        issue(
+          "audit_without_concrete_boundaries",
+          "Audit task plan must name at least one concrete non-report repository path, source root, declared scope root, or accepted source boundary.",
+        ),
+      );
+    }
+
+    if (missingChildDecision) {
+      issues.push(
+        issue(
+          "missing_child_audit_report_decision",
+          "Audit task plan must state whether child/source audit reports are required or not required.",
+        ),
+      );
+    }
+
+    const requiresBroadDecomposition =
+      decomposition.requiresDecomposition &&
+      decomposition.reasonCodes.some((reason) => reason !== "audit_without_concrete_boundaries");
+    if (requiresBroadDecomposition && !hasDecompositionDecision) {
+      issues.push(
+        issue(
+          "missing_audit_decomposition",
+          `Broad audit task plan requires decomposed child/source reports plus synthesis before implementation. Classifier reasons: ${decomposition.reasonCodes.join(", ")}.`,
         ),
       );
     }

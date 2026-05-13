@@ -25,6 +25,8 @@ import {
   resolveTaskIntentDefaults,
   validateGeneratedAuditCard,
   validateGeneratedTaskIntent,
+  classifyAuditDecompositionRequest,
+  type AuditDecompositionClassification,
   type TaskIntent,
 } from "@aif/shared";
 import {
@@ -108,6 +110,7 @@ export interface GenerateRoadmapFileInput {
 export interface GenerateRoadmapFileResult {
   roadmapPath: string;
   content: string;
+  auditDecomposition?: AuditDecompositionClassification;
 }
 
 export interface RoadmapGitCommitResult {
@@ -227,6 +230,8 @@ export function assertRoadmapIntentMatchesRequest(input: {
 
 const AUDIT_ROADMAP_VALIDATION_MESSAGE =
   "Audit roadmap generation produced implementation-shaped milestones; no tasks imported.";
+const AUDIT_CHILD_REPORT_STATUS_REQUIREMENT =
+  "Child report status: final synthesis must include a table listing every source report artifact with status passed, failed, or inconclusive and must not claim a stronger outcome than child reports support.";
 
 function toProjectRelativeGitPath(projectRoot: string, absolutePath: string): string | null {
   const rel = relative(projectRoot, absolutePath).replaceAll("\\", "/");
@@ -674,7 +679,12 @@ function buildAuditRoadmapItem(
     '  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     `  - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}`,
     `  - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}`,
-    ...(role === "synthesis" ? [`  - ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}`] : []),
+    ...(role === "synthesis"
+      ? [
+          `  - ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}`,
+          `  - ${AUDIT_CHILD_REPORT_STATUS_REQUIREMENT}`,
+        ]
+      : []),
     "  - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "  - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
   ].join("\n");
@@ -1027,6 +1037,13 @@ export async function generateRoadmapFile(
 
   const description = existsSync(descriptionPath) ? readFileSync(descriptionPath, "utf8") : null;
   const architecture = existsSync(architecturePath) ? readFileSync(architecturePath, "utf8") : null;
+  const auditDecomposition =
+    intent === "audit"
+      ? classifyAuditDecompositionRequest({
+          title: roadmapAlias ?? "Audit roadmap",
+          description: [vision ?? null, description, architecture].filter(Boolean).join("\n"),
+        })
+      : undefined;
 
   if (!description && !vision) {
     throw new RoadmapGenerationError(
@@ -1050,6 +1067,7 @@ export async function generateRoadmapFile(
       architecture,
       vision: vision ?? null,
       roadmapAlias: roadmapAlias ?? null,
+      auditDecomposition,
     },
     intent,
   );
@@ -1117,7 +1135,7 @@ export async function generateRoadmapFile(
 
   log.info({ projectId, roadmapPath, contentLength: content.length }, "Roadmap file generated");
 
-  return { roadmapPath, content };
+  return { roadmapPath, content, auditDecomposition };
 }
 
 function buildRoadmapGenerationPrompt(
@@ -1126,6 +1144,7 @@ function buildRoadmapGenerationPrompt(
     architecture: string | null;
     vision: string | null;
     roadmapAlias?: string | null;
+    auditDecomposition?: AuditDecompositionClassification | null;
   },
   intent: TaskIntent,
 ): string {
@@ -1150,12 +1169,18 @@ function buildRoadmapGenerationPrompt(
     const priorContextLine = priorContext
       ? `  - ${formatPriorAuditContextLine(priorContext)}\n`
       : "";
+    const decompositionRule = ctx.auditDecomposition
+      ? `Request decomposition mode: ${ctx.auditDecomposition.mode}; requires decomposition: ${
+          ctx.auditDecomposition.requiresDecomposition ? "yes" : "no"
+        }; reasons: ${ctx.auditDecomposition.reasonCodes.join(", ") || "none"}.`
+      : "Request decomposition mode: decomposed_report_batch; reasons: audit roadmap generation.";
     return `You are creating an owner-grade diagnostic audit decomposition roadmap based on the project context below.
 
 ${sections.join("\n\n")}
 
 Operating model:
 - Treat the user request as a high-level suspicion that technical quality may be poor.
+- ${decompositionRule}
 - Decompose the audit into owner-area checks; the user should not need to provide detailed audit instructions.
 - Each owner area must produce actionable findings or a rigorous "No validated findings" report.
 - A weak area report should be rejected later, so encode the quality bar directly in every card.
@@ -1196,6 +1221,7 @@ ${priorContextLine}  - Allowed changes: only create/update audit/${reportDate}-s
   - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
   - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
   - ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}
+  - ${AUDIT_CHILD_REPORT_STATUS_REQUIREMENT}
   - Git requirements: run git status --short; git add the summary artifact; git commit the summary artifact; verify with git log -1 --name-only --oneline.
   - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.
 
@@ -1208,6 +1234,7 @@ Rules:
 - Every source audit task must include a locally parseable Risk hypotheses: line with risk-* IDs, and every declared Scope root must appear in at least one risk hypothesis.
 - Synthesis tasks do not need product risk hypotheses; their Scope must stay limited to all audit/${reportDate}-*-audit.md reports from this audit batch.
 - Each audit task must be independently runnable and must have exactly one report artifact.
+- The final synthesis task must list every child report artifact with a passed, failed, or inconclusive status before stating the overall audit outcome.
 - Output ONLY the markdown content for ROADMAP.md, nothing else`;
   }
 
@@ -1424,6 +1451,7 @@ Rules:
 - Every task description must include: ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
 - Every task description must include: ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
 - Synthesis task descriptions must include: ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}
+- Synthesis task descriptions must include: ${AUDIT_CHILD_REPORT_STATUS_REQUIREMENT}
 ${priorContextRule}
 - Every task description must require Evidence: <path>:<line>, Risk:, Proposed fix:, Verification: Command ... output ..., git status --short, git commit, and git log -1 --name-only --oneline.
 - Return ONLY valid JSON, no explanatory text`;

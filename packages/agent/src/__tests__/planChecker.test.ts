@@ -285,9 +285,68 @@ describe("runPlanChecker", () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 
+  it("rejects weak broad audit plans before implementation", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-weak-audit",
+        projectId: "project-1",
+        title: "Audit the whole repository",
+        taskIntent: "audit",
+        description:
+          "Run a comprehensive audit of the entire repo. Report artifact: audit/full-repo-audit.md.",
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "- [ ] Keep this diagnostic-only and do not implement fixes.",
+          "- [ ] Write findings to `audit/full-repo-audit.md`.",
+          "- [ ] Summarize results.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(runPlanChecker("task-weak-audit", "/tmp/plan-checker-test")).rejects.toThrow(
+      TaskPlanQualityError,
+    );
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects synthesis-only broad audit plans that target only the final report artifact", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-final-report-only-synthesis",
+        projectId: "project-1",
+        title: "Comprehensive repository audit",
+        taskIntent: "audit",
+        description:
+          "Audit the entire repo for security and reliability. Report artifact: audit/final-synthesis.md.",
+        status: "plan_ready",
+        plan: [
+          "## Decomposed audit synthesis plan",
+          "Report artifact: `audit/final-synthesis.md`",
+          "Scope: existing completed child audit reports.",
+          "Scoped evidence targets: `audit/final-synthesis.md`; existing completed child audit reports.",
+          "Excluded areas: generated files, dependency caches, and build output.",
+          "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+          "Child reports: required existing completed child audit reports plus final synthesis.",
+          "Synthesis: combine existing completed child audit reports into `audit/final-synthesis.md`.",
+          "- [ ] Keep this diagnostic-only and do not implement fixes.",
+          "- [ ] Read the existing completed child audit reports.",
+          "- [ ] Produce synthesis report `audit/final-synthesis.md`.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-final-report-only-synthesis", "/tmp/plan-checker-test"),
+    ).rejects.toThrow(TaskPlanQualityError);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
   it("replaces invalid diagnostic audit plans with a deterministic fallback", async () => {
     const description =
-      "Diagnostic only. Do not implement fixes. Do not create follow-up tasks. Produce a committed report at: audit/2026-05-08-initial-audit.md.";
+      "Diagnostic only. Scope: packages/shared/src/planQuality.ts. Do not implement fixes. Do not create follow-up tasks. Produce a committed report at: audit/2026-05-08-initial-audit.md.";
 
     testDb.current
       .insert(tasks)
@@ -318,6 +377,10 @@ describe("runPlanChecker", () => {
       .get();
     expect(row?.plan).toContain("## Diagnostic-only plan");
     expect(row?.plan).toContain("audit/2026-05-08-initial-audit.md");
+    expect(row?.plan).toContain("Scoped evidence targets:");
+    expect(row?.plan).toContain("Excluded areas:");
+    expect(row?.plan).toContain("Expected report structure:");
+    expect(row?.plan).toContain("Child audit reports: not required");
     expect(row?.plan).toContain("do not implement fixes");
     expect(row?.plan).not.toContain("<aif-plan");
     expect(
@@ -326,6 +389,80 @@ describe("runPlanChecker", () => {
         plan: row?.plan,
       }).ok,
     ).toBe(true);
+  });
+
+  it("does not replace report-only audit plans with deterministic fallback", async () => {
+    const description =
+      "Diagnostic only. Do not implement fixes. Report artifact: audit/report-only-audit.md.";
+
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-report-only-diagnostic-fallback",
+        projectId: "project-1",
+        title: "Audit",
+        taskIntent: "audit",
+        description,
+        status: "plan_ready",
+        plan: [
+          "## Report-only audit plan",
+          "Report artifact: `audit/report-only-audit.md`",
+          "Scope: audit report.",
+          "Scoped evidence targets: `audit/report-only-audit.md`.",
+          "Excluded areas: none.",
+          "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+          "Child audit reports: not required for this narrow source report.",
+          "- [ ] Keep this diagnostic-only and do not implement fixes.",
+          "- [ ] Update `audit/report-only-audit.md`.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-report-only-diagnostic-fallback", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-report-only-diagnostic-fallback"))
+      .get();
+    expect(row?.plan).toContain("Report-only audit plan");
+  });
+
+  it("does not replace broad decomposition-required audit plans with deterministic fallback", async () => {
+    const description =
+      "Diagnostic only. Run a comprehensive audit of the entire repo for security and reliability. Report artifact: audit/full-repo-audit.md.";
+
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-broad-diagnostic-fallback",
+        projectId: "project-1",
+        title: "Audit the entire repository",
+        taskIntent: "audit",
+        description,
+        status: "plan_ready",
+        plan: [
+          "## Weak broad audit plan",
+          "- [ ] Keep this diagnostic-only and do not implement fixes.",
+          "- [ ] Write findings to `audit/full-repo-audit.md`.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-broad-diagnostic-fallback", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-broad-diagnostic-fallback"))
+      .get();
+    expect(row?.plan).toContain("Weak broad audit plan");
   });
 
   it("accepts fenced markdown and persists valid checklist plan", async () => {

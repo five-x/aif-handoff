@@ -389,6 +389,56 @@ interface AuditSourceReportSummary {
   omittedFindingCount: number;
 }
 
+function formatMarkdownTableCell(value: string): string {
+  const normalized = value.replace(/\r?\n/g, "<br>").replace(/\|/g, "\\|").trim();
+  return normalized.length > 0 ? normalized : "none";
+}
+
+function weakAuditArtifactStatus(artifact: WeakAuditArtifactSummary): "failed" | "inconclusive" {
+  return artifact.state === "source_inconclusive" ||
+    artifact.state === "terminal_inconclusive" ||
+    artifact.state === "manual_exception"
+    ? "inconclusive"
+    : "failed";
+}
+
+function buildAuditChildReportStatusSection(
+  sourceSummaries: AuditSourceReportSummary[],
+  weakArtifacts: WeakAuditArtifactSummary[],
+): string[] {
+  const rows = [
+    ...sourceSummaries.map((summary) => ({
+      artifactPath: summary.artifact.artifactPath,
+      taskId: summary.artifact.taskId,
+      status: "passed",
+      notes: `included findings: ${summary.includedFindings.length}; omitted findings: ${summary.omittedFindingCount}`,
+    })),
+    ...weakArtifacts.map((artifact) => ({
+      artifactPath: artifact.artifactPath,
+      taskId: artifact.taskId,
+      status: weakAuditArtifactStatus(artifact),
+      notes: `state: ${artifact.state}; failure family: ${artifact.failureFamily ?? "none"}`,
+    })),
+  ];
+
+  if (rows.length === 0) {
+    return ["## Child Report Status", "", "- No child report artifacts were available.", ""];
+  }
+
+  return [
+    "## Child Report Status",
+    "",
+    "| Source report | Task | Status | Notes |",
+    "| --- | --- | --- | --- |",
+    ...rows.map((row) => {
+      return `| \`${formatMarkdownTableCell(row.artifactPath)}\` | \`${formatMarkdownTableCell(
+        row.taskId,
+      )}\` | ${row.status} | ${formatMarkdownTableCell(row.notes)} |`;
+    }),
+    "",
+  ];
+}
+
 const AUDIT_EVIDENCE_REPAIR_MARKER = "audit_evidence_repair_required";
 const AUDIT_EVIDENCE_REPAIR_SIGNAL_PATTERNS: RegExp[] = [
   new RegExp(AUDIT_EVIDENCE_REPAIR_MARKER, "i"),
@@ -1595,6 +1645,10 @@ function buildDeterministicAuditSynthesisContent(
     (sum, summary) => sum + summary.omittedFindingCount,
     0,
   );
+  const childReportStatusSection = buildAuditChildReportStatusSection(
+    sourceSummaries,
+    weakArtifacts,
+  );
 
   if (sourceOutcome.kind === "inconclusive_batch_evidence") {
     const lines = [
@@ -1607,6 +1661,7 @@ function buildDeterministicAuditSynthesisContent(
       sourceOutcome.reason,
       "No findings from the source reports survived the strict synthesis evidence filter, but the batch evidence does not support a product-quality no-findings conclusion.",
       "",
+      ...childReportStatusSection,
       "## Source Reports Checked",
       "",
       sourceSummaries.length > 0
@@ -1681,6 +1736,7 @@ function buildDeterministicAuditSynthesisContent(
       "",
       "Generated from terminal audit batch report artifacts. Source report findings were included only when they carried concrete path:line Evidence, Risk, Proposed fix, and Verification sections.",
       "",
+      ...childReportStatusSection,
       "## Source Reports Checked",
       "",
       sourceSummaries.length > 0
@@ -1773,6 +1829,7 @@ function buildDeterministicAuditSynthesisContent(
     "Only findings with concrete path:line Evidence, Risk, Proposed fix, and Verification sections were included.",
     "Weak or invalid source reports are listed as coverage gaps only.",
     "",
+    ...childReportStatusSection,
     "## Source Reports",
     "",
     sourceSummaries.length > 0

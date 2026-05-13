@@ -80,6 +80,28 @@ export interface ValidateGeneratedAuditCardResult {
   issueDetails: AuditGeneratedCardValidationIssue[];
 }
 
+export type AuditDecompositionMode = "single_report" | "decomposed_report_batch";
+
+export type AuditDecompositionReasonCode =
+  | "concrete_scope_and_report"
+  | "narrow_file_or_component_scope"
+  | "broad_repository_scope"
+  | "comprehensive_audit_scope"
+  | "multi_domain_audit_scope"
+  | "owner_grade_production_readiness_scope"
+  | "audit_without_concrete_boundaries";
+
+export interface ClassifyAuditDecompositionRequestInput {
+  title?: string | null;
+  description?: string | null;
+}
+
+export interface AuditDecompositionClassification {
+  mode: AuditDecompositionMode;
+  requiresDecomposition: boolean;
+  reasonCodes: AuditDecompositionReasonCode[];
+}
+
 export const AUDIT_REQUIRED_GENERATED_CARD_MARKERS = [
   "scope:",
   "allowed changes:",
@@ -475,6 +497,120 @@ export function parseExpectedAuditReportArtifactPath(description: string): strin
   const line = findAuditReportArtifactLine(description);
   if (!line) return null;
   return parseAuditReportArtifactPath(line.replace(/^report artifact\s*:\s*/i, "").trim());
+}
+
+function hasConcreteScopeAndReport(description: string): boolean {
+  const scopes = parseAuditScopeRoots(description);
+  return (
+    scopes.length > 0 &&
+    scopes.every((scope) => !isNonConcreteAuditSourceScopeRoot(scope)) &&
+    parseExpectedAuditReportArtifactPath(description) != null
+  );
+}
+
+function normalizeAuditDecompositionInput(
+  input: string | ClassifyAuditDecompositionRequestInput,
+): string {
+  if (typeof input === "string") return input;
+  return [input.title ?? "", input.description ?? ""].filter(Boolean).join("\n");
+}
+
+function countAuditDomains(lowerText: string): number {
+  const domainPatterns = [
+    /\bsecurity\b/,
+    /\bperformance\b/,
+    /\bcorrectness\b/,
+    /\b(?:ops|operations|operational|reliability|observability|deployment|production)\b/,
+  ];
+  return domainPatterns.filter((pattern) => pattern.test(lowerText)).length;
+}
+
+function hasBroadAuditTarget(lowerText: string): boolean {
+  const auditAction = String.raw`(?:audit|diagnostic|review|inspect|investigate)`;
+  const broadTarget = String.raw`(?:repo|repository|codebase)`;
+  return (
+    /\b(?:whole|entire|all|complete|full)\s+(?:project|repo|repository|codebase)\b/.test(
+      lowerText,
+    ) ||
+    /\bproject[-\s]?wide\b/.test(lowerText) ||
+    new RegExp(String.raw`\b${auditAction}\b[^\r\n.]{0,80}\b(?:the\s+)?${broadTarget}\b`).test(
+      lowerText,
+    ) ||
+    new RegExp(String.raw`\b${broadTarget}\b[^\r\n.]{0,80}\b${auditAction}\b`).test(lowerText)
+  );
+}
+
+function hasNarrowFileOrComponentTarget(text: string): boolean {
+  const sourcePathTokens = extractAuditPathTokens(text).filter(
+    (path) => !isAuditReportArtifactPath(path) && !/[?*[\]{}]/.test(path),
+  );
+  if (sourcePathTokens.length > 0 && sourcePathTokens.length <= 3) return true;
+
+  return /\b(?:file|component|module|service|controller|route|hook|provider|view|page)\s+[`"']?(?!to\b|for\b|that\b|which\b|with\b|a\b|an\b|the\b)[A-Za-z0-9_.\/-]+[`"']?\b/i.test(
+    text,
+  );
+}
+
+export function classifyAuditDecompositionRequest(
+  input: string | ClassifyAuditDecompositionRequestInput,
+): AuditDecompositionClassification {
+  const text = normalizeAuditDecompositionInput(input);
+  const lowerText = text.toLowerCase();
+
+  const reasonCodes: AuditDecompositionReasonCode[] = [];
+  if (hasBroadAuditTarget(lowerText)) {
+    reasonCodes.push("broad_repository_scope");
+  }
+  if (/\b(?:comprehensive|full|complete|end-to-end|top-to-bottom)\s+audit\b/.test(lowerText)) {
+    reasonCodes.push("comprehensive_audit_scope");
+  }
+  if (countAuditDomains(lowerText) >= 2) {
+    reasonCodes.push("multi_domain_audit_scope");
+  }
+  if (/\b(?:production[-\s]?readiness|production[-\s]?ready|owner[-\s]?grade)\b/.test(lowerText)) {
+    reasonCodes.push("owner_grade_production_readiness_scope");
+  }
+
+  if (reasonCodes.length > 0) {
+    return {
+      mode: "decomposed_report_batch",
+      requiresDecomposition: true,
+      reasonCodes,
+    };
+  }
+
+  if (hasConcreteScopeAndReport(text)) {
+    return {
+      mode: "single_report",
+      requiresDecomposition: false,
+      reasonCodes: ["concrete_scope_and_report"],
+    };
+  }
+
+  if (hasNarrowFileOrComponentTarget(text)) {
+    return {
+      mode: "single_report",
+      requiresDecomposition: false,
+      reasonCodes: ["narrow_file_or_component_scope"],
+    };
+  }
+
+  if (
+    /\b(?:audit|diagnostic|review|inspect|investigate)\b/.test(lowerText) ||
+    lowerText.includes("аудит")
+  ) {
+    return {
+      mode: "decomposed_report_batch",
+      requiresDecomposition: true,
+      reasonCodes: ["audit_without_concrete_boundaries"],
+    };
+  }
+
+  return {
+    mode: "single_report",
+    requiresDecomposition: false,
+    reasonCodes: ["narrow_file_or_component_scope"],
+  };
 }
 
 function hasAll(text: string, markers: readonly string[]): boolean {

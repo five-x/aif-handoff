@@ -92,6 +92,43 @@ function mergeFindings(...groups: AutoReviewFinding[][]): AutoReviewFinding[] {
   return [...map.values()];
 }
 
+function enrichBlockingFindings(input: {
+  findings: AutoReviewFinding[];
+  previousFindings: AutoReviewFinding[];
+  iteration: number;
+}): AutoReviewFinding[] {
+  const previousById = new Map(input.previousFindings.map((finding) => [finding.id, finding]));
+  return input.findings.map((finding) => {
+    const previous = previousById.get(finding.id);
+    if (!previous) {
+      return {
+        ...finding,
+        firstSeenIteration: input.iteration,
+        lastSeenIteration: input.iteration,
+        streak: 1,
+      };
+    }
+
+    const previousStreak =
+      typeof previous.streak === "number" && Number.isInteger(previous.streak)
+        ? Math.max(1, previous.streak)
+        : 1;
+    const previousFirstSeen =
+      typeof previous.firstSeenIteration === "number" &&
+      Number.isInteger(previous.firstSeenIteration) &&
+      previous.firstSeenIteration > 0
+        ? previous.firstSeenIteration
+        : Math.max(1, input.iteration - previousStreak);
+
+    return {
+      ...finding,
+      firstSeenIteration: previousFirstSeen,
+      lastSeenIteration: input.iteration,
+      streak: previousStreak + 1,
+    };
+  });
+}
+
 function reviewGateFinding(text: string): AutoReviewFinding {
   return {
     id: createAutoReviewFindingId("review_gate", text),
@@ -342,10 +379,15 @@ function buildStructuredDecision(
     };
   }
 
+  const enrichedBlockingFindings = enrichBlockingFindings({
+    findings: blockingFindings,
+    previousFindings: input.previousFindings,
+    iteration: input.iteration,
+  });
   const autoReviewState = toAutoReviewState({
     strategy: input.strategy,
     iteration: input.iteration,
-    findings: blockingFindings,
+    findings: enrichedBlockingFindings,
   });
 
   if (
@@ -358,8 +400,8 @@ function buildStructuredDecision(
       status: "manual_review_required",
       handoffReason: "new_blockers_after_rework",
       metrics,
-      blockingFindings,
-      fixesMarkdown: formatFixesMarkdown(blockingFindings),
+      blockingFindings: enrichedBlockingFindings,
+      fixesMarkdown: formatFixesMarkdown(enrichedBlockingFindings),
       autoReviewState,
     };
   }
@@ -367,8 +409,8 @@ function buildStructuredDecision(
   return {
     status: "request_changes",
     metrics,
-    blockingFindings,
-    fixesMarkdown: formatFixesMarkdown(blockingFindings),
+    blockingFindings: enrichedBlockingFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedBlockingFindings),
     autoReviewState,
   };
 }
@@ -402,16 +444,21 @@ function buildFallbackDecision(
   });
 
   if (input.previousFindings.length > 0) {
+    const enrichedFindings = enrichBlockingFindings({
+      findings: mergedFindings,
+      previousFindings: input.previousFindings,
+      iteration: input.iteration,
+    });
     return {
       status: "manual_review_required",
       handoffReason: "malformed_review_output_fallback",
       metrics,
-      blockingFindings: mergedFindings,
-      fixesMarkdown: formatFixesMarkdown(mergedFindings),
+      blockingFindings: enrichedFindings,
+      fixesMarkdown: formatFixesMarkdown(enrichedFindings),
       autoReviewState: toAutoReviewState({
         strategy: input.strategy,
         iteration: input.iteration,
-        findings: mergedFindings,
+        findings: enrichedFindings,
       }),
     };
   }
@@ -429,15 +476,20 @@ function buildFallbackDecision(
     };
   }
 
+  const enrichedFindings = enrichBlockingFindings({
+    findings: fallbackAndDeterministicFindings,
+    previousFindings: input.previousFindings,
+    iteration: input.iteration,
+  });
   return {
     status: "request_changes",
     metrics,
-    blockingFindings: fallbackAndDeterministicFindings,
-    fixesMarkdown: formatFixesMarkdown(fallbackAndDeterministicFindings),
+    blockingFindings: enrichedFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedFindings),
     autoReviewState: toAutoReviewState({
       strategy: input.strategy,
       iteration: input.iteration,
-      findings: fallbackAndDeterministicFindings,
+      findings: enrichedFindings,
     }),
   };
 }
@@ -478,10 +530,15 @@ function buildLegacyBlockingSectionDecision(
     };
   }
 
+  const enrichedBlockingFindings = enrichBlockingFindings({
+    findings: mergedBlockingFindings,
+    previousFindings: input.previousFindings,
+    iteration: input.iteration,
+  });
   const autoReviewState = toAutoReviewState({
     strategy: input.strategy,
     iteration: input.iteration,
-    findings: mergedBlockingFindings,
+    findings: enrichedBlockingFindings,
   });
 
   if (
@@ -494,8 +551,8 @@ function buildLegacyBlockingSectionDecision(
       status: "manual_review_required",
       handoffReason: "new_blockers_after_rework",
       metrics,
-      blockingFindings: mergedBlockingFindings,
-      fixesMarkdown: formatFixesMarkdown(mergedBlockingFindings),
+      blockingFindings: enrichedBlockingFindings,
+      fixesMarkdown: formatFixesMarkdown(enrichedBlockingFindings),
       autoReviewState,
     };
   }
@@ -503,8 +560,8 @@ function buildLegacyBlockingSectionDecision(
   return {
     status: "request_changes",
     metrics,
-    blockingFindings: mergedBlockingFindings,
-    fixesMarkdown: formatFixesMarkdown(mergedBlockingFindings),
+    blockingFindings: enrichedBlockingFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedBlockingFindings),
     autoReviewState,
   };
 }
@@ -567,6 +624,11 @@ function buildSubstantiveEvidenceHandoff(
     source: "review_gate",
     text: "Risky audit/review/discovery acceptance requires substantive review evidence.",
   };
+  const enrichedFindings = enrichBlockingFindings({
+    findings: [finding],
+    previousFindings: input.previousFindings,
+    iteration: input.iteration,
+  });
 
   return {
     status: "manual_review_required",
@@ -576,12 +638,12 @@ function buildSubstantiveEvidenceHandoff(
       newBlockingCount: metrics.newBlockingCount + 1,
       totalBlockingCount: metrics.totalBlockingCount + 1,
     },
-    blockingFindings: [finding],
-    fixesMarkdown: formatFixesMarkdown([finding]),
+    blockingFindings: enrichedFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedFindings),
     autoReviewState: toAutoReviewState({
       strategy: input.strategy,
       iteration: input.iteration,
-      findings: [finding],
+      findings: enrichedFindings,
     }),
   };
 }

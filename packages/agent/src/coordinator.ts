@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -29,6 +30,7 @@ import {
   updateRoadmapBatchArtifactState,
   setTaskFields,
   type CoordinatorStage,
+  type HydratedTaskRow,
   type TaskFieldsPatch,
   type TaskRow,
 } from "@aif/data";
@@ -47,6 +49,7 @@ import {
   TaskPlanQualityError,
   withTimeout,
   type AuditFailureFamily,
+  type AutoReviewFinding,
   type TaskStatus,
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
@@ -65,7 +68,7 @@ import {
   notifyProjectBroadcast,
   type TaskNotificationInfo,
 } from "./notifier.js";
-import { handleAutoReviewGate } from "./autoReviewHandler.js";
+import { handleAutoReviewGate, type ReviewGateOutcome } from "./autoReviewHandler.js";
 import { classifyStageError } from "./stageErrorHandler.js";
 import { setActiveStageAbortController } from "./stageAbort.js";
 import { setCoordinatorId } from "./subagentQuery.js";
@@ -81,6 +84,8 @@ const STAGE_RUN_TIMEOUT_MS = Math.max(env.AGENT_STAGE_RUN_TIMEOUT_MS, 60_000);
 const CLAIM_LOCK_DURATION_MS = STAGE_RUN_TIMEOUT_MS + 5 * 60 * 1000; // stage timeout + 5 min buffer
 const PLAN_QUALITY_MAX_RETRIES = 2;
 export const COORDINATOR_ID = crypto.randomUUID();
+
+type TaskWithHydratedFields = TaskRow & Pick<HydratedTaskRow, "autoReviewState">;
 
 let _runtimeRegistry: RuntimeRegistry | null = null;
 export function setRuntimeRegistry(registry: RuntimeRegistry): void {
@@ -575,6 +580,103 @@ function readAuditArtifactText(
   }
 }
 
+function readRelativeFileSha(projectRoot: string, relativePath: string): string | null {
+  try {
+    const absolutePath = resolve(projectRoot, relativePath);
+    return existsSync(absolutePath)
+      ? createHash("sha256").update(readFileSync(absolutePath)).digest("hex")
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatAutoReviewFindingsForBlockedReason(
+  findings: AutoReviewFinding[] | undefined,
+): string {
+  if (!findings || findings.length === 0) return "none";
+  return findings.map((finding) => `[${finding.id}] ${finding.source}: ${finding.text}`).join("; ");
+}
+
+function blockTaskForStalledAutoReview(input: {
+  task: TaskWithHydratedFields;
+  outcome: Extract<ReviewGateOutcome, { status: "manual_review_required" }>;
+  fromStatus: TaskStatus;
+  title: string;
+}): boolean {
+  if (input.outcome.handoffReason !== "stalled_rework_loop") return false;
+  const threshold = env.AGENT_AUTO_REVIEW_STALL_THRESHOLD;
+  const blockedReason =
+    `manual_review_required: stalled_rework_loop after ${input.outcome.currentIteration}/${threshold} same-blocker reviews; ` +
+    `unresolved blockers: ${formatAutoReviewFindingsForBlockedReason(input.outcome.autoReviewState.findings)}`;
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: input.fromStatus,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      reworkRequested: false,
+      reviewIterationCount: input.outcome.currentIteration,
+      manualReviewRequired: true,
+      autoReviewState: input.outcome.autoReviewState,
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] Auto review terminalized stalled rework loop: ${blockedReason}`,
+  );
+  return true;
+}
+
+function blockTaskForNoSubstantiveReworkDeltaIfNeeded(input: {
+  task: TaskWithHydratedFields;
+  projectRoot: string;
+  fromStatus: TaskStatus;
+  title: string;
+}): boolean {
+  const snapshot = input.task.autoReviewState?.reworkSnapshot;
+  if (!snapshot?.artifactPath) return false;
+
+  const baselineSha = snapshot.artifactContentSha ?? null;
+  const currentSha = readRelativeFileSha(input.projectRoot, snapshot.artifactPath);
+  if (baselineSha !== currentSha) return false;
+
+  const shaDisplay = currentSha ?? "missing";
+  const findingIds =
+    snapshot.findingIds && snapshot.findingIds.length > 0 ? snapshot.findingIds.join(", ") : "none";
+  const blockedReason =
+    `manual_review_required: no_substantive_rework_delta for ${snapshot.artifactPath}; ` +
+    `artifact content sha unchanged (${shaDisplay}); ` +
+    `rework iteration ${snapshot.iteration}; blocker ids: ${findingIds}; ` +
+    `unresolved blockers: ${formatAutoReviewFindingsForBlockedReason(input.task.autoReviewState?.findings)}`;
+
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: input.fromStatus,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      reworkRequested: false,
+      reviewIterationCount: input.task.reviewIterationCount ?? 0,
+      manualReviewRequired: true,
+      autoReviewState: input.task.autoReviewState,
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] Blocked unchanged audit rework before review: ${blockedReason}`,
+  );
+  return true;
+}
+
 function auditArtifactRequiresLedgerEvidence(input: {
   artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>;
   projectRoot: string;
@@ -957,7 +1059,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     await runStageWithTimeout(stage.runner, task.id, executionRoot, stage.label);
 
     flushActivityQueue(task.id);
-    let latestTask = findTaskById(task.id) ?? task;
+    let latestTask: TaskWithHydratedFields = findTaskById(task.id) ?? task;
 
     if (stage.label === "implementer" && latestTask.skipReview) {
       if (
@@ -990,6 +1092,16 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
       if (outcome?.status === "manual_review_required") {
         latestTask = findTaskById(task.id) ?? latestTask;
+        if (
+          blockTaskForStalledAutoReview({
+            task: latestTask,
+            outcome,
+            fromStatus: stage.inProgress,
+            title: taskTitle,
+          })
+        ) {
+          return false;
+        }
         if (
           blockTaskForCompletionEvidenceIfNeeded({
             task: latestTask,
@@ -1096,6 +1208,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       }
     }
 
+    if (
+      stage.label === "implementer" &&
+      task.reworkRequested &&
+      blockTaskForNoSubstantiveReworkDeltaIfNeeded({
+        task: latestTask,
+        projectRoot: executionRoot,
+        fromStatus: stage.inProgress,
+        title: taskTitle,
+      })
+    ) {
+      return false;
+    }
+
     if (stage.onSuccess === "done") {
       latestTask = findTaskById(task.id) ?? latestTask;
       if (
@@ -1114,6 +1239,9 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       ...CLEAN_STATE_RESET,
       reviewIterationCount: stage.label === "implementer" ? (task.reviewIterationCount ?? 0) : 0,
     };
+    if (stage.label === "implementer" && task.reworkRequested) {
+      successReset.autoReviewState = latestTask.autoReviewState ?? null;
+    }
     if (stage.label === "planner" && isPlanQualityRetryState(latestTask)) {
       successReset.retryCount = latestTask.retryCount ?? 0;
     }

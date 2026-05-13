@@ -1142,7 +1142,7 @@ describe("data layer", () => {
       ]);
     });
 
-    it("keeps source_inconclusive and manual_exception out of synthesis readiness", () => {
+    it("lets explicit terminal source states release synthesis without counting as trusted valid", () => {
       const sourceInconclusiveTask = createTask({
         projectId: "proj-1",
         title: "Audit data",
@@ -1207,14 +1207,27 @@ describe("data layer", () => {
         },
       });
 
-      expect(ready?.synthesisReady).toBe(false);
+      expect(ready?.synthesisReady).toBe(true);
+      expect(ready?.status).toBe("synthesis_ready");
       expect(ready?.counts.valid).toBe(0);
       expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
-      expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
+      const synthesisArtifacts = listRoadmapReportArtifactsForSynthesis(summary.batchId).map(
+        (artifact) => ({
+          taskId: artifact.taskId,
+          state: artifact.state,
+        }),
+      );
+      expect(synthesisArtifacts).toHaveLength(2);
+      expect(synthesisArtifacts).toEqual(
+        expect.arrayContaining([
+          { taskId: sourceInconclusiveTask!.id, state: "source_inconclusive" },
+          { taskId: manualExceptionTask!.id, state: "manual_exception" },
+        ]),
+      );
       expect(findTaskById(synthesisTask!.id)).toEqual(
         expect.objectContaining({
-          paused: true,
-          blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+          paused: false,
+          blockedReason: null,
         }),
       );
     });
@@ -1380,6 +1393,129 @@ describe("data layer", () => {
             id: "finding-1",
             source: "code_review",
             text: "Add manual review banner",
+          },
+        ],
+      });
+    });
+
+    it("preserves valid autoReviewState finding metadata and rework snapshot", () => {
+      const t = createTask({ projectId: "proj-1", title: "Enriched", description: "D" });
+      setTaskFields(t!.id, {
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 3,
+          findings: [
+            {
+              id: "finding-1",
+              source: "review_gate",
+              text: "Refresh audit evidence",
+              firstSeenIteration: 1,
+              lastSeenIteration: 3,
+              streak: 3,
+            },
+          ],
+          reworkSnapshot: {
+            iteration: 2,
+            artifactPath: "docs/audit/report.md",
+            artifactContentSha: "abc123",
+            findingIds: ["finding-1"],
+          },
+        }),
+      });
+
+      const raw = findTaskById(t!.id)!;
+      const resp = toTaskResponse(raw);
+
+      expect(resp.autoReviewState).toEqual({
+        strategy: "full_re_review",
+        iteration: 3,
+        findings: [
+          {
+            id: "finding-1",
+            source: "review_gate",
+            text: "Refresh audit evidence",
+            firstSeenIteration: 1,
+            lastSeenIteration: 3,
+            streak: 3,
+          },
+        ],
+        reworkSnapshot: {
+          iteration: 2,
+          artifactPath: "docs/audit/report.md",
+          artifactContentSha: "abc123",
+          findingIds: ["finding-1"],
+        },
+      });
+    });
+
+    it("keeps legacy autoReviewState valid when optional metadata is absent", () => {
+      const t = createTask({ projectId: "proj-1", title: "Legacy", description: "D" });
+      setTaskFields(t!.id, {
+        autoReviewStateJson: JSON.stringify({
+          strategy: "closure_first",
+          iteration: 1,
+          findings: [
+            {
+              id: "legacy-finding",
+              source: "security_audit",
+              text: "Legacy blocker",
+            },
+          ],
+        }),
+      });
+
+      const raw = findTaskById(t!.id)!;
+      const resp = toTaskResponse(raw);
+
+      expect(resp.autoReviewState).toEqual({
+        strategy: "closure_first",
+        iteration: 1,
+        findings: [
+          {
+            id: "legacy-finding",
+            source: "security_audit",
+            text: "Legacy blocker",
+          },
+        ],
+      });
+    });
+
+    it("drops invalid optional autoReviewState metadata without rejecting legacy fields", () => {
+      const t = createTask({ projectId: "proj-1", title: "Invalid Optional", description: "D" });
+      setTaskFields(t!.id, {
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "finding-1",
+              source: "code_review",
+              text: "Fix blocker",
+              firstSeenIteration: "1",
+              lastSeenIteration: -1,
+              streak: 0,
+            },
+          ],
+          reworkSnapshot: {
+            iteration: "2",
+            artifactPath: "docs/audit/report.md",
+            artifactContentSha: "abc123",
+            findingIds: ["finding-1"],
+          },
+        }),
+      });
+
+      const raw = findTaskById(t!.id)!;
+      const resp = toTaskResponse(raw);
+
+      expect(resp.autoReviewState).toEqual({
+        strategy: "full_re_review",
+        iteration: 2,
+        findings: [
+          {
+            id: "finding-1",
+            source: "code_review",
+            text: "Fix blocker",
           },
         ],
       });

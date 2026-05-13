@@ -395,15 +395,20 @@ describe("roadmapGeneration", () => {
         context: {},
       });
 
-      await generateRoadmapFile({
+      const result = await generateRoadmapFile({
         projectId,
         roadmapAlias: "audit-logging",
         taskIntent: "audit",
         vision: "\u043f\u0440\u043e\u0432\u0435\u0434\u0438 \u0430\u0443\u0434\u0438\u0442",
       });
 
+      expect(result.auditDecomposition).toMatchObject({
+        mode: "decomposed_report_batch",
+        requiresDecomposition: true,
+      });
       const callArgs = mockRunApiRuntimeOneShot.mock.calls[0][0];
       expect(callArgs.prompt).toContain("owner-grade diagnostic audit decomposition roadmap");
+      expect(callArgs.prompt).toContain("Request decomposition mode: decomposed_report_batch");
       expect(callArgs.prompt).toContain(
         "Do not create implementation, fixing, refactoring, hardening",
       );
@@ -415,6 +420,7 @@ describe("roadmapGeneration", () => {
       expect(callArgs.prompt).toContain(AUDIT_NO_FINDINGS_PROOF_GUARDRAIL);
       expect(callArgs.prompt).toContain(AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT);
       expect(callArgs.prompt).toContain(AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT);
+      expect(callArgs.prompt).toContain("Child report status:");
       expect(callArgs.prompt).toContain(
         "every summarized finding must include Evidence: <source repo path>:<line>",
       );
@@ -464,6 +470,7 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain(AUDIT_NO_FINDINGS_PROOF_GUARDRAIL);
       expect(result.content).toContain(AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT);
       expect(result.content).toContain(AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT);
+      expect(result.content).toContain("Child report status:");
       expect(result.content).toContain("Scope: README.md, pyproject.toml");
       expect(result.content).toContain("Risk hypotheses: risk-");
       expect(result.content).toContain("src/my_app");

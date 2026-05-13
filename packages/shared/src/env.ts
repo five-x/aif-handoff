@@ -104,6 +104,7 @@ const envSchema = z.object({
   AGENT_CHAT_MAX_TURNS: z.coerce.number().min(1).default(50),
   AGENT_MAX_REVIEW_ITERATIONS: z.coerce.number().min(1).default(100),
   AGENT_AUTO_REVIEW_STRATEGY: z.enum(AUTO_REVIEW_STRATEGIES).default("full_re_review"),
+  AGENT_AUTO_REVIEW_STALL_THRESHOLD: z.coerce.number().int().min(1).default(3),
   AGENT_USE_SUBAGENTS: z
     .preprocess((value) => {
       if (typeof value === "string") {

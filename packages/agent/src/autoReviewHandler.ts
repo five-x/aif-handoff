@@ -3,6 +3,9 @@
  * and decides whether to accept, request rework, or stop at manual review.
  */
 
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   createTaskComment,
   findRoadmapBatchArtifactByTaskId,
@@ -19,7 +22,10 @@ import {
 
 const log = logger("auto-review-handler");
 
-export type AutoReviewHandlerHandoffReason = ReviewGateManualHandoffReason | "max_iterations";
+export type AutoReviewHandlerHandoffReason =
+  | ReviewGateManualHandoffReason
+  | "max_iterations"
+  | "stalled_rework_loop";
 
 export type ReviewGateOutcome =
   | {
@@ -74,6 +80,8 @@ function buildSummaryComment(input: {
   maxIterations: number;
   fixesMarkdown: string;
   handoffReason?: AutoReviewHandlerHandoffReason;
+  stallThreshold?: number;
+  stalledFindings?: AutoReviewState["findings"];
 }): string {
   const lines = [
     "## Auto Review Gate Summary",
@@ -89,6 +97,9 @@ function buildSummaryComment(input: {
 
   if (input.handoffReason) {
     lines.push(`- Handoff reason: ${input.handoffReason}`);
+  }
+  if (input.handoffReason === "stalled_rework_loop" && input.stallThreshold) {
+    lines.push(`- Stall threshold: ${input.stallThreshold}`);
   }
 
   lines.push("");
@@ -109,6 +120,18 @@ function buildSummaryComment(input: {
   lines.push("");
   lines.push("## Blocking Findings");
   lines.push(input.fixesMarkdown);
+  if (input.stalledFindings && input.stalledFindings.length > 0) {
+    lines.push("");
+    lines.push("## Stalled Findings");
+    lines.push(
+      input.stalledFindings
+        .map(
+          (finding) =>
+            `- [${finding.id}] ${finding.source} | streak ${finding.streak ?? "unknown"} | ${finding.text}`,
+        )
+        .join("\n"),
+    );
+  }
 
   return lines.join("\n");
 }
@@ -137,6 +160,47 @@ function buildActivityMessage(input: {
   return `${base}, reason=${input.handoffReason}`;
 }
 
+function readArtifactSha(projectRoot: string, artifactPath: string): string | null {
+  const absolutePath = resolve(projectRoot, artifactPath);
+  if (!existsSync(absolutePath)) return null;
+  return createHash("sha256").update(readFileSync(absolutePath)).digest("hex");
+}
+
+function withReworkSnapshot(input: {
+  taskId: string;
+  projectRoot: string;
+  iteration: number;
+  autoReviewState: AutoReviewState;
+}): AutoReviewState {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.taskId);
+  if (!artifact || (artifact.role !== "report" && artifact.role !== "synthesis")) {
+    return input.autoReviewState;
+  }
+
+  return {
+    ...input.autoReviewState,
+    reworkSnapshot: {
+      iteration: input.iteration,
+      artifactPath: artifact.artifactPath,
+      artifactContentSha:
+        readArtifactSha(input.projectRoot, artifact.artifactPath) ?? artifact.contentSha ?? null,
+      findingIds: input.autoReviewState.findings.map((finding) => finding.id),
+    },
+  };
+}
+
+function stalledFindings(
+  autoReviewState: AutoReviewState,
+  threshold: number,
+): AutoReviewState["findings"] {
+  return autoReviewState.findings.filter(
+    (finding) =>
+      typeof finding.streak === "number" &&
+      Number.isInteger(finding.streak) &&
+      finding.streak >= threshold,
+  );
+}
+
 export async function handleAutoReviewGate(
   input: AutoReviewInput,
 ): Promise<ReviewGateOutcome | null> {
@@ -148,6 +212,7 @@ export async function handleAutoReviewGate(
 
   const currentIteration = (refreshedTask.reviewIterationCount ?? 0) + 1;
   const maxIterations = refreshedTask.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const stallThreshold = env.AGENT_AUTO_REVIEW_STALL_THRESHOLD;
 
   logActivity(
     input.taskId,
@@ -198,6 +263,59 @@ export async function handleAutoReviewGate(
     };
   }
 
+  if (reviewGate.status === "request_changes") {
+    const stalled = stalledFindings(reviewGate.autoReviewState, stallThreshold);
+    if (stalled.length > 0) {
+      createTaskComment({
+        taskId: input.taskId,
+        author: "agent",
+        message: buildSummaryComment({
+          outcome: "manual_review_required",
+          metrics: reviewGate.metrics,
+          currentIteration,
+          maxIterations,
+          fixesMarkdown: reviewGate.fixesMarkdown,
+          handoffReason: "stalled_rework_loop",
+          stallThreshold,
+          stalledFindings: stalled,
+        }),
+        attachments: [],
+      });
+
+      log.warn(
+        {
+          taskId: input.taskId,
+          currentIteration,
+          maxIterations,
+          stallThreshold,
+          stalledFindingIds: stalled.map((finding) => finding.id),
+          metrics: reviewGate.metrics,
+        },
+        "Auto review stalled on repeated blocker fingerprints; manual review required",
+      );
+
+      logActivity(
+        input.taskId,
+        "Agent",
+        buildActivityMessage({
+          outcome: "manual_review_required",
+          metrics: reviewGate.metrics,
+          currentIteration,
+          maxIterations,
+          handoffReason: "stalled_rework_loop",
+        }),
+      );
+
+      return {
+        status: "manual_review_required",
+        currentIteration,
+        metrics: reviewGate.metrics,
+        autoReviewState: reviewGate.autoReviewState,
+        handoffReason: "stalled_rework_loop",
+      };
+    }
+  }
+
   if (reviewGate.status === "request_changes" && currentIteration >= maxIterations) {
     createTaskComment({
       taskId: input.taskId,
@@ -245,6 +363,12 @@ export async function handleAutoReviewGate(
   }
 
   if (reviewGate.status === "request_changes") {
+    const autoReviewState = withReworkSnapshot({
+      taskId: input.taskId,
+      projectRoot: input.projectRoot,
+      iteration: currentIteration,
+      autoReviewState: reviewGate.autoReviewState,
+    });
     createTaskComment({
       taskId: input.taskId,
       author: "agent",
@@ -283,7 +407,7 @@ export async function handleAutoReviewGate(
       status: "rework_requested",
       currentIteration,
       metrics: reviewGate.metrics,
-      autoReviewState: reviewGate.autoReviewState,
+      autoReviewState,
     };
   }
 

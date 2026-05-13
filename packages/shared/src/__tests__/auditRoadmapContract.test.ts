@@ -8,6 +8,7 @@ import {
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
   buildAuditFailureSignature,
+  classifyAuditDecompositionRequest,
   isAuditReportArtifactPath,
   isAuditSynthesisTitle,
   mapTaskCompletionIssueCodeToAuditFailureFamily,
@@ -133,6 +134,105 @@ describe("auditRoadmapContract", () => {
         "audit task title describes implementation work",
       ]),
     );
+  });
+
+  it("classifies broad repository audit requests as decomposed report batches", () => {
+    expect(
+      classifyAuditDecompositionRequest(
+        "Run a comprehensive audit of the whole repository for technical risks.",
+      ),
+    ).toEqual({
+      mode: "decomposed_report_batch",
+      requiresDecomposition: true,
+      reasonCodes: ["broad_repository_scope", "comprehensive_audit_scope"],
+    });
+  });
+
+  it("classifies multi-domain owner audit requests as decomposed report batches", () => {
+    expect(
+      classifyAuditDecompositionRequest(
+        "Act as the platform owner and run a production-readiness audit for security, performance, correctness, and ops.",
+      ),
+    ).toEqual({
+      mode: "decomposed_report_batch",
+      requiresDecomposition: true,
+      reasonCodes: ["multi_domain_audit_scope", "owner_grade_production_readiness_scope"],
+    });
+  });
+
+  it("classifies unbounded audit requests as decomposed report batches", () => {
+    expect(
+      classifyAuditDecompositionRequest({
+        title: "audit-logging",
+        description: "# My App\nA service to audit\nпроведи аудит",
+      }),
+    ).toEqual({
+      mode: "decomposed_report_batch",
+      requiresDecomposition: true,
+      reasonCodes: ["audit_without_concrete_boundaries"],
+    });
+  });
+
+  it("classifies concrete single-report audit cards as single reports", () => {
+    expect(
+      classifyAuditDecompositionRequest({
+        title: "Audit: security configuration",
+        description: completeAuditDescription(),
+      }),
+    ).toEqual({
+      mode: "single_report",
+      requiresDecomposition: false,
+      reasonCodes: ["concrete_scope_and_report"],
+    });
+  });
+
+  it("keeps broad audit signals ahead of concrete scope and report markers", () => {
+    expect(
+      classifyAuditDecompositionRequest({
+        title: "Audit entire repository",
+        description: [
+          "Scope: src, packages, tests, docs",
+          "Audit mandate: Audit security, performance, correctness, and operations readiness across the whole project.",
+          "Report artifact: audit/full.md",
+        ].join("\n"),
+      }),
+    ).toEqual({
+      mode: "decomposed_report_batch",
+      requiresDecomposition: true,
+      reasonCodes: ["broad_repository_scope", "multi_domain_audit_scope"],
+    });
+  });
+
+  it("classifies bare repository audit targets as broad even with concrete report markers", () => {
+    expect(
+      classifyAuditDecompositionRequest({
+        title: "Audit repository",
+        description: [
+          "Scope: src, packages, tests, docs",
+          "Audit mandate: Inspect repository quality risks.",
+          "Report artifact: audit/full.md",
+        ].join("\n"),
+      }),
+    ).toEqual({
+      mode: "decomposed_report_batch",
+      requiresDecomposition: true,
+      reasonCodes: ["broad_repository_scope"],
+    });
+  });
+
+  it("classifies narrow file and component audits as single reports", () => {
+    expect(classifyAuditDecompositionRequest("Audit src/config.ts for unsafe defaults.")).toEqual({
+      mode: "single_report",
+      requiresDecomposition: false,
+      reasonCodes: ["narrow_file_or_component_scope"],
+    });
+    expect(
+      classifyAuditDecompositionRequest("Review component SettingsPanel for state bugs."),
+    ).toEqual({
+      mode: "single_report",
+      requiresDecomposition: false,
+      reasonCodes: ["narrow_file_or_component_scope"],
+    });
   });
 
   it("rejects audit cards missing canonical no-findings guardrails", () => {

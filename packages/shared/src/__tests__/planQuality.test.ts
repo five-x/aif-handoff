@@ -89,6 +89,12 @@ describe("evaluateTaskPlanQuality", () => {
       },
       plan: [
         "## Synthesize audit findings",
+        "Report artifact: `audit/2026-05-10-summary.md`",
+        "Scope: existing child audit reports from this audit batch.",
+        "Scoped evidence targets: `audit/source-audit-one.md`, `audit/source-audit-two.md`.",
+        "Excluded areas: source code, config, and test files.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child reports: required existing completed source audit reports plus synthesis summary.",
         "- [ ] Keep this diagnostic-only and do not edit source, config, or test files.",
         "- [ ] Create or update `audit/2026-05-10-summary.md` with exact Evidence: <path>:<line>, Risk:, and Verification: Command ... output ... markers.",
         "- [ ] Commit `audit/2026-05-10-summary.md` and verify with git log -1 --name-only --oneline.",
@@ -97,6 +103,211 @@ describe("evaluateTaskPlanQuality", () => {
 
     expect(result.ok).toBe(true);
     expect(result.categories).not.toContain("missing_diagnostic_report_constraints");
+  });
+
+  it("rejects weak broad audit plans with missing contract markers and decomposition", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Audit the whole repository",
+        description: "Run a comprehensive audit of the entire repo.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Plan",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Write findings to `audit/repo-audit.md`.",
+        "- [ ] Summarize findings.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toEqual(
+      expect.arrayContaining([
+        "missing_audit_evidence_targets",
+        "missing_audit_exclusions",
+        "missing_audit_report_structure",
+        "missing_child_audit_report_decision",
+        "missing_audit_decomposition",
+      ]),
+    );
+  });
+
+  it("rejects oversized unrelated broad audit plans without decomposed structure", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Owner-grade production readiness audit",
+        description:
+          "Audit the repository for security, performance, reliability, and correctness. Report artifact: audit/production-readiness.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Plan",
+        "Report artifact: `audit/production-readiness.md`",
+        "Scope: entire repository.",
+        "Scoped evidence targets: app code, deployment config, tests, and docs.",
+        "Excluded areas: none.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect everything and update `audit/production-readiness.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("missing_audit_decomposition");
+  });
+
+  it("accepts a narrow audit plan with scoped evidence, exclusions, report fields, and no child reports", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Audit plan-quality evaluator",
+        description:
+          "Scope: packages/shared/src/planQuality.ts. Report artifact: audit/plan-quality-audit.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Plan-quality audit",
+        "Report artifact: `audit/plan-quality-audit.md`",
+        "Scope: `packages/shared/src/planQuality.ts`.",
+        "Scoped evidence targets: `packages/shared/src/planQuality.ts` and `packages/shared/src/__tests__/planQuality.test.ts`.",
+        "Excluded areas: runtime services, generated files, and unrelated packages.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect the scoped files and update `audit/plan-quality-audit.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).toEqual([]);
+  });
+
+  it("rejects marker-only narrow audit plans without concrete evidence boundaries", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Audit planner quality",
+        description: "Report artifact: audit/planner-quality.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Planner quality audit",
+        "Report artifact: `audit/planner-quality.md`",
+        "Scope: planner quality audit.",
+        "Scoped evidence targets: audit findings and report artifact.",
+        "Excluded areas: none.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Update `audit/planner-quality.md` with findings.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("audit_without_concrete_boundaries");
+  });
+
+  it("rejects decomposed broad audit plans with marker-only source targets", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Comprehensive repository audit",
+        description: "Audit the entire repo for security and reliability.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Decomposed audit plan",
+        "Report artifact: `audit/final-synthesis.md`",
+        "Scope: entire repository split by source report.",
+        "Scoped evidence targets: child reports, source audit outputs, and final synthesis.",
+        "Excluded areas: generated files, dependency caches, and build output.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child reports: required source reports plus final synthesis.",
+        "Synthesis: combine child report outcomes into `audit/final-synthesis.md`.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Produce child source reports.",
+        "- [ ] Produce synthesis report `audit/final-synthesis.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("audit_without_concrete_boundaries");
+  });
+
+  it("rejects synthesis-only broad audit plans that target only the final report artifact", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Comprehensive repository audit",
+        description: "Audit the entire repo for security and reliability.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Decomposed audit synthesis plan",
+        "Report artifact: `audit/final-synthesis.md`",
+        "Scope: existing completed child audit reports.",
+        "Scoped evidence targets: `audit/final-synthesis.md`; existing completed child audit reports.",
+        "Excluded areas: generated files, dependency caches, and build output.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child reports: required existing completed child audit reports plus final synthesis.",
+        "Synthesis: combine existing completed child audit reports into `audit/final-synthesis.md`.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Read the existing completed child audit reports.",
+        "- [ ] Produce synthesis report `audit/final-synthesis.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("audit_without_concrete_boundaries");
+  });
+
+  it("accepts a decomposed broad audit plan with child reports and synthesis", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Comprehensive repository audit",
+        description: "Audit the entire repo for security and reliability.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Decomposed audit plan",
+        "Report artifact: `audit/final-synthesis.md`",
+        "Scope: entire repository split by source report.",
+        "Scoped evidence targets: `packages/agent/src`, `packages/shared/src`, and `docs/ops`.",
+        "Excluded areas: generated files, dependency caches, and build output.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child reports: required source reports plus final synthesis.",
+        "Synthesis: combine child report outcomes into `audit/final-synthesis.md`.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Produce child source report `audit/agent-source-audit.md`.",
+        "- [ ] Produce child source report `audit/shared-source-audit.md`.",
+        "- [ ] Produce synthesis report `audit/final-synthesis.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).toEqual([]);
+  });
+
+  it("rejects audit plans with an empty exclusions line", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Audit plan-quality evaluator",
+        description:
+          "Scope: packages/shared/src/planQuality.ts. Report artifact: audit/plan-quality-audit.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Plan-quality audit",
+        "Report artifact: `audit/plan-quality-audit.md`",
+        "Scope: `packages/shared/src/planQuality.ts`.",
+        "Scoped evidence targets: `packages/shared/src/planQuality.ts`.",
+        "Excluded areas:",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect the scoped file and update `audit/plan-quality-audit.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("missing_audit_exclusions");
   });
 
   it("rejects diagnostic plans that use the plan file as the report artifact", () => {
@@ -179,7 +390,7 @@ describe("evaluateTaskPlanQuality", () => {
     const task = {
       title: "Audit",
       description:
-        "Diagnostic only. Do not implement fixes. Write the report to audit/2026-05-08-initial-audit.md.",
+        "Diagnostic only. Scope: packages/shared/src/planQuality.ts. Do not implement fixes. Write the report to audit/2026-05-08-initial-audit.md.",
     };
     const plan = buildDeterministicDiagnosticPlan({
       task,
@@ -188,9 +399,41 @@ describe("evaluateTaskPlanQuality", () => {
 
     expect(plan).toContain("Diagnostic-only plan");
     expect(plan).toContain("audit/2026-05-08-initial-audit.md");
+    expect(plan).toContain("Scoped evidence targets:");
+    expect(plan).toContain("Excluded areas:");
+    expect(plan).toContain("Expected report structure:");
+    expect(plan).toContain("Child audit reports: not required");
     expect(plan).toContain("- [ ] Keep the run diagnostic-only");
     expect(plan).not.toContain("<aif-plan");
     expect(evaluateTaskPlanQuality({ task, plan }).ok).toBe(true);
+  });
+
+  it("does not build deterministic fallback when only the report artifact is available", () => {
+    const plan = buildDeterministicDiagnosticPlan({
+      task: {
+        title: "Audit",
+        taskIntent: "audit",
+        description:
+          "Diagnostic only. Do not implement fixes. Report artifact: audit/2026-05-08-initial-audit.md.",
+      },
+      extraText: ["</think>\n<aif-plan fast @.ai-factory/PLAN.md docs:false tests:false"],
+    });
+
+    expect(plan).toBeNull();
+  });
+
+  it("does not build deterministic fallback for broad audit tasks that need decomposition", () => {
+    const plan = buildDeterministicDiagnosticPlan({
+      task: {
+        title: "Audit the entire repository",
+        taskIntent: "audit",
+        description:
+          "Diagnostic only. Comprehensive audit of the whole repo for security and performance. Report artifact: audit/full-repo-audit.md.",
+      },
+      extraText: ["</think>\n<aif-plan fast @.ai-factory/PLAN.md docs:false tests:false"],
+    });
+
+    expect(plan).toBeNull();
   });
 
   it("builds deterministic diagnostic fallback from the declared report artifact before stale plan text", () => {

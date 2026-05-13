@@ -213,10 +213,130 @@
     {
       "taskId": "work-20260513-define-workflow-contract-pack-interface",
       "title": "Define Workflow Contract Pack Interface",
-      "status": "queued",
+      "status": "done",
       "priority": "critical",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260513-define-workflow-contract-pack-interface"
+    },
+    {
+      "taskId": "work-20260513-implement-workflow-pack-registry-feature-canary",
+      "title": "Implement Workflow Pack Registry And Feature Canary",
+      "status": "queued",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-implement-workflow-pack-registry-feature-canary"
+    },
+    {
+      "taskId": "work-20260513-move-audit-roadmap-hooks-behind-pack",
+      "title": "Move Audit Roadmap Hooks Behind Workflow Pack",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-move-audit-roadmap-hooks-behind-pack"
+    },
+    {
+      "taskId": "work-20260513-generalize-evidence-unit-aliases",
+      "title": "Generalize Evidence Unit Aliases For Audit Ledger",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-generalize-evidence-unit-aliases"
+    },
+    {
+      "taskId": "work-20260513-design-generic-artifact-claim-persistence",
+      "title": "Design Generic Artifact Claim Persistence",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-design-generic-artifact-claim-persistence"
+    },
+    {
+      "taskId": "work-20260513-add-artifact-claim-evidence-timelines",
+      "title": "Add Artifact Claim And Evidence Timelines",
+      "status": "queued",
+      "priority": "medium",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines"
+    },
+    {
+      "taskId": "work-20260513-terminalize-stalled-audit-rework-loops",
+      "title": "Terminalize Stalled Audit Rework Loops",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-terminalize-stalled-audit-rework-loops"
+    },
+    {
+      "taskId": "work-20260513-split-broad-audit-requests-into-micro-report-cards",
+      "title": "Split Broad Audit Requests Into Micro Report Cards",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-split-broad-audit-requests-into-micro-report-cards"
+    },
+    {
+      "taskId": "work-20260513-reject-weak-audit-plans-in-plan-checker",
+      "title": "Reject Weak Audit Plans In Plan Checker",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-reject-weak-audit-plans-in-plan-checker"
+    },
+    {
+      "taskId": "work-20260513-design-hierarchical-task-model",
+      "title": "Design Hierarchical Task And Subtask Model",
+      "status": "done",
+      "priority": "medium",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-design-hierarchical-task-model"
+    },
+    {
+      "taskId": "work-20260513-add-task-hierarchy-schema-api-contract",
+      "title": "Add Task Hierarchy Schema And API Contract",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-add-task-hierarchy-schema-api-contract"
+    },
+    {
+      "taskId": "work-20260513-enforce-hierarchy-rollup-runtime-gates",
+      "title": "Enforce Hierarchy Rollup And Runtime Gates",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-enforce-hierarchy-rollup-runtime-gates"
+    },
+    {
+      "taskId": "work-20260513-surface-task-hierarchy-in-ui",
+      "title": "Surface Task Hierarchy In UI",
+      "status": "queued",
+      "priority": "medium",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-surface-task-hierarchy-in-ui"
+    },
+    {
+      "taskId": "work-20260513-bridge-audit-roadmap-batches-to-hierarchy",
+      "title": "Bridge Audit Roadmap Batches To Hierarchy",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-bridge-audit-roadmap-batches-to-hierarchy"
+    },
+    {
+      "taskId": "work-20260513-plan-b-audit-decomposition-regression-suite",
+      "title": "Plan B Audit Decomposition Regression Suite",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-plan-b-audit-decomposition-regression-suite"
+    },
+    {
+      "taskId": "work-20260513-plan-b-v13-audit-runbook",
+      "title": "Plan B V13 Audit Runbook And Prompt Pack",
+      "status": "done",
+      "priority": "medium",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-plan-b-v13-audit-runbook"
     }
   ]
 }

@@ -8,6 +8,7 @@ import {
   resetEnvCache,
   formatAuditSynthesisOutcomeForArtifact,
   computeAuditReportContentSha256,
+  computeAuditReportArtifactSha256,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 import { RuntimeExecutionError } from "@aif/runtime";
@@ -2395,6 +2396,247 @@ describe("coordinator", () => {
     task = db.select().from(tasks).where(eq(tasks.id, "task-rework-flag")).get();
     expect(task!.status).toBe("done");
     expect(task!.reworkRequested).toBe(false);
+  });
+
+  it("should block stalled auto-review loops instead of reworking again", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-stalled-review-loop",
+        projectId: "test-project",
+        title: "Stalled review loop",
+        status: "review",
+        autoMode: true,
+        reviewComments: "## Blocking Findings\n- fix issue A",
+        reviewIterationCount: 2,
+        maxReviewIterations: 100,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "fix-a",
+              source: "code_review",
+              text: "fix issue A",
+              firstSeenIteration: 1,
+              lastSeenIteration: 2,
+              streak: 2,
+            },
+          ],
+        }),
+      })
+      .run();
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "manual_review_required",
+      currentIteration: 3,
+      handoffReason: "stalled_rework_loop",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 3,
+        previousBlockingCount: 1,
+        stillBlockingCount: 1,
+        newBlockingCount: 0,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 3,
+        findings: [
+          {
+            id: "fix-a",
+            source: "code_review",
+            text: "fix issue A",
+            firstSeenIteration: 1,
+            lastSeenIteration: 3,
+            streak: 3,
+          },
+        ],
+      },
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-stalled-review-loop")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("manual_review_required: stalled_rework_loop");
+    expect(task!.blockedReason).toContain("[fix-a] code_review: fix issue A");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.reviewIterationCount).toBe(3);
+    expect(task!.autoReviewStateJson).toContain('"streak":3');
+  });
+
+  it("should block audit rework that resubmits an unchanged artifact", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-no-delta-rework-");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const reportText = "# Audit\n\nFinding still needs evidence.\n";
+    writeFileSync(join(rootPath, "audit", "report.md"), reportText, "utf8");
+
+    db.insert(projects).values({ id: "no-delta-project", name: "No Delta", rootPath }).run();
+    db.insert(tasks)
+      .values({
+        id: "task-no-delta-rework",
+        projectId: "no-delta-project",
+        title: "Audit no-delta rework",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+        status: "implementing",
+        autoMode: true,
+        reworkRequested: true,
+        reviewIterationCount: 2,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "fix-a",
+              source: "code_review",
+              text: "Replace weak audit evidence",
+              firstSeenIteration: 1,
+              lastSeenIteration: 2,
+              streak: 2,
+            },
+          ],
+          reworkSnapshot: {
+            iteration: 2,
+            artifactPath: "audit/report.md",
+            artifactContentSha: computeAuditReportArtifactSha256(reportText),
+            findingIds: ["fix-a"],
+          },
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "no-delta-project",
+      roadmapAlias: "no-delta",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-no-delta-rework"],
+      artifacts: [
+        {
+          taskId: "task-no-delta-rework",
+          role: "report",
+          artifactPath: "audit/report.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-no-delta-rework")).get();
+    expect(runImplementer).toHaveBeenCalledWith("task-no-delta-rework", rootPath);
+    expect(runReviewer).not.toHaveBeenCalledWith("task-no-delta-rework", rootPath);
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toContain("manual_review_required: no_substantive_rework_delta");
+    expect(task!.blockedReason).toContain("audit/report.md");
+    expect(task!.blockedReason).toContain("fix-a");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.autoReviewStateJson).toContain('"reworkSnapshot"');
+  });
+
+  it("should allow audit rework with artifact content changes to proceed to review", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-changed-rework-");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const beforeText = "# Audit\n\nFinding still needs evidence.\n";
+    const afterText = "# Audit\n\nEvidence: `README.md:1` contains the fixture heading.\n";
+    writeFileSync(join(rootPath, "audit", "report.md"), beforeText, "utf8");
+
+    db.insert(projects)
+      .values({ id: "changed-rework-project", name: "Changed Rework", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-changed-rework",
+        projectId: "changed-rework-project",
+        title: "Audit changed rework",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+        status: "implementing",
+        autoMode: true,
+        reworkRequested: true,
+        reviewIterationCount: 2,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "fix-a",
+              source: "code_review",
+              text: "Replace weak audit evidence",
+              firstSeenIteration: 1,
+              lastSeenIteration: 2,
+              streak: 2,
+            },
+          ],
+          reworkSnapshot: {
+            iteration: 2,
+            artifactPath: "audit/report.md",
+            artifactContentSha: computeAuditReportArtifactSha256(beforeText),
+            findingIds: ["fix-a"],
+          },
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "changed-rework-project",
+      roadmapAlias: "changed-rework",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-changed-rework"],
+      artifacts: [
+        {
+          taskId: "task-changed-rework",
+          role: "report",
+          artifactPath: "audit/report.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    let autoReviewStateDuringReview: string | null | undefined;
+    vi.mocked(runImplementer).mockImplementationOnce(async () => {
+      writeFileSync(join(rootPath, "audit", "report.md"), afterText, "utf8");
+    });
+    vi.mocked(runReviewer).mockImplementationOnce(async (taskId) => {
+      autoReviewStateDuringReview = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .get()?.autoReviewStateJson;
+    });
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "accepted",
+      currentIteration: 3,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 3,
+        previousBlockingCount: 1,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      autoReviewState: null,
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-changed-rework")).get();
+    expect(runImplementer).toHaveBeenCalledWith("task-changed-rework", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-changed-rework", rootPath);
+    expect(autoReviewStateDuringReview).toContain("fix-a");
+    expect(autoReviewStateDuringReview).toContain("reworkSnapshot");
+    expect(task!.status).toBe("implementing");
+    expect(task!.blockedReason).not.toContain("no_substantive_rework_delta");
+    expect(task!.manualReviewRequired).toBe(false);
   });
 
   it("should do nothing when no tasks exist", async () => {

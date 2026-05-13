@@ -10,6 +10,7 @@ import {
   normalizeTaskIntent,
   resolveTaskIntentDefaults,
   getEnv,
+  classifyAuditDecompositionRequest,
 } from "@aif/shared";
 import {
   createTaskSchema,
@@ -166,6 +167,29 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
       ? true
       : (body.useSubagents ??
         (taskIntent === "general" ? envUseSubagents : intentDefaults.useSubagents));
+
+  if (taskIntent === "audit") {
+    const auditDecomposition = classifyAuditDecompositionRequest({
+      title: body.title,
+      description: [
+        body.description,
+        body.roadmapAlias ? `Roadmap alias: ${body.roadmapAlias}` : "",
+        body.tags.length > 0 ? `Tags: ${body.tags.join(", ")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    if (auditDecomposition.requiresDecomposition) {
+      return c.json(
+        {
+          error: "Broad audit requests must be decomposed into an audit roadmap before execution.",
+          code: "AUDIT_DECOMPOSITION_REQUIRED",
+          decomposition: auditDecomposition,
+        },
+        400,
+      );
+    }
+  }
   if (
     body.plannerMode === undefined ||
     body.skipReview === undefined ||

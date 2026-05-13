@@ -63,6 +63,7 @@ describe("env validation", () => {
     expect(result.AGENT_WAKE_ENABLED).toBe(true);
     expect(result.AGENT_CHAT_MAX_TURNS).toBe(50);
     expect(result.AGENT_MAX_REVIEW_ITERATIONS).toBe(100);
+    expect(result.AGENT_AUTO_REVIEW_STALL_THRESHOLD).toBe(3);
     expect(result.AGENT_USE_SUBAGENTS).toBe(false);
     expect(result.AIF_MEMORY_ENABLED).toBe(true);
     expect(result.AIF_WARMUP_ENABLED).toBe(false);
@@ -133,6 +134,22 @@ describe("env validation", () => {
     });
 
     expect(result.AIF_RUNTIME_MODULES).toEqual(["module-one", "module-two", "module-three"]);
+  });
+
+  it("should accept custom AGENT_AUTO_REVIEW_STALL_THRESHOLD values", () => {
+    const result = validateEnv({
+      AGENT_AUTO_REVIEW_STALL_THRESHOLD: "5",
+    });
+
+    expect(result.AGENT_AUTO_REVIEW_STALL_THRESHOLD).toBe(5);
+  });
+
+  it("should reject AGENT_AUTO_REVIEW_STALL_THRESHOLD below one", () => {
+    expect(() =>
+      validateEnv({
+        AGENT_AUTO_REVIEW_STALL_THRESHOLD: "0",
+      }),
+    ).toThrow();
   });
 
   it("should reject invalid LOG_LEVEL", () => {

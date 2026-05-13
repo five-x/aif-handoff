@@ -444,6 +444,34 @@ function serializeRuntimeLimitSnapshot(
   return snapshot == null ? null : JSON.stringify(snapshot);
 }
 
+function readStoredOptionalNonNegativeInteger(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  if (!hasOwnProperty(record, key)) return undefined;
+  const value = record[key];
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+    ? value
+    : undefined;
+}
+
+function readStoredOptionalPositiveInteger(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  if (!hasOwnProperty(record, key)) return undefined;
+  const value = record[key];
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 1
+    ? value
+    : undefined;
+}
+
 function parseAutoReviewState(raw: string | null | undefined): AutoReviewState | null {
   if (!raw) return null;
 
@@ -504,10 +532,23 @@ function parseAutoReviewState(raw: string | null | undefined): AutoReviewState |
         return null;
       }
 
+      const firstSeenIteration = readStoredOptionalNonNegativeInteger(
+        finding,
+        "firstSeenIteration",
+      );
+      const lastSeenIteration = readStoredOptionalNonNegativeInteger(
+        finding,
+        "lastSeenIteration",
+      );
+      const streak = readStoredOptionalPositiveInteger(finding, "streak");
+
       normalizedFindings.push({
         id: finding.id,
         text: finding.text,
         source: finding.source as AutoReviewState["findings"][number]["source"],
+        ...(firstSeenIteration !== undefined ? { firstSeenIteration } : {}),
+        ...(lastSeenIteration !== undefined ? { lastSeenIteration } : {}),
+        ...(streak !== undefined ? { streak } : {}),
       });
     }
 
@@ -519,10 +560,15 @@ function parseAutoReviewState(raw: string | null | undefined): AutoReviewState |
       return null;
     }
 
+    const reworkSnapshot = isObjectRecord(candidate.reworkSnapshot)
+      ? parseAutoReviewReworkSnapshot(candidate.reworkSnapshot, warnMalformed)
+      : undefined;
+
     return {
       strategy: strategy as AutoReviewState["strategy"],
       iteration,
       findings: normalizedFindings,
+      ...(reworkSnapshot !== undefined ? { reworkSnapshot } : {}),
     };
   } catch (error) {
     warnMalformed("json_parse_failed", {
@@ -530,6 +576,48 @@ function parseAutoReviewState(raw: string | null | undefined): AutoReviewState |
     });
     return null;
   }
+}
+
+function parseAutoReviewReworkSnapshot(
+  snapshot: Record<string, unknown>,
+  warnMalformed: (reason: string, extra?: Record<string, unknown>) => void,
+): AutoReviewState["reworkSnapshot"] | undefined {
+  const iteration = readStoredOptionalNonNegativeInteger(snapshot, "iteration");
+  const artifactPath =
+    typeof snapshot.artifactPath === "string" && snapshot.artifactPath.length > 0
+      ? snapshot.artifactPath
+      : null;
+  const artifactContentSha =
+    typeof snapshot.artifactContentSha === "string" || snapshot.artifactContentSha === null
+      ? snapshot.artifactContentSha
+      : undefined;
+  const findingIds = Array.isArray(snapshot.findingIds)
+    ? snapshot.findingIds.filter((findingId): findingId is string => typeof findingId === "string")
+    : null;
+  const findingIdCount = Array.isArray(snapshot.findingIds) ? snapshot.findingIds.length : null;
+
+  if (
+    iteration === undefined ||
+    artifactPath == null ||
+    artifactContentSha === undefined ||
+    findingIds == null ||
+    findingIds.length !== findingIdCount
+  ) {
+    warnMalformed("invalid_rework_snapshot", {
+      hasIteration: iteration !== undefined,
+      hasArtifactPath: artifactPath != null,
+      hasArtifactContentSha: artifactContentSha !== undefined,
+      hasFindingIds: Array.isArray(snapshot.findingIds),
+    });
+    return undefined;
+  }
+
+  return {
+    iteration,
+    artifactPath,
+    artifactContentSha,
+    findingIds,
+  };
 }
 
 function parseRuntimeHeaders(raw: string | null | undefined): Record<string, string> {
@@ -2938,9 +3026,18 @@ function roadmapArtifactCountsAsValid(artifact: RoadmapBatchArtifactRow): boolea
   return false;
 }
 
+function roadmapSourceArtifactTerminalForSynthesis(artifact: RoadmapBatchArtifactRow): boolean {
+  if (artifact.role !== "report") return false;
+  return (
+    artifact.state === "source_inconclusive" ||
+    artifact.state === "terminal_inconclusive" ||
+    artifact.state === "manual_exception"
+  );
+}
+
 function roadmapSourceArtifactReadyForSynthesis(artifact: RoadmapBatchArtifactRow): boolean {
   if (artifact.role === "synthesis") return true;
-  return roadmapArtifactCountsAsValid(artifact);
+  return roadmapArtifactCountsAsValid(artifact) || roadmapSourceArtifactTerminalForSynthesis(artifact);
 }
 
 function summarizeRoadmapArtifacts(
@@ -3343,7 +3440,7 @@ export function listRoadmapReportArtifactsForSynthesis(
     .filter((artifact) =>
       artifact.state === "valid"
         ? hasTrustedAuditSourceClassification(artifact)
-        : roadmapSourceArtifactReadyForSynthesis(artifact),
+        : roadmapSourceArtifactTerminalForSynthesis(artifact),
     );
 }
 
