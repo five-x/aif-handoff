@@ -564,6 +564,12 @@ function shouldUseDeterministicAuditReportRepair(
   );
 }
 
+function hasAttemptedDeterministicAuditReportRepair(
+  implementationLog: string | null | undefined,
+): boolean {
+  return /\bDeterministic audit report repair completed\b/i.test(implementationLog ?? "");
+}
+
 function normalizeAuditScopeRoot(path: string): string | null {
   const trimmed = path
     .trim()
@@ -2136,6 +2142,9 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const expectedAuditReportArtifactPath =
     roadmapArtifact?.role === "report" ? roadmapArtifact.artifactPath : null;
   const auditEvidenceRepairMode = isAuditEvidenceRepairMode(task, expectedAuditReportArtifactPath);
+  const repeatedDeterministicAuditReportRepair =
+    expectedAuditReportArtifactPath &&
+    hasAttemptedDeterministicAuditReportRepair(task.implementationLog);
   const auditSynthesisInputs = isAuditSynthesisTask
     ? readAuditSynthesisInputs(taskId, projectRoot)
     : { validatedArtifacts: [], weakArtifacts: [] };
@@ -2242,7 +2251,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   if (
     expectedAuditReportArtifactPath &&
     (auditEvidenceRepairMode || currentReportNeedsDeterministicRepair) &&
-    shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)
+    shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes) &&
+    !repeatedDeterministicAuditReportRepair
   ) {
     const nowIso = new Date().toISOString();
     const resultText = runDeterministicAuditReportRepair({
@@ -2270,6 +2280,23 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         : "Audit report rework completed deterministically",
     );
     return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    repeatedDeterministicAuditReportRepair &&
+    (auditEvidenceRepairMode || currentReportNeedsDeterministicRepair) &&
+    shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)
+  ) {
+    logActivity(
+      taskId,
+      "Agent",
+      "Skipped repeated deterministic audit report repair; routing rework to runtime implementation",
+    );
+    log.warn(
+      { taskId, artifactPath: expectedAuditReportArtifactPath },
+      "Skipped repeated deterministic audit report repair to avoid a fast review/rework loop",
+    );
   }
 
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}

@@ -1270,6 +1270,77 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
+  it("routes repeated deterministic audit report repair rework through the runtime", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(streamSuccess("Runtime repair done"));
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-repeated-deterministic-loop",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: "Scope: README.md, AGENTS.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "Runtime repair required.",
+        reworkRequested: true,
+        useSubagents: true,
+        implementationLog: [
+          "Deterministic audit report repair completed from risk-specific declared scope evidence.",
+          "Report artifact: audit/architecture.md",
+        ].join("\n"),
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 50,
+          findings: [
+            {
+              id: "935884566c2b",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (speculative_audit_claim): Report artifact contains speculative audit claims that are not backed by evidence.",
+            },
+            {
+              id: "24c7efaea330",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (missing_scope_coverage): Report artifact does not cover declared audit scope roots. AGENTS.md needs an existing path:line citation; README.md needs an existing path:line citation.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-repeated-deterministic-loop",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-repeated-deterministic-loop"],
+      artifacts: [
+        {
+          taskId: "task-audit-repeated-deterministic-loop",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-repeated-deterministic-loop", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain("speculative_audit_claim");
+    expect(implementCall.prompt).toContain("missing_scope_coverage");
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-repeated-deterministic-loop"))
+      .get();
+    expect(updatedTask?.implementationLog).toBe("Runtime repair done");
+    expect(updatedTask?.agentActivityLog).toContain(
+      "Skipped repeated deterministic audit report repair",
+    );
+  });
+
   it("does not use hidden tooling files as broad deterministic repair evidence", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
