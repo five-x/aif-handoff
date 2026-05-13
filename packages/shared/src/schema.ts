@@ -100,7 +100,7 @@ export const tasks = sqliteTable("tasks", {
   tags: text("tags").notNull().default("[]"),
   reworkRequested: integer("rework_requested", { mode: "boolean" }).notNull().default(false),
   reviewIterationCount: integer("review_iteration_count").notNull().default(0),
-  maxReviewIterations: integer("max_review_iterations").notNull().default(3),
+  maxReviewIterations: integer("max_review_iterations").notNull().default(100),
   manualReviewRequired: integer("manual_review_required", { mode: "boolean" })
     .notNull()
     .default(false),

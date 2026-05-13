@@ -104,7 +104,7 @@ function ensureTables(sqlite: Database.Database): void {
       tags TEXT NOT NULL DEFAULT '[]',
       rework_requested INTEGER NOT NULL DEFAULT 0,
       review_iteration_count INTEGER NOT NULL DEFAULT 0,
-      max_review_iterations INTEGER NOT NULL DEFAULT 3,
+      max_review_iterations INTEGER NOT NULL DEFAULT 100,
       manual_review_required INTEGER NOT NULL DEFAULT 0,
       auto_review_state_json TEXT,
       paused INTEGER NOT NULL DEFAULT 0,

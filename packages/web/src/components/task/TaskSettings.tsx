@@ -164,9 +164,11 @@ export function TaskSettings({ task, onSave }: Props) {
           <Input
             type="number"
             min={1}
-            max={50}
+            max={100}
             value={maxReviewIterations}
-            onChange={(e) => setMaxReviewIterations(Math.max(1, parseInt(e.target.value) || 1))}
+            onChange={(e) =>
+              setMaxReviewIterations(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))
+            }
             inputSize="sm"
             className="w-20"
           />

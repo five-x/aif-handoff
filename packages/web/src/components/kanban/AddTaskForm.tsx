@@ -42,7 +42,7 @@ export function AddTaskForm({ projectId }: Props) {
   const [planTests, setPlanTests] = useState(initialFlagDefaults.planTests);
   const [skipReview, setSkipReview] = useState(initialFlagDefaults.skipReview);
   const [useSubagents, setUseSubagents] = useState(false);
-  const [maxReviewIterations, setMaxReviewIterations] = useState(3);
+  const [maxReviewIterations, setMaxReviewIterations] = useState(100);
   const [runtimeProfileId, setRuntimeProfileId] = useState("");
   const [modelOverride, setModelOverride] = useState("");
   const [runtimeOverrideOpen, setRuntimeOverrideOpen] = useState(false);
@@ -77,7 +77,7 @@ export function AddTaskForm({ projectId }: Props) {
 
   // Derive defaults from server data (no setState in effects)
   const useSubagentsDefault = settings?.useSubagents ?? false;
-  const maxReviewIterationsDefault = settings?.maxReviewIterations ?? 3;
+  const maxReviewIterationsDefault = settings?.maxReviewIterations ?? 100;
   const defaultPlanPath = defaults?.paths?.plan ?? DEFAULT_PLAN_PATH;
   const plansDir = defaults?.paths?.plans ?? ".ai-factory/plans/";
 

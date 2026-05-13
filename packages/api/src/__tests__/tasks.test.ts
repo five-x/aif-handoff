@@ -528,13 +528,13 @@ describe("tasks API", () => {
         body: JSON.stringify({
           title: "Task with max iterations",
           projectId: "test-project",
-          maxReviewIterations: 5,
+          maxReviewIterations: 100,
         }),
       });
 
       expect(res.status).toBe(201);
       const body = await res.json();
-      expect(body.maxReviewIterations).toBe(5);
+      expect(body.maxReviewIterations).toBe(100);
       expect(body.reviewIterationCount).toBe(0);
     });
 
@@ -900,12 +900,12 @@ describe("tasks API", () => {
       const res = await app.request("/tasks/upd-mri", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxReviewIterations: 10 }),
+        body: JSON.stringify({ maxReviewIterations: 100 }),
       });
 
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.maxReviewIterations).toBe(10);
+      expect(body.maxReviewIterations).toBe(100);
     });
 
     it("should return 404 for non-existent task", async () => {

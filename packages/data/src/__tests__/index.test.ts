@@ -5,6 +5,7 @@ import {
   codexLimitHistory,
   codexSessionFiles,
   codexSessions,
+  getEnv,
   projects,
   tasks,
 } from "@aif/shared";
@@ -305,6 +306,7 @@ describe("data layer", () => {
       expect(t!.title).toBe("T");
       expect(t!.status).toBe("backlog");
       expect(t!.taskIntent).toBe("general");
+      expect(t!.maxReviewIterations).toBe(getEnv().AGENT_MAX_REVIEW_ITERATIONS);
     });
 
     it("keeps omitted taskIntent as general even when title looks typed", () => {

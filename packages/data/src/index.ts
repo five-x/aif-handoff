@@ -816,7 +816,7 @@ export function createTask(input: {
       planTests,
       skipReview,
       useSubagents,
-      maxReviewIterations: input.maxReviewIterations,
+      maxReviewIterations: input.maxReviewIterations ?? getEnv().AGENT_MAX_REVIEW_ITERATIONS,
       paused: input.paused,
       runtimeProfileId: input.runtimeProfileId ?? null,
       modelOverride: input.modelOverride ?? null,

@@ -60,7 +60,7 @@ Returns frontend-visible defaults and runtime readiness metadata.
 ```json
 {
   "useSubagents": false,
-  "maxReviewIterations": 3,
+  "maxReviewIterations": 100,
   "autoReviewStrategy": "full_re_review",
   "runtimeReadiness": {
     "availableRuntimeCount": 3,
