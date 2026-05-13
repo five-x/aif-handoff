@@ -654,7 +654,7 @@ describe("data layer", () => {
       expect(summarizeRoadmapBatch(summary.batchId)?.synthesisReady).toBe(false);
     });
 
-    it("allows terminal manual-review invalid attempts to release synthesis readiness", () => {
+    it("keeps terminal manual-review invalid attempts from releasing synthesis readiness", () => {
       const invalidReportTask = createTask({
         projectId: "proj-1",
         title: "Audit security",
@@ -698,16 +698,17 @@ describe("data layer", () => {
         validationDetails: { issues: ["low_quality_report_evidence"] },
       });
 
-      expect(terminal?.synthesisReady).toBe(true);
-      expect(terminal?.status).toBe("synthesis_ready");
+      expect(terminal?.synthesisReady).toBe(false);
+      expect(terminal?.status).toBe("rework_needed");
       expect(terminal?.counts.valid).toBe(0);
-      expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([
+      expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
+      expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+      expect(findTaskById(synthesisTask!.id)).toEqual(
         expect.objectContaining({
-          taskId: invalidReportTask!.id,
-          state: "invalid",
-          failureFamily: "invalid_artifact_content",
+          paused: true,
+          blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
         }),
-      ]);
+      );
     });
 
     it("keeps inconclusive synthesis as invalid and exposes its failure family", () => {
@@ -1139,7 +1140,7 @@ describe("data layer", () => {
       ]);
     });
 
-    it("does not count source_inconclusive or manual_exception as trusted valid but terminalizes readiness", () => {
+    it("keeps source_inconclusive and manual_exception out of synthesis readiness", () => {
       const sourceInconclusiveTask = createTask({
         projectId: "proj-1",
         title: "Audit data",
@@ -1204,10 +1205,16 @@ describe("data layer", () => {
         },
       });
 
-      expect(ready?.synthesisReady).toBe(true);
-      expect(ready?.status).toBe("synthesis_ready");
+      expect(ready?.synthesisReady).toBe(false);
       expect(ready?.counts.valid).toBe(0);
       expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+      expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
+      expect(findTaskById(synthesisTask!.id)).toEqual(
+        expect.objectContaining({
+          paused: true,
+          blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+        }),
+      );
     });
   });
 

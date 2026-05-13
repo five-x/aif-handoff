@@ -10,6 +10,7 @@ import {
   persistTaskPlanForTask,
   setTaskFields,
   summarizeRoadmapBatch,
+  updateRoadmapBatchArtifactState,
   type RoadmapBatchArtifactRow,
   type TaskRow,
 } from "@aif/data";
@@ -23,6 +24,7 @@ import {
   buildAuditEvidencePayload,
   classifyAuditSourceEvidence,
   classifyAuditSynthesisSourceReports,
+  computeAuditReportArtifactSha256,
   computeAuditReportContentSha256,
   extractAuditSynthesisCommandEvidence,
   formatAuditSynthesisOutcomeForArtifact,
@@ -46,6 +48,7 @@ const IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET = 26_000;
 const PROMPT_BUDGET_CHARS_PER_TOKEN = 3;
 const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
   IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET * PROMPT_BUDGET_CHARS_PER_TOKEN;
+const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesis-no-findings";
 const PROMPT_SECTION_LIMITS = {
   reworkComment: 8_000,
   reworkCommentMessage: 5_000,
@@ -600,6 +603,11 @@ function parseAuditScopeRoots(description: string | null): string[] {
 
 const AUDIT_REPAIR_IGNORED_DIRS = new Set([
   ".git",
+  ".agents",
+  ".ai-factory",
+  ".claude",
+  ".codex",
+  ".github",
   "node_modules",
   "dist",
   "build",
@@ -639,11 +647,58 @@ interface AuditRepairEvidenceByRoot {
   evidenceUnit: AuditEvidenceUnit | null;
 }
 
+interface AuditRepairRiskHypothesis {
+  id: string;
+  description: string;
+  scopeIds: string[];
+  terms: string[];
+}
+
+interface AuditRepairRiskEvidence {
+  riskId: string;
+  root: string;
+  files: string[];
+  terms: string[];
+  command: GitCaptureResult;
+  evidenceUnit: AuditEvidenceUnit | null;
+}
+
+type AuditReportRepairOutcome = "validated_no_findings" | "source_inconclusive";
+
+interface AuditReportRepairDecision {
+  outcome: AuditReportRepairOutcome;
+  reasons: string[];
+  riskHypotheses: AuditRepairRiskHypothesis[];
+}
+
+const AUDIT_REPAIR_HIDDEN_TOOLING_ROOTS = new Set([
+  ".agents",
+  ".ai-factory",
+  ".claude",
+  ".codex",
+  ".github",
+]);
+
 function isAuditRepairIgnoredFile(path: string): boolean {
   const lower = path.toLowerCase();
   if (lower.includes("/.git/") || lower.includes("/__pycache__/")) return true;
   if (/(^|\/)\.env(?:\.|$)/i.test(path)) return true;
   return [...AUDIT_REPAIR_IGNORED_FILE_EXTENSIONS].some((extension) => lower.endsWith(extension));
+}
+
+function auditRepairPathSegments(path: string): string[] {
+  return path.replaceAll("\\", "/").split("/").filter(Boolean);
+}
+
+function isAuditRepairHiddenToolingPath(path: string): boolean {
+  return auditRepairPathSegments(path).some((segment) =>
+    AUDIT_REPAIR_HIDDEN_TOOLING_ROOTS.has(segment),
+  );
+}
+
+function isExplicitHiddenAuditScopeRoot(scopeRoot: string): boolean {
+  const firstSegment = auditRepairPathSegments(scopeRoot)[0];
+  return Boolean(firstSegment && AUDIT_REPAIR_HIDDEN_TOOLING_ROOTS.has(firstSegment));
 }
 
 function fileHasLineEvidence(projectRoot: string, path: string): boolean {
@@ -660,10 +715,13 @@ function collectAuditRepairEvidenceFiles(
   scopeRoot: string,
   limit = 3,
 ): string[] {
+  const allowHiddenTooling = isExplicitHiddenAuditScopeRoot(scopeRoot);
   const absPath = resolve(projectRoot, scopeRoot);
   if (!existsSync(absPath)) return [];
   const stat = statSync(absPath);
-  if (stat.isFile()) return [scopeRoot];
+  if (stat.isFile()) {
+    return allowHiddenTooling || !isAuditRepairHiddenToolingPath(scopeRoot) ? [scopeRoot] : [];
+  }
   if (!stat.isDirectory()) return [];
 
   const files: string[] = [];
@@ -685,6 +743,7 @@ function collectAuditRepairEvidenceFiles(
           .replaceAll("\\", "/");
         if (
           isAuditRepairIgnoredFile(relativePath) ||
+          (!allowHiddenTooling && isAuditRepairHiddenToolingPath(relativePath)) ||
           !fileHasLineEvidence(projectRoot, relativePath)
         ) {
           continue;
@@ -695,6 +754,88 @@ function collectAuditRepairEvidenceFiles(
   };
   visit(absPath);
   return files;
+}
+
+const AUDIT_REPAIR_RISK_STOPWORDS = new Set([
+  "audit",
+  "evidence",
+  "finding",
+  "hypothesis",
+  "hypotheses",
+  "missing",
+  "product",
+  "report",
+  "risk",
+  "scope",
+  "source",
+  "technical",
+  "validated",
+  "verification",
+]);
+
+function deriveAuditRepairRiskTerms(description: string, roots: string[]): string[] {
+  const rootTerms = new Set(
+    roots.flatMap((root) =>
+      auditRepairPathSegments(root)
+        .map((segment) => segment.toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  const terms = new Set<string>();
+  for (const match of description.matchAll(/[A-Za-z][A-Za-z0-9_-]{3,}/g)) {
+    const term = match[0].toLowerCase();
+    if (term.startsWith("risk-")) continue;
+    if (AUDIT_REPAIR_RISK_STOPWORDS.has(term)) continue;
+    if (rootTerms.has(term)) continue;
+    terms.add(term);
+  }
+  return [...terms].slice(0, 6);
+}
+
+function parseAuditRiskHypotheses(
+  description: string | null,
+  roots: string[],
+): AuditRepairRiskHypothesis[] {
+  if (!description) return [];
+  const lines = description.split(/\r?\n/);
+  const riskLines: string[] = [];
+  let inRiskSection = false;
+  for (const line of lines) {
+    if (/^\s*(?:[-*]\s*)?Risk hypotheses\s*:/i.test(line)) {
+      inRiskSection = true;
+      const inline = line.replace(/^\s*(?:[-*]\s*)?Risk hypotheses\s*:\s*/i, "").trim();
+      if (inline) riskLines.push(inline);
+      continue;
+    }
+    if (inRiskSection && /^\s*(?:[-*]\s*)?[A-Z][A-Za-z ]+\s*:/i.test(line)) break;
+    if (inRiskSection && line.trim()) riskLines.push(line);
+  }
+
+  const sourceLines =
+    riskLines.length > 0 ? riskLines : lines.filter((line) => /\brisk-[\w-]+\b/i.test(line));
+  const risks = new Map<string, AuditRepairRiskHypothesis>();
+  for (const line of sourceLines) {
+    const id = line.match(/\brisk-[\w-]+\b/i)?.[0].toLowerCase();
+    if (!id || risks.has(id)) continue;
+    const descriptionText = line
+      .replace(/^\s*[-*]\s*/, "")
+      .replace(new RegExp(`^${id}\\s*[:\\-]?\\s*`, "i"), "")
+      .trim();
+    const lowered = line.toLowerCase();
+    const scopeIds = roots.filter((root) => lowered.includes(root.toLowerCase()));
+    risks.set(id, {
+      id,
+      description: descriptionText || line.trim(),
+      scopeIds,
+      terms: deriveAuditRepairRiskTerms(line, roots),
+    });
+  }
+  return [...risks.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function buildAuditRepairRiskPattern(terms: string[]): string | null {
+  const escaped = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).filter(Boolean);
+  return escaped.length > 0 ? escaped.join("|") : null;
 }
 
 function shellQuote(value: string): string {
@@ -787,16 +928,43 @@ function buildAuditReportManifest(input: {
   body: string;
   roots: string[];
   evidenceByRoot: AuditRepairEvidenceByRoot[];
+  riskEvidence: AuditRepairRiskEvidence[];
+  decision: AuditReportRepairDecision;
 }): Record<string, unknown> {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
-  const evidenceRefs = input.evidenceByRoot
-    .flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : []))
-    .sort();
+  const evidenceRefs = [
+    ...input.evidenceByRoot.flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : [])),
+    ...input.riskEvidence.flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : [])),
+  ].sort();
   const scopeCoverage = input.evidenceByRoot.map((entry) => ({
     root: entry.root,
-    covered: entry.files.length > 0 && Boolean(entry.evidenceUnit),
-    evidenceRefs: entry.evidenceUnit ? [entry.evidenceUnit.id] : [],
+    covered:
+      entry.files.length > 0 &&
+      (Boolean(entry.evidenceUnit) ||
+        input.riskEvidence.some(
+          (riskEntry) => riskEntry.root === entry.root && riskEntry.evidenceUnit,
+        )),
+    evidenceRefs: [
+      ...(entry.evidenceUnit ? [entry.evidenceUnit.id] : []),
+      ...input.riskEvidence
+        .filter((riskEntry) => riskEntry.root === entry.root && riskEntry.evidenceUnit)
+        .map((riskEntry) => riskEntry.evidenceUnit?.id)
+        .filter((id): id is string => Boolean(id)),
+    ].sort(),
   }));
+  const noFindingsClaims =
+    input.decision.outcome === "validated_no_findings"
+      ? [
+          {
+            id: "nf-deterministic-repair",
+            scopeIds: input.roots,
+            evidenceRefs,
+            riskIds: input.decision.riskHypotheses.map((risk) => risk.id),
+            reasoning:
+              "Deterministic repair used risk-specific scoped source inspections and removed unvalidated candidate findings.",
+          },
+        ]
+      : [];
   return {
     version: 1,
     auditPlanId: resolveAuditPlanId({
@@ -811,19 +979,21 @@ function buildAuditReportManifest(input: {
     artifactPath: input.artifactPath,
     contentSha256: computeAuditReportContentSha256(input.body),
     sourceSnapshot: input.snapshot,
-    outcome: "validated_no_findings",
+    outcome: input.decision.outcome,
     scopeCoverage,
-    riskHypotheses: [],
+    riskHypotheses: input.decision.riskHypotheses.map((risk) => ({
+      id: risk.id,
+      description: risk.description,
+      scopeIds: risk.scopeIds,
+      evidenceRefs: input.riskEvidence
+        .filter((entry) => entry.riskId === risk.id && entry.evidenceUnit)
+        .map((entry) => entry.evidenceUnit?.id)
+        .filter((id): id is string => Boolean(id))
+        .sort(),
+      status: input.decision.outcome === "validated_no_findings" ? "covered" : "inconclusive",
+    })),
     findings: [],
-    noFindingsClaims: [
-      {
-        id: "nf-deterministic-repair",
-        scopeIds: input.roots,
-        evidenceRefs,
-        reasoning:
-          "Deterministic repair preserved only scoped source inspections and removed unvalidated candidate findings.",
-      },
-    ],
+    noFindingsClaims,
     evidenceRefs,
   };
 }
@@ -863,8 +1033,22 @@ function buildAuditSynthesisManifest(input: {
             id: "nf-deterministic-synthesis",
             scopeIds: scopeRoots,
             evidenceRefs,
+            riskIds: [DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID],
             reasoning:
               "Deterministic synthesis used only already-validated source audit reports and preserved substantive no-findings evidence.",
+          },
+        ]
+      : [];
+  const riskHypotheses =
+    input.outcome === "validated_no_findings"
+      ? [
+          {
+            id: DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID,
+            description:
+              "Trusted source audit reports contain no validated findings that survived deterministic synthesis.",
+            scopeIds: scopeRoots,
+            evidenceRefs,
+            status: "covered",
           },
         ]
       : [];
@@ -889,7 +1073,7 @@ function buildAuditSynthesisManifest(input: {
       covered: Boolean(input.evidenceUnit),
       evidenceRefs,
     })),
-    riskHypotheses: [],
+    riskHypotheses,
     findings,
     noFindingsClaims,
     evidenceRefs,
@@ -900,9 +1084,15 @@ function buildDeterministicAuditReportRepairContent(input: {
   task: TaskRow;
   projectRoot: string;
   artifactPath: string;
-}): string {
+}): {
+  content: string;
+  body: string;
+  sourceSnapshot: AuditReportSourceSnapshot;
+  decision: AuditReportRepairDecision;
+} {
   const scopeRoots = parseAuditScopeRoots(input.task.description);
-  const roots = scopeRoots.length > 0 ? scopeRoots : ["."];
+  const roots = scopeRoots;
+  const riskHypotheses = parseAuditRiskHypotheses(input.task.description, roots);
   const sourceSnapshot = currentAuditReportSourceSnapshot(input.projectRoot);
   const evidenceByRoot = roots.map((root) => {
     const files = collectAuditRepairEvidenceFiles(input.projectRoot, root);
@@ -934,13 +1124,124 @@ function buildDeterministicAuditReportRepairContent(input: {
       evidenceUnit,
     };
   });
+  const riskEvidence = riskHypotheses.flatMap((risk) =>
+    risk.scopeIds.map((root) => {
+      const files =
+        evidenceByRoot.find((entry) => entry.root === root)?.files.slice(0, 3) ??
+        collectAuditRepairEvidenceFiles(input.projectRoot, root);
+      const pattern = buildAuditRepairRiskPattern(risk.terms);
+      const command =
+        pattern && files.length > 0
+          ? runGitCapture(input.projectRoot, [
+              "grep",
+              "-n",
+              "-m",
+              "5",
+              "-E",
+              pattern,
+              "--",
+              ...files,
+            ])
+          : {
+              args: [],
+              command: "risk-specific grep skipped because no risk terms were parsed",
+              exitCode: 1,
+              output:
+                files.length === 0
+                  ? "No scoped files were available for risk-specific deterministic repair."
+                  : "No risk-specific terms were parsed for deterministic repair.",
+            };
+      const hasSubstantiveRiskEvidence =
+        files.length > 0 &&
+        pattern !== null &&
+        command.exitCode === 0 &&
+        command.output.trim().length > 0;
+      const evidenceUnit = hasSubstantiveRiskEvidence
+        ? persistAuditEvidencePayload(
+            input.task.id,
+            input.projectRoot,
+            buildAuditEvidencePayload({
+              toolName: "deterministic_audit_report_repair",
+              evidenceKind: "shell_command",
+              evidenceGrade: "substantive",
+              scopeIds: [root],
+              riskHypothesisIds: [risk.id],
+              paths: files,
+              command: command.command,
+              exitCode: command.exitCode,
+              output: command.output,
+              maxPreviewChars: 2_000,
+            }),
+          )
+        : null;
+      return {
+        riskId: risk.id,
+        root,
+        files,
+        terms: risk.terms,
+        command,
+        evidenceUnit,
+      };
+    }),
+  );
+  const decisionReasons: string[] = [];
+  if (roots.length === 0) decisionReasons.push("No concrete audit scope roots were parsed.");
+  if (riskHypotheses.length === 0) {
+    decisionReasons.push("No risk hypotheses were parsed from the task description.");
+  }
+  for (const risk of riskHypotheses) {
+    if (risk.scopeIds.length === 0) {
+      decisionReasons.push(`Risk ${risk.id} does not reference a declared scope root.`);
+      continue;
+    }
+    const hasBoundEvidence = riskEvidence.some(
+      (entry) => entry.riskId === risk.id && entry.evidenceUnit !== null,
+    );
+    if (!hasBoundEvidence) {
+      decisionReasons.push(`Risk ${risk.id} has no bound risk-specific substantive evidence.`);
+    }
+  }
+  const decision: AuditReportRepairDecision = {
+    outcome: decisionReasons.length === 0 ? "validated_no_findings" : "source_inconclusive",
+    reasons: decisionReasons,
+    riskHypotheses,
+  };
   const checkedFiles = [...new Set(evidenceByRoot.flatMap((entry) => entry.files))].sort();
+  const bodyLines =
+    decision.outcome === "validated_no_findings"
+      ? [
+          `# ${input.task.title}`,
+          "",
+          "No validated findings.",
+          "",
+          "The previous candidate findings did not meet the audit finding contract for concrete technical defects. They were removed instead of being rephrased.",
+        ]
+      : [
+          `# ${input.task.title}`,
+          "",
+          "Audit source inconclusive.",
+          "",
+          "Deterministic repair normalized the report artifact, but the available evidence did not meet the trusted no-findings contract.",
+          "",
+          "## Inconclusive Reasons",
+          "",
+          ...decision.reasons.map((reason) => `- ${reason}`),
+        ];
   const body = [
-    `# ${input.task.title}`,
+    ...bodyLines,
     "",
-    "No validated findings.",
+    "## Risk Hypotheses",
     "",
-    "The previous candidate findings did not meet the audit finding contract for concrete technical defects. They were removed instead of being rephrased.",
+    ...(riskHypotheses.length > 0
+      ? riskHypotheses.map(
+          (risk) =>
+            `- ${risk.id}: ${risk.description} (scope: ${
+              risk.scopeIds.length > 0
+                ? risk.scopeIds.map((root) => `\`${root}\``).join(", ")
+                : "unbound"
+            })`,
+        )
+      : ["- No parseable risk hypotheses were declared."]),
     "",
     "## Evidence Register",
     "",
@@ -954,6 +1255,15 @@ function buildDeterministicAuditReportRepairContent(input: {
       return `| \`${entry.root}\` | ${evidence} | Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\` |`;
     }),
     "",
+    "## Risk-Specific Evidence",
+    "",
+    ...(riskEvidence.length > 0
+      ? riskEvidence.map(
+          (entry) =>
+            `- ${entry.riskId} / \`${entry.root}\`: Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\``,
+        )
+      : ["- No risk-specific evidence commands were run."]),
+    "",
     "## Checked Files",
     "",
     ...(checkedFiles.length > 0
@@ -963,6 +1273,12 @@ function buildDeterministicAuditReportRepairContent(input: {
     "## Checked Commands",
     "",
     ...evidenceByRoot.flatMap((entry) => [
+      `- Command \`${entry.command.command}\` output:`,
+      "```",
+      entry.command.output || "<empty>",
+      "```",
+    ]),
+    ...riskEvidence.flatMap((entry) => [
       `- Command \`${entry.command.command}\` output:`,
       "```",
       entry.command.output || "<empty>",
@@ -979,9 +1295,16 @@ function buildDeterministicAuditReportRepairContent(input: {
     body,
     roots,
     evidenceByRoot,
+    riskEvidence,
+    decision,
   });
 
-  return `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+  return {
+    content: `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+    body,
+    sourceSnapshot,
+    decision,
+  };
 }
 
 function formatValidatedAuditSynthesisInput(
@@ -1333,6 +1656,7 @@ function buildDeterministicAuditSynthesisContent(
       ),
     ].sort();
     const checkedPaths = [...new Set(checkedRefs.map(pathFromLineEvidenceRef))].slice(0, 12);
+    const absenceClaimRef = checkedRefs[0] ?? null;
     const lines = [
       "# Audit Summary",
       "",
@@ -1341,6 +1665,12 @@ function buildDeterministicAuditSynthesisContent(
       "No validated findings.",
       "",
       "Audit outcome: Validated no-findings with substantive audit evidence.",
+      ...(absenceClaimRef
+        ? [
+            "",
+            `Absence reasoning: \`${absenceClaimRef}\` ruled out validated source-report findings across the trusted audit batch inputs.`,
+          ]
+        : []),
       "",
       "Generated from terminal audit batch report artifacts. Source report findings were included only when they carried concrete path:line Evidence, Risk, Proposed fix, and Verification sections.",
       "",
@@ -1530,6 +1860,12 @@ function buildDeterministicAuditSynthesisContentWithManifest(input: {
   const weakArtifactPaths = [
     ...new Set(input.weakArtifacts.map((artifact) => artifact.artifactPath).filter(Boolean)),
   ].sort();
+  const outcome = classifyAuditSourceEvidence({
+    text: body,
+    projectRoot: input.projectRoot,
+    excludedReferencedPaths: [input.artifactPath],
+    requireProposedFix: true,
+  }).classification;
   const evidenceOutput = [
     `summaryArtifact=${input.artifactPath}`,
     `sourceReportCount=${input.artifacts.length}`,
@@ -1551,6 +1887,8 @@ function buildDeterministicAuditSynthesisContentWithManifest(input: {
       evidenceKind: "shell_command",
       evidenceGrade: "substantive",
       scopeIds: sourceArtifactPaths.length > 0 ? sourceArtifactPaths : [input.artifactPath],
+      riskHypothesisIds:
+        outcome === "validated_no_findings" ? [DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID] : [],
       paths: [...sourceArtifactPaths, ...weakArtifactPaths],
       command: `deterministic-audit-synthesis --artifact ${input.artifactPath}`,
       exitCode: 0,
@@ -1558,12 +1896,6 @@ function buildDeterministicAuditSynthesisContentWithManifest(input: {
       maxPreviewChars: 4_000,
     }),
   );
-  const outcome = classifyAuditSourceEvidence({
-    text: body,
-    projectRoot: input.projectRoot,
-    excludedReferencedPaths: [input.artifactPath],
-    requireProposedFix: true,
-  }).classification;
   const manifest = buildAuditSynthesisManifest({
     task: input.task,
     artifactPath: input.artifactPath,
@@ -1605,17 +1937,51 @@ function runDeterministicAuditReportRepair(input: {
 }): string {
   const artifactPath = resolve(input.projectRoot, input.artifactPath);
   mkdirSync(dirname(artifactPath), { recursive: true });
-  const content = buildDeterministicAuditReportRepairContent(input);
-  writeFileSync(artifactPath, content, "utf8");
+  const repair = buildDeterministicAuditReportRepairContent(input);
+  writeFileSync(artifactPath, repair.content, "utf8");
   const gitLog = commitArtifactIfChanged(
     input.projectRoot,
     input.artifactPath,
     "Audit: repair report evidence",
   );
+  if (repair.decision.outcome === "source_inconclusive") {
+    updateRoadmapBatchArtifactState({
+      taskId: input.task.id,
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      classification: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
+      sourceSnapshotId: repair.sourceSnapshot.id,
+      projectRoot: input.projectRoot,
+      contentSha: computeAuditReportArtifactSha256(repair.content),
+      validationDetails: {
+        evidence: {
+          auditReportValidation: {
+            sourceClassification: "source_inconclusive",
+            manifestStatus: "valid",
+            manifestVersion: 1,
+          },
+        },
+        deterministicRepair: {
+          outcome: repair.decision.outcome,
+          reasons: repair.decision.reasons,
+          terminalHandling:
+            "reworkRequested is cleared because source_inconclusive is a terminal non-trusted repair outcome, not because the report is trusted valid.",
+        },
+      },
+    });
+  }
   return [
-    "Deterministic audit report repair completed from declared scope evidence.",
+    repair.decision.outcome === "validated_no_findings"
+      ? "Deterministic audit report repair completed from risk-specific declared scope evidence."
+      : "Deterministic audit report repair completed as source_inconclusive.",
     `Report artifact: ${input.artifactPath}`,
-    "Rejected prior candidate findings that did not meet the technical finding contract.",
+    repair.decision.outcome === "validated_no_findings"
+      ? "Rejected prior candidate findings that did not meet the technical finding contract."
+      : "Rejected prior candidate findings and persisted a terminal non-trusted source_inconclusive artifact state.",
+    ...(repair.decision.reasons.length > 0
+      ? repair.decision.reasons.map((reason) => `Inconclusive reason: ${reason}`)
+      : []),
     "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
     gitLog,
   ].join("\n");
@@ -1890,10 +2256,18 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
-    logActivity(taskId, "Agent", "Deterministic audit report repair complete");
+    logActivity(
+      taskId,
+      "Agent",
+      resultText.includes("source_inconclusive")
+        ? "Deterministic audit report repair terminalized as source_inconclusive"
+        : "Deterministic audit report repair complete",
+    );
     log.info(
       { taskId, artifactPath: expectedAuditReportArtifactPath },
-      "Audit report rework completed deterministically",
+      resultText.includes("source_inconclusive")
+        ? "Audit report rework completed deterministically as source_inconclusive"
+        : "Audit report rework completed deterministically",
     );
     return;
   }

@@ -2,7 +2,7 @@
 
 - Task ID: work-20260512-harden-audit-roadmap-generation-guardrails
 - Lane: work
-- Status: inbox
+- Status: done
 - Priority: high
 - Created: 2026-05-12
 - Due: unset

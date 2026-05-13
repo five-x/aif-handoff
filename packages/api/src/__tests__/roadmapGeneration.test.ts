@@ -96,8 +96,15 @@ function runGit(cwd: string, args: string[]) {
 function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
   const synthesis = /\b(?:summary|synthesis)\b/i.test(reportName);
   return [
-    "Scope: src/config.ts, src/index.ts",
+    synthesis
+      ? "Scope: all audit/2026-05-09-*-audit.md reports from this audit batch."
+      : "Scope: src/config.ts, src/index.ts",
     "Audit mandate: Act as the area owner and find actionable technical-quality risks.",
+    ...(synthesis
+      ? []
+      : [
+          "Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults; risk-config-2 src/index.ts may contain unsafe exports.",
+        ]),
     "Allowed changes: only create/update one report artifact.",
     `Report artifact: ${reportName}`,
     "Acceptance criteria: inspect the scoped files and record only actionable findings or no validated findings.",
@@ -401,6 +408,7 @@ describe("roadmapGeneration", () => {
         "Do not create implementation, fixing, refactoring, hardening",
       );
       expect(callArgs.prompt).toContain("Audit mandate:");
+      expect(callArgs.prompt).toContain("Risk hypotheses:");
       expect(callArgs.prompt).toContain("Proposed fix:");
       expect(callArgs.prompt).toContain("Quality bar:");
       expect(callArgs.prompt).toContain("Report artifact: audit/");
@@ -410,6 +418,7 @@ describe("roadmapGeneration", () => {
       expect(callArgs.prompt).toContain(
         "every summarized finding must include Evidence: <source repo path>:<line>",
       );
+      expect(callArgs.prompt).toContain("never use Scope: .");
     });
 
     it("should replace invalid generated audit roadmaps with a deterministic diagnostic roadmap", async () => {
@@ -456,12 +465,44 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain(AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT);
       expect(result.content).toContain(AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT);
       expect(result.content).toContain("Scope: README.md, pyproject.toml");
+      expect(result.content).toContain("Risk hypotheses: risk-");
       expect(result.content).toContain("src/my_app");
+      expect(result.content).not.toContain("Scope: .");
       expect(result.content).not.toContain("packages/api/src");
       expect(result.content).toContain("Synthesize audit findings");
+      expect(result.content).toContain("Scope: all audit/");
       expect(result.content).toContain("Allowed changes: only create/update audit/");
       expect(result.content).not.toContain("Initial Audit & Inventory");
       expect(readFileSync(result.roadmapPath, "utf8")).toBe(result.content);
+    });
+
+    it("should build deterministic audit scopes for botIntevra-like projects", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# botIntevra\nTelegram bot");
+      mkdirSync(join(tmpDir, "src", "bot_intevra"), { recursive: true });
+      writeFileSync(join(tmpDir, "src", "bot_intevra", "config.py"), "TOKEN = None\n");
+      writeFileSync(join(tmpDir, "src", "bot_intevra", "secret_scan.py"), "def scan(): pass\n");
+      writeFileSync(join(tmpDir, "src", "bot_intevra", "service.py"), "def run(): pass\n");
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: "- [ ] **Initial Audit & Inventory** - Review everything.",
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+        },
+        context: {},
+      });
+
+      const result = await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        vision: "Audit botIntevra",
+      });
+
+      expect(result.content).toContain("src/bot_intevra/config.py");
+      expect(result.content).toContain("src/bot_intevra/secret_scan.py");
+      expect(result.content).toContain("src/bot_intevra/service.py");
+      expect(result.content).toContain("Risk hypotheses: risk-");
+      expect(result.content).not.toContain("Scope: .");
     });
 
     it("should preserve v8-like prior inconclusive context in generated audit task descriptions", async () => {
@@ -773,6 +814,45 @@ describe("roadmapGeneration", () => {
       await expect(
         generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
       ).rejects.toThrow("must limit Allowed changes to the report artifact");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit synthesis roadmap with Allowed changes that include source edits", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace(
+          "Report artifact: audit/2026-05-09-summary.md",
+          "Allowed changes: only create/update audit/2026-05-09-summary.md and src/config.ts.\n  - Report artifact: audit/2026-05-09-summary.md",
+        ),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("must limit Allowed changes to the report artifact");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap with Scope: . before extraction", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace("Scope: src/config.ts, src/index.ts", "Scope: ."),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("scope must use concrete files or directories");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("should reject audit source roadmap without parseable risk hypotheses", async () => {
+      const { projectId } = createProjectWithRoadmap(
+        validAuditRoadmapContent().replace(
+          "Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults; risk-config-2 src/index.ts may contain unsafe exports.\n",
+          "",
+        ),
+      );
+
+      await expect(
+        generateRoadmapTasks({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).rejects.toThrow("Risk hypotheses");
       expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
     });
 

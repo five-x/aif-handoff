@@ -2821,26 +2821,6 @@ export type RoadmapBatchArtifactState =
   | "manual_exception";
 export type RoadmapBatchFailureFamily = AuditFailureFamily;
 
-const SYNTHESIS_SOURCE_TERMINAL_STATES = new Set<string>([
-  "valid",
-  "invalid",
-  "missing",
-  "external_blocked",
-]);
-
-const SYNTHESIS_SOURCE_TERMINAL_ATTEMPT_STATES = new Set<string>([
-  "source_inconclusive",
-  "terminal_inconclusive",
-  "manual_exception",
-  "external_blocked",
-]);
-
-const SYNTHESIS_SOURCE_TERMINAL_REWORK_STATUSES = new Set<string>([
-  "manual_review_required",
-  "terminal_inconclusive",
-  "manual_exception",
-]);
-
 export interface RoadmapBatchArtifactInput {
   taskId: string;
   role: RoadmapBatchArtifactRole;
@@ -2958,50 +2938,9 @@ function roadmapArtifactCountsAsValid(artifact: RoadmapBatchArtifactRow): boolea
   return false;
 }
 
-function roadmapArtifactHasAttemptHistory(artifact: RoadmapBatchArtifactRow): boolean {
-  return (
-    (artifact.attemptNumber ?? 0) > 0 ||
-    artifact.attemptBoundaryId != null ||
-    artifact.failureSignature != null
-  );
-}
-
-function latestRoadmapArtifactAttempt(
-  artifact: RoadmapBatchArtifactRow,
-): RoadmapBatchArtifactAttemptRow | undefined {
-  return getDb()
-    .select()
-    .from(roadmapBatchArtifactAttempts)
-    .where(eq(roadmapBatchArtifactAttempts.artifactId, artifact.id))
-    .orderBy(desc(roadmapBatchArtifactAttempts.attemptNumber))
-    .limit(1)
-    .get();
-}
-
-function roadmapArtifactHasCurrentTerminalAttempt(artifact: RoadmapBatchArtifactRow): boolean {
-  const attempt = latestRoadmapArtifactAttempt(artifact);
-  if (!attempt) return false;
-  if (!SYNTHESIS_SOURCE_TERMINAL_REWORK_STATUSES.has(attempt.reworkStatus)) return false;
-  return (
-    attempt.state === artifact.state &&
-    attempt.attemptBoundaryId === artifact.attemptBoundaryId &&
-    attempt.failureSignature === artifact.failureSignature
-  );
-}
-
 function roadmapSourceArtifactReadyForSynthesis(artifact: RoadmapBatchArtifactRow): boolean {
   if (artifact.role === "synthesis") return true;
-  if (!roadmapArtifactHasAttemptHistory(artifact)) {
-    return SYNTHESIS_SOURCE_TERMINAL_STATES.has(artifact.state);
-  }
-  if (roadmapArtifactCountsAsValid(artifact)) return true;
-  if (SYNTHESIS_SOURCE_TERMINAL_ATTEMPT_STATES.has(artifact.state)) return true;
-  if (roadmapArtifactHasCurrentTerminalAttempt(artifact)) return true;
-  return (
-    artifact.state === "invalid" &&
-    (artifact.failureFamily === "manual_review_required" ||
-      artifact.failureFamily === "external_blocker")
-  );
+  return roadmapArtifactCountsAsValid(artifact);
 }
 
 function summarizeRoadmapArtifacts(

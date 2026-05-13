@@ -26,9 +26,15 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 
 const { runImplementer } = await import("../subagents/implementer.js");
 const {
+  claimBacklogTaskForAdvance,
   createRoadmapBatchContract,
   findRoadmapBatchArtifactByTaskId,
+  listRoadmapBatchArtifactAttempts,
+  listRoadmapBatchArtifacts,
   listAuditEvidenceEvents,
+  listRoadmapReportArtifactsForSynthesis,
+  listValidatedRoadmapReportArtifacts,
+  summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
 } = await import("@aif/data");
 
@@ -50,6 +56,12 @@ function trustedNoFindingsValidationDetails(): Record<string, unknown> {
       },
     },
   };
+}
+
+function readAuditReportManifest(text: string): Record<string, unknown> {
+  const match = text.match(/```audit-report-manifest\s*([\s\S]*?)```/);
+  if (!match) throw new Error("missing audit-report-manifest block");
+  return JSON.parse(match[1] ?? "{}") as Record<string, unknown>;
 }
 
 function streamSuccess(result: string): AsyncIterable<{
@@ -194,17 +206,6 @@ describe("runImplementer rework behavior", () => {
       .run();
     db.insert(tasks)
       .values({
-        id: "task-weak-report",
-        projectId: "project-1",
-        title: "Audit security",
-        description: "Report artifact: audit/security.md",
-        taskIntent: "audit",
-        status: "blocked_external",
-        manualReviewRequired: true,
-      })
-      .run();
-    db.insert(tasks)
-      .values({
         id: "task-synthesis",
         projectId: "project-1",
         title: "Synthesize audit findings",
@@ -220,19 +221,13 @@ describe("runImplementer rework behavior", () => {
       roadmapAlias: "audit",
       taskIntent: "audit",
       executionPolicy: "serialized_shared_checkout",
-      createdTaskIds: ["task-synthesis-report", "task-weak-report", "task-synthesis"],
+      createdTaskIds: ["task-synthesis-report", "task-synthesis"],
       synthesisTaskId: "task-synthesis",
       artifacts: [
         {
           taskId: "task-synthesis-report",
           role: "report",
           artifactPath: "audit/config.md",
-          projectRoot,
-        },
-        {
-          taskId: "task-weak-report",
-          role: "report",
-          artifactPath: "audit/security.md",
           projectRoot,
         },
         {
@@ -249,13 +244,6 @@ describe("runImplementer rework behavior", () => {
       failureFamily: null,
       validationDetails: trustedFindingsValidationDetails(),
     });
-    updateRoadmapBatchArtifactState({
-      taskId: "task-weak-report",
-      state: "invalid",
-      failureFamily: "invalid_artifact_content",
-      reworkStatus: "manual_review_required",
-      validationDetails: { issues: ["low_quality_report_evidence"] },
-    });
 
     await runImplementer("task-synthesis", projectRoot);
 
@@ -264,9 +252,8 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("<<<VALIDATED_AUDIT_BATCH_INPUTS");
     expect(call.prompt).toContain("--- artifact: audit/config.md");
     expect(call.prompt).toContain("Evidence: `README.md:1` identifies project docs.");
-    expect(call.prompt).toContain("--- weak_or_invalid_artifacts ---");
-    expect(call.prompt).toContain("artifact: audit/security.md");
-    expect(call.prompt).toContain("failureFamily: invalid_artifact_content");
+    expect(call.prompt).not.toContain("--- weak_or_invalid_artifacts ---");
+    expect(call.prompt).not.toContain("artifact: audit/security.md");
     expect(call.prompt).not.toContain("INVALID_REPORT_CONTENT_SHOULD_NOT_BE_SYNTHESIZED");
     expect(call.prompt).toContain("use those exact validated report contents");
   });
@@ -283,7 +270,7 @@ describe("runImplementer rework behavior", () => {
       cwd: projectRoot,
       stdio: "ignore",
     });
-    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nproducer branch evidence\n", "utf8");
     execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
       cwd: projectRoot,
@@ -385,16 +372,16 @@ describe("runImplementer rework behavior", () => {
       cwd: projectRoot,
       stdio: "ignore",
     });
-    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nproducer branch evidence\n", "utf8");
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
     writeFileSync(
       join(projectRoot, "audit", "config.md"),
       [
         "## Finding: Valid source evidence",
-        "Evidence: `README.md:1` identifies project docs from the report branch.",
+        "Evidence: `README.md:2` identifies project docs from the report branch.",
         "Risk: Synthesis can miss validated source evidence.",
         "Proposed fix: carry source report branch content into synthesis deterministically.",
-        "Verification: Command `git log -1 --name-only --oneline` output included audit/config.md.",
+        'Verification: Command `rg -n "producer branch evidence" README.md` output included `README.md:2:producer branch evidence`.',
         "",
         "### Finding: Tool limit placeholder",
         "Evidence: `README.md` was reported as file is too large (8409 bytes > 1000 byte limit).",
@@ -472,7 +459,7 @@ describe("runImplementer rework behavior", () => {
     expect(queryMock).not.toHaveBeenCalled();
     const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
     expect(summary).toContain("Generated from terminal audit batch report artifacts.");
-    expect(summary).toContain("Evidence: `README.md:1`");
+    expect(summary).toContain("Evidence: `README.md:2`");
     expect(summary).toContain("Risk: Synthesis can miss validated source evidence.");
     expect(summary).toContain("Proposed fix: carry source report branch content");
     expect(summary).toContain("Included findings: 1");
@@ -528,7 +515,7 @@ describe("runImplementer rework behavior", () => {
     });
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
     mkdirSync(join(projectRoot, "src"), { recursive: true });
-    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nruntime evidence\n", "utf8");
     writeFileSync(
       join(projectRoot, "src", "config.ts"),
       "export const timeoutMs = 1000;\n",
@@ -541,23 +528,25 @@ describe("runImplementer rework behavior", () => {
         "",
         "No validated findings.",
         "",
+        "Risk hypotheses: risk-runtime `src/config.ts` timeout behavior is covered with no findings.",
+        "",
         "## Evidence Register",
         "",
         "| Scope | Checked evidence | Verification |",
         "| --- | --- | --- |",
-        '| `README.md` | `README.md:1` | Command `rg -n "Project" README.md` output includes `README.md:1:# Project` |',
+        '| `README.md` | `README.md:2` | Command `rg -n "runtime evidence" README.md` output includes `README.md:2:runtime evidence` |',
         '| `src/config.ts` | `src/config.ts:1` | Command `rg -n "timeoutMs" src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |',
         "",
         "## Checked Files",
         "",
-        "- `README.md:1`",
+        "- `README.md:2`",
         "- `src/config.ts:1`",
         "",
         "## Checked Commands",
         "",
-        '- Command `rg -n "Project" README.md` output:',
+        '- Command `rg -n "runtime evidence" README.md` output:',
         "```",
-        "README.md:1:# Project",
+        "README.md:2:runtime evidence",
         "```",
         '- Command `rg -n "timeoutMs" src/config.ts` output:',
         "```",
@@ -637,9 +626,9 @@ describe("runImplementer rework behavior", () => {
     const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
     expect(summary).toContain("No validated findings.");
     expect(summary).toContain("## Checked Files");
-    expect(summary).toContain("`README.md:1`");
+    expect(summary).toContain("`README.md:2`");
     expect(summary).toContain("`src/config.ts:1`");
-    expect(summary).toContain('Command `rg -n "Project" README.md` output:');
+    expect(summary).toContain('Command `rg -n "runtime evidence" README.md` output:');
     expect(summary).toContain("Audit outcome: Validated no-findings");
     expect(summary).not.toContain("Risk:");
     expect(summary).not.toContain("Proposed fix:");
@@ -1139,7 +1128,7 @@ describe("runImplementer rework behavior", () => {
 
     expect(queryMock).not.toHaveBeenCalled();
     const repaired = readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8");
-    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("Audit source inconclusive.");
     expect(repaired).toContain("`README.md:1`");
     expect(repaired).toContain("`AGENTS.md:1`");
     expect(repaired).toContain("`pyproject.toml:1`");
@@ -1147,32 +1136,28 @@ describe("runImplementer rework behavior", () => {
     expect(repaired).not.toContain("Missing Ownership Clarity");
     expect(repaired).not.toContain("1234567");
     expect(repaired).toContain("```audit-report-manifest");
+    const manifest = readAuditReportManifest(repaired);
+    expect(manifest.outcome).toBe("source_inconclusive");
+    expect(manifest.noFindingsClaims).toEqual([]);
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-deterministic-repair");
     if (!artifact) throw new Error("missing deterministic repair artifact");
-    const auditEvidenceUnits = listAuditEvidenceEvents({
-      taskId: "task-audit-deterministic-repair",
-      auditPlanId: `batch:${artifact.batchId}:task:task-audit-deterministic-repair`,
-    });
-    const validation = validateAuditReportArtifact({
-      text: repaired,
-      projectRoot,
-      taskId: "task-audit-deterministic-repair",
-      roadmapBatchId: artifact.batchId,
-      roadmapAlias: artifact.roadmapAlias,
-      taskDescription: description,
-      reportArtifactPaths: ["audit/architecture.md"],
-      requireProposedFix: true,
-      auditEvidenceUnits,
-      requireLedgerEvidence: true,
-    });
-    expect(validation.ok).toBe(true);
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.state).toBe("source_inconclusive");
+    expect(attempts[0]?.classification).toBe("source_inconclusive");
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-deterministic-repair"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed as source_inconclusive",
+    );
+    expect(updatedTask?.implementationLog).toContain("terminal non-trusted");
   });
 
   it("deterministically rewrites structurally invalid audit validator reports", async () => {
@@ -1258,7 +1243,7 @@ describe("runImplementer rework behavior", () => {
 
     expect(queryMock).not.toHaveBeenCalled();
     const repaired = readFileSync(join(projectRoot, "audit", "security.md"), "utf8");
-    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("Audit source inconclusive.");
     expect(repaired).toContain("`README.md:1`");
     expect(repaired).toContain("`src/alpha.ts:1`");
     expect(repaired).toContain("`src/beta.ts:1`");
@@ -1266,32 +1251,550 @@ describe("runImplementer rework behavior", () => {
     expect(repaired).not.toContain("Candidate");
     expect(repaired).not.toContain("would show");
     expect(repaired).toContain("```audit-report-manifest");
+    const manifest = readAuditReportManifest(repaired);
+    expect(manifest.outcome).toBe("source_inconclusive");
+    expect(manifest.noFindingsClaims).toEqual([]);
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-validator-repair");
     if (!artifact) throw new Error("missing repeated validator repair artifact");
-    const auditEvidenceUnits = listAuditEvidenceEvents({
-      taskId: "task-audit-repeated-validator-repair",
-      auditPlanId: `batch:${artifact.batchId}:task:task-audit-repeated-validator-repair`,
-    });
-    const validation = validateAuditReportArtifact({
-      text: repaired,
-      projectRoot,
-      taskId: "task-audit-repeated-validator-repair",
-      roadmapBatchId: artifact.batchId,
-      roadmapAlias: artifact.roadmapAlias,
-      taskDescription: description,
-      reportArtifactPaths: ["audit/security.md"],
-      requireProposedFix: true,
-      auditEvidenceUnits,
-      requireLedgerEvidence: true,
-    });
-    expect(validation.ok).toBe(true);
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-validator-repair"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed as source_inconclusive",
+    );
+  });
+
+  it("does not use hidden tooling files as broad deterministic repair evidence", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, ".agents", "skills"), { recursive: true });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, ".agents", "skills", "audit.md"), "# Hidden tooling\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "app.ts"), "export const app = true;\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "audit", "hidden.md"),
+      [
+        "# Audit",
+        "",
+        "No validated findings.",
+        "",
+        "## Finding: Candidate",
+        "Evidence: `.agents/skills/audit.md:1`",
+        "Risk: Hidden tooling was treated as product source.",
+        "Verification: expected command output would show the issue.",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", ".agents/skills/audit.md", "src/app.ts", "audit/hidden.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = "Report artifact: audit/hidden.md";
+    db.insert(tasks)
+      .values({
+        id: "task-audit-hidden-tooling-broad-repair",
+        projectId: "project-1",
+        title: "Audit hidden tooling fallback",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        reviewComments: "## Blocking Findings\n- Missing declared source scope.",
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "finding-missing-manifest",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (missing_report_manifest): missing source report manifest.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-hidden-tooling-broad-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-hidden-tooling-broad-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-hidden-tooling-broad-repair",
+          role: "report",
+          artifactPath: "audit/hidden.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-hidden-tooling-broad-repair", projectRoot);
+
+    const repaired = readFileSync(join(projectRoot, "audit", "hidden.md"), "utf8");
+    expect(repaired).toContain("Audit source inconclusive.");
+    expect(repaired).toContain("No concrete audit scope roots were parsed.");
+    expect(repaired).not.toContain("`.agents/skills/audit.md:1`");
+    expect(readAuditReportManifest(repaired).outcome).toBe("source_inconclusive");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-hidden-tooling-broad-repair");
+    if (!artifact) throw new Error("missing hidden tooling repair artifact");
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
+  });
+
+  it("keeps all-hidden broad audit repairs from releasing batch synthesis", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, ".agents", "aaa"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    mkdirSync(join(projectRoot, "zsrc"), { recursive: true });
+    writeFileSync(join(projectRoot, ".agents", "aaa", "policy.md"), "# Hidden policy\n", "utf8");
+    writeFileSync(
+      join(projectRoot, ".agents", "aaa", "workflow.md"),
+      "# Hidden workflow\n",
+      "utf8",
+    );
+    writeFileSync(join(projectRoot, "zsrc", "app.ts"), "export const app = true;\n", "utf8");
+
+    const sourceTasks = [
+      {
+        id: "task-audit-hidden-source-a",
+        title: "Audit hidden source A",
+        reportPath: "audit/source-a.md",
+        evidencePath: ".agents/aaa/policy.md",
+      },
+      {
+        id: "task-audit-hidden-source-b",
+        title: "Audit hidden source B",
+        reportPath: "audit/source-b.md",
+        evidencePath: ".agents/aaa/workflow.md",
+      },
+    ];
+
+    for (const sourceTask of sourceTasks) {
+      writeFileSync(
+        join(projectRoot, sourceTask.reportPath),
+        [
+          "# Audit",
+          "",
+          "No validated findings.",
+          "",
+          "## Finding: Candidate",
+          `Evidence: \`${sourceTask.evidencePath}:1\``,
+          "Risk: Hidden tooling was treated as product source.",
+          "Verification: expected command output would show the issue.",
+        ].join("\n"),
+        "utf8",
+      );
+      db.insert(tasks)
+        .values({
+          id: sourceTask.id,
+          projectId: "project-1",
+          title: sourceTask.title,
+          description: [`Scope: .`, `Report artifact: ${sourceTask.reportPath}`].join("\n"),
+          taskIntent: "audit",
+          status: "implementing",
+          plan: "## Plan\n- [ ] Repair audit report",
+          reworkRequested: true,
+          useSubagents: true,
+          reviewComments:
+            "## Blocking Findings\n- Hidden tooling evidence is not product evidence.",
+          autoReviewStateJson: JSON.stringify({
+            strategy: "full_re_review",
+            iteration: 2,
+            findings: [
+              {
+                id: "finding-hidden-tooling",
+                source: "review_gate",
+                text: "Audit report validator blocked completion (missing_report_manifest): hidden .agents evidence cannot support a trusted product audit.",
+              },
+            ],
+          }),
+        })
+        .run();
+    }
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-hidden-synthesis",
+        projectId: "project-1",
+        title: "Synthesize hidden-source audit",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "backlog",
+        paused: true,
+        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+      })
+      .run();
+    execFileSync(
+      "git",
+      [
+        "add",
+        ".agents/aaa/policy.md",
+        ".agents/aaa/workflow.md",
+        "zsrc/app.ts",
+        "audit/source-a.md",
+        "audit/source-b.md",
+      ],
+      { cwd: projectRoot, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const summary = createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-hidden-batch-canary",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: [
+        "task-audit-hidden-source-a",
+        "task-audit-hidden-source-b",
+        "task-audit-hidden-synthesis",
+      ],
+      synthesisTaskId: "task-audit-hidden-synthesis",
+      artifacts: [
+        {
+          taskId: "task-audit-hidden-source-a",
+          role: "report",
+          artifactPath: "audit/source-a.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-audit-hidden-source-b",
+          role: "report",
+          artifactPath: "audit/source-b.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-audit-hidden-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    for (const sourceTask of sourceTasks) {
+      await runImplementer(sourceTask.id, projectRoot);
+    }
+
+    expect(queryMock).not.toHaveBeenCalled();
+    for (const sourceTask of sourceTasks) {
+      const repaired = readFileSync(join(projectRoot, sourceTask.reportPath), "utf8");
+      const manifest = readAuditReportManifest(repaired);
+      expect(manifest.outcome).toBe("source_inconclusive");
+      expect(manifest.noFindingsClaims).toEqual([]);
+      expect(repaired).toContain("Audit source inconclusive.");
+      expect(repaired).not.toContain("`.agents/");
+
+      const artifact = findRoadmapBatchArtifactByTaskId(sourceTask.id);
+      if (!artifact) throw new Error(`missing artifact for ${sourceTask.id}`);
+      expect(artifact.state).toBe("source_inconclusive");
+      expect(artifact.failureFamily).toBe("source_inconclusive");
+      const validationDetails = JSON.parse(artifact.validationDetailsJson ?? "{}") as {
+        evidence?: { auditReportValidation?: { sourceClassification?: string } };
+      };
+      expect(validationDetails.evidence?.auditReportValidation?.sourceClassification).toBe(
+        "source_inconclusive",
+      );
+      const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({
+        state: "source_inconclusive",
+        classification: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        reworkStatus: "terminal_inconclusive",
+      });
+      const attemptValidationDetails = JSON.parse(attempts[0]!.validationDetailsJson ?? "{}") as {
+        evidence?: { auditReportValidation?: { sourceClassification?: string } };
+      };
+      expect(attemptValidationDetails.evidence?.auditReportValidation?.sourceClassification).toBe(
+        "source_inconclusive",
+      );
+    }
+
+    const batch = summarizeRoadmapBatch(summary.batchId);
+    expect(batch?.counts.valid).toBe(0);
+    expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+    expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
+    expect(batch?.synthesisReady).toBe(false);
+    expect(
+      db.select().from(tasks).where(eq(tasks.id, "task-audit-hidden-synthesis")).get(),
+    ).toEqual(
+      expect.objectContaining({
+        paused: true,
+        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+      }),
+    );
+    expect(claimBacklogTaskForAdvance("task-audit-hidden-synthesis")).toBe(false);
+    expect(
+      listRoadmapBatchArtifacts(summary.batchId).find(
+        (artifact) => artifact.taskId === "task-audit-hidden-synthesis",
+      ),
+    ).toEqual(expect.objectContaining({ state: "expected" }));
+    expect(existsSync(join(projectRoot, "audit", "summary.md"))).toBe(false);
+  });
+
+  it("keeps explicit product scope with only generic evidence source_inconclusive", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "app.ts"), "export const app = true;\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "audit", "generic.md"),
+      [
+        "# Audit",
+        "",
+        "No validated findings.",
+        "",
+        "## Finding: Candidate",
+        "Evidence: `src/app.ts:1`",
+        "Risk: This was not verified.",
+        "Verification: expected command output would show the issue.",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/app.ts", "audit/generic.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = [
+      "Scope: src",
+      "Risk hypotheses:",
+      "- risk-timeout: src timeout handling may deadlock under cancellation.",
+      "Report artifact: audit/generic.md",
+    ].join("\n");
+    db.insert(tasks)
+      .values({
+        id: "task-audit-generic-evidence-repair",
+        projectId: "project-1",
+        title: "Audit generic evidence",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        reviewComments:
+          "## Blocking Findings\n- Generic source presence is not risk-specific evidence.",
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "finding-missing-manifest",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (missing_report_manifest): missing source report manifest.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-generic-evidence-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-generic-evidence-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-generic-evidence-repair",
+          role: "report",
+          artifactPath: "audit/generic.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-generic-evidence-repair", projectRoot);
+
+    const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
+    expect(repaired).toContain("Audit source inconclusive.");
+    expect(repaired).toContain(
+      "Risk risk-timeout has no bound risk-specific substantive evidence.",
+    );
+    expect(repaired).toContain("`src/app.ts:1`");
+    const manifest = readAuditReportManifest(repaired);
+    expect(manifest.outcome).toBe("source_inconclusive");
+    expect(manifest.noFindingsClaims).toEqual([]);
+    expect(JSON.stringify(manifest.riskHypotheses)).toContain("risk-timeout");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-generic-evidence-repair");
+    if (!artifact) throw new Error("missing generic evidence repair artifact");
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
+    expect(listRoadmapBatchArtifactAttempts(artifact.id)[0]?.classification).toBe(
+      "source_inconclusive",
+    );
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-generic-evidence-repair"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain("terminal non-trusted");
+  });
+
+  it("keeps deterministic no-findings repair trusted when evidence is risk-specific", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "app.ts"),
+      "export function cancelTimeout(timeoutMs: number) { return timeoutMs > 0; }\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "audit", "risk-specific.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding: Candidate",
+        "Evidence: `src/app.ts:1`",
+        "Risk: This was not verified.",
+        "Verification: expected command output would show the issue.",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/app.ts", "audit/risk-specific.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = [
+      "Scope: src",
+      "Risk hypotheses:",
+      "- risk-timeout: src timeout cancellation handling may fail.",
+      "Report artifact: audit/risk-specific.md",
+    ].join("\n");
+    db.insert(tasks)
+      .values({
+        id: "task-audit-risk-specific-repair",
+        projectId: "project-1",
+        title: "Audit risk-specific evidence",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        reviewComments: "## Blocking Findings\n- Generic candidate finding must be repaired.",
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "finding-placeholder",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (placeholder commit hash): fake command output.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-risk-specific-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-risk-specific-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-risk-specific-repair",
+          role: "report",
+          artifactPath: "audit/risk-specific.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-risk-specific-repair", projectRoot);
+
+    const repaired = readFileSync(join(projectRoot, "audit", "risk-specific.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("risk-timeout");
+    expect(repaired).toContain("`src/app.ts:1`");
+    const manifest = readAuditReportManifest(repaired);
+    expect(manifest.outcome).toBe("validated_no_findings");
+    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-timeout");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-risk-specific-repair");
+    if (!artifact) throw new Error("missing risk-specific repair artifact");
+    const auditEvidenceUnits = listAuditEvidenceEvents({
+      taskId: "task-audit-risk-specific-repair",
+      auditPlanId: `batch:${artifact.batchId}:task:task-audit-risk-specific-repair`,
+    });
+    const validation = validateAuditReportArtifact({
+      text: repaired,
+      projectRoot,
+      taskId: "task-audit-risk-specific-repair",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/risk-specific.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits,
+      requireLedgerEvidence: true,
+    });
+    expect(validation.ok).toBe(true);
   });
 
   it("skips runtime repair when retrying an already-valid audit report after timeout", async () => {
@@ -1316,16 +1819,18 @@ describe("runImplementer rework behavior", () => {
       "",
       "No validated findings.",
       "",
+      "Risk hypotheses: risk-runtime `src/alpha.ts` runtime behavior is covered with no findings.",
+      "",
       "## Evidence Register",
       "",
       "| Scope | Checked evidence | Verification |",
       "| --- | --- | --- |",
-      '| `README.md` | `README.md:1` | Command `git grep -n "." -- README.md` output includes `README.md:1:# Project` |',
+      '| `README.md` | `README.md:2` | Command `git grep -n "." -- README.md` output includes `README.md:2:runtime notes` |',
       '| `src` | `src/alpha.ts:1`, `src/beta.ts:1`, `src/gamma.ts:1` | Command `git grep -n "." -- src/alpha.ts` output includes `src/alpha.ts:1:export const alpha = 1;` |',
       "",
       "## Checked Files",
       "",
-      "- `README.md:1`",
+      "- `README.md:2`",
       "- `src/alpha.ts:1`",
       "- `src/beta.ts:1`",
       "- `src/gamma.ts:1`",
@@ -1334,7 +1839,7 @@ describe("runImplementer rework behavior", () => {
       "",
       '- Command `git grep -n "." -- README.md` output:',
       "```",
-      "README.md:1:# Project",
+      "README.md:2:runtime notes",
       "```",
       '- Command `git grep -n "." -- src/alpha.ts` output:',
       "```",

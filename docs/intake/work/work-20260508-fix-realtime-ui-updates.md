@@ -2,7 +2,7 @@
 
 - Task ID: work-20260508-fix-realtime-ui-updates
 - Lane: work
-- Status: next
+- Status: done
 - Priority: high
 - Created: 2026-05-08
 - Due: unset

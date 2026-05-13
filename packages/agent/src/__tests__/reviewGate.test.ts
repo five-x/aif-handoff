@@ -57,9 +57,9 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     return initReportRepoWithReport(
       [
         "## Finding",
-        "Evidence: `README.md:1` contains the repository root documentation.",
-        "Risk: The audit scope depends on that documented root.",
-        "Verification: Command `rg reviewed README.md` output matched the inspected line.",
+        "Evidence: `src/config.ts:1` exports the reviewed configuration marker.",
+        "Risk: The audit scope depends on that source configuration marker.",
+        'Verification: Command `rg -n "reviewed" src/config.ts` output: `src/config.ts:1:export const reviewed = true;`',
         "",
       ].join("\n"),
     );

@@ -17,19 +17,25 @@ import {
   validateGeneratedAuditCard,
 } from "../auditRoadmapContract.js";
 
-function completeAuditDescription() {
+function completeAuditDescription(options: { synthesis?: boolean } = {}) {
+  const synthesis = options.synthesis ?? false;
   return [
-    "Scope: src/config.ts",
+    synthesis
+      ? "Scope: all audit/2026-05-13-*-audit.md reports from this audit batch."
+      : "Scope: src/config.ts",
     "Audit mandate: Act as the security owner and find actionable technical-quality risks.",
+    ...(synthesis
+      ? []
+      : ["Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults."]),
     "Allowed changes: only create/update one report artifact.",
-    "Report artifact: audit/config-audit.md",
+    synthesis ? "Report artifact: audit/summary.md" : "Report artifact: audit/config-audit.md",
     "Acceptance criteria: inspect the scoped files and record findings or none.",
     "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, Proposed fix:, and Verification: Command rg config src/config.ts output matched.",
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
     AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
-    AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+    ...(synthesis ? [AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT] : []),
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
     "Evidence: src/config.ts:1",
@@ -149,7 +155,7 @@ describe("auditRoadmapContract", () => {
   it("rejects audit synthesis cards missing outcome requirements", () => {
     const invalid = validateGeneratedAuditCard({
       title: "Synthesize audit findings",
-      description: completeAuditDescription().replace(
+      description: completeAuditDescription({ synthesis: true }).replace(
         `${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}\n`,
         "",
       ),
@@ -159,6 +165,94 @@ describe("auditRoadmapContract", () => {
     expect(invalid.issueDetails.map((issue) => issue.code)).toContain(
       "missing_synthesis_outcome_requirement",
     );
+  });
+
+  it("rejects source audit cards with broad or non-concrete scope", () => {
+    for (const scope of [
+      ".",
+      "./",
+      "*",
+      "packages/*",
+      "all files",
+      "entire repository",
+      "the runtime behavior",
+    ]) {
+      const invalid = validateGeneratedAuditCard({
+        title: "Audit: security configuration",
+        description: completeAuditDescription().replace("Scope: src/config.ts", `Scope: ${scope}`),
+      });
+
+      expect(invalid.ok, scope).toBe(false);
+      expect(invalid.issueDetails.map((issue) => issue.code)).toContain("invalid_source_scope");
+    }
+  });
+
+  it("requires parseable risk hypotheses for every source scope root", () => {
+    const missingLine = validateGeneratedAuditCard({
+      title: "Audit: security configuration",
+      description: completeAuditDescription().replace(
+        "Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults.\n",
+        "",
+      ),
+    });
+    expect(missingLine.issueDetails.map((issue) => issue.code)).toContain(
+      "missing_risk_hypotheses",
+    );
+
+    const missingScope = validateGeneratedAuditCard({
+      title: "Audit: security configuration",
+      description: completeAuditDescription().replace(
+        "Scope: src/config.ts",
+        "Scope: src/config.ts, src/index.ts",
+      ),
+    });
+    expect(missingScope.issueDetails.map((issue) => issue.code)).toContain(
+      "missing_scope_risk_hypothesis",
+    );
+  });
+
+  it("exempts synthesis cards from product risk hypotheses but requires report batch scope", () => {
+    expect(
+      validateGeneratedAuditCard({
+        title: "Synthesize audit findings",
+        description: completeAuditDescription({ synthesis: true }),
+      }),
+    ).toMatchObject({ ok: true });
+
+    const invalidScope = validateGeneratedAuditCard({
+      title: "Synthesize audit findings",
+      description: completeAuditDescription({ synthesis: true }).replace(
+        "Scope: all audit/2026-05-13-*-audit.md reports from this audit batch.",
+        "Scope: src/config.ts",
+      ),
+    });
+    expect(invalidScope.issueDetails.map((issue) => issue.code)).toContain(
+      "invalid_synthesis_scope",
+    );
+  });
+
+  it("requires report-only allowed changes for source and synthesis cards", () => {
+    for (const [title, description] of [
+      [
+        "Audit: security configuration",
+        completeAuditDescription().replace(
+          "Allowed changes: only create/update one report artifact.",
+          "Allowed changes: only create/update audit/config-audit.md and src/config.ts.",
+        ),
+      ],
+      [
+        "Synthesize audit findings",
+        completeAuditDescription({ synthesis: true }).replace(
+          "Allowed changes: only create/update one report artifact.",
+          "Allowed changes: only create/update audit/summary.md and src/config.ts.",
+        ),
+      ],
+    ]) {
+      const invalid = validateGeneratedAuditCard({ title, description });
+      expect(invalid.issueDetails.map((issue) => issue.code)).toContain(
+        "allowed_changes_not_report_only",
+      );
+    }
   });
 
   it("maps task completion issue codes to audit failure families", () => {

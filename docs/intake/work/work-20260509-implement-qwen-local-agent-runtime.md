@@ -2,7 +2,7 @@
 
 - Task ID: work-20260509-implement-qwen-local-agent-runtime
 - Lane: work
-- Status: next
+- Status: done
 - Priority: high
 - Created: 2026-05-09
 - Due: unset

@@ -14,7 +14,7 @@ work
 
 ## Status
 
-inbox
+done
 
 ## Priority
 

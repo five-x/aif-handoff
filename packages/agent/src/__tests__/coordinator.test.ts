@@ -119,7 +119,7 @@ function initGitFixture(prefix: string): string {
     stdio: "ignore",
   });
   execFileSync("git", ["config", "user.name", "T"], { cwd: rootPath, stdio: "ignore" });
-  writeFileSync(join(rootPath, "README.md"), "# audit fixture\n", "utf8");
+  writeFileSync(join(rootPath, "README.md"), "# audit fixture\nruntime audit evidence\n", "utf8");
   execFileSync("git", ["add", "README.md"], { cwd: rootPath, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
     cwd: rootPath,
@@ -161,7 +161,7 @@ function withAuditManifest(input: {
       { id: "risk-1", description: "Runtime evidence refs must be captured", status: "covered" },
     ],
     findings: [],
-    noFindingsClaims: [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+    noFindingsClaims: [{ id: "nf-1", riskIds: ["risk-1"], evidenceRefs: ["ev-1"] }],
     evidenceRefs: ["ev-1"],
   };
   return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
@@ -550,11 +550,11 @@ describe("coordinator", () => {
     let report = db.select().from(tasks).where(eq(tasks.id, "task-canary-report")).get();
     expect(report?.status).toBe("implementing");
     expect(report?.reworkRequested).toBe(true);
-    expect(report?.blockedReason).toContain("invalid_artifact_content");
+    expect(report?.blockedReason).toContain("invalid_inventory_only");
     let artifacts = listRoadmapBatchArtifacts(batch.batchId);
     let reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
     expect(reportArtifact?.state).toBe("invalid");
-    expect(reportArtifact?.failureFamily).toBe("invalid_artifact_content");
+    expect(reportArtifact?.failureFamily).toBe("invalid_inventory_only");
     const weakDetails = JSON.parse(reportArtifact?.validationDetailsJson ?? "{}");
     expect(reportArtifact?.contentSha).toMatch(/^[a-f0-9]{64}$/);
     expect(reportArtifact?.contentSha).toBe(
@@ -883,7 +883,7 @@ describe("coordinator", () => {
       stdio: "ignore",
     });
     execFileSync("git", ["config", "user.name", "T"], { cwd: rootPath, stdio: "ignore" });
-    writeFileSync(join(rootPath, "README.md"), "# audit fixture\n");
+    writeFileSync(join(rootPath, "README.md"), "# audit fixture\nruntime audit evidence\n");
     execFileSync("git", ["add", "README.md"], { cwd: rootPath, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
       cwd: rootPath,
@@ -908,10 +908,10 @@ describe("coordinator", () => {
         }),
         "",
         "## Finding 1",
-        "Evidence: `README.md:1` records the validated source audit report.",
+        "Evidence: `README.md:2` records the validated source audit report.",
         "Risk: Re-running the synthesis implementer can loop after the report is already committed.",
         "Proposed fix: Keep committed synthesis rework bounded.",
-        'Verification: Command `rg -n "audit fixture" README.md` output: `README.md:1:# audit fixture`.',
+        'Verification: Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`.',
         "",
       ].join("\n"),
     );
@@ -1277,8 +1277,8 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("placeholder commit hashes");
     expect(task!.blockedReason).toContain("failed after 3/3 review iterations");
     const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
-    expect(artifact?.state).toBe("invalid");
-    expect(artifact?.failureFamily).toBe("invalid_artifact_content");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("insufficient_substantive_evidence");
   });
 
   it("should route repeated weak audit evidence failures into repair mode before max iterations", async () => {
@@ -1383,7 +1383,7 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("low_quality_report_evidence");
     const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
     expect(artifact?.state).toBe("invalid");
-    expect(artifact?.failureFamily).toBe("invalid_artifact_content");
+    expect(artifact?.failureFamily).toBe("insufficient_substantive_evidence");
   });
 
   it("should surface missing runtime ledger refs for manifest-backed audit artifacts", async () => {
@@ -1443,12 +1443,13 @@ describe("coordinator", () => {
       "# Audit",
       "",
       "No validated findings.",
+      "Risk hypotheses: risk-1 for `README.md:2` runtime evidence refs were covered and absent.",
       "",
       "Checked files:",
-      "- `README.md:1`",
+      "- `README.md:2`",
       "",
       "Checked commands:",
-      '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
+      '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
       "",
     ].join("\n");
     mkdirSync(join(rootPath, "audit"), { recursive: true });

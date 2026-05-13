@@ -11,12 +11,20 @@ import {
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
 } from "../auditRoadmapContract.js";
 
-function completeAuditDescription() {
+function completeAuditDescription(options: { synthesis?: boolean } = {}) {
+  const synthesis = options.synthesis ?? false;
   return [
-    "Scope: src/config.ts",
+    synthesis
+      ? "Scope: all audit/2026-05-13-*-audit.md reports from this audit batch."
+      : "Scope: src/config.ts",
     "Audit mandate: Act as the security owner and find actionable technical-quality risks.",
+    ...(synthesis
+      ? []
+      : ["Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults."]),
     "Allowed changes: only create/update one report artifact.",
-    "Report artifact: audit/config-audit.md",
+    synthesis
+      ? "Report artifact: audit/security-summary.md"
+      : "Report artifact: audit/config-audit.md",
     "Acceptance criteria: inspect the scoped files and record findings or none.",
     "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, Proposed fix:, and Verification: Command rg config src/config.ts output matched.",
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
@@ -173,10 +181,7 @@ describe("taskIntent", () => {
     const result = validateGeneratedTaskIntent({
       taskIntent: "audit",
       title: "Synthesize audit findings",
-      description: completeAuditDescription().replace(
-        "Report artifact: audit/config-audit.md",
-        "Report artifact: audit/security-summary.md",
-      ),
+      description: completeAuditDescription({ synthesis: true }),
     });
 
     expect(result).toEqual({ ok: true, issues: [] });

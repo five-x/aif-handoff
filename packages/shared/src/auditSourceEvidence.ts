@@ -28,6 +28,7 @@ export interface AuditSourceEvidenceClassification {
 
 export interface AuditSourceEvidenceReader {
   fileLineCount(path: string): number | null;
+  fileLine?(path: string, line: number): string | null;
 }
 
 const LINE_REF_PATTERN =
@@ -94,6 +95,59 @@ function fileLineCount(projectRoot: string, path: string): number | null {
   }
 }
 
+function fileLine(projectRoot: string, path: string, line: number): string | null {
+  if (line < 1) return null;
+  const absPath = resolve(projectRoot, path);
+  if (!existsSync(absPath)) return null;
+  try {
+    const stat = statSync(absPath);
+    if (!stat.isFile() || stat.size > 512_000) return null;
+    return readFileSync(absPath, "utf8").split(/\r?\n/)[line - 1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function isConservativeMetadataOnlyLineOne(input: {
+  path: string;
+  line: number;
+  text: string | null;
+}): boolean {
+  if (input.line !== 1 || input.text == null) return false;
+  const trimmed = input.text.trim();
+  if (!trimmed) return true;
+  if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|kt|cs|c|cpp|h|hpp)$/i.test(input.path)) {
+    return /^(?:\/\/|\/\*|\*|#(?!\s*(?:!|include\b|define\b))|<!--)/.test(trimmed);
+  }
+  if (/^(?:---|\+\+\+|#\s+|<!--|\/\/|\/\*|\*)/.test(trimmed)) return true;
+  if (/^[{[]$/.test(trimmed)) return true;
+  return false;
+}
+
+export function hasScopedNoFindingsRiskClaim(text: string): boolean {
+  if (!/\bNo validated findings\b/i.test(text)) return false;
+  const scopedPathToken =
+    "`(?:\\.{1,2}/)?(?:[\\w.@-]+/)*[\\w.@-]+(?:\\.[A-Za-z0-9]{1,12})?(?::\\d+(?:(?::|[-\\u2013])\\d+)?)?`";
+  if (
+    new RegExp(
+      `\\bRisk hypotheses?\\s*:[^\\n]*\\brisk-[a-z0-9][a-z0-9-]*\\b[^\\n]*${scopedPathToken}`,
+      "i",
+    ).test(text)
+  ) {
+    return true;
+  }
+  if (/"riskHypotheses"\s*:\s*\[[\s\S]{0,800}\brisk-[a-z0-9][a-z0-9-]*\b/i.test(text)) {
+    return true;
+  }
+  if (new RegExp(`\\babsence\\s+reasoning\\s*:[^\\n]*${scopedPathToken}`, "i").test(text)) {
+    return true;
+  }
+  return new RegExp(
+    `\\b(?:Scoped\\s+)?(?:(?:no-findings|no findings|absence)\\s+claim|absence\\s+reasoning)\\s*:[^\\n]*${scopedPathToken}[^\\n]*(?:\\b(?:covered|absent|ruled out|not present|no findings?)\\b)`,
+    "i",
+  ).test(text);
+}
+
 function splitFindingSections(text: string): string[] {
   return text
     .split(/\n(?=#{2,4}\s+|\s*[-*]\s+(?:finding|issue|risk)\b)/i)
@@ -109,6 +163,7 @@ export function collectExistingAuditLineEvidenceRefs(input: {
   text: string;
   projectRoot: string;
   excludedReferencedPaths?: string[];
+  excludeMetadataOnlyLineOne?: boolean;
   sourceReader?: AuditSourceEvidenceReader;
 }): string[] {
   const excludedPaths = new Set(
@@ -133,6 +188,14 @@ export function collectExistingAuditLineEvidenceRefs(input: {
       ? input.sourceReader.fileLineCount(path)
       : fileLineCount(input.projectRoot, path);
     if (lineCount === null || endLine > lineCount) continue;
+    if (input.excludeMetadataOnlyLineOne) {
+      const lineText = input.sourceReader?.fileLine
+        ? input.sourceReader.fileLine(path, startLine)
+        : fileLine(input.projectRoot, path, startLine);
+      if (isConservativeMetadataOnlyLineOne({ path, line: startLine, text: lineText })) {
+        continue;
+      }
+    }
     refs.add(`${path}:${startLine}`);
   }
   return [...refs].sort();
@@ -179,6 +242,7 @@ export function countValidatedAuditFindings(input: {
         text: section,
         projectRoot: input.projectRoot,
         excludedReferencedPaths: input.excludedReferencedPaths,
+        excludeMetadataOnlyLineOne: true,
         sourceReader: input.sourceReader,
       }).length > 0
     );
@@ -193,6 +257,10 @@ export function classifyAuditSourceEvidence(input: {
   sourceReader?: AuditSourceEvidenceReader;
 }): AuditSourceEvidenceClassification {
   const existingLineEvidenceRefs = collectExistingAuditLineEvidenceRefs(input);
+  const substantiveLineEvidenceRefs = collectExistingAuditLineEvidenceRefs({
+    ...input,
+    excludeMetadataOnlyLineOne: true,
+  });
   const commandEvidence = extractAuditCommandEvidence(input.text);
   const substantiveCommandEvidence = commandEvidence.filter((entry) => !entry.inventoryOnly);
   const inventoryCommandEvidence = commandEvidence.filter((entry) => entry.inventoryOnly);
@@ -208,7 +276,8 @@ export function classifyAuditSourceEvidence(input: {
       );
     if (
       hasNoFindingsRegister &&
-      existingLineEvidenceRefs.length > 0 &&
+      hasScopedNoFindingsRiskClaim(input.text) &&
+      substantiveLineEvidenceRefs.length > 0 &&
       substantiveCommandEvidence.length > 0
     ) {
       classification = "validated_no_findings";

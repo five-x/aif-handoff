@@ -309,4 +309,55 @@ describe("audit contract corpus", () => {
     },
     20_000,
   );
+
+  it.each([
+    {
+      label: "changing runtime risk ids",
+      build: (root: string) => {
+        const snapshot = auditSnapshot(root);
+        return buildManifestBackedReport({
+          report: validFindingsAuditReportCases[0],
+          snapshot,
+          evidenceRiskHypothesisIds: ["risk-other"],
+        });
+      },
+      expectedIssues: ["audit_evidence_risk_mismatch"],
+      expectedFamily: "invalid_artifact_integrity",
+    },
+    {
+      label: "changing runtime scope ids",
+      build: (root: string) => {
+        const snapshot = auditSnapshot(root);
+        return buildManifestBackedReport({
+          report: validFindingsAuditReportCases[0],
+          snapshot,
+          evidenceScopeIds: ["src/config.ts"],
+        });
+      },
+      expectedIssues: ["audit_evidence_scope_mismatch"],
+      expectedFamily: "invalid_artifact_integrity",
+    },
+  ])(
+    "fails manifest-backed findings mutation: $label",
+    (mutation) => {
+      const report = mutation.build(corpusRoot);
+
+      const result = validateAuditReportArtifact({
+        text: report.text,
+        projectRoot: corpusRoot,
+        taskId: report.taskId,
+        scopeRoots: validFindingsAuditReportCases[0].scopeRoots,
+        reportArtifactPaths: [report.artifactPath],
+        expectedReportArtifactPath: report.artifactPath,
+        auditEvidenceUnits: report.evidenceUnits,
+        requireLedgerEvidence: true,
+        requireProposedFix: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(issueCodes(result)).toEqual(expect.arrayContaining(mutation.expectedIssues));
+      expect(failureFamily(result)).toBe(mutation.expectedFamily);
+    },
+    20_000,
+  );
 });

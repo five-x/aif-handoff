@@ -215,7 +215,7 @@ The target audit batch lifecycle is:
 
 1. `expected`: required source reports have not all arrived.
 2. `source_rework_needed`: any required source report is missing, invalid, or requires another attempt before synthesis.
-3. `synthesis_ready`: source outcomes are sufficient to synthesize a valid findings result, valid no-findings result, or terminal inconclusive result.
+3. `synthesis_ready`: trusted source outcomes are sufficient to synthesize a valid findings result or valid no-findings result.
 4. `complete_valid_findings`: at least one validated finding exists and final synthesis preserves it.
 5. `complete_valid_no_findings`: every required source report is `valid_no_findings`.
 6. `terminal_inconclusive`: no validated findings survive, and the source reports do not prove trusted no-findings.
@@ -224,7 +224,7 @@ Batch precedence rules:
 
 - `valid_findings` takes precedence over no-findings when at least one scoped, validated finding exists.
 - `complete_valid_no_findings` requires all required source reports to be `valid_no_findings`.
-- `inventory_only_invalid`, `insufficient_substantive_evidence`, and `source_inconclusive` cannot produce `complete_valid_no_findings`.
+- `inventory_only_invalid`, `insufficient_substantive_evidence`, and `source_inconclusive` cannot produce `synthesis_ready` or `complete_valid_no_findings`.
 - Missing required source reports block trusted final conclusions.
 - Final synthesis prose must be downgraded when it is stronger than source report classifications.
 - A terminal inconclusive batch is a fail-closed audit outcome, not a product-quality pass.

@@ -61,6 +61,9 @@ function withManifest(input: {
   omitTaskId?: boolean;
   omitBatchId?: boolean;
   omitRoadmapAlias?: boolean;
+  scopeCoverage?: unknown[];
+  riskHypotheses?: unknown[];
+  noFindingsClaims?: unknown[];
 }): string {
   const taskId = input.taskId ?? "task-audit";
   const manifest = {
@@ -73,8 +76,8 @@ function withManifest(input: {
     contentSha256: input.contentSha256 ?? computeAuditReportContentSha256(input.body),
     sourceSnapshot: { ...input.snapshot, dirty: false },
     outcome: input.outcome ?? "validated_no_findings",
-    scopeCoverage: [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
-    riskHypotheses: [
+    scopeCoverage: input.scopeCoverage ?? [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
+    riskHypotheses: input.riskHypotheses ?? [
       { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
     ],
     findings:
@@ -84,7 +87,7 @@ function withManifest(input: {
     noFindingsClaims:
       input.outcome === "validated_findings_present"
         ? []
-        : [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+        : (input.noFindingsClaims ?? [{ id: "nf-1", evidenceRefs: ["ev-1"] }]),
     evidenceRefs: ["ev-1"],
   };
   return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
@@ -181,7 +184,36 @@ describe("auditReportValidator", () => {
     );
   });
 
-  it("accepts valid no-findings reports with checked files and commands", () => {
+  it("accepts valid no-findings reports with checked files, commands, and scoped risk claims", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.substantiveEvidence).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(result.existingReferencedPaths).toContain("src/config.ts");
+  });
+
+  it("rejects plain no-findings reports without risk hypotheses or scoped claims", () => {
     const root = initRepo();
     const text = [
       "# Runtime Audit",
@@ -203,10 +235,41 @@ describe("auditReportValidator", () => {
       requireProposedFix: true,
     });
 
-    expect(result.ok).toBe(true);
-    expect(result.substantiveEvidence).toBe(true);
-    expect(result.sourceClassification).toBe("validated_no_findings");
-    expect(result.existingReferencedPaths).toContain("src/config.ts");
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toContain("missing_risk_hypotheses");
+  });
+
+  it.each([
+    "Risk hypotheses: covered and absent",
+    "Risk hypotheses: risk-1 was covered and is absent",
+    "Scoped no-findings claim: timeout risk is absent",
+  ])("rejects generic no-findings claim text without path or risk id: %s", (claim) => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      claim,
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toContain("missing_risk_hypotheses");
   });
 
   it.each([
@@ -287,9 +350,9 @@ describe("auditReportValidator", () => {
       "# Runtime Audit",
       "",
       "No validated findings.",
+      "Scoped no-findings claim: `src/config.ts` timeout configuration risk is absent.",
       "",
       "Checked files:",
-      "- `README.md:1-1`",
       "- `src/config.ts:1-1`",
       "",
       "Checked commands:",
@@ -300,18 +363,13 @@ describe("auditReportValidator", () => {
     const result = validateAuditReportArtifact({
       text,
       projectRoot: root,
-      taskDescription: "Scope: README.md, src/config.ts",
+      taskDescription: "Scope: src/config.ts",
       reportArtifactPaths: ["audit/runtime-audit.md"],
       requireProposedFix: true,
     });
 
     expect(result.ok).toBe(true);
     expect(result.scopeCoverage).toEqual([
-      expect.objectContaining({
-        root: "README.md",
-        coveredFiles: ["README.md"],
-        ok: true,
-      }),
       expect.objectContaining({
         root: "src/config.ts",
         coveredFiles: ["src/config.ts"],
@@ -467,6 +525,7 @@ describe("auditReportValidator", () => {
     }
     const text = [
       "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` source exports was covered and is absent.",
       "",
       "Checked files:",
       "- `src/config.ts:1`",
@@ -503,6 +562,7 @@ describe("auditReportValidator", () => {
       "# Runtime Audit",
       "",
       "No validated findings.",
+      "Scoped no-findings claim: `src/config.ts` timeout configuration risk is absent.",
       "",
       "Checked files:",
       "- `src/config.ts:1`",
@@ -529,6 +589,171 @@ describe("auditReportValidator", () => {
         ok: true,
       }),
     ]);
+  });
+
+  it("rejects metadata/header-only line-one no-findings evidence", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Scoped no-findings claim: `README.md` documentation risk is absent.",
+      "",
+      "Checked files:",
+      "- `README.md:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "test" README.md` output: `1:# test`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toContain("missing_substantive_evidence");
+  });
+
+  it("rejects structured findings supported only by header-only line-one citations", () => {
+    const root = initRepo();
+    const text = [
+      "## Finding",
+      "Evidence: `README.md:1` is a cited repository line.",
+      "Risk: Header-only citations are not substantive audit evidence.",
+      "Proposed fix: Cite source behavior instead of document metadata.",
+      '- Verification: Command `rg -n "test" README.md` output: `1:# test`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_findings_present");
+    expect(issueCodes(result)).toContain("missing_substantive_evidence");
+  });
+
+  it("does not count header-only line-one citations as declared scope coverage", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Scoped no-findings claim: `README.md` documentation risk is absent.",
+      "",
+      "Checked files:",
+      "- `README.md:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "test" README.md` output: `1:# test`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: README.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("missing_scope_coverage");
+    expect(result.scopeCoverage).toEqual([
+      expect.objectContaining({
+        root: "README.md",
+        coveredFiles: [],
+        ok: false,
+      }),
+    ]);
+  });
+
+  it("rejects explicit root scope as unverifiable coverage", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: .",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("missing_scope_coverage");
+
+    const multiline = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope:\n- `.`",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(multiline.ok).toBe(false);
+    expect(issueCodes(multiline)).toContain("missing_scope_coverage");
+  });
+
+  it("excludes hidden/generated evidence unless directly scoped", () => {
+    const root = initRepo();
+    mkdirSync(join(root, ".ai-factory"), { recursive: true });
+    writeFileSync(join(root, ".ai-factory", "config.yaml"), "enabled: true\n", "utf8");
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Scoped no-findings claim: `.ai-factory/config.yaml` generated-config risk is absent.",
+      "",
+      "Checked files:",
+      "- `.ai-factory/config.yaml:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "enabled" .ai-factory/config.yaml` output: `1:enabled: true`',
+      "",
+    ].join("\n");
+
+    const unscoped = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+    expect(unscoped.ok).toBe(false);
+    expect(unscoped.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(unscoped)).toContain("irrelevant_audit_evidence");
+
+    const scoped = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: .ai-factory/config.yaml",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+    expect(scoped.ok).toBe(true);
+    expect(scoped.sourceClassification).toBe("validated_no_findings");
+    expect(issueCodes(scoped)).not.toContain("irrelevant_audit_evidence");
   });
 
   it("rejects reports that cite only root docs when declared scope is source code", () => {
@@ -572,12 +797,13 @@ describe("auditReportValidator", () => {
       "# Batch Audit",
       "",
       "No validated findings.",
+      "Scoped no-findings claim: `src/config.ts` timeout configuration risk is absent.",
       "",
       "Checked files:",
-      "- `docs/ops/runbook.md:1`",
+      "- `src/config.ts:1`",
       "",
       "Checked commands:",
-      '- Command `rg -n "Runbook" docs/ops` output: `docs/ops/runbook.md:1:# Runbook`',
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
       "",
     ].join("\n");
 
@@ -688,6 +914,69 @@ describe("auditReportValidator", () => {
     expect(result.ok).toBe(true);
     expect(result.manifestStatus).toBe("valid");
     expect(issueCodes(result)).not.toContain("missing_audit_evidence_ref");
+  });
+
+  it("rejects no-findings manifests without risk hypothesis ids", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        riskHypotheses: [],
+        noFindingsClaims: [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot })],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("missing_risk_hypotheses");
+  });
+
+  it("rejects no-findings manifests without scope coverage ids", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        scopeCoverage: [],
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot })],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("missing_scope_coverage");
   });
 
   it("does not require committed report manifests to self-reference the report commit", () => {

@@ -32,6 +32,7 @@ function substantiveNoFindingsReport(path = "src/config.ts"): string {
     "# Runtime Audit",
     "",
     "No validated findings.",
+    `Scoped no-findings claim: \`${path}\` runtime risk is absent.`,
     "",
     "## Checked Files",
     "",

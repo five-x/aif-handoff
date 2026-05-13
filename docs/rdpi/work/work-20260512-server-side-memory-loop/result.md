@@ -12,6 +12,7 @@ Gate status:
 - `TEST PASS`: passed after the redaction fix.
 - `REVIEW PASS`: passed after the redaction fix.
 - `memsync MODE=auto`: success.
+- Deployment acceptance on `192.168.88.67`: passed.
 
 ## Implementation summary
 
@@ -77,6 +78,22 @@ Independent final reviewer verdict:
 - `REVIEW PASS`.
 - Reviewer verified tag redaction, note sanitization, blocked approval, clean-only retrieval, and approved-to-pending demotion on unsafe edits.
 - Residual gap: richer tag/note and approved-to-blocked retrieval regressions are data-layer tests rather than full end-to-end API tests.
+
+## Deployment acceptance
+
+The deployed verification server was checked after rollout:
+
+- Deployed repository commit: `b6ef199 feat: add server-side memory loop`.
+- API health returned `ok`.
+- `/api/memory` routes were live.
+- Project `botIntevra` had no approved memory remaining after cleanup.
+- Canary `78dca6ba-1bcb-44ad-84f8-eafdd04368ed` verified the happy path: manual memory create, clean edit, approve, chat retrieval, usage event with `workflowKind=chat` and `source=api:chat`, then expiration cleanup.
+- Canary `91f2ecfe-5fac-40d3-b658-13c4e65ee6ec` verified the redaction guard: blocked/redacted content, rejected state, `approvedAt=null`, and lifecycle entries for create/reject.
+
+Independent deployment gates:
+
+- `TEST PASS`: read-only API assertions passed for health, approved/expired/rejected filters, usage events, lifecycle events, and redaction-blocked state.
+- `REVIEW PASS`: no blocking deployed-acceptance issues. Non-blocking notes: set `AIF_MEMORY_ENABLED=true` explicitly in production env for operator clarity, and run a non-chat workflow canary if deployed evidence is needed for planner/implementer/reviewer prompt injection.
 
 ## Files touched
 

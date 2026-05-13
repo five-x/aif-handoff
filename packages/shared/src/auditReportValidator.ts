@@ -5,6 +5,8 @@ import { relative, resolve, sep } from "node:path";
 import {
   classifyAuditSourceEvidence,
   extractSubstantiveAuditCommandEvidence,
+  hasScopedNoFindingsRiskClaim,
+  isConservativeMetadataOnlyLineOne,
   type AuditSourceClassification,
 } from "./auditSourceEvidence.js";
 import type { AuditEvidenceUnit } from "./auditEvidenceLedger.js";
@@ -25,6 +27,8 @@ export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "missing_substantive_evidence",
   "missing_declared_scope_root",
   "missing_scope_coverage",
+  "missing_risk_hypotheses",
+  "irrelevant_audit_evidence",
   "missing_report_manifest",
   "invalid_report_manifest",
   "unsupported_report_manifest_version",
@@ -199,6 +203,7 @@ interface AuditReportSourceReader {
   pathExists(path: string): boolean;
   pathKind(path: string): SourcePathKind;
   fileLineCount(path: string): number | null;
+  fileLine(path: string, line: number): string | null;
   collectRepresentativeFiles(directory: string, limit?: number): string[];
 }
 
@@ -386,6 +391,9 @@ function createLiveSourceReader(projectRoot: string): AuditReportSourceReader {
     fileLineCount(path: string): number | null {
       return fileLineCount(projectRoot, path);
     },
+    fileLine(path: string, line: number): string | null {
+      return fileLine(projectRoot, path, line);
+    },
     collectRepresentativeFiles(directory: string, limit = 1_000): string[] {
       return collectRepresentativeFilesUnderDirectory(projectRoot, directory, limit);
     },
@@ -397,17 +405,39 @@ function createGitSnapshotSourceReader(
   snapshot: AuditReportSourceSnapshot,
 ): AuditReportSourceReader {
   const treeish = snapshot.tree || snapshot.commit || "HEAD";
+  const kindCache = new Map<string, SourcePathKind>();
+  const contentCache = new Map<string, string | null>();
+  const representativeFilesCache = new Map<string, string[]>();
   const objectFor = (path: string): string | null => {
     const gitPath = safeGitObjectPath(path);
     return gitPath ? `${treeish}:${gitPath}` : null;
   };
   const kindFor = (path: string): SourcePathKind => {
+    const normalized = normalizePathForComparison(path);
+    const cached = kindCache.get(normalized);
+    if (cached) return cached;
     const object = objectFor(path);
-    if (!object) return "missing";
+    if (!object) {
+      kindCache.set(normalized, "missing");
+      return "missing";
+    }
     const type = runGit(projectRoot, ["cat-file", "-t", object]);
-    if (type === "blob") return "file";
-    if (type === "tree") return "directory";
-    return type ? "other" : "missing";
+    const kind =
+      type === "blob" ? "file" : type === "tree" ? "directory" : type ? "other" : "missing";
+    kindCache.set(normalized, kind);
+    return kind;
+  };
+  const fileContentFor = (path: string): string | null => {
+    const normalized = normalizePathForComparison(path);
+    if (contentCache.has(normalized)) return contentCache.get(normalized) ?? null;
+    if (kindFor(path) !== "file") {
+      contentCache.set(normalized, null);
+      return null;
+    }
+    const object = objectFor(path);
+    const content = object ? runGit(projectRoot, ["show", object]) : null;
+    contentCache.set(normalized, content);
+    return content;
   };
   return {
     pathExists(path: string): boolean {
@@ -417,26 +447,40 @@ function createGitSnapshotSourceReader(
       return kindFor(path);
     },
     fileLineCount(path: string): number | null {
-      if (kindFor(path) !== "file") return null;
-      const object = objectFor(path);
-      if (!object) return null;
-      const content = runGit(projectRoot, ["show", object]);
+      const content = fileContentFor(path);
       if (content == null) return null;
       if (content.length === 0) return 0;
       return content.split(/\r?\n/).length;
     },
+    fileLine(path: string, line: number): string | null {
+      if (line < 1) return null;
+      const content = fileContentFor(path);
+      if (content == null) return null;
+      return content.split(/\r?\n/)[line - 1] ?? null;
+    },
     collectRepresentativeFiles(directory: string, limit = 1_000): string[] {
+      const cacheKey = `${normalizePathForComparison(directory)}:${limit}`;
+      const cached = representativeFilesCache.get(cacheKey);
+      if (cached) return cached;
       const gitPath = safeGitObjectPath(directory);
-      if (!gitPath || kindFor(gitPath) !== "directory") return [];
+      if (!gitPath || kindFor(gitPath) !== "directory") {
+        representativeFilesCache.set(cacheKey, []);
+        return [];
+      }
       const output = runGit(projectRoot, ["ls-tree", "-r", "--name-only", treeish, gitPath]);
-      if (!output) return [];
-      return output
+      if (!output) {
+        representativeFilesCache.set(cacheKey, []);
+        return [];
+      }
+      const files = output
         .split(/\r?\n/)
         .map(normalizeRelativePath)
         .filter(Boolean)
         .filter((path) => !path.split("/").some((part) => IGNORED_SCOPE_DIRECTORY_NAMES.has(part)))
         .slice(0, limit)
         .sort();
+      representativeFilesCache.set(cacheKey, files);
+      return files;
     },
   };
 }
@@ -483,7 +527,9 @@ function hasManifestIssue(issues: AuditReportValidationIssue[]): boolean {
       entry.code === "invalid_report_manifest" ||
       entry.code === "unsupported_report_manifest_version" ||
       entry.code === "missing_report_manifest_fields" ||
-      entry.code === "missing_audit_evidence_ref",
+      entry.code === "missing_audit_evidence_ref" ||
+      entry.code === "missing_risk_hypotheses" ||
+      entry.code === "missing_scope_coverage",
   );
 }
 
@@ -630,6 +676,12 @@ function validateManifestEvidenceRefs(input: {
     }
   }
 
+  const validatesTrustedClaims =
+    (input.manifest.outcome === "validated_findings_present" &&
+      input.manifest.findings.length > 0) ||
+    (input.manifest.outcome === "validated_no_findings" &&
+      input.manifest.noFindingsClaims.length > 0);
+
   if (input.manifest.outcome === "validated_no_findings") {
     if (!citedUnits.some((unit) => unit.evidenceGrade === "substantive")) {
       issues.push(
@@ -639,6 +691,9 @@ function validateManifestEvidenceRefs(input: {
         ),
       );
     }
+  }
+
+  if (validatesTrustedClaims) {
     const citedScopeIds = [...new Set(citedUnits.flatMap((unit) => unit.scopeIds))].sort();
     const requiredScopeIds = manifestScopeIds(input.manifest);
     if (!hasAllIds(citedScopeIds, requiredScopeIds)) {
@@ -732,6 +787,38 @@ function parseScopeRootsFromTaskDescription(taskDescription: string | null | und
     inScopeList = false;
   }
   return [...roots].sort();
+}
+
+function hasExplicitRootDotScope(taskDescription: string | null | undefined): boolean {
+  if (!taskDescription) return false;
+  let inScopeList = false;
+  const isRootDot = (value: string): boolean =>
+    value
+      .trim()
+      .replace(/^[-*]\s+/, "")
+      .replace(/^['"`]+|['"`]+$/g, "") === ".";
+  for (const line of taskDescription.split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:[-*]\s*)?Scope\s*:\s*(.*)$/i);
+    if (match) {
+      const value = match[1].trim();
+      inScopeList = value.length === 0;
+      if (isRootDot(value) || value.split(/[,;]+/).some(isRootDot)) {
+        return true;
+      }
+      continue;
+    }
+    if (!inScopeList) continue;
+    if (/^\s*$/.test(line)) continue;
+    if (/^\s*(?:[-*]\s*)?[A-Za-z][A-Za-z -]{1,40}\s*:/i.test(line)) {
+      inScopeList = false;
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(line) && isRootDot(line)) {
+      return true;
+    }
+    inScopeList = false;
+  }
+  return false;
 }
 
 function resolveScopeRoots(input: AuditReportValidationInput): {
@@ -856,6 +943,19 @@ function fileLineCount(projectRoot: string, path: string): number | null {
   }
 }
 
+function fileLine(projectRoot: string, path: string, line: number): string | null {
+  if (line < 1) return null;
+  const absPath = resolve(projectRoot, path);
+  if (!isInsideRoot(projectRoot, absPath) || !existsSync(absPath)) return null;
+  try {
+    const stat = statSync(absPath);
+    if (!stat.isFile() || stat.size > 512_000) return null;
+    return readFileSync(absPath, "utf8").split(/\r?\n/)[line - 1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function hasInvalidExistingLineReference(
   text: string,
   projectRoot: string,
@@ -908,6 +1008,16 @@ function collectExistingRefsWithLineNumbers(
         reference.end >= reference.start &&
         reference.end <= lineCount
       ) {
+        const lineText = sourceReader.fileLine(normalized, reference.start);
+        if (
+          isConservativeMetadataOnlyLineOne({
+            path: normalized,
+            line: reference.start,
+            text: lineText,
+          })
+        ) {
+          continue;
+        }
         refs.add(normalized);
       }
     }
@@ -933,6 +1043,49 @@ function isPathUnderDirectory(path: string, directory: string): boolean {
   return (
     normalizedPath === normalizedDirectory || normalizedPath.startsWith(`${normalizedDirectory}/`)
   );
+}
+
+function isDefaultExcludedAuditEvidencePath(path: string): boolean {
+  const normalized = normalizePathForComparison(path).replace(/\/+$/g, "");
+  return (
+    normalized === ".agents" ||
+    normalized.startsWith(".agents/") ||
+    normalized === ".ai-factory" ||
+    normalized.startsWith(".ai-factory/") ||
+    normalized === ".codex" ||
+    normalized.startsWith(".codex/") ||
+    normalized === "docs/rdpi" ||
+    normalized.startsWith("docs/rdpi/") ||
+    normalized === "docs/intake" ||
+    normalized.startsWith("docs/intake/") ||
+    normalized === "docs/memory" ||
+    normalized.startsWith("docs/memory/")
+  );
+}
+
+function isDirectlyScopedExcludedEvidencePath(path: string, scopeRoots: string[]): boolean {
+  return scopeRoots.some((root) => {
+    if (!isDefaultExcludedAuditEvidencePath(root)) return false;
+    return isSameRepositoryPath(path, root) || isPathUnderDirectory(path, root);
+  });
+}
+
+function collectDefaultExcludedEvidencePaths(input: {
+  referencedPaths: string[];
+  reportArtifactPaths: string[];
+  scopeRoots: string[];
+}): string[] {
+  return [...new Set([...input.referencedPaths, ...input.reportArtifactPaths])]
+    .filter((path) => {
+      if (input.reportArtifactPaths.some((artifact) => isSameRepositoryPath(path, artifact))) {
+        return true;
+      }
+      return (
+        isDefaultExcludedAuditEvidencePath(path) &&
+        !isDirectlyScopedExcludedEvidencePath(path, input.scopeRoots)
+      );
+    })
+    .sort();
 }
 
 function collectRepresentativeFilesUnderDirectory(
@@ -1206,17 +1359,23 @@ export function validateAuditReportArtifact(
       ? createGitSnapshotSourceReader(input.projectRoot, manifest.sourceSnapshot)
       : createLiveSourceReader(input.projectRoot);
   const { parsedScopeRoots, scopeRoots } = resolveScopeRoots(input);
+  const explicitRootDotScope = hasExplicitRootDotScope(input.taskDescription);
   const reportArtifactPaths = [
     ...new Set((input.reportArtifactPaths ?? []).map(normalizeRelativePath)),
   ].sort();
   const allowedEvidenceArtifactPaths = [
     ...new Set((input.allowedEvidenceArtifactPaths ?? []).map(normalizeRelativePath)),
   ].sort();
-  const excludedPaths = new Set(reportArtifactPaths.map(normalizePathForComparison));
   const allowedPathSet = new Set(
     [...allowedEvidenceArtifactPaths, ...reportArtifactPaths].map(normalizePathForComparison),
   );
   const referencedPaths = extractReferencedPaths(text, input.projectRoot, sourceReader);
+  const excludedEvidencePaths = collectDefaultExcludedEvidencePaths({
+    referencedPaths,
+    reportArtifactPaths,
+    scopeRoots,
+  });
+  const excludedPaths = new Set(excludedEvidencePaths.map(normalizePathForComparison));
   const { existing, missing } = classifyReferencedPaths(
     referencedPaths,
     allowedPathSet,
@@ -1232,7 +1391,7 @@ export function validateAuditReportArtifact(
   const sourceEvidenceClassification = classifyAuditSourceEvidence({
     text,
     projectRoot: input.projectRoot,
-    excludedReferencedPaths: reportArtifactPaths,
+    excludedReferencedPaths: excludedEvidencePaths,
     requireProposedFix: input.requireProposedFix,
     sourceReader,
   });
@@ -1303,6 +1462,26 @@ export function validateAuditReportArtifact(
           `Audit report manifest is missing required fields: ${missingFields.join(", ")}.`,
         ),
       );
+    }
+    if (manifest.outcome === "validated_no_findings") {
+      const requiredScopeIds = manifestScopeIds(manifest);
+      const requiredRiskIds = manifestRiskHypothesisIds(manifest);
+      if (requiredScopeIds.length === 0) {
+        issues.push(
+          issue(
+            "missing_scope_coverage",
+            "Audit report manifest claims validated no-findings but does not declare any scoped coverage IDs.",
+          ),
+        );
+      }
+      if (requiredRiskIds.length === 0) {
+        issues.push(
+          issue(
+            "missing_risk_hypotheses",
+            "Audit report manifest claims validated no-findings but does not declare any covered risk hypothesis IDs.",
+          ),
+        );
+      }
     }
     const identityMismatches: string[] = [];
     if (expectedPlanId && manifest.auditPlanId !== expectedPlanId) {
@@ -1394,6 +1573,15 @@ export function validateAuditReportArtifact(
     );
   }
 
+  if (!manifest && /\bNo validated findings\b/i.test(text) && !hasScopedNoFindingsRiskClaim(text)) {
+    issues.push(
+      issue(
+        "missing_risk_hypotheses",
+        "Plain no-findings reports must state explicit risk hypotheses or an equivalent scoped no-findings claim.",
+      ),
+    );
+  }
+
   if (text.trim()) {
     for (const { code, pattern, message } of LOW_QUALITY_REPORT_PATTERNS) {
       if (pattern.test(text)) issues.push(issue(code, message));
@@ -1448,6 +1636,29 @@ export function validateAuditReportArtifact(
     );
   }
 
+  const irrelevantEvidencePaths = excludedEvidencePaths.filter(
+    (path) => !reportArtifactPaths.some((artifactPath) => isSameRepositoryPath(path, artifactPath)),
+  );
+  if (irrelevantEvidencePaths.length > 0) {
+    issues.push(
+      issue(
+        "irrelevant_audit_evidence",
+        `Report artifact cites hidden or generated repository paths that are not directly scoped by the audit mandate: ${formatPathExamples(irrelevantEvidencePaths)}.`,
+        irrelevantEvidencePaths,
+      ),
+    );
+  }
+
+  if (explicitRootDotScope) {
+    issues.push(
+      issue(
+        "missing_scope_coverage",
+        "Task declares `Scope: .`, which is too broad to validate for audit coverage. Declare concrete files or directories.",
+        ["."],
+      ),
+    );
+  }
+
   const missingScopeRoots = scopeCoverage
     .filter((entry) => !entry.exists)
     .map((entry) => entry.root);
@@ -1498,7 +1709,7 @@ export function validateAuditReportArtifact(
     hasSubstantiveReportEvidenceInternal({
       text,
       projectRoot: input.projectRoot,
-      excludedReferencedPaths: reportArtifactPaths,
+      excludedReferencedPaths: excludedEvidencePaths,
       allowedEvidenceArtifactPaths,
       requireProposedFix: input.requireProposedFix,
       sourceReader,

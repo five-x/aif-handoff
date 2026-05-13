@@ -1617,6 +1617,7 @@ describe("taskCompletionEvidence", () => {
         "# Runtime Audit",
         "",
         "No validated findings.",
+        "Risk hypotheses: risk-runtime-1 for `src/config.ts:1` timeout configuration drift was covered and absent.",
         "",
         "Checked files:",
         "- `src/config.ts:1`",
@@ -2136,6 +2137,7 @@ describe("taskCompletionEvidence", () => {
         }),
         "",
         "No validated findings.",
+        "Risk hypotheses: risk-readme-1 for `README.md:1` audit batch evidence integrity was covered and absent.",
         "",
         "## Checked Files",
         "",
@@ -2243,6 +2245,15 @@ describe("taskCompletionEvidence", () => {
 
   it("allows audit synthesis with persisted substantive no-findings outcome", () => {
     const root = initRepo();
+    writeFileSync(join(root, "README.md"), "# test\nruntime evidence marker\n", "utf8");
+    execFileSync("git", ["add", "README.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add substantive readme evidence", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
     execFileSync("git", ["checkout", "-b", "feature/audit-substantive-no-findings"], {
       cwd: root,
       stdio: "ignore",
@@ -2265,14 +2276,15 @@ describe("taskCompletionEvidence", () => {
         }),
         "",
         "No validated findings.",
+        "Risk hypotheses: risk-readme-1 for `README.md:2` audit batch evidence integrity was covered and absent.",
         "",
         "## Checked Files",
         "",
-        "- `README.md:1`",
+        "- `README.md:2`",
         "",
         "## Checked Commands",
         "",
-        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        '- Command `rg -n "runtime evidence" README.md` output: `README.md:2:runtime evidence marker`',
         "",
       ].join("\n"),
       "utf8",
@@ -2573,6 +2585,7 @@ describe("taskCompletionEvidence", () => {
       join(root, "reports", "audit.md"),
       [
         "No validated findings.",
+        "Risk hypotheses: risk-src-1 for `src/app.ts:1` source value drift was covered and absent.",
         "",
         "Checked files:",
         "- `src/app.ts:1`",

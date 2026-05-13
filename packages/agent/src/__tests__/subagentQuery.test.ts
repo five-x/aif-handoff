@@ -230,7 +230,7 @@ function initAuditGitFixture(): string {
   execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
-  writeFileSync(join(root, "README.md"), "# audit fixture\n", "utf8");
+  writeFileSync(join(root, "README.md"), "# audit fixture\nruntime audit evidence\n", "utf8");
   execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
     cwd: root,
@@ -267,9 +267,17 @@ function withAuditManifest(input: {
     sourceSnapshot: { ...input.snapshot, dirty: false },
     outcome: "validated_no_findings",
     scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: [input.evidenceId] }],
-    riskHypotheses: [],
+    riskHypotheses: [
+      {
+        id: "risk-readme-1",
+        description: "Runtime evidence refs must be captured",
+        status: "covered",
+      },
+    ],
     findings: [],
-    noFindingsClaims: [{ id: "nf-1", evidenceRefs: [input.evidenceId] }],
+    noFindingsClaims: [
+      { id: "nf-1", riskIds: ["risk-readme-1"], evidenceRefs: [input.evidenceId] },
+    ],
     evidenceRefs: [input.evidenceId],
   };
   return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
@@ -445,7 +453,7 @@ describe("executeSubagentQuery attribution", () => {
       toolName: "Grep",
       evidenceKind: "search",
       paths: ["README.md"],
-      output: "README.md:1:# audit fixture\n",
+      output: "README.md:2:runtime audit evidence\n",
     });
     const evidenceId = auditPayload.id ?? "";
     expect(evidenceId).toMatch(/^ev_/);
@@ -460,7 +468,7 @@ describe("executeSubagentQuery attribution", () => {
           auditPlanId: `task:${persistedTaskId}`,
           sourceSnapshotId: snapshot.id,
           scopeIds: ["README.md"],
-          riskHypothesisIds: [],
+          riskHypothesisIds: ["risk-readme-1"],
         },
         parsed,
       );
@@ -530,12 +538,13 @@ describe("executeSubagentQuery attribution", () => {
       "# Audit",
       "",
       "No validated findings.",
+      "Risk hypotheses: risk-readme-1 for `README.md:2` runtime audit evidence was covered and absent.",
       "",
       "Checked files:",
-      "- `README.md:1`",
+      "- `README.md:2`",
       "",
       "Checked commands:",
-      '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
+      '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
       "",
     ].join("\n");
     mkdirSync(join(root, "reports"), { recursive: true });

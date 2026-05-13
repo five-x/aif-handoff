@@ -3,7 +3,7 @@
 - Task ID: work-20260509-harden-audit-quality-gate
 - Server Task ID: fead5a05-6fc5-4e1a-adfb-8f629d36b31b
 - Lane: work
-- Status: next
+- Status: done
 - Priority: high
 - Created: 2026-05-09
 - Due: unset

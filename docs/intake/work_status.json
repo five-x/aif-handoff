@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-12",
+  "updated": "2026-05-13",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -177,6 +177,46 @@
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260512-audit-contract-corpus"
+    },
+    {
+      "taskId": "work-20260513-audit-roadmap-explicit-scope-risk-contract",
+      "title": "Audit Roadmap Explicit Scope And Risk Contract",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-audit-roadmap-explicit-scope-risk-contract"
+    },
+    {
+      "taskId": "work-20260513-deterministic-audit-repair-source-inconclusive",
+      "title": "Deterministic Audit Repair Emits Source Inconclusive",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-deterministic-audit-repair-source-inconclusive"
+    },
+    {
+      "taskId": "work-20260513-audit-evidence-relevance-gate",
+      "title": "Audit Evidence Relevance Gate",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-audit-evidence-relevance-gate"
+    },
+    {
+      "taskId": "work-20260513-audit-v10-false-valid-regression",
+      "title": "Audit V10 False Valid Regression",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-audit-v10-false-valid-regression"
+    },
+    {
+      "taskId": "work-20260513-define-workflow-contract-pack-interface",
+      "title": "Define Workflow Contract Pack Interface",
+      "status": "queued",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-define-workflow-contract-pack-interface"
     }
   ]
 }

@@ -117,7 +117,7 @@ function initGitFixture(): string {
   execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
-  writeFileSync(join(root, "README.md"), "# audit fixture\n", "utf8");
+  writeFileSync(join(root, "README.md"), "# audit fixture\nruntime audit evidence\n", "utf8");
   execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
     cwd: root,
@@ -154,9 +154,17 @@ function withAuditManifest(input: {
     sourceSnapshot: { ...input.snapshot, dirty: false },
     outcome: "validated_no_findings",
     scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: [input.evidenceId] }],
-    riskHypotheses: [],
+    riskHypotheses: [
+      {
+        id: "risk-readme-1",
+        description: "Runtime evidence refs must be captured",
+        status: "covered",
+      },
+    ],
     findings: [],
-    noFindingsClaims: [{ id: "nf-1", evidenceRefs: [input.evidenceId] }],
+    noFindingsClaims: [
+      { id: "nf-1", riskIds: ["risk-readme-1"], evidenceRefs: [input.evidenceId] },
+    ],
     evidenceRefs: [input.evidenceId],
   };
   return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
@@ -368,7 +376,8 @@ describe("hooks - activity logging", () => {
       testDb.current
         .update(tasks)
         .set({
-          description: "Scope: README.md\nReport artifact: reports/audit.md",
+          description:
+            "Scope: README.md\nRisk hypotheses: risk-readme-1 README.md runtime audit evidence may be uncaptured.\nReport artifact: reports/audit.md",
           taskIntent: "general",
           agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         })
@@ -379,9 +388,9 @@ describe("hooks - activity logging", () => {
       await logger(
         {
           tool_name: "Grep",
-          tool_input: { pattern: "audit", path: "README.md" },
+          tool_input: { pattern: "runtime audit", path: "README.md" },
           tool_response: {
-            content: "README.md:1:# audit fixture\n",
+            content: "README.md:2:runtime audit evidence\n",
           },
         },
         "tool-use-grep",
@@ -399,12 +408,13 @@ describe("hooks - activity logging", () => {
         "# Audit",
         "",
         "No validated findings.",
+        "Risk hypotheses: risk-readme-1 for `README.md:2` runtime audit evidence was covered and absent.",
         "",
         "Checked files:",
-        "- `README.md:1`",
+        "- `README.md:2`",
         "",
         "Checked commands:",
-        '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
+        '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
         "",
       ].join("\n");
       mkdirSync(join(root, "reports"), { recursive: true });

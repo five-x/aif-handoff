@@ -2,7 +2,7 @@
 
 - Task ID: work-20260511-audit-inconclusive-synthesis-gate
 - Lane: work
-- Status: backlog
+- Status: done
 - Priority: high
 - Created: 2026-05-11
 - Due: unset

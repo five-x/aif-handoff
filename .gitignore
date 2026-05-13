@@ -78,6 +78,7 @@ docs-html/
 # Misc
 .data
 .projects
+*.bak.*
 
 # Attachment files (stored inside project .ai-factory/files/)
 .ai-factory/files/

@@ -638,6 +638,17 @@ function auditSlug(value: string): string {
   );
 }
 
+function formatAuditRiskHypotheses(title: string, scope: string): string {
+  const riskPrefix = auditSlug(title).replace(/^audit-/, "risk-");
+  return scope
+    .split(/\s*,\s*/)
+    .map((scopeRoot, index) => {
+      const riskId = `${riskPrefix}-${index + 1}`;
+      return `${riskId} ${scopeRoot} may contain owner-area defects that produce actionable audit findings`;
+    })
+    .join("; ");
+}
+
 function buildAuditRoadmapItem(
   title: string,
   scope: string,
@@ -650,6 +661,9 @@ function buildAuditRoadmapItem(
     `- [ ] **${title}** - Diagnostic-only audit.`,
     `  - Scope: ${scope}`,
     `  - Audit mandate: ${mandate}`,
+    ...(role === "report"
+      ? [`  - Risk hypotheses: ${formatAuditRiskHypotheses(title, scope)}`]
+      : []),
     ...(options.priorContext ? [`  - ${formatPriorAuditContextLine(options.priorContext)}`] : []),
     `  - Allowed changes: only create/update ${reportPath}.`,
     `  - Report artifact: ${reportPath}`,
@@ -700,11 +714,49 @@ function listScopedChildren(projectRoot: string, root: string, max = 8): string[
   }
 }
 
+const AUDIT_SCOPE_IGNORED_ROOT_ENTRIES = new Set([
+  ".git",
+  ".venv",
+  "node_modules",
+  "__pycache__",
+  "dist",
+  "build",
+  "coverage",
+  "audit",
+  "report",
+  "reports",
+  "aif-plan",
+]);
+
+function listConcreteRootScopeFallbackPaths(projectRoot: string, max = 4): string[] {
+  try {
+    const rootEntries = readdirSync(projectRoot, { withFileTypes: true })
+      .filter((entry) => !AUDIT_SCOPE_IGNORED_ROOT_ENTRIES.has(entry.name))
+      .filter((entry) => !entry.name.startsWith("."))
+      .filter((entry) => entry.isDirectory() || /\.[a-z0-9]+$/i.test(entry.name))
+      .map((entry) => entry.name.replaceAll("\\", "/"))
+      .slice(0, max);
+    if (rootEntries.length > 0) return rootEntries;
+  } catch {
+    // Fall back to managed project context below.
+  }
+
+  return existingAuditScopePaths(
+    projectRoot,
+    [".ai-factory/DESCRIPTION.md", ".ai-factory/config.yaml", "README.md", "package.json"],
+    max,
+  );
+}
+
 function scopeText(projectRoot: string, candidates: string[], fallback: string[]): string {
   const paths = existingAuditScopePaths(projectRoot, candidates);
   if (paths.length > 0) return paths.join(", ");
   const fallbackPaths = existingAuditScopePaths(projectRoot, fallback, 4);
-  return fallbackPaths.length > 0 ? fallbackPaths.join(", ") : ".";
+  if (fallbackPaths.length > 0) return fallbackPaths.join(", ");
+  const concreteRootFallbackPaths = listConcreteRootScopeFallbackPaths(projectRoot, 4);
+  return concreteRootFallbackPaths.length > 0
+    ? concreteRootFallbackPaths.join(", ")
+    : fallback.slice(0, 4).join(", ");
 }
 
 function buildAuditAreasForProject(projectRoot: string): AuditArea[] {
@@ -1120,6 +1172,7 @@ Generate a ROADMAP.md file with the following format:
 - [ ] **Audit: <small area name>** - Diagnostic-only audit.
   - Scope: <3-10 concrete files or directories to inspect>
   - Audit mandate: <owner role and concrete quality risks to investigate>
+  - Risk hypotheses: risk-<area>-1 <scope root> may contain <specific actionable risk>; risk-<area>-2 <scope root> may contain <specific actionable risk>
 ${priorContextLine}  - Allowed changes: only create/update one report artifact.
   - Report artifact: audit/${reportDate}-<short-name>-audit.md
   - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.
@@ -1151,6 +1204,9 @@ Rules:
 - Every task must be diagnostic-only.
 - Do not create implementation, fixing, refactoring, hardening, test-expansion, deployment, or documentation tasks.
 - Prefer narrow scopes such as project structure, configuration, persistence, integrations, orchestration, error handling, security, tests, packaging, and ops readiness.
+- Source audit task Scope values must be concrete files or directories; never use Scope: ., ./, *, globs, "all files", "entire repository", or natural-language-only scope.
+- Every source audit task must include a locally parseable Risk hypotheses: line with risk-* IDs, and every declared Scope root must appear in at least one risk hypothesis.
+- Synthesis tasks do not need product risk hypotheses; their Scope must stay limited to all audit/${reportDate}-*-audit.md reports from this audit batch.
 - Each audit task must be independently runnable and must have exactly one report artifact.
 - Output ONLY the markdown content for ROADMAP.md, nothing else`;
   }
@@ -1349,7 +1405,7 @@ Required output format (JSON only, no markdown fences):
     {
       "title": "Audit: short area name",
       "taskIntent": "audit",
-      "description": "Scope: ...\\nAudit mandate: ...\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\n${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\\n${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+      "description": "Scope: packages/api/src/services/roadmapGeneration.ts, packages/shared/src/auditRoadmapContract.ts\\nAudit mandate: ...\\nRisk hypotheses: risk-roadmap-1 packages/api/src/services/roadmapGeneration.ts may contain extraction gaps; risk-roadmap-2 packages/shared/src/auditRoadmapContract.ts may contain validation gaps\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\n${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\\n${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
       "phase": 1,
       "phaseName": "Audit",
       "sequence": 1
@@ -1363,6 +1419,8 @@ Rules:
 - Every task must remain diagnostic-only.
 - Every task must set "taskIntent": "audit".
 - Every task description must include Scope:, Audit mandate:, Allowed changes:, Report artifact:, Acceptance criteria:, Evidence requirements:, Quality bar:, No-findings rule:, Git requirements:, and Constraint:.
+- Source audit task descriptions must include concrete Scope roots and Risk hypotheses: with risk-* IDs that mention every Scope root; never use Scope: ., ./, *, globs, all files, entire repository, or natural-language-only scope.
+- Synthesis descriptions must keep Scope: all audit/YYYY-MM-DD-*-audit.md reports from this audit batch and report-only allowed changes.
 - Every task description must include: ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
 - Every task description must include: ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
 - Synthesis task descriptions must include: ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}

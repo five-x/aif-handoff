@@ -2,7 +2,7 @@
 
 - Task ID: work-20260510-harden-typed-roadmap-content-validation
 - Lane: work
-- Status: next
+- Status: done
 - Priority: high
 - Created: 2026-05-10
 - Due: unset

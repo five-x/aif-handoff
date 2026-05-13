@@ -51,6 +51,10 @@ export const AUDIT_GENERATED_CARD_ISSUE_CODES = [
   "missing_no_findings_proof_guardrail",
   "missing_substantive_no_findings_requirement",
   "missing_synthesis_outcome_requirement",
+  "invalid_source_scope",
+  "missing_risk_hypotheses",
+  "missing_scope_risk_hypothesis",
+  "invalid_synthesis_scope",
   "implementation_shaped_title",
   "implementation_shaped_description",
   "allowed_changes_none",
@@ -129,6 +133,8 @@ export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailure
   missing_substantive_evidence: "invalid_artifact_content",
   missing_declared_scope_root: "invalid_artifact_content",
   missing_scope_coverage: "invalid_artifact_content",
+  missing_risk_hypotheses: "invalid_artifact_content",
+  irrelevant_audit_evidence: "invalid_artifact_content",
   unexpected_non_report_changes: "invalid_artifact_content",
   invalid_or_missing_file_references: "invalid_artifact_content",
   insufficient_report_evidence: "invalid_artifact_content",
@@ -339,6 +345,132 @@ export function findAuditReportArtifactLine(description: string): string | null 
   );
 }
 
+export function findAuditScopeLine(description: string): string | null {
+  return (
+    description
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => /^scope\s*:/i.test(line)) ?? null
+  );
+}
+
+export function parseAuditScopeRoots(description: string): string[] {
+  const line = findAuditScopeLine(description);
+  if (!line) return [];
+  return line
+    .replace(/^scope\s*:\s*/i, "")
+    .split(/\s*,\s*/)
+    .map((scope) => scope.trim().replaceAll("\\", "/").replace(/^`|`$/g, ""))
+    .filter(Boolean);
+}
+
+export function findAuditRiskHypothesesLine(description: string): string | null {
+  return (
+    description
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => /^risk hypotheses\s*:/i.test(line)) ?? null
+  );
+}
+
+export function extractAuditRiskHypothesisIdsFromLine(line: string): string[] {
+  return [...line.matchAll(/\brisk-[a-z0-9][a-z0-9-]*\b/gi)].map((match) => match[0].toLowerCase());
+}
+
+function isNonConcreteAuditSourceScopeRoot(scope: string): boolean {
+  const normalized = scope.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  if (
+    !normalized ||
+    normalized === "." ||
+    normalized === "./" ||
+    normalized === "*" ||
+    normalized === "**" ||
+    normalized === "/*" ||
+    normalized === "repo" ||
+    normalized === "repository" ||
+    normalized === "root" ||
+    normalized === "project" ||
+    normalized === "codebase"
+  ) {
+    return true;
+  }
+  if (/[?*[\]{}]/.test(normalized)) return true;
+  if (
+    /\b(?:all files|all source|entire repository|entire repo|whole repository|whole repo|full repository|full repo|complete repository|complete repo|the repository|the repo|the codebase|everything)\b/i.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+
+  const pathLike =
+    /^(?:\.?[a-z0-9_.-]+\/)+[a-z0-9_.-]+$/i.test(normalized) ||
+    /^[a-z0-9_.-]+\.[a-z0-9]+$/i.test(normalized) ||
+    /^(?:src|test|tests|docs|scripts|packages|apps|lib|config|migrations|data)$/i.test(normalized);
+  return !pathLike;
+}
+
+function hasSynthesisReportBatchScope(description: string): boolean {
+  const scopes = parseAuditScopeRoots(description);
+  if (scopes.length !== 1) return false;
+  const scope = scopes[0].toLowerCase();
+  return (
+    /\baudit\/[^,\s]*\*-audit\.md\b/.test(scope) &&
+    /\breports?\s+from\s+this\s+audit\s+batch\b/.test(scope)
+  );
+}
+
+function validateAuditScopeAndRiskHypotheses(
+  title: string,
+  description: string,
+): AuditGeneratedCardValidationIssue[] {
+  const synthesis = isAuditSynthesisTitle(title);
+  const scopes = parseAuditScopeRoots(description);
+  if (synthesis) {
+    if (!hasSynthesisReportBatchScope(description)) {
+      return [
+        {
+          code: "invalid_synthesis_scope",
+          message: "audit synthesis task scope must be the report batch artifacts",
+        },
+      ];
+    }
+    return [];
+  }
+
+  if (scopes.length === 0 || scopes.some(isNonConcreteAuditSourceScopeRoot)) {
+    return [
+      {
+        code: "invalid_source_scope",
+        message: "audit source task scope must use concrete files or directories",
+      },
+    ];
+  }
+
+  const riskLine = findAuditRiskHypothesesLine(description);
+  if (!riskLine || extractAuditRiskHypothesisIdsFromLine(riskLine).length === 0) {
+    return [
+      {
+        code: "missing_risk_hypotheses",
+        message: "audit source task must include parseable Risk hypotheses with risk-* ids",
+      },
+    ];
+  }
+
+  const normalizedRiskLine = riskLine.replaceAll("\\", "/").toLowerCase();
+  const missingScope = scopes.find((scope) => !normalizedRiskLine.includes(scope.toLowerCase()));
+  if (missingScope) {
+    return [
+      {
+        code: "missing_scope_risk_hypothesis",
+        message: `audit source task Risk hypotheses must mention scope root ${missingScope}`,
+      },
+    ];
+  }
+
+  return [];
+}
+
 export function parseExpectedAuditReportArtifactPath(description: string): string | null {
   const line = findAuditReportArtifactLine(description);
   if (!line) return null;
@@ -539,6 +671,7 @@ export function validateGeneratedAuditCard(
   }
 
   issueDetails.push(
+    ...validateAuditScopeAndRiskHypotheses(title, description),
     ...validateAuditAllowedChanges(description),
     ...validateAuditReportArtifact(description),
   );

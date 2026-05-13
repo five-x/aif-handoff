@@ -2,7 +2,7 @@
 
 - Task ID: work-20260508-harden-planner-replan-loop
 - Lane: work
-- Status: backlog
+- Status: done
 - Priority: high
 - Created: 2026-05-08
 - Due: unset
