@@ -565,9 +565,10 @@ function shouldUseDeterministicAuditReportRepair(
 }
 
 function hasAttemptedDeterministicAuditReportRepair(
-  implementationLog: string | null | undefined,
+  task: Pick<TaskRow, "implementationLog" | "agentActivityLog">,
 ): boolean {
-  return /\bDeterministic audit report repair completed\b/i.test(implementationLog ?? "");
+  const text = [task.implementationLog ?? "", task.agentActivityLog ?? ""].join("\n");
+  return /\bDeterministic audit report repair (?:completed|complete)\b/i.test(text);
 }
 
 function normalizeAuditScopeRoot(path: string): string | null {
@@ -2143,8 +2144,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     roadmapArtifact?.role === "report" ? roadmapArtifact.artifactPath : null;
   const auditEvidenceRepairMode = isAuditEvidenceRepairMode(task, expectedAuditReportArtifactPath);
   const repeatedDeterministicAuditReportRepair =
-    expectedAuditReportArtifactPath &&
-    hasAttemptedDeterministicAuditReportRepair(task.implementationLog);
+    expectedAuditReportArtifactPath && hasAttemptedDeterministicAuditReportRepair(task);
   const auditSynthesisInputs = isAuditSynthesisTask
     ? readAuditSynthesisInputs(taskId, projectRoot)
     : { validatedArtifacts: [], weakArtifacts: [] };
