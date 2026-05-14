@@ -157,6 +157,73 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).toContain("missing_audit_decomposition");
   });
 
+  it("does not require decomposition again for source report children in a persisted audit batch", () => {
+    const task = {
+      title: "Owner-grade production readiness audit source report",
+      description:
+        "Audit security, performance, reliability, and correctness for packages/agent/src. Report artifact: audit/agent-source-audit.md.",
+      taskIntent: "audit" as const,
+      auditArtifactRole: "report" as const,
+      roadmapBatchId: "batch-1",
+    };
+    const plan = [
+      "## Source report audit plan",
+      "Report artifact: `audit/agent-source-audit.md`",
+      "Scope: `packages/agent/src`.",
+      "Scoped evidence targets: `packages/agent/src`.",
+      "Excluded areas: generated files, dependency caches, build output, and unrelated packages.",
+      "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+      "Child audit reports: not required for this persisted source report child.",
+      "- [ ] Keep this diagnostic-only and do not implement fixes.",
+      "- [ ] Inspect `packages/agent/src` and update `audit/agent-source-audit.md`.",
+    ].join("\n");
+    const result = evaluateTaskPlanQuality({ task, plan });
+    const missingExclusions = evaluateTaskPlanQuality({
+      task,
+      plan: [
+        "## Source report audit plan",
+        "Report artifact: `audit/agent-source-audit.md`",
+        "Scope: `packages/agent/src`.",
+        "Scoped evidence targets: `packages/agent/src`.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this persisted source report child.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect `packages/agent/src` and update `audit/agent-source-audit.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("missing_audit_decomposition");
+    expect(missingExclusions.ok).toBe(false);
+    expect(missingExclusions.categories).toContain("missing_audit_exclusions");
+    expect(missingExclusions.categories).not.toContain("missing_audit_decomposition");
+  });
+
+  it("still rejects broad audit plans without persisted batch source report context", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Owner-grade production readiness audit source report",
+        description:
+          "Audit security, performance, reliability, and correctness for packages/agent/src. Report artifact: audit/agent-source-audit.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Source report audit plan",
+        "Report artifact: `audit/agent-source-audit.md`",
+        "Scope: `packages/agent/src`.",
+        "Scoped evidence targets: `packages/agent/src`.",
+        "Excluded areas: generated files, dependency caches, build output, and unrelated packages.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this persisted source report child.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect `packages/agent/src` and update `audit/agent-source-audit.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("missing_audit_decomposition");
+  });
+
   it("accepts a narrow audit plan with scoped evidence, exclusions, report fields, and no child reports", () => {
     const result = evaluateTaskPlanQuality({
       task: {

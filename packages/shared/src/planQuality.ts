@@ -34,6 +34,8 @@ export interface TaskPlanQualityTask {
   tags?: string[] | string | null;
   roadmapAlias?: string | null;
   planPath?: string | null;
+  auditArtifactRole?: "report" | "synthesis" | null;
+  roadmapBatchId?: string | null;
 }
 
 export interface TaskPlanQualityIssue {
@@ -346,6 +348,15 @@ function hasSynthesisOnlyReportEvidenceTarget(plan: string): boolean {
   return nonReportPaths.length === 0;
 }
 
+function isPersistedAuditSourceReportTask(task: TaskPlanQualityTask): boolean {
+  return (
+    task.taskIntent === "audit" &&
+    task.auditArtifactRole === "report" &&
+    typeof task.roadmapBatchId === "string" &&
+    task.roadmapBatchId.trim().length > 0
+  );
+}
+
 export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQualityResult {
   const plan = input.plan?.trim() ?? "";
   const taskText = combinedTaskText(input.task);
@@ -517,7 +528,8 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
 
     const requiresBroadDecomposition =
       decomposition.requiresDecomposition &&
-      decomposition.reasonCodes.some((reason) => reason !== "audit_without_concrete_boundaries");
+      decomposition.reasonCodes.some((reason) => reason !== "audit_without_concrete_boundaries") &&
+      !isPersistedAuditSourceReportTask(input.task);
     if (requiresBroadDecomposition && !hasDecompositionDecision) {
       issues.push(
         issue(

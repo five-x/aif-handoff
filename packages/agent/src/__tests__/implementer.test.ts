@@ -1282,7 +1282,7 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
-  it("terminalizes repeated deterministic audit report repair without calling runtime", async () => {
+  it("routes repeated deterministic audit report repair to runtime rework", async () => {
     const db = testDb.current;
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
     writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
@@ -1338,27 +1338,52 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repeated-deterministic-loop", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(queryMock).toHaveBeenCalledTimes(1);
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-deterministic-loop");
     if (!artifact) throw new Error("missing repeated deterministic artifact");
     expect(artifact.state).toBe("missing");
-    expect(artifact.failureFamily).toBe("manual_review_required");
+    expect(artifact.failureFamily).toBe("missing_artifact");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    expect(attempts.at(-1)).toMatchObject({
+      state: "missing",
+      failureFamily: "missing_artifact",
+      reworkStatus: "rework_requested",
+    });
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-deterministic-loop"))
       .get();
-    expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair terminalized for manual review",
+      "Repeated deterministic audit report repair did not satisfy strict validation; routing to runtime implementation rework.",
     );
+    expect(updatedTask?.implementationLog).toContain("Runtime implementer result:");
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
     expect(updatedTask?.implementationLog).toContain("missing_report_file_references");
+    expect(updatedTask?.blockedReason).toContain("deterministic_audit_repair_rework_required");
     expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
     expect(updatedTask?.blockedReason).toContain("missing_report_file_references");
+    const autoReviewState = JSON.parse(updatedTask?.autoReviewStateJson ?? "{}");
+    expect(autoReviewState.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "deterministic_repair_missing_report_file_references",
+          source: "review_gate",
+        }),
+      ]),
+    );
+    expect(autoReviewState.reworkSnapshot).toMatchObject({
+      artifactPath: "audit/architecture.md",
+      findingIds: expect.arrayContaining(["deterministic_repair_missing_report_file_references"]),
+    });
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain("deterministic_audit_repair_rework_required");
+    expect(implementCall.prompt).toContain("deterministic_repair_missing_report_file_references");
     expect(updatedTask?.agentActivityLog).toContain(
-      "Terminalized repeated deterministic audit report repair",
+      "Repeated deterministic audit report repair requested runtime rework",
     );
   });
 
@@ -1410,20 +1435,26 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repeated-deterministic-activity-log", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(queryMock).toHaveBeenCalledTimes(1);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-deterministic-activity-log"))
       .get();
-    expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair terminalized for manual review",
+      "Repeated deterministic audit report repair did not satisfy strict validation; routing to runtime implementation rework.",
     );
+    expect(updatedTask?.implementationLog).toContain("Runtime implementer result:");
+    expect(updatedTask?.blockedReason).toContain("deterministic_audit_repair_rework_required");
     expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
+    expect(JSON.parse(updatedTask?.autoReviewStateJson ?? "{}").reworkSnapshot).toMatchObject({
+      artifactPath: "audit/architecture.md",
+    });
     expect(updatedTask?.agentActivityLog).toContain(
-      "Terminalized repeated deterministic audit report repair",
+      "Repeated deterministic audit report repair requested runtime rework",
     );
   });
 

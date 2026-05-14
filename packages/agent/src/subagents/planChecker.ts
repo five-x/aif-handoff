@@ -1,10 +1,16 @@
-import { findProjectById, findTaskById, persistTaskPlanForTask } from "@aif/data";
+import {
+  findProjectById,
+  findRoadmapBatchArtifactByTaskId,
+  findTaskById,
+  persistTaskPlanForTask,
+} from "@aif/data";
 import {
   TaskPlanQualityError,
   buildDeterministicDiagnosticPlan,
   evaluateTaskPlanQuality,
   logger,
   looksLikeFullPlanUpdate,
+  type TaskPlanQualityTask,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
@@ -13,6 +19,19 @@ import { logActivity } from "../hooks.js";
 const log = logger("plan-checker");
 const AGENT_NAME = "plan-checker";
 type PlanCheckerTask = NonNullable<ReturnType<typeof findTaskById>>;
+
+function toAuditArtifactRole(role: string | null | undefined): "report" | "synthesis" | null {
+  return role === "report" || role === "synthesis" ? role : null;
+}
+
+function buildPlanQualityTaskContext(task: PlanCheckerTask): PlanCheckerTask & TaskPlanQualityTask {
+  const artifact = findRoadmapBatchArtifactByTaskId(task.id);
+  return {
+    ...task,
+    auditArtifactRole: toAuditArtifactRole(artifact?.role),
+    roadmapBatchId: artifact?.batchId ?? null,
+  };
+}
 
 export function normalizeMarkdownFence(text: string): string {
   const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
@@ -51,7 +70,10 @@ export function isPlanAlreadyChecklist(text: string): boolean {
 }
 
 function assertTaskPlanQuality(task: PlanCheckerTask, planText: string | null | undefined): void {
-  const result = evaluateTaskPlanQuality({ task, plan: planText });
+  const result = evaluateTaskPlanQuality({
+    task: buildPlanQualityTaskContext(task),
+    plan: planText,
+  });
   if (!result.ok) {
     throw new TaskPlanQualityError(result);
   }
@@ -61,11 +83,12 @@ function persistDeterministicDiagnosticPlanIfAvailable(
   task: PlanCheckerTask,
   projectRoot: string,
 ): boolean {
-  const currentQuality = evaluateTaskPlanQuality({ task, plan: task.plan });
+  const qualityTask = buildPlanQualityTaskContext(task);
+  const currentQuality = evaluateTaskPlanQuality({ task: qualityTask, plan: task.plan });
   if (currentQuality.ok) return false;
 
   const fallbackPlan = buildDeterministicDiagnosticPlan({
-    task,
+    task: qualityTask,
     extraText: [task.plan],
   });
   if (!fallbackPlan) return false;

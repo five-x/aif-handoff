@@ -104,7 +104,10 @@ import {
   type AuditEvidenceGrade,
   type AuditEvidenceRedactionStatus,
   buildAuditFailureSignature,
+  isTerminalAuditArtifactState,
+  isTerminalAuditReworkStatus,
   selectAuditArtifactFailureFamily,
+  type AuditArtifactState,
   type AuditArtifactReworkStatus,
   type AuditFailureFamily,
 } from "@aif/shared";
@@ -169,6 +172,26 @@ export interface CreateRuntimeWarmupSessionInput extends RuntimeWarmupScopeInput
 export type TaskFieldsPatch = Partial<Omit<TaskRow, "id" | "projectId" | "createdAt">> & {
   autoReviewState?: AutoReviewState | null;
 };
+
+function isOperatorInputRequiredReason(reason: string | null | undefined): boolean {
+  return reason?.startsWith("operator_input_required:") === true;
+}
+
+function normalizeOperatorInputHoldPatch(
+  patch: Partial<TaskRow> & { autoReviewStateJson?: string | null },
+  existing?: TaskRow | null,
+): void {
+  const effectiveStatus = patch.status ?? existing?.status;
+  const effectiveBlockedReason =
+    "blockedReason" in patch ? patch.blockedReason : existing?.blockedReason;
+  if (
+    effectiveStatus === "blocked_external" &&
+    isOperatorInputRequiredReason(effectiveBlockedReason)
+  ) {
+    patch.paused = true;
+    patch.retryAfter = null;
+  }
+}
 
 /** API-level update: domain types (attachments as array, tags as string[]). Serialization handled by data layer. */
 export type TaskFieldsUpdate = {
@@ -1010,6 +1033,7 @@ export function updateTask(id: string, fields: TaskFieldsUpdate): TaskRow | unde
       "Updated task runtime metadata",
     );
   }
+  normalizeOperatorInputHoldPatch(patch, existing);
   getDb().update(tasks).set(patch).where(eq(tasks.id, id)).run();
   return findTaskById(id);
 }
@@ -1029,6 +1053,7 @@ export function setTaskFields(id: string, fields: TaskFieldsPatch): void {
     patch.autoReviewStateJson =
       autoReviewState === null ? null : JSON.stringify(autoReviewState);
   }
+  normalizeOperatorInputHoldPatch(patch, findTaskById(id));
   getDb().update(tasks).set(patch).where(eq(tasks.id, id)).run();
 }
 
@@ -1576,6 +1601,7 @@ export function countActivePipelineTasksForProject(projectId: string): number {
       manualReviewRequired: tasks.manualReviewRequired,
       retryAfter: tasks.retryAfter,
       reworkRequested: tasks.reworkRequested,
+      artifactId: roadmapBatchArtifacts.id,
       artifactRole: roadmapBatchArtifacts.role,
       artifactState: roadmapBatchArtifacts.state,
     })
@@ -1589,14 +1615,23 @@ export function countActivePipelineTasksForProject(projectId: string): number {
     )
     .all();
   return rows.filter((row) => {
-    const terminalManualAuditReportBlock =
+    const artifactState = row.artifactState as AuditArtifactState | null;
+    const latestReworkStatus = row.artifactId
+      ? (listRoadmapBatchArtifactAttempts(row.artifactId).at(-1)
+          ?.reworkStatus as AuditArtifactReworkStatus | undefined)
+      : null;
+    const terminalManualAuditArtifactBlock =
       row.status === "blocked_external" &&
-      row.manualReviewRequired &&
       !row.retryAfter &&
       !row.reworkRequested &&
-      row.artifactRole === "report" &&
-      (row.artifactState === "invalid" || row.artifactState === "missing");
-    return !terminalManualAuditReportBlock;
+      (row.artifactRole === "report" || row.artifactRole === "synthesis") &&
+      isTerminalAuditArtifactState(artifactState) &&
+      (isTerminalAuditReworkStatus(latestReworkStatus) ||
+        row.manualReviewRequired ||
+        artifactState === "source_inconclusive" ||
+        artifactState === "terminal_inconclusive" ||
+        artifactState === "manual_exception");
+    return !terminalManualAuditArtifactBlock;
   }).length;
 }
 

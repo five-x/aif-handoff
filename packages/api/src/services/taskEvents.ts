@@ -8,6 +8,7 @@ import {
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
   buildAuditFailureSignature,
+  isRecoverableAuditFailureFamily,
   isBranchIsolationError,
   looksLikeFullPlanUpdate,
   getProjectConfig,
@@ -46,17 +47,6 @@ export type EventHandlerResult =
   | { ok: false; status: number; error: string }
   | { ok: true; task: TaskRow; broadcastType: "task:moved" | "task:updated" };
 
-const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
-  "invalid_artifact_content",
-  "invalid_artifact_contract",
-  "invalid_artifact_integrity",
-  "invalid_inventory_only",
-  "insufficient_substantive_evidence",
-  "source_inconclusive",
-  "missing_artifact",
-  "missing_tool_evidence",
-  "rework_needed",
-]);
 const AUDIT_REPORT_MANIFEST_BLOCK_PATTERN = /```audit-report-manifest\b/i;
 
 function restoreTaskBranchForMutation(
@@ -100,6 +90,22 @@ function assertTaskBranchPostRun(task: TaskRow, projectRoot: string): EventHandl
         : String(err);
     return { ok: false, status: 409, error };
   }
+}
+
+function isOperatorInputHold(task: TaskRow): boolean {
+  return (
+    task.status === "blocked_external" &&
+    task.blockedReason?.startsWith("operator_input_required:") === true
+  );
+}
+
+function hasFreshOperatorInputAnswer(task: TaskRow): boolean {
+  const latestComment = getLatestHumanComment(task.id);
+  if (!latestComment?.message.trim()) return false;
+  const commentTime = Date.parse(latestComment.createdAt);
+  const taskUpdateTime = Date.parse(task.updatedAt);
+  if (!Number.isFinite(commentTime) || !Number.isFinite(taskUpdateTime)) return false;
+  return commentTime > taskUpdateTime;
 }
 
 function firstAuditFailureFamily(
@@ -349,25 +355,33 @@ function blockTaskForCompletionEvidence(
   const nowIso = new Date().toISOString();
   const failureFamily = firstAuditFailureFamily(result);
   const auditArtifact = options.auditArtifact;
+  const auditReviewIteration = task.reviewIterationCount ?? 0;
+  const auditMaxReviewIterations = task.maxReviewIterations ?? 100;
   const shouldReturnToRework =
     Boolean(auditArtifact) &&
     Boolean(options.allowAuditRework) &&
-    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(failureFamily) &&
-    (auditArtifact
-      ? repeatedAuditFailureCount({ artifact: auditArtifact, family: failureFamily, result }) === 0
-      : true);
-  const repeatedSameFailure =
+    isRecoverableAuditFailureFamily(failureFamily) &&
+    auditReviewIteration < auditMaxReviewIterations;
+  const auditReworkLimitReached =
     Boolean(auditArtifact) &&
-    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(failureFamily) &&
+    Boolean(options.allowAuditRework) &&
+    isRecoverableAuditFailureFamily(failureFamily) &&
     !shouldReturnToRework;
+  const repeatedSameFailure =
+    auditArtifact && isRecoverableAuditFailureFamily(failureFamily)
+      ? repeatedAuditFailureCount({ artifact: auditArtifact, family: failureFamily, result }) > 0
+      : false;
   const blockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
+  const reworkBlockedReason = repeatedSameFailure
+    ? `${blockedReason} Rework requested again for repeated audit artifact failure signature; local rework continues until the no-progress guard or review budget proves it is unproductive.`
+    : blockedReason;
   const terminalBlockedReason = auditArtifact
     ? `${failureFamily}: ${
-        repeatedSameFailure
-          ? `${blockedReason} Manual review required: repeated same audit artifact failure signature.`
-          : blockedReason
+        auditReworkLimitReached
+          ? `${blockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
+          : reworkBlockedReason
       }`
     : blockedReason;
 
@@ -398,7 +412,7 @@ function blockTaskForCompletionEvidence(
   if (shouldReturnToRework) {
     setTaskFields(task.id, {
       status: "implementing",
-      blockedReason: `${failureFamily}: ${blockedReason}`,
+      blockedReason: `${failureFamily}: ${reworkBlockedReason}`,
       blockedFromStatus: options.blockedFromStatus ?? "done",
       retryAfter: null,
       retryCount: task.retryCount ?? 0,
@@ -409,7 +423,7 @@ function blockTaskForCompletionEvidence(
     });
     appendTaskActivityLog(
       task.id,
-      `[${nowIso}] Completion evidence guard returned ${options.action ?? "approve_done"} to implementation rework: ${blockedReason}`,
+      `[${nowIso}] Completion evidence guard returned ${options.action ?? "approve_done"} to implementation rework: ${reworkBlockedReason}`,
     );
 
     const updated = findTaskById(task.id);
@@ -425,7 +439,9 @@ function blockTaskForCompletionEvidence(
     blockedFromStatus: options.blockedFromStatus ?? "done",
     retryAfter: null,
     retryCount: task.retryCount ?? 0,
-    manualReviewRequired: result.issues.some((entry) => entry.code === "manual_review_required"),
+    manualReviewRequired:
+      auditReworkLimitReached ||
+      result.issues.some((entry) => entry.code === "manual_review_required"),
     lastHeartbeatAt: nowIso,
     updatedAt: nowIso,
   });
@@ -559,6 +575,15 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     return { ok: false, status: 404, error: "Task not found" };
   }
   const { event } = input;
+  const operatorInputRetry = event === "retry_from_blocked" && isOperatorInputHold(task);
+  if (operatorInputRetry && !hasFreshOperatorInputAnswer(task)) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        "operator_input_required tasks need a newer human answer comment before retry_from_blocked can resume",
+    };
+  }
   const transition = applyHumanTaskEvent(task, event);
   if (!transition.ok) {
     return { ok: false, status: 409, error: transition.error };
@@ -722,7 +747,12 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
   }
 
   const nowIso = new Date().toISOString();
-  setTaskFields(task.id, { ...transition.patch, lastHeartbeatAt: nowIso, updatedAt: nowIso });
+  setTaskFields(task.id, {
+    ...transition.patch,
+    ...(operatorInputRetry ? { paused: false } : {}),
+    lastHeartbeatAt: nowIso,
+    updatedAt: nowIso,
+  });
 
   const updated = findTaskById(task.id);
   if (!updated) {

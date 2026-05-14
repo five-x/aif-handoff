@@ -161,6 +161,45 @@ describe("processAutoQueueAdvance", () => {
       expect(findTaskById("t2")?.status).toBe("planning");
     });
 
+    it("advances past terminal source-inconclusive audit report artifacts", () => {
+      seedTask("t1", "seq", 100, {
+        status: "blocked_external",
+        taskIntent: "audit",
+        manualReviewRequired: false,
+      });
+      seedTask("t2", "seq", 200);
+      createRoadmapBatchContract({
+        projectId: "seq",
+        roadmapAlias: "audit-source-inconclusive",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["t1", "t2"],
+        artifacts: [{ taskId: "t1", role: "report", artifactPath: "audit/source.md" }],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "t1",
+        state: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        reworkStatus: "terminal_inconclusive",
+      });
+
+      expect(processAutoQueueAdvance()).toBe(1);
+      expect(findTaskById("t2")?.status).toBe("planning");
+    });
+
+    it("does not advance while an operator-input hold is waiting", () => {
+      seedTask("t1", "seq", 100, {
+        status: "blocked_external",
+        blockedFromStatus: "implementing",
+        blockedReason: "operator_input_required: provide the missing external evidence",
+        paused: true,
+      });
+      seedTask("t2", "seq", 200);
+
+      expect(processAutoQueueAdvance()).toBe(0);
+      expect(findTaskById("t2")?.status).toBe("backlog");
+    });
+
     it("skips paused backlog tasks and picks the next unpaused one", () => {
       seedTask("t1", "seq", 100, { paused: true });
       seedTask("t2", "seq", 200);

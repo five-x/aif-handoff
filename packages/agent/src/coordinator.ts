@@ -43,6 +43,7 @@ import {
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
   buildAuditFailureSignature,
+  isRecoverableAuditFailureFamily,
   selectAuditArtifactFailureFamily,
   selectTaskCompletionAuditFailureFamily,
   resolveAuditPlanId,
@@ -352,18 +353,6 @@ function proactivelyBlockTaskForRuntimeGate(
     "Blocked task before claim due to runtime limit gate",
   );
 }
-
-const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
-  "invalid_artifact_content",
-  "invalid_artifact_contract",
-  "invalid_artifact_integrity",
-  "invalid_inventory_only",
-  "insufficient_substantive_evidence",
-  "source_inconclusive",
-  "missing_artifact",
-  "missing_tool_evidence",
-  "rework_needed",
-]);
 
 const AUDIT_EVIDENCE_REPAIR_ISSUE_CODES = new Set([
   "insufficient_report_evidence",
@@ -755,15 +744,13 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   const recoverableAuditArtifactFailure =
     Boolean(artifact) &&
     input.phase !== "pre_implementation" &&
-    RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(family);
+    isRecoverableAuditFailureFamily(family);
   const repeatedSameFailure =
     recoverableAuditArtifactFailure && artifact
       ? repeatedAuditFailureCount({ artifact, family, result }) > 0
       : false;
   const shouldReturnToRework =
-    recoverableAuditArtifactFailure &&
-    !repeatedSameFailure &&
-    auditReviewIteration < auditMaxReviewIterations;
+    recoverableAuditArtifactFailure && auditReviewIteration < auditMaxReviewIterations;
   const auditReworkLimitReached = recoverableAuditArtifactFailure && !shouldReturnToRework;
   const baseBlockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
@@ -774,10 +761,10 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   const actionableBlockedReason = auditEvidenceRepairRequired
     ? `audit_evidence_repair_required (${repairIssueCodes.join(", ")}): ${baseBlockedReason}`
     : baseBlockedReason;
-  const blockedReason = repeatedSameFailure
-    ? `${baseBlockedReason} Manual review required: repeated same audit artifact failure signature.`
-    : auditReworkLimitReached
-      ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
+  const blockedReason = auditReworkLimitReached
+    ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
+    : repeatedSameFailure
+      ? `${actionableBlockedReason} Rework requested again for repeated audit artifact failure signature; local rework continues until the no-progress guard or review budget proves it is unproductive.`
       : actionableBlockedReason;
   const terminalBlockedReason = artifact ? `${family}: ${blockedReason}` : blockedReason;
   if (shouldReturnToRework && artifact) {

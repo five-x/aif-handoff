@@ -350,6 +350,15 @@
       "priority": "medium",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260513-plan-b-v13-audit-runbook"
+    },
+    {
+      "taskId": "work-20260514-route-recoverable-audit-failures-to-rework-or-input",
+      "title": "Route Recoverable Audit Failures To Rework Or Input",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260514-route-recoverable-audit-failures-to-rework-or-input",
+      "updated": "2026-05-14"
     }
   ]
 }

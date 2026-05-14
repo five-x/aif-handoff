@@ -98,6 +98,7 @@ const { runReviewer } = await import("../subagents/reviewer.js");
 const { handleAutoReviewGate } = await import("../autoReviewHandler.js");
 const {
   createRoadmapBatchContract,
+  listRoadmapBatchArtifactAttempts,
   listRoadmapBatchArtifacts,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
@@ -575,6 +576,27 @@ describe("coordinator", () => {
       ]),
     );
     expect(summarizeRoadmapBatch(batch.batchId)?.synthesisReady).toBe(false);
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+
+    report = db.select().from(tasks).where(eq(tasks.id, "task-canary-report")).get();
+    expect(runImplementer).toHaveBeenCalledWith("task-canary-report", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-canary-report", rootPath);
+    expect(report?.status).toBe("implementing");
+    expect(report?.reworkRequested).toBe(true);
+    expect(report?.manualReviewRequired).toBe(false);
+    expect(report?.blockedReason).toContain("invalid_inventory_only");
+    expect(report?.blockedReason).toContain(
+      "Rework requested again for repeated audit artifact failure signature",
+    );
+    artifacts = listRoadmapBatchArtifacts(batch.batchId);
+    reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
+    if (!reportArtifact) throw new Error("missing canary report artifact");
+    const repeatedAttempts = listRoadmapBatchArtifactAttempts(reportArtifact.id).filter(
+      (attempt) => attempt.reworkStatus === "rework_requested",
+    );
+    expect(repeatedAttempts.length).toBeGreaterThanOrEqual(2);
 
     vi.clearAllMocks();
     writeFileSync(

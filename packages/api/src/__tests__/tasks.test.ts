@@ -2128,6 +2128,68 @@ describe("tasks API", () => {
       const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
       expect(artifact.state).toBe("missing");
       expect(artifact.failureFamily).toBe("missing_artifact");
+
+      db.update(tasks)
+        .set({
+          status: "done",
+          blockedReason: null,
+          blockedFromStatus: null,
+          reworkRequested: false,
+          manualReviewRequired: false,
+          reviewIterationCount: 1,
+          maxReviewIterations: 3,
+        })
+        .where(eq(tasks.id, "ev-audit-rework-1"))
+        .run();
+
+      const repeatedRes = await app.request("/tasks/ev-audit-rework-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(repeatedRes.status).toBe(200);
+      const repeatedBody = await repeatedRes.json();
+      expect(repeatedBody.status).toBe("implementing");
+      expect(repeatedBody.reworkRequested).toBe(true);
+      expect(repeatedBody.manualReviewRequired).toBe(false);
+      expect(repeatedBody.blockedReason).toContain("missing_artifact");
+      expect(repeatedBody.blockedReason).toContain(
+        "Rework requested again for repeated audit artifact failure signature",
+      );
+      const repeatedArtifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      expect(repeatedArtifact.state).toBe("missing");
+      expect(listRoadmapBatchArtifactAttempts(repeatedArtifact.id).length).toBeGreaterThanOrEqual(
+        2,
+      );
+
+      db.update(tasks)
+        .set({
+          status: "done",
+          blockedReason: null,
+          blockedFromStatus: null,
+          reworkRequested: false,
+          manualReviewRequired: false,
+          reviewIterationCount: 3,
+          maxReviewIterations: 3,
+        })
+        .where(eq(tasks.id, "ev-audit-rework-1"))
+        .run();
+
+      const maxedRes = await app.request("/tasks/ev-audit-rework-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(maxedRes.status).toBe(200);
+      const maxedBody = await maxedRes.json();
+      expect(maxedBody.status).toBe("blocked_external");
+      expect(maxedBody.reworkRequested).toBe(false);
+      expect(maxedBody.manualReviewRequired).toBe(true);
+      expect(maxedBody.blockedReason).toContain(
+        "Manual review required: audit evidence guard failed after 3/3 review iterations",
+      );
     });
 
     it("should block approve_done when audit report references missing files only", async () => {
@@ -2656,6 +2718,88 @@ describe("tasks API", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.status).toBe("implementing");
+      expect(body.blockedFromStatus).toBeNull();
+      expect(body.blockedReason).toBeNull();
+      expect(body.retryAfter).toBeNull();
+    });
+
+    it("should reject operator input retry when the only human comment is stale", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-operator-input-stale",
+          projectId: "test-project",
+          title: "Needs operator answer",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "operator_input_required: provide missing source credentials",
+          paused: true,
+          updatedAt: "2026-05-14T10:00:00.000Z",
+        })
+        .run();
+      db.insert(taskComments)
+        .values({
+          id: "ev-operator-input-stale-comment",
+          taskId: "ev-operator-input-stale",
+          author: "human",
+          message: "Previous unrelated note",
+          attachments: "[]",
+          createdAt: "2026-05-14T09:00:00.000Z",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-operator-input-stale/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(409);
+      const persisted = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, "ev-operator-input-stale"))
+        .get();
+      expect(persisted?.status).toBe("blocked_external");
+      expect(persisted?.paused).toBe(true);
+      expect(persisted?.blockedReason).toContain("operator_input_required");
+    });
+
+    it("should clear paused and retry operator input holds after a newer human answer", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-operator-input-answered",
+          projectId: "test-project",
+          title: "Needs operator answer",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "operator_input_required: provide missing source credentials",
+          paused: true,
+          updatedAt: "2026-05-14T10:00:00.000Z",
+        })
+        .run();
+      db.insert(taskComments)
+        .values({
+          id: "ev-operator-input-answer",
+          taskId: "ev-operator-input-answered",
+          author: "human",
+          message: "Use the approved read-only token from the operator vault.",
+          attachments: "[]",
+          createdAt: "2026-05-14T10:05:00.000Z",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-operator-input-answered/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+      expect(body.paused).toBe(false);
       expect(body.blockedFromStatus).toBeNull();
       expect(body.blockedReason).toBeNull();
       expect(body.retryAfter).toBeNull();

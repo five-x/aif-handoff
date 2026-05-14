@@ -1767,6 +1767,48 @@ describe("data layer", () => {
       expect(found.status).toBe("blocked_external");
       expect(found.blockedReason).toBe("waiting");
     });
+
+    it("normalizes operator input holds to durable paused waiting state", () => {
+      const t = createTask({ projectId: "proj-1", title: "T", description: "D" });
+      updateTaskStatus(t!.id, "blocked_external", {
+        blockedReason: "operator_input_required: provide external source access",
+        blockedFromStatus: "implementing",
+        paused: false,
+        retryAfter: "2026-05-14T11:00:00.000Z",
+      });
+
+      const found = findTaskById(t!.id)!;
+      expect(found.status).toBe("blocked_external");
+      expect(found.blockedReason).toContain("operator_input_required");
+      expect(found.paused).toBe(true);
+      expect(found.retryAfter).toBeNull();
+    });
+
+    it("normalizes operator input holds written through generic task field updates", () => {
+      const t = createTask({ projectId: "proj-1", title: "T", description: "D" });
+      setTaskFields(t!.id, {
+        status: "blocked_external",
+        blockedReason: "operator_input_required: answer missing audit question",
+        blockedFromStatus: "review",
+        paused: false,
+        retryAfter: "2026-05-14T11:00:00.000Z",
+      });
+
+      let found = findTaskById(t!.id)!;
+      expect(found.paused).toBe(true);
+      expect(found.retryAfter).toBeNull();
+
+      updateTask(t!.id, {
+        blockedReason: "operator_input_required: answer updated audit question",
+        paused: false,
+        retryAfter: "2026-05-14T12:00:00.000Z",
+      });
+
+      found = findTaskById(t!.id)!;
+      expect(found.status).toBe("blocked_external");
+      expect(found.paused).toBe(true);
+      expect(found.retryAfter).toBeNull();
+    });
   });
 
   // ── Token usage ─────────────────────────────────────────
@@ -2503,6 +2545,91 @@ describe("data layer", () => {
       });
 
       expect(countActivePipelineTasksForProject("proj-1")).toBe(0);
+    });
+
+    it("countActivePipelineTasksForProject ignores terminal report and synthesis audit artifacts", () => {
+      const report = createTask({
+        projectId: "proj-1",
+        title: "Audit unavailable source",
+        description: "Report artifact: audit/source.md",
+        taskIntent: "audit",
+      });
+      const synthesis = createTask({
+        projectId: "proj-1",
+        title: "Synthesize unavailable sources",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+      });
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-terminal-source-states",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [report!.id, synthesis!.id],
+        synthesisTaskId: synthesis!.id,
+        artifacts: [
+          { taskId: report!.id, role: "report", artifactPath: "audit/source.md" },
+          { taskId: synthesis!.id, role: "synthesis", artifactPath: "audit/summary.md" },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: report!.id,
+        state: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        reworkStatus: "terminal_inconclusive",
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: synthesis!.id,
+        state: "manual_exception",
+        failureFamily: "manual_exception",
+        reworkStatus: "manual_exception",
+        validationDetails: {
+          justification: "Operator accepted the terminal synthesis exception.",
+        },
+      });
+      updateTaskStatus(report!.id, "blocked_external", {
+        manualReviewRequired: false,
+        reworkRequested: false,
+        retryAfter: null,
+      });
+      updateTaskStatus(synthesis!.id, "blocked_external", {
+        manualReviewRequired: true,
+        reworkRequested: false,
+        retryAfter: null,
+      });
+
+      expect(countActivePipelineTasksForProject("proj-1")).toBe(0);
+    });
+
+    it("countActivePipelineTasksForProject keeps true external audit blockers active", () => {
+      const report = createTask({
+        projectId: "proj-1",
+        title: "Audit remote service",
+        description: "Report artifact: audit/remote-service.md",
+        taskIntent: "audit",
+      });
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-external-blocker",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [report!.id],
+        artifacts: [
+          { taskId: report!.id, role: "report", artifactPath: "audit/remote-service.md" },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: report!.id,
+        state: "external_blocked",
+        failureFamily: "external_blocker",
+      });
+      updateTaskStatus(report!.id, "blocked_external", {
+        manualReviewRequired: false,
+        reworkRequested: false,
+        retryAfter: null,
+      });
+
+      expect(countActivePipelineTasksForProject("proj-1")).toBe(1);
     });
 
     it("hasActiveBranchBoundTasksForProject returns false when no task has a branchName", () => {

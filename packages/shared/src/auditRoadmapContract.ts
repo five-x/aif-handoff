@@ -46,6 +46,48 @@ export const AUDIT_ARTIFACT_REWORK_STATUSES = [
 
 export type AuditArtifactReworkStatus = (typeof AUDIT_ARTIFACT_REWORK_STATUSES)[number];
 
+const RECOVERABLE_AUDIT_FAILURE_FAMILIES = new Set<AuditFailureFamily>([
+  "invalid_artifact_content",
+  "invalid_artifact_contract",
+  "invalid_artifact_integrity",
+  "invalid_inventory_only",
+  "insufficient_substantive_evidence",
+  "source_inconclusive",
+  "missing_artifact",
+  "missing_tool_evidence",
+  "rework_needed",
+]);
+
+const TERMINAL_AUDIT_ARTIFACT_STATES = new Set<AuditArtifactState>([
+  "invalid",
+  "missing",
+  "source_inconclusive",
+  "terminal_inconclusive",
+  "manual_exception",
+]);
+
+const TERMINAL_AUDIT_REWORK_STATUSES = new Set<AuditArtifactReworkStatus>([
+  "manual_review_required",
+  "terminal_inconclusive",
+  "manual_exception",
+]);
+
+export function isRecoverableAuditFailureFamily(family: AuditFailureFamily): boolean {
+  return RECOVERABLE_AUDIT_FAILURE_FAMILIES.has(family);
+}
+
+export function isTerminalAuditArtifactState(
+  state: AuditArtifactState | null | undefined,
+): boolean {
+  return state != null && TERMINAL_AUDIT_ARTIFACT_STATES.has(state);
+}
+
+export function isTerminalAuditReworkStatus(
+  status: AuditArtifactReworkStatus | null | undefined,
+): boolean {
+  return status != null && TERMINAL_AUDIT_REWORK_STATUSES.has(status);
+}
+
 export const AUDIT_GENERATED_CARD_ISSUE_CODES = [
   "missing_diagnostic_markers",
   "missing_no_findings_proof_guardrail",
