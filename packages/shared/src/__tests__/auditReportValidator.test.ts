@@ -1396,6 +1396,58 @@ describe("auditReportValidator", () => {
     }
   }, 10_000);
 
+  it("rejects placeholder manifest hashes and source snapshots", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId: "task:task-audit",
+      taskId: "task-audit",
+      artifactPath: "audit/runtime-audit.md",
+      contentSha256: "<computed_sha256>",
+      sourceSnapshot: {
+        id: "<source_snapshot>",
+        commit: "<commit>",
+        tree: "<tree>",
+        dirty: false,
+      },
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
+      riskHypotheses: [
+        { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
+      ],
+      findings: [],
+      noFindingsClaims: [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+      evidenceRefs: ["ev-1"],
+    };
+
+    const result = validateAuditReportArtifact({
+      text: `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      expectedSourceSnapshot: snapshot,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.manifestStatus).toBe("invalid");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "missing_report_manifest_fields",
+        "manifest_source_snapshot_mismatch",
+      ]),
+    );
+  }, 10_000);
+
   it("validates source line references against the declared snapshot instead of current worktree", () => {
     const root = initRepo();
     const snapshot = gitSnapshot(root);

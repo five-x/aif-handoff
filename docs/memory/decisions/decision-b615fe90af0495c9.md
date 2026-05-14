@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260513-make-audit-report-rework-deterministic-until-valid::entity-capsule
+memory_id: task::aif-handoff::work::work-20260513-make-audit-report-rework-deterministic-until-valid::decision-b615fe90af0495c9
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: work-20260513-make-audit-report-rework-deterministic-until-valid
 source_path: docs/rdpi/work/work-20260513-make-audit-report-rework-deterministic-until-valid
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: decision
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -23,7 +23,7 @@ tags:
 - aif-handoff
 - aif-handoff
 - work
-- capsule
+- decision
   source_refs:
 - docs/rdpi/work/work-20260513-make-audit-report-rework-deterministic-until-valid/research.md
 - docs/rdpi/work/work-20260513-make-audit-report-rework-deterministic-until-valid/design.md
@@ -36,22 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260513-make-audit-report-rework-deterministic-until-valid.
+`source_inconclusive` remains a terminal non-trusted audit source, not a trusted valid report.
 
 # Why it matters
 
-Makes entity-level recall cheaper and more consistent.
+Captures a reusable decision made during the task.
 
 # When to reuse
 
-Reuse before editing the same component or domain.
+Reuse when the same design pressure appears again.
 
 # When not to reuse
 
-Do not reuse if the entity boundary or ownership changed.
-
-## Active decisions
-
-- Deterministic report repair must be self-validating before review handoff.
-- Repeated strict validator failures should terminalize with exact validator issue codes instead of falling through to general LLM implementation.
-- `source_inconclusive` remains a terminal non-trusted audit source, not a trusted valid report.
+Do not reuse when the constraints that justified the decision changed.

@@ -2541,6 +2541,43 @@ describe("coordinator", () => {
     expect(task!.autoReviewStateJson).toContain('"reworkSnapshot"');
   });
 
+  it("should preserve implementer terminalization instead of moving back to review", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-implementer-terminalized",
+        projectId: "test-project",
+        title: "Implementer terminalized",
+        status: "implementing",
+        reworkRequested: true,
+      })
+      .run();
+    vi.mocked(runImplementer).mockImplementationOnce(async (taskId) => {
+      db.update(tasks)
+        .set({
+          status: "blocked_external",
+          blockedReason:
+            "manual_review_required: deterministic audit report repair could not resolve strict validator issue codes for audit/report.md: missing_report_manifest",
+          blockedFromStatus: "implementing",
+          reworkRequested: false,
+          manualReviewRequired: true,
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-implementer-terminalized", "/tmp/test");
+    expect(runReviewer).not.toHaveBeenCalledWith("task-implementer-terminalized", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-implementer-terminalized")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.blockedReason).toContain("missing_report_manifest");
+  });
+
   it("should allow audit rework with artifact content changes to proceed to review", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-changed-rework-");

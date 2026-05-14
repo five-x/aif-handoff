@@ -1061,6 +1061,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     flushActivityQueue(task.id);
     let latestTask: TaskWithHydratedFields = findTaskById(task.id) ?? task;
 
+    if (stage.label === "implementer" && latestTask.status === "blocked_external") {
+      log.info(
+        {
+          taskId: task.id,
+          from: stage.inProgress,
+          to: latestTask.status,
+          blockedReason: latestTask.blockedReason,
+        },
+        "Implementer terminalized task before review handoff",
+      );
+      return false;
+    }
+
     if (stage.label === "implementer" && latestTask.skipReview) {
       if (
         blockTaskForCompletionEvidenceIfNeeded({

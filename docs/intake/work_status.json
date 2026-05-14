@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-13",
+  "updated": "2026-05-14",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -193,6 +193,15 @@
       "priority": "critical",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260513-deterministic-audit-repair-source-inconclusive"
+    },
+    {
+      "taskId": "work-20260513-make-audit-report-rework-deterministic-until-valid",
+      "title": "Make Audit Report Rework Deterministic Until Valid",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260513-make-audit-report-rework-deterministic-until-valid",
+      "updated": "2026-05-14"
     },
     {
       "taskId": "work-20260513-audit-evidence-relevance-gate",

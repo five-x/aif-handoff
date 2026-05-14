@@ -1157,7 +1157,11 @@ describe("runImplementer rework behavior", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-audit-deterministic-repair"))
       .get();
+    expect(updatedTask?.status).toBe("blocked_external");
     expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
     expect(updatedTask?.implementationLog).toContain(
       "Deterministic audit report repair completed as source_inconclusive",
     );
@@ -1268,16 +1272,20 @@ describe("runImplementer rework behavior", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-validator-repair"))
       .get();
+    expect(updatedTask?.status).toBe("blocked_external");
     expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("audit/security.md");
     expect(updatedTask?.implementationLog).toContain(
       "Deterministic audit report repair completed as source_inconclusive",
     );
   });
 
-  it("routes repeated deterministic audit report repair rework through the runtime", async () => {
+  it("terminalizes repeated deterministic audit report repair without calling runtime", async () => {
     const db = testDb.current;
-    queryMock.mockReturnValueOnce(streamSuccess("Runtime repair done"));
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
 
     db.insert(tasks)
       .values({
@@ -1330,26 +1338,32 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repeated-deterministic-loop", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
-    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
-    expect(implementCall.prompt).toContain("speculative_audit_claim");
-    expect(implementCall.prompt).toContain("missing_scope_coverage");
+    expect(queryMock).not.toHaveBeenCalled();
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-deterministic-loop");
+    if (!artifact) throw new Error("missing repeated deterministic artifact");
+    expect(artifact.state).toBe("missing");
+    expect(artifact.failureFamily).toBe("manual_review_required");
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-deterministic-loop"))
       .get();
-    expect(updatedTask?.implementationLog).toBe("Runtime repair done");
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair terminalized for manual review",
+    );
+    expect(updatedTask?.implementationLog).toContain("missing_report_file_references");
+    expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
+    expect(updatedTask?.blockedReason).toContain("missing_report_file_references");
     expect(updatedTask?.agentActivityLog).toContain(
-      "Skipped repeated deterministic audit report repair",
+      "Terminalized repeated deterministic audit report repair",
     );
   });
 
   it("uses the activity log to detect repeated deterministic audit report repair", async () => {
     const db = testDb.current;
-    queryMock.mockReturnValueOnce(
-      streamSuccess("Runtime repair after logged deterministic repair"),
-    );
 
     db.insert(tasks)
       .values({
@@ -1396,15 +1410,20 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repeated-deterministic-activity-log", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(queryMock).not.toHaveBeenCalled();
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-deterministic-activity-log"))
       .get();
-    expect(updatedTask?.implementationLog).toBe("Runtime repair after logged deterministic repair");
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair terminalized for manual review",
+    );
+    expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
     expect(updatedTask?.agentActivityLog).toContain(
-      "Skipped repeated deterministic audit report repair",
+      "Terminalized repeated deterministic audit report repair",
     );
   });
 
@@ -1944,6 +1963,8 @@ describe("runImplementer rework behavior", () => {
     expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-timeout");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-risk-specific-repair");
     if (!artifact) throw new Error("missing risk-specific repair artifact");
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
     const auditEvidenceUnits = listAuditEvidenceEvents({
       taskId: "task-audit-risk-specific-repair",
       auditPlanId: `batch:${artifact.batchId}:task:task-audit-risk-specific-repair`,
@@ -2081,6 +2102,136 @@ describe("runImplementer rework behavior", () => {
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain("already valid before rework");
+  });
+
+  it("terminalizes an existing source_inconclusive report instead of treating it as trusted valid", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const batch = createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-existing-source-inconclusive",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-existing-source-inconclusive"],
+      artifacts: [
+        {
+          taskId: "task-audit-existing-source-inconclusive",
+          role: "report",
+          artifactPath: "audit/inconclusive.md",
+          projectRoot,
+        },
+      ],
+    });
+    const body = [
+      "Audit source inconclusive.",
+      "Checked files:",
+      "- `README.md:1`",
+      "Checked commands:",
+      '- Command `git grep -n "Project" -- README.md` output: `README.md:1:# Project`',
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId: `batch:${batch.batchId}:task:task-audit-existing-source-inconclusive`,
+      batchId: batch.batchId,
+      roadmapAlias: "audit-existing-source-inconclusive",
+      taskId: "task-audit-existing-source-inconclusive",
+      artifactPath: "audit/inconclusive.md",
+      contentSha256: "<computed_sha256>",
+      sourceSnapshot: {
+        id: "<source_snapshot>",
+        commit: "<commit>",
+        tree: "<tree>",
+        dirty: false,
+      },
+      outcome: "source_inconclusive",
+      scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: ["ev-1"] }],
+      riskHypotheses: [],
+      findings: [],
+      noFindingsClaims: [],
+      evidenceRefs: ["ev-1"],
+    };
+    const report = `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+    writeFileSync(join(projectRoot, "audit", "inconclusive.md"), report, "utf8");
+    execFileSync("git", ["add", "audit/inconclusive.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add inconclusive report", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = "Scope: README.md\nReport artifact: audit/inconclusive.md";
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-existing-source-inconclusive",
+        projectId: "project-1",
+        title: "Audit inconclusive",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Retry audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          "- Review Iteration: 2",
+          "",
+          "## Blocking Findings",
+          "- none",
+        ].join("\n"),
+      })
+      .run();
+
+    await runImplementer("task-audit-existing-source-inconclusive", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-existing-source-inconclusive"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("audit/inconclusive.md");
+    expect(updatedTask?.implementationLog).toContain(
+      "manifest already declares source_inconclusive",
+    );
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-existing-source-inconclusive");
+    if (!artifact) throw new Error("missing existing source_inconclusive artifact");
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
+    const details = JSON.parse(artifact.validationDetailsJson ?? "{}") as {
+      evidence?: { auditReportValidation?: { issueCodes?: string[] } };
+      sourceInconclusiveTerminal?: { artifactPath?: string };
+    };
+    expect(details.evidence?.auditReportValidation?.issueCodes).toEqual(
+      expect.arrayContaining(["manifest_outcome_mismatch", "missing_report_manifest_fields"]),
+    );
+    expect(details.sourceInconclusiveTerminal?.artifactPath).toBe("audit/inconclusive.md");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    expect(attempts[0]).toMatchObject({
+      state: "source_inconclusive",
+      classification: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
+    });
   });
 
   it("does NOT resume a stored session when rework is requested", async () => {

@@ -6,6 +6,7 @@ import {
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
   getLatestReworkComment,
+  listAuditEvidenceEvents,
   listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
   setTaskFields,
@@ -24,7 +25,6 @@ import {
   buildAuditEvidencePayload,
   classifyAuditSourceEvidence,
   classifyAuditSynthesisSourceReports,
-  computeAuditReportArtifactSha256,
   computeAuditReportContentSha256,
   extractAuditSynthesisCommandEvidence,
   formatAuditSynthesisOutcomeForArtifact,
@@ -2008,41 +2008,79 @@ function runDeterministicAuditReportRepair(input: {
     input.artifactPath,
     "Audit: repair report evidence",
   );
-  if (repair.decision.outcome === "source_inconclusive") {
+  const validation = validateAuditReportArtifactWithTaskContext({
+    task: input.task,
+    projectRoot: input.projectRoot,
+    artifactPath: input.artifactPath,
+    requireLedgerEvidence: true,
+  });
+  if (!validation) {
+    throw new Error(`deterministic audit report repair could not read ${input.artifactPath}`);
+  }
+  if (isTrustedValidAuditReportValidation(validation)) {
     updateRoadmapBatchArtifactState({
       taskId: input.task.id,
-      state: "source_inconclusive",
-      failureFamily: "source_inconclusive",
-      classification: "source_inconclusive",
-      reworkStatus: "terminal_inconclusive",
-      sourceSnapshotId: repair.sourceSnapshot.id,
+      state: "valid",
+      failureFamily: null,
+      classification: validation.sourceClassification,
+      reworkStatus: "accepted",
+      sourceSnapshotId: validation.sourceSnapshot?.id ?? repair.sourceSnapshot.id,
       projectRoot: input.projectRoot,
-      contentSha: computeAuditReportArtifactSha256(repair.content),
-      validationDetails: {
-        evidence: {
-          auditReportValidation: {
-            sourceClassification: "source_inconclusive",
-            manifestStatus: "valid",
-            manifestVersion: 1,
-          },
-        },
+      contentSha: validation.artifactSha256,
+      validationDetails: buildAuditReportValidationDetails(validation, {
         deterministicRepair: {
           outcome: repair.decision.outcome,
           reasons: repair.decision.reasons,
-          terminalHandling:
-            "reworkRequested is cleared because source_inconclusive is a terminal non-trusted repair outcome, not because the report is trusted valid.",
+          terminalHandling: "strict validation passed after deterministic repair",
         },
+      }),
+    });
+  } else if (repair.decision.outcome === "source_inconclusive") {
+    const validationDetails = buildAuditReportValidationDetails(validation, {
+      deterministicRepair: {
+        outcome: repair.decision.outcome,
+        reasons: repair.decision.reasons,
+        terminalHandling:
+          "reworkRequested is cleared because source_inconclusive is a terminal non-trusted repair outcome, not because the report is trusted valid.",
       },
     });
+    validationDetails.evidence = {
+      auditReportValidation: {
+        ...((validationDetails.evidence as { auditReportValidation?: Record<string, unknown> })
+          .auditReportValidation ?? {}),
+        sourceClassification: "source_inconclusive",
+      },
+    };
+    terminalizeSourceInconclusiveAuditReport({
+      task: input.task,
+      projectRoot: input.projectRoot,
+      artifactPath: input.artifactPath,
+      reasons: repair.decision.reasons,
+      validation,
+      sourceSnapshotId: validation.sourceSnapshot?.id ?? repair.sourceSnapshot.id,
+      validationDetails,
+    });
+  } else {
+    terminalizeManualReviewRequiredAuditRepair({
+      task: input.task,
+      projectRoot: input.projectRoot,
+      artifactPath: input.artifactPath,
+      validation,
+    });
   }
+  const issueCodes = auditReportValidationIssueCodes(validation);
   return [
-    repair.decision.outcome === "validated_no_findings"
-      ? "Deterministic audit report repair completed from risk-specific declared scope evidence."
-      : "Deterministic audit report repair completed as source_inconclusive.",
+    isTrustedValidAuditReportValidation(validation)
+      ? "Deterministic audit report repair completed from risk-specific declared scope evidence and passed strict validation."
+      : repair.decision.outcome === "source_inconclusive"
+        ? "Deterministic audit report repair completed as source_inconclusive."
+        : "Deterministic audit report repair terminalized for manual review after strict validation failed.",
     `Report artifact: ${input.artifactPath}`,
-    repair.decision.outcome === "validated_no_findings"
+    isTrustedValidAuditReportValidation(validation)
       ? "Rejected prior candidate findings that did not meet the technical finding contract."
-      : "Rejected prior candidate findings and persisted a terminal non-trusted source_inconclusive artifact state.",
+      : repair.decision.outcome === "source_inconclusive"
+        ? "Rejected prior candidate findings and persisted a terminal non-trusted source_inconclusive artifact state."
+        : `Manual review required for unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}.`,
     ...(repair.decision.reasons.length > 0
       ? repair.decision.reasons.map((reason) => `Inconclusive reason: ${reason}`)
       : []),
@@ -2051,20 +2089,244 @@ function runDeterministicAuditReportRepair(input: {
   ].join("\n");
 }
 
-function validateExistingAuditReportArtifact(input: {
+function auditReportValidationIssueCodes(
+  validation: ReturnType<typeof validateAuditReportArtifact>,
+): string[] {
+  return [...new Set(validation.issues.map((issue) => issue.code))].sort();
+}
+
+function buildAuditReportValidationDetails(
+  validation: ReturnType<typeof validateAuditReportArtifact>,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    issues: validation.issues,
+    evidence: {
+      auditReportValidation: {
+        ok: validation.ok,
+        issueCodes: auditReportValidationIssueCodes(validation),
+        artifactSha256: validation.artifactSha256,
+        contentSha256: validation.contentSha256,
+        sourceClassification: validation.sourceClassification,
+        manifestStatus: validation.manifestStatus,
+        manifestVersion: validation.manifestVersion,
+      },
+    },
+    ...extra,
+  };
+}
+
+function isTrustedValidAuditReportValidation(
+  validation: ReturnType<typeof validateAuditReportArtifact>,
+): boolean {
+  return (
+    validation.ok &&
+    (validation.sourceClassification === "validated_no_findings" ||
+      validation.sourceClassification === "validated_findings_present")
+  );
+}
+
+function terminalizeSourceInconclusiveAuditReport(input: {
+  task: TaskRow;
   projectRoot: string;
   artifactPath: string;
-  taskDescription: string | null;
+  reasons?: string[];
+  validation?: ReturnType<typeof validateAuditReportArtifact> | null;
+  sourceSnapshotId?: string | null;
+  validationDetails?: Record<string, unknown>;
+}): string {
+  const issueCodes = input.validation ? auditReportValidationIssueCodes(input.validation) : [];
+  const details = [
+    ...(input.reasons ?? []).map((reason) => reason.trim()).filter(Boolean),
+    ...(issueCodes.length > 0 ? [`validator issue codes: ${issueCodes.join(", ")}`] : []),
+  ];
+  const blockedReason = `source_inconclusive: audit report ${input.artifactPath} is terminal non-trusted${
+    details.length > 0 ? `: ${details.join("; ")}` : "."
+  }`;
+  const validationDetails =
+    input.validationDetails ??
+    (input.validation
+      ? buildAuditReportValidationDetails(input.validation, {
+          sourceInconclusiveTerminal: {
+            artifactPath: input.artifactPath,
+            reasons: input.reasons ?? [],
+            issueCodes,
+            validatorSourceClassification: input.validation.sourceClassification,
+          },
+        })
+      : {
+          sourceInconclusiveTerminal: {
+            artifactPath: input.artifactPath,
+            reasons: input.reasons ?? [],
+            issueCodes,
+          },
+        });
+  if (input.validation && !input.validationDetails) {
+    validationDetails.evidence = {
+      auditReportValidation: {
+        ...((validationDetails.evidence as { auditReportValidation?: Record<string, unknown> })
+          .auditReportValidation ?? {}),
+        sourceClassification: "source_inconclusive",
+        validatorSourceClassification: input.validation.sourceClassification,
+      },
+    };
+  }
+  updateRoadmapBatchArtifactState({
+    taskId: input.task.id,
+    state: "source_inconclusive",
+    failureFamily: "source_inconclusive",
+    classification: "source_inconclusive",
+    reworkStatus: "terminal_inconclusive",
+    sourceSnapshotId: input.sourceSnapshotId ?? input.validation?.sourceSnapshot?.id ?? null,
+    projectRoot: input.projectRoot,
+    contentSha: input.validation?.artifactSha256,
+    validationDetails,
+  });
+  const nowIso = new Date().toISOString();
+  setTaskFields(input.task.id, {
+    status: "blocked_external",
+    reworkRequested: false,
+    manualReviewRequired: false,
+    blockedReason,
+    blockedFromStatus: input.task.status,
+    lastHeartbeatAt: nowIso,
+    updatedAt: nowIso,
+  });
+  return blockedReason;
+}
+
+function validateAuditReportArtifactWithTaskContext(input: {
+  task: TaskRow;
+  projectRoot: string;
+  artifactPath: string;
+  requireLedgerEvidence?: boolean;
 }): ReturnType<typeof validateAuditReportArtifact> | null {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   const artifactPath = resolve(input.projectRoot, input.artifactPath);
   if (!existsSync(artifactPath)) return null;
+  const auditPlanId = resolveAuditPlanId({
+    taskId: input.task.id,
+    roadmapBatchId: artifact?.batchId ?? null,
+  });
+  const auditEvidenceUnits = listAuditEvidenceEvents({
+    taskId: input.task.id,
+    auditPlanId,
+  });
   return validateAuditReportArtifact({
     text: readFileSync(artifactPath, "utf8"),
     projectRoot: input.projectRoot,
-    taskDescription: input.taskDescription,
+    taskId: input.task.id,
+    roadmapBatchId: artifact?.batchId ?? null,
+    roadmapAlias: artifact?.roadmapAlias ?? input.task.roadmapAlias,
+    auditPlanId,
+    taskDescription: input.task.description,
     reportArtifactPaths: [input.artifactPath],
+    expectedReportArtifactPath: input.artifactPath,
     requireProposedFix: true,
+    auditEvidenceUnits,
+    requireLedgerEvidence: input.requireLedgerEvidence ?? false,
   });
+}
+
+function persistManualReviewRequiredAuditRepairFailure(input: {
+  task: TaskRow;
+  projectRoot: string;
+  artifactPath: string;
+  validation: ReturnType<typeof validateAuditReportArtifact>;
+  deterministicRepair?: Record<string, unknown>;
+}): string {
+  const issueCodes = auditReportValidationIssueCodes(input.validation);
+  const blockedReason = `manual_review_required: deterministic audit report repair could not resolve strict validator issue codes for ${input.artifactPath}: ${
+    issueCodes.join(", ") || "unknown"
+  }`;
+  updateRoadmapBatchArtifactState({
+    taskId: input.task.id,
+    state: "invalid",
+    failureFamily: "manual_review_required",
+    classification: input.validation.sourceClassification,
+    reworkStatus: "manual_review_required",
+    projectRoot: input.projectRoot,
+    contentSha: input.validation.artifactSha256,
+    validationDetails: buildAuditReportValidationDetails(input.validation, {
+      deterministicRepair: input.deterministicRepair ?? null,
+      manualReviewRequired: {
+        artifactPath: input.artifactPath,
+        issueCodes,
+      },
+    }),
+  });
+  return blockedReason;
+}
+
+function terminalizeManualReviewRequiredAuditRepair(input: {
+  task: TaskRow;
+  projectRoot: string;
+  artifactPath: string;
+  validation: ReturnType<typeof validateAuditReportArtifact> | null;
+  fallbackIssueCodes?: string[];
+}): string {
+  const issueCodes =
+    input.validation != null
+      ? auditReportValidationIssueCodes(input.validation)
+      : [
+          ...new Set(
+            input.fallbackIssueCodes?.length
+              ? input.fallbackIssueCodes
+              : ["missing_report_file_references"],
+          ),
+        ].sort();
+  const blockedReason =
+    input.validation != null
+      ? persistManualReviewRequiredAuditRepairFailure({
+          task: input.task,
+          projectRoot: input.projectRoot,
+          artifactPath: input.artifactPath,
+          validation: input.validation,
+          deterministicRepair: {
+            outcome: "manual_review_required",
+            terminalHandling:
+              "Repeated deterministic audit report repair is terminalized deterministically; runtime implementation is not allowed to override strict repair validation failures.",
+          },
+        })
+      : `manual_review_required: deterministic audit report repair could not read ${input.artifactPath}; strict validator issue codes: ${
+          issueCodes.join(", ") || "missing_report_file_references"
+        }`;
+  if (input.validation == null) {
+    updateRoadmapBatchArtifactState({
+      taskId: input.task.id,
+      state: "missing",
+      failureFamily: "manual_review_required",
+      reworkStatus: "manual_review_required",
+      projectRoot: input.projectRoot,
+      validationDetails: {
+        issues: issueCodes.map((code) => ({
+          code,
+          message: `Strict deterministic repair validation could not read ${input.artifactPath}.`,
+        })),
+        manualReviewRequired: {
+          artifactPath: input.artifactPath,
+          issueCodes,
+        },
+      },
+    });
+  }
+  const nowIso = new Date().toISOString();
+  setTaskFields(input.task.id, {
+    status: "blocked_external",
+    implementationLog: [
+      "Deterministic audit report repair terminalized for manual review.",
+      `Report artifact: ${input.artifactPath}`,
+      `Unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}`,
+      "Runtime implementation was not invoked for this strict repair failure.",
+    ].join("\n"),
+    reworkRequested: false,
+    manualReviewRequired: true,
+    blockedReason,
+    blockedFromStatus: input.task.status,
+    lastHeartbeatAt: nowIso,
+    updatedAt: nowIso,
+  });
+  return blockedReason;
 }
 
 async function runChecklistSyncQuery(input: {
@@ -2213,10 +2475,10 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   );
   const currentAuditReportValidation =
     expectedAuditReportArtifactPath && task.reworkRequested
-      ? validateExistingAuditReportArtifact({
+      ? validateAuditReportArtifactWithTaskContext({
+          task,
           projectRoot,
           artifactPath: expectedAuditReportArtifactPath,
-          taskDescription: task.description,
         })
       : null;
   const currentAuditReportIssueCodes =
@@ -2253,7 +2515,80 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   if (
     expectedAuditReportArtifactPath &&
     task.reworkRequested &&
+    roadmapArtifact?.state === "source_inconclusive"
+  ) {
+    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      reasons: ["roadmap artifact is already source_inconclusive"],
+      validation: currentAuditReportValidation,
+    });
+    const nowIso = new Date().toISOString();
+    const resultText = [
+      "Audit report artifact is already source_inconclusive before rework implementation; terminalized before review handoff.",
+      `Report artifact: ${expectedAuditReportArtifactPath}`,
+      `Blocked reason: ${blockedReason}`,
+    ].join("\n");
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      reworkRequested: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "Audit report artifact already source_inconclusive before rework implementation",
+    );
+    log.info(
+      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      "Audit report rework terminalized because artifact state is source_inconclusive",
+    );
+    return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    task.reworkRequested &&
+    currentAuditReportValidation?.manifest?.outcome === "source_inconclusive"
+  ) {
+    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      reasons: ["existing audit report manifest declares source_inconclusive"],
+      validation: currentAuditReportValidation,
+    });
+    const nowIso = new Date().toISOString();
+    const resultText = [
+      "Audit report manifest already declares source_inconclusive before rework implementation; terminalized before review handoff.",
+      `Report artifact: ${expectedAuditReportArtifactPath}`,
+      `Blocked reason: ${blockedReason}`,
+    ].join("\n");
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      reworkRequested: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "Audit report manifest already source_inconclusive before rework implementation",
+    );
+    log.info(
+      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      "Audit report rework terminalized because existing manifest is source_inconclusive",
+    );
+    return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    task.reworkRequested &&
     currentAuditReportValidation?.ok &&
+    isTrustedValidAuditReportValidation(currentAuditReportValidation) &&
     reviewCommentsDeclareNoBlockingFindings(task.reviewComments) &&
     (task.autoReviewState?.findings.length ?? 0) === 0
   ) {
@@ -2276,6 +2611,43 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     log.info(
       { taskId, artifactPath: expectedAuditReportArtifactPath },
       "Audit report rework skipped because existing artifact already validates",
+    );
+    return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    task.reworkRequested &&
+    currentAuditReportValidation?.ok &&
+    currentAuditReportValidation.sourceClassification === "source_inconclusive"
+  ) {
+    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      reasons: ["existing audit report is already classified source_inconclusive"],
+      validation: currentAuditReportValidation,
+    });
+    const nowIso = new Date().toISOString();
+    const resultText = [
+      "Audit report evidence is already source_inconclusive before rework implementation; terminalized before review handoff.",
+      `Report artifact: ${expectedAuditReportArtifactPath}`,
+      `Blocked reason: ${blockedReason}`,
+    ].join("\n");
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      reworkRequested: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "Audit report evidence already source_inconclusive before rework implementation",
+    );
+    log.info(
+      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      "Audit report rework terminalized because existing artifact is source_inconclusive",
     );
     return;
   }
@@ -2345,15 +2717,23 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     (auditEvidenceRepairMode || currentReportNeedsDeterministicRepair) &&
     shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)
   ) {
+    const blockedReason = terminalizeManualReviewRequiredAuditRepair({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      validation: currentAuditReportValidation,
+      fallbackIssueCodes: currentAuditReportIssueCodes,
+    });
     logActivity(
       taskId,
       "Agent",
-      "Skipped repeated deterministic audit report repair; routing rework to runtime implementation",
+      `Terminalized repeated deterministic audit report repair for manual review: ${blockedReason}`,
     );
     log.warn(
-      { taskId, artifactPath: expectedAuditReportArtifactPath },
-      "Skipped repeated deterministic audit report repair to avoid a fast review/rework loop",
+      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      "Terminalized repeated deterministic audit report repair instead of routing to runtime implementation",
     );
+    return;
   }
 
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
