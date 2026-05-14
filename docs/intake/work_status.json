@@ -359,6 +359,15 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260514-route-recoverable-audit-failures-to-rework-or-input",
       "updated": "2026-05-14"
+    },
+    {
+      "taskId": "work-20260514-terminalize-roadmap-audit-stalls-as-inconclusive",
+      "title": "Terminalize Roadmap Audit Stalls As Inconclusive",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260514-terminalize-roadmap-audit-stalls-as-inconclusive",
+      "updated": "2026-05-14"
     }
   ]
 }

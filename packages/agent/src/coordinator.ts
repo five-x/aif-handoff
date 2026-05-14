@@ -587,9 +587,64 @@ function formatAutoReviewFindingsForBlockedReason(
   return findings.map((finding) => `[${finding.id}] ${finding.source}: ${finding.text}`).join("; ");
 }
 
+function terminalizeRoadmapSourceReportAsInconclusive(input: {
+  task: TaskWithHydratedFields;
+  projectRoot: string;
+  fromStatus: TaskStatus;
+  title: string;
+  reason: "stalled_rework_loop" | "no_substantive_rework_delta";
+  blockedReason: string;
+  reviewIterationCount: number;
+  autoReviewState?: TaskWithHydratedFields["autoReviewState"];
+  contentSha?: string | null;
+  validationDetails?: Record<string, unknown>;
+}): boolean {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  if (!artifact || artifact.role !== "report") return false;
+
+  const artifactSha =
+    input.contentSha ?? readRelativeFileSha(input.projectRoot, artifact.artifactPath);
+  updateRoadmapBatchArtifactState({
+    taskId: input.task.id,
+    state: "source_inconclusive",
+    failureFamily: "source_inconclusive",
+    classification: "source_inconclusive",
+    reworkStatus: "terminal_inconclusive",
+    validationDetails: {
+      sourceClassification: "source_inconclusive",
+      terminalizationReason: input.reason,
+      blockedReason: input.blockedReason,
+      artifactPath: artifact.artifactPath,
+      autoReviewState: input.autoReviewState ?? null,
+      ...(input.validationDetails ?? {}),
+    },
+    contentSha: artifactSha,
+    branchName: input.task.branchName,
+    worktreePath: input.task.worktreePath,
+    projectRoot: input.projectRoot,
+  });
+
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "done",
+    {
+      ...CLEAN_STATE_RESET,
+      reviewIterationCount: input.reviewIterationCount,
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] Roadmap audit source report terminalized as source_inconclusive after ${input.reason}: ${input.blockedReason}`,
+  );
+  return true;
+}
+
 function blockTaskForStalledAutoReview(input: {
   task: TaskWithHydratedFields;
   outcome: Extract<ReviewGateOutcome, { status: "manual_review_required" }>;
+  projectRoot: string;
   fromStatus: TaskStatus;
   title: string;
 }): boolean {
@@ -598,6 +653,25 @@ function blockTaskForStalledAutoReview(input: {
   const blockedReason =
     `manual_review_required: stalled_rework_loop after ${input.outcome.currentIteration}/${threshold} same-blocker reviews; ` +
     `unresolved blockers: ${formatAutoReviewFindingsForBlockedReason(input.outcome.autoReviewState.findings)}`;
+  if (
+    terminalizeRoadmapSourceReportAsInconclusive({
+      task: input.task,
+      projectRoot: input.projectRoot,
+      fromStatus: input.fromStatus,
+      title: input.title,
+      reason: "stalled_rework_loop",
+      blockedReason,
+      reviewIterationCount: input.outcome.currentIteration,
+      autoReviewState: input.outcome.autoReviewState,
+      validationDetails: {
+        metrics: input.outcome.metrics,
+        handoffReason: input.outcome.handoffReason,
+        stallThreshold: threshold,
+      },
+    })
+  ) {
+    return true;
+  }
   clearTaskRuntimeLimitSnapshot(input.task.id);
   updateTaskStatus(
     input.task.id,
@@ -642,6 +716,25 @@ function blockTaskForNoSubstantiveReworkDeltaIfNeeded(input: {
     `artifact content sha unchanged (${shaDisplay}); ` +
     `rework iteration ${snapshot.iteration}; blocker ids: ${findingIds}; ` +
     `unresolved blockers: ${formatAutoReviewFindingsForBlockedReason(input.task.autoReviewState?.findings)}`;
+
+  if (
+    terminalizeRoadmapSourceReportAsInconclusive({
+      task: input.task,
+      projectRoot: input.projectRoot,
+      fromStatus: input.fromStatus,
+      title: input.title,
+      reason: "no_substantive_rework_delta",
+      blockedReason,
+      reviewIterationCount: input.task.reviewIterationCount ?? 0,
+      autoReviewState: input.task.autoReviewState,
+      contentSha: currentSha,
+      validationDetails: {
+        reworkSnapshot: snapshot,
+      },
+    })
+  ) {
+    return true;
+  }
 
   clearTaskRuntimeLimitSnapshot(input.task.id);
   updateTaskStatus(
@@ -1096,6 +1189,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           blockTaskForStalledAutoReview({
             task: latestTask,
             outcome,
+            projectRoot: executionRoot,
             fromStatus: stage.inProgress,
             title: taskTitle,
           })

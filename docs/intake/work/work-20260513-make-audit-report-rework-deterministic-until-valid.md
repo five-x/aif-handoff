@@ -2,7 +2,7 @@
 
 - Task ID: work-20260513-make-audit-report-rework-deterministic-until-valid
 - Lane: work
-- Status: queued
+- Status: done
 - Priority: critical
 - Created: 2026-05-13
 - Due: unset

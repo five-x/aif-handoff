@@ -2420,7 +2420,7 @@ describe("coordinator", () => {
     expect(task!.reworkRequested).toBe(false);
   });
 
-  it("should block stalled auto-review loops instead of reworking again", async () => {
+  it("should block non-roadmap stalled auto-review loops instead of reworking again", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -2491,7 +2491,130 @@ describe("coordinator", () => {
     expect(task!.autoReviewStateJson).toContain('"streak":3');
   });
 
-  it("should block audit rework that resubmits an unchanged artifact", async () => {
+  it("should terminalize roadmap source reports when auto-review stalls", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-roadmap-stalled-report",
+        projectId: "test-project",
+        title: "Audit stalled roadmap report",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        reviewComments: "## Blocking Findings\n- fix issue A",
+        reviewIterationCount: 2,
+        maxReviewIterations: 100,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "fix-a",
+              source: "review_gate",
+              text: "Fix missing audit evidence",
+              firstSeenIteration: 1,
+              lastSeenIteration: 2,
+              streak: 2,
+            },
+          ],
+        }),
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-roadmap-stalled-synthesis",
+        projectId: "test-project",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "backlog",
+        paused: true,
+        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-stalled",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-roadmap-stalled-report", "task-roadmap-stalled-synthesis"],
+      synthesisTaskId: "task-roadmap-stalled-synthesis",
+      artifacts: [
+        {
+          taskId: "task-roadmap-stalled-report",
+          role: "report",
+          artifactPath: "audit/report.md",
+          projectRoot: "/tmp/test",
+        },
+        {
+          taskId: "task-roadmap-stalled-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot: "/tmp/test",
+        },
+      ],
+    });
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "manual_review_required",
+      currentIteration: 3,
+      handoffReason: "stalled_rework_loop",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 3,
+        previousBlockingCount: 1,
+        stillBlockingCount: 1,
+        newBlockingCount: 0,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 3,
+        findings: [
+          {
+            id: "fix-a",
+            source: "review_gate",
+            text: "Fix missing audit evidence",
+            firstSeenIteration: 1,
+            lastSeenIteration: 3,
+            streak: 3,
+          },
+        ],
+      },
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-roadmap-stalled-report")).get();
+    expect(task!.status).toBe("done");
+    expect(task!.blockedReason).toBeNull();
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.reviewIterationCount).toBe(3);
+
+    const reportArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (artifact) => artifact.taskId === "task-roadmap-stalled-report",
+    );
+    expect(reportArtifact?.state).toBe("source_inconclusive");
+    expect(reportArtifact?.failureFamily).toBe("source_inconclusive");
+    const attempts = listRoadmapBatchArtifactAttempts(reportArtifact!.id);
+    expect(attempts.at(-1)?.reworkStatus).toBe("terminal_inconclusive");
+    expect(attempts.at(-1)?.classification).toBe("source_inconclusive");
+
+    const summary = summarizeRoadmapBatch(batch.batchId);
+    expect(summary?.synthesisReady).toBe(true);
+    const synthesis = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-roadmap-stalled-synthesis"))
+      .get();
+    expect(synthesis?.paused).toBe(false);
+    expect(synthesis?.blockedReason).toBeNull();
+  });
+
+  it("should terminalize roadmap audit rework that resubmits an unchanged artifact", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-no-delta-rework-");
     mkdirSync(join(rootPath, "audit"), { recursive: true });
@@ -2532,7 +2655,7 @@ describe("coordinator", () => {
         }),
       })
       .run();
-    createRoadmapBatchContract({
+    const batch = createRoadmapBatchContract({
       projectId: "no-delta-project",
       roadmapAlias: "no-delta",
       taskIntent: "audit",
@@ -2553,14 +2676,17 @@ describe("coordinator", () => {
     const task = db.select().from(tasks).where(eq(tasks.id, "task-no-delta-rework")).get();
     expect(runImplementer).toHaveBeenCalledWith("task-no-delta-rework", rootPath);
     expect(runReviewer).not.toHaveBeenCalledWith("task-no-delta-rework", rootPath);
-    expect(task!.status).toBe("blocked_external");
-    expect(task!.blockedFromStatus).toBe("implementing");
-    expect(task!.blockedReason).toContain("manual_review_required: no_substantive_rework_delta");
-    expect(task!.blockedReason).toContain("audit/report.md");
-    expect(task!.blockedReason).toContain("fix-a");
-    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.status).toBe("done");
+    expect(task!.blockedReason).toBeNull();
+    expect(task!.blockedFromStatus).toBeNull();
+    expect(task!.manualReviewRequired).toBe(false);
     expect(task!.reworkRequested).toBe(false);
-    expect(task!.autoReviewStateJson).toContain('"reworkSnapshot"');
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact!.id);
+    expect(attempts.at(-1)?.reworkStatus).toBe("terminal_inconclusive");
+    expect(attempts.at(-1)?.validationDetailsJson).toContain("no_substantive_rework_delta");
   });
 
   it("should preserve implementer terminalization instead of moving back to review", async () => {
