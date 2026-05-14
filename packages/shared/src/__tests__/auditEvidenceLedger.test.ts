@@ -1,11 +1,56 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUDIT_EVIDENCE_KINDS,
+  EVIDENCE_UNIT_KINDS,
   buildAuditEvidencePayload,
   buildAuditEvidenceUnit,
+  buildEvidenceUnit,
+  buildEvidenceUnitPayload,
   deriveAuditEvidenceScopeIdsFromPaths,
+  readEvidenceUnitRuntimePayload,
 } from "../auditEvidenceLedger.js";
 
 describe("auditEvidenceLedger", () => {
+  it("exposes generic evidence unit aliases over the audit ledger shape", () => {
+    expect(EVIDENCE_UNIT_KINDS).toBe(AUDIT_EVIDENCE_KINDS);
+
+    const payload = buildEvidenceUnitPayload({
+      id: "ev-generic",
+      toolName: "Read",
+      evidenceKind: "file_read",
+      paths: ["src/index.ts"],
+      output: "export const ok = true;\n",
+    });
+    const parsed = readEvidenceUnitRuntimePayload(payload);
+    const auditUnit = buildAuditEvidenceUnit(
+      {
+        taskId: "task-1",
+        auditPlanId: "task:task-1",
+        sourceSnapshotId: "git:commit:tree",
+      },
+      payload,
+    );
+    const evidenceUnit = buildEvidenceUnit(
+      {
+        taskId: "task-1",
+        auditPlanId: "task:task-1",
+        sourceSnapshotId: "git:commit:tree",
+      },
+      payload,
+    );
+
+    expect(parsed).toEqual(payload);
+    expect(evidenceUnit).toEqual(auditUnit);
+    expect(evidenceUnit).toEqual(
+      expect.objectContaining({
+        id: "ev-generic",
+        taskId: "task-1",
+        auditPlanId: "task:task-1",
+        evidenceKind: "file_read",
+      }),
+    );
+  });
+
   it("captures hashes and bounded redacted previews without raw secrets", () => {
     const payload = buildAuditEvidencePayload({
       toolName: "run_shell",

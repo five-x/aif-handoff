@@ -15,6 +15,20 @@ export {
   type AppSettings,
   type UpdateAppSettingsInput,
   type Task,
+  type WorkflowTimeline,
+  type WorkflowTimelineArtifact,
+  type WorkflowTimelineArtifactState,
+  type WorkflowTimelineAttempt,
+  type WorkflowTimelineClaim,
+  type WorkflowTimelineClaimOutcome,
+  type WorkflowTimelineContext,
+  type WorkflowTimelineEvent,
+  type WorkflowTimelineEventKind,
+  type WorkflowTimelineEvidence,
+  type WorkflowTimelineEvidenceLink,
+  type WorkflowTimelineEvidenceLinkRelation,
+  type WorkflowTimelineSourceKind,
+  type WorkflowTimelineTrustLevel,
   type CreateTaskInput,
   type UpdateTaskInput,
   type TaskComment,
@@ -99,6 +113,12 @@ export {
   type ValidateGeneratedTaskIntentInput,
   type ValidateGeneratedTaskIntentResult,
 } from "./taskIntent.js";
+export {
+  WORKFLOW_PACKS,
+  getWorkflowPack,
+  validateGeneratedWorkflowTask,
+  type WorkflowPack,
+} from "./workflowPacks.js";
 
 export {
   STATUS_CONFIG,

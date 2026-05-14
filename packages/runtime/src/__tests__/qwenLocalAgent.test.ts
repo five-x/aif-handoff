@@ -238,6 +238,9 @@ describe("qwen-local-agent adapter", () => {
     expect(evidence.map((entry) => entry.evidenceKind)).toEqual(
       expect.arrayContaining(["file_read", "search", "shell_command"]),
     );
+    expect(
+      auditEvents.every((event) => event.data.evidenceUnit.id === event.data.auditEvidence.id),
+    ).toBe(true);
     expect(evidence.find((entry) => entry.toolName === "list_files").evidenceGrade).toBe(
       "discovery",
     );

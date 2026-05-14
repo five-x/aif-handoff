@@ -177,6 +177,7 @@ vi.mock("@/hooks/useTasks", () => ({
                             ? mockPlanningTaskWithActivityOnly
                             : null,
   }),
+  useTaskTimeline: () => ({ data: null, isLoading: false }),
   useUpdateTask: () => ({ mutate: mutateUpdateTask }),
   useDeleteTask: () => ({ mutate: mutateDeleteTask }),
   useTaskEvent: () => ({
@@ -272,6 +273,12 @@ describe("TaskDetail", () => {
     expect(screen.getAllByText("Read").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Write").length).toBeGreaterThan(0);
     expect(screen.getAllByText("TOOL").length).toBeGreaterThan(0);
+  });
+
+  it("should render workflow timeline tab", () => {
+    render(<TaskDetail taskId="detail-1" onClose={vi.fn()} />, { wrapper: Wrapper });
+    fireEvent.click(screen.getByText("Timeline"));
+    expect(screen.getByText("Timeline unavailable.")).toBeDefined();
   });
 
   it("defaults to activity tab when implementation log is empty but agent activity exists", () => {

@@ -76,6 +76,16 @@ import {
   type Task,
   type TaskIntent,
   type TaskStatus,
+  type WorkflowTimeline,
+  type WorkflowTimelineArtifact,
+  type WorkflowTimelineArtifactState,
+  type WorkflowTimelineAttempt,
+  type WorkflowTimelineClaim,
+  type WorkflowTimelineClaimOutcome,
+  type WorkflowTimelineEvent,
+  type WorkflowTimelineEvidence,
+  type WorkflowTimelineEvidenceLink,
+  type WorkflowTimelineTrustLevel,
   normalizeTaskIntent,
   resolveRuntimeLimitFutureHint,
   sanitizeRuntimeLimitSnapshotForExposure,
@@ -89,6 +99,7 @@ import {
   type AuditEvidenceCommandMetadata,
   type AuditEvidenceParsedSummary,
   type AuditEvidenceUnit,
+  type EvidenceUnit,
   type AuditEvidenceKind,
   type AuditEvidenceGrade,
   type AuditEvidenceRedactionStatus,
@@ -2091,6 +2102,8 @@ export interface ListAuditEvidenceEventsOptions {
   limit?: number;
 }
 
+export type ListEvidenceUnitEventsOptions = ListAuditEvidenceEventsOptions;
+
 function parseJsonObject<T>(raw: string | null | undefined): T | null {
   if (!raw) return null;
   try {
@@ -2183,6 +2196,16 @@ export function listAuditEvidenceEvents(
     .limit(Math.max(1, Math.min(options.limit ?? 500, 1_000)))
     .all()
     .map(toAuditEvidenceUnit);
+}
+
+export function appendEvidenceUnitEvent(unit: EvidenceUnit): EvidenceUnit {
+  return appendAuditEvidenceEvent(unit);
+}
+
+export function listEvidenceUnitEvents(
+  options: ListEvidenceUnitEventsOptions = {},
+): EvidenceUnit[] {
+  return listAuditEvidenceEvents(options);
 }
 
 // ---------------------------------------------------------------------------
@@ -3396,6 +3419,368 @@ export function listRoadmapBatchArtifactAttempts(
     .where(eq(roadmapBatchArtifactAttempts.artifactId, artifactId))
     .orderBy(asc(roadmapBatchArtifactAttempts.attemptNumber))
     .all();
+}
+
+function mapWorkflowArtifactState(state: string): WorkflowTimelineArtifactState {
+  switch (state) {
+    case "valid":
+      return "accepted";
+    case "invalid":
+      return "rejected";
+    case "missing":
+      return "missing";
+    case "synthesis_not_ready":
+    case "source_inconclusive":
+    case "terminal_inconclusive":
+      return "inconclusive";
+    case "external_blocked":
+      return "blocked";
+    case "manual_exception":
+      return "manual_exception";
+    case "expected":
+    default:
+      return "expected";
+  }
+}
+
+function mapWorkflowClaimOutcome(state: string): WorkflowTimelineClaimOutcome {
+  switch (state) {
+    case "valid":
+      return "supported";
+    case "invalid":
+    case "missing":
+      return "refuted";
+    case "external_blocked":
+      return "blocked";
+    case "source_inconclusive":
+    case "terminal_inconclusive":
+    case "synthesis_not_ready":
+      return "inconclusive";
+    case "manual_exception":
+      return "waived";
+    case "expected":
+    default:
+      return "not_evaluated";
+  }
+}
+
+function mapWorkflowTrustLevel(input: {
+  state: string;
+  failureFamily?: string | null;
+}): WorkflowTimelineTrustLevel {
+  if (input.state === "valid" && !input.failureFamily) return "trusted";
+  if (input.state === "manual_exception" || input.state === "expected") return "weak";
+  return "untrusted";
+}
+
+function artifactKindFromCompatibilityRole(role: string): string {
+  if (role === "synthesis") return "audit.synthesis_report";
+  if (role === "report") return "audit.source_report";
+  return role;
+}
+
+function artifactLabelFromCompatibilityRole(role: string): string {
+  if (role === "synthesis") return "Synthesis artifact";
+  if (role === "report") return "Source artifact";
+  return "Artifact";
+}
+
+function listRoadmapBatchArtifactsByTaskId(taskId: string): RoadmapBatchArtifactRow[] {
+  return getDb()
+    .select()
+    .from(roadmapBatchArtifacts)
+    .where(eq(roadmapBatchArtifacts.taskId, taskId))
+    .orderBy(asc(roadmapBatchArtifacts.createdAt))
+    .all();
+}
+
+function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimelineArtifact {
+  return {
+    id: artifact.id,
+    taskId: artifact.taskId,
+    kind: artifactKindFromCompatibilityRole(artifact.role),
+    label: artifactLabelFromCompatibilityRole(artifact.role),
+    path: artifact.artifactPath,
+    state: mapWorkflowArtifactState(artifact.state),
+    currentAttemptNumber: artifact.attemptNumber,
+    createdAt: artifact.createdAt,
+    updatedAt: artifact.updatedAt,
+    metadata: {
+      compatibilitySource: "roadmap_batch_artifact",
+      role: artifact.role,
+      roadmapAlias: artifact.roadmapAlias,
+      batchId: artifact.batchId,
+      originalState: artifact.state,
+      failureFamily: artifact.failureFamily,
+      failureSignature: artifact.failureSignature,
+      attemptBoundaryId: artifact.attemptBoundaryId,
+      contentSha: artifact.contentSha,
+      validatedAt: artifact.validatedAt,
+      branchName: artifact.branchName,
+      worktreePath: artifact.worktreePath,
+    },
+  };
+}
+
+function buildWorkflowAttempt(attempt: RoadmapBatchArtifactAttemptRow): WorkflowTimelineAttempt {
+  return {
+    id: attempt.id,
+    artifactId: attempt.artifactId,
+    taskId: attempt.taskId,
+    attemptNumber: attempt.attemptNumber,
+    state: mapWorkflowArtifactState(attempt.state),
+    outcome: mapWorkflowClaimOutcome(attempt.state),
+    trustLevel: mapWorkflowTrustLevel({
+      state: attempt.state,
+      failureFamily: attempt.failureFamily,
+    }),
+    sourceSnapshotId: attempt.sourceSnapshotId,
+    createdAt: attempt.createdAt,
+    metadata: {
+      compatibilitySource: "roadmap_batch_artifact_attempt",
+      role: attempt.role,
+      roadmapAlias: attempt.roadmapAlias,
+      originalState: attempt.state,
+      classification: attempt.classification,
+      failureFamily: attempt.failureFamily,
+      failureSignature: attempt.failureSignature,
+      reworkStatus: attempt.reworkStatus,
+      attemptBoundaryId: attempt.attemptBoundaryId,
+      contentSha: attempt.contentSha,
+    },
+  };
+}
+
+function buildWorkflowClaim(input: {
+  id: string;
+  artifactId: string;
+  taskId: string;
+  attemptId: string | null;
+  state: string;
+  failureFamily?: string | null;
+  evaluatedAt: string | null;
+  metadata: Record<string, unknown>;
+}): WorkflowTimelineClaim {
+  return {
+    id: input.id,
+    artifactId: input.artifactId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    label: "Artifact claim",
+    outcome: mapWorkflowClaimOutcome(input.state),
+    trustLevel: mapWorkflowTrustLevel({
+      state: input.state,
+      failureFamily: input.failureFamily,
+    }),
+    evaluatedAt: input.evaluatedAt,
+    metadata: input.metadata,
+  };
+}
+
+function buildWorkflowEvidence(unit: EvidenceUnit): WorkflowTimelineEvidence {
+  return {
+    id: unit.id,
+    taskId: unit.taskId,
+    kind: unit.evidenceKind,
+    grade: unit.evidenceGrade,
+    toolName: unit.toolName,
+    summary: unit.outputPreview,
+    createdAt: unit.createdAt,
+    metadata: {
+      compatibilitySource: "audit_evidence_event",
+      auditPlanId: unit.auditPlanId,
+      sourceSnapshotId: unit.sourceSnapshotId,
+      scopeIds: unit.scopeIds,
+      riskHypothesisIds: unit.riskHypothesisIds,
+      pathHashes: unit.pathHashes,
+      pathRangeHashes: unit.pathRangeHashes,
+      command: unit.command,
+      exitCode: unit.exitCode,
+      outputSha256: unit.outputSha256,
+      outputPreviewTruncated: unit.outputPreviewTruncated,
+      parsedSummary: unit.parsedSummary,
+      redactionStatus: unit.redactionStatus,
+    },
+  };
+}
+
+function timelineEventSort(a: WorkflowTimelineEvent, b: WorkflowTimelineEvent): number {
+  const byTime = a.occurredAt.localeCompare(b.occurredAt);
+  return byTime === 0 ? a.id.localeCompare(b.id) : byTime;
+}
+
+export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+
+  const workflowKind = normalizeTaskIntent(task.taskIntent, task.isFix ? "fix" : "general");
+  const generatedAt = new Date().toISOString();
+  if (workflowKind !== "audit") {
+    return {
+      context: {
+        taskId: task.id,
+        projectId: task.projectId,
+        workflowPackId: workflowKind,
+        workflowKind,
+        roadmapAlias: task.roadmapAlias,
+        sourceKind: "none",
+        sourceId: null,
+        status: task.status,
+        generatedAt,
+      },
+      artifacts: [],
+      attempts: [],
+      claims: [],
+      evidence: [],
+      evidenceLinks: [],
+      events: [],
+    };
+  }
+
+  const artifacts = listRoadmapBatchArtifactsByTaskId(taskId);
+  const firstArtifact = artifacts[0] ?? null;
+  const attempts = artifacts.flatMap((artifact) => listRoadmapBatchArtifactAttempts(artifact.id));
+  const evidenceUnits = listEvidenceUnitEvents({ taskId });
+
+  const workflowArtifacts = artifacts.map(buildWorkflowArtifact);
+  const workflowAttempts = attempts.map(buildWorkflowAttempt);
+  const currentClaims = artifacts.map((artifact) =>
+    buildWorkflowClaim({
+      id: `${artifact.id}:claim:current`,
+      artifactId: artifact.id,
+      taskId: artifact.taskId,
+      attemptId: null,
+      state: artifact.state,
+      failureFamily: artifact.failureFamily,
+      evaluatedAt: artifact.validatedAt ?? artifact.updatedAt,
+      metadata: {
+        compatibilitySource: "roadmap_batch_artifact",
+        role: artifact.role,
+        roadmapAlias: artifact.roadmapAlias,
+        originalState: artifact.state,
+        failureFamily: artifact.failureFamily,
+        failureSignature: artifact.failureSignature,
+      },
+    }),
+  );
+  const attemptClaims = attempts.map((attempt) =>
+    buildWorkflowClaim({
+      id: `${attempt.id}:claim`,
+      artifactId: attempt.artifactId,
+      taskId: attempt.taskId,
+      attemptId: attempt.id,
+      state: attempt.state,
+      failureFamily: attempt.failureFamily,
+      evaluatedAt: attempt.createdAt,
+      metadata: {
+        compatibilitySource: "roadmap_batch_artifact_attempt",
+        role: attempt.role,
+        roadmapAlias: attempt.roadmapAlias,
+        originalState: attempt.state,
+        classification: attempt.classification,
+        failureFamily: attempt.failureFamily,
+        failureSignature: attempt.failureSignature,
+        reworkStatus: attempt.reworkStatus,
+      },
+    }),
+  );
+  const claims = [...currentClaims, ...attemptClaims];
+  const evidence = evidenceUnits.map(buildWorkflowEvidence);
+  const primaryClaim = firstArtifact
+    ? currentClaims.find((claim) => claim.artifactId === firstArtifact.id) ?? null
+    : null;
+  const evidenceLinks: WorkflowTimelineEvidenceLink[] = evidence.map((unit) => ({
+    id: `${unit.id}:link:${primaryClaim?.id ?? "task"}`,
+    evidenceId: unit.id,
+    artifactId: primaryClaim?.artifactId ?? null,
+    claimId: primaryClaim?.id ?? null,
+    relation: primaryClaim?.outcome === "supported" ? "supports" : "context",
+    metadata: {
+      compatibilitySource: "task_scoped_evidence",
+    },
+  }));
+
+  const events: WorkflowTimelineEvent[] = [
+    ...workflowArtifacts.flatMap((artifact) => [
+      {
+        id: `${artifact.id}:created`,
+        kind: "artifact_created" as const,
+        occurredAt: artifact.createdAt,
+        title: "Artifact created",
+        artifactId: artifact.id,
+        attemptId: null,
+        claimId: null,
+        evidenceId: null,
+        metadata: { state: artifact.state },
+      },
+      {
+        id: `${artifact.id}:updated`,
+        kind: "artifact_updated" as const,
+        occurredAt: artifact.updatedAt,
+        title: "Artifact updated",
+        artifactId: artifact.id,
+        attemptId: null,
+        claimId: `${artifact.id}:claim:current`,
+        evidenceId: null,
+        metadata: { state: artifact.state },
+      },
+    ]),
+    ...workflowAttempts.map((attempt) => ({
+      id: `${attempt.id}:attempt`,
+      kind: "attempt_recorded" as const,
+      occurredAt: attempt.createdAt,
+      title: "Attempt recorded",
+      artifactId: attempt.artifactId,
+      attemptId: attempt.id,
+      claimId: `${attempt.id}:claim`,
+      evidenceId: null,
+      metadata: { state: attempt.state, outcome: attempt.outcome },
+    })),
+    ...claims
+      .filter((claim) => claim.evaluatedAt)
+      .map((claim) => ({
+        id: `${claim.id}:evaluated`,
+        kind: "claim_evaluated" as const,
+        occurredAt: claim.evaluatedAt!,
+        title: "Claim evaluated",
+        artifactId: claim.artifactId,
+        attemptId: claim.attemptId,
+        claimId: claim.id,
+        evidenceId: null,
+        metadata: { outcome: claim.outcome, trustLevel: claim.trustLevel },
+      })),
+    ...evidence.map((unit) => ({
+      id: `${unit.id}:recorded`,
+      kind: "evidence_recorded" as const,
+      occurredAt: unit.createdAt,
+      title: "Evidence recorded",
+      artifactId: null,
+      attemptId: null,
+      claimId: null,
+      evidenceId: unit.id,
+      metadata: { kind: unit.kind, grade: unit.grade, toolName: unit.toolName },
+    })),
+  ].sort(timelineEventSort);
+
+  return {
+    context: {
+      taskId: task.id,
+      projectId: task.projectId,
+      workflowPackId: workflowKind,
+      workflowKind,
+      roadmapAlias: task.roadmapAlias,
+      sourceKind: firstArtifact ? "roadmap_batch" : "none",
+      sourceId: firstArtifact?.batchId ?? null,
+      status: task.status,
+      generatedAt,
+    },
+    artifacts: workflowArtifacts,
+    attempts: workflowAttempts,
+    claims,
+    evidence,
+    evidenceLinks,
+    events,
+  };
 }
 
 export function listValidatedRoadmapReportArtifacts(batchId: string): RoadmapBatchArtifactRow[] {

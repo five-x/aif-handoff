@@ -181,6 +181,10 @@ describe("codex app-server event mapper", () => {
                 evidenceKind?: string;
                 outputPreview?: string | null;
               };
+              evidenceUnit?: {
+                id?: string;
+                evidenceKind?: string;
+              };
             };
           },
       )
@@ -194,6 +198,9 @@ describe("codex app-server event mapper", () => {
       "search",
       "shell_command",
     ]);
+    expect(
+      auditEvents.every((event) => event.data?.evidenceUnit?.id === event.data?.auditEvidence?.id),
+    ).toBe(true);
     expect(auditEvents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAuditEvidencePayload,
   buildAuditEvidenceUnit,
+  buildEvidenceUnit,
+  buildEvidenceUnitPayload,
   projects,
   tasks,
 } from "@aif/shared";
@@ -17,7 +19,12 @@ vi.mock("@aif/shared/server", async (importOriginal) => {
   };
 });
 
-const { appendAuditEvidenceEvent, listAuditEvidenceEvents } = await import("../index.js");
+const {
+  appendAuditEvidenceEvent,
+  appendEvidenceUnitEvent,
+  listAuditEvidenceEvents,
+  listEvidenceUnitEvents,
+} = await import("../index.js");
 
 describe("audit evidence ledger repository", () => {
   beforeEach(() => {
@@ -83,5 +90,37 @@ describe("audit evidence ledger repository", () => {
       }),
     );
     expect(listAuditEvidenceEvents({ taskId: "missing" })).toEqual([]);
+  });
+
+  it("stores generic evidence unit aliases in the existing audit ledger table", () => {
+    const payload = buildEvidenceUnitPayload({
+      id: "ev-generic",
+      toolName: "Read",
+      evidenceKind: "file_read",
+      paths: ["README.md"],
+      output: "# test\n",
+    });
+    const unit = buildEvidenceUnit(
+      {
+        taskId: "task-1",
+        auditPlanId: "task:task-1",
+        sourceSnapshotId: "git:commit:tree",
+      },
+      payload,
+    );
+
+    const saved = appendEvidenceUnitEvent(unit);
+
+    expect(saved).toEqual(expect.objectContaining({ id: "ev-generic", taskId: "task-1" }));
+    expect(listEvidenceUnitEvents({ taskId: "task-1" })[0]).toEqual(
+      expect.objectContaining({
+        id: "ev-generic",
+        evidenceKind: "file_read",
+        outputPreview: "# test\n",
+      }),
+    );
+    expect(listAuditEvidenceEvents({ evidenceIds: ["ev-generic"] })[0]).toEqual(
+      expect.objectContaining({ id: "ev-generic" }),
+    );
   });
 });

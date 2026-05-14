@@ -3,12 +3,13 @@ import { Trash2 } from "lucide-react";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useTask } from "@/hooks/useTasks";
+import { useTask, useTaskTimeline } from "@/hooks/useTasks";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { TaskDescription } from "./TaskDescription";
 import { TaskPlan } from "./TaskPlan";
 import { TaskLog } from "./TaskLog";
 import { AgentTimeline } from "./AgentTimeline";
+import { WorkflowTimelinePanel } from "./WorkflowTimelinePanel";
 import { TaskComments } from "./TaskComments";
 import { TaskAttachments } from "./TaskAttachments";
 import { TaskSettings } from "./TaskSettings";
@@ -27,6 +28,7 @@ interface TaskDetailProps {
 
 export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
   const { data: task } = useTask(taskId);
+  const { data: timeline, isLoading: isTimelineLoading } = useTaskTimeline(taskId);
   const [selectedTab, setSelectedTab] = useState<TaskDetailTab | null>(null);
   const actions = useTaskDetailActions(task, onClose);
   const defaultTab: TaskDetailTab = (() => {
@@ -168,6 +170,11 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
                       }
                     >
                       <AgentTimeline activityLog={task.agentActivityLog} />
+                    </Section>
+                  )}
+                  {activeTab === "timeline" && (
+                    <Section title="Timeline">
+                      <WorkflowTimelinePanel timeline={timeline} isLoading={isTimelineLoading} />
                     </Section>
                   )}
                 </div>

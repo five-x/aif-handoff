@@ -177,6 +177,128 @@ export interface TaskComment {
   createdAt: string;
 }
 
+export type WorkflowTimelineSourceKind = "none" | "roadmap_batch";
+
+export type WorkflowTimelineArtifactState =
+  | "expected"
+  | "accepted"
+  | "rejected"
+  | "missing"
+  | "inconclusive"
+  | "blocked"
+  | "manual_exception";
+
+export type WorkflowTimelineClaimOutcome =
+  | "supported"
+  | "refuted"
+  | "inconclusive"
+  | "blocked"
+  | "waived"
+  | "not_evaluated";
+
+export type WorkflowTimelineTrustLevel = "trusted" | "weak" | "untrusted";
+
+export type WorkflowTimelineEvidenceLinkRelation = "supports" | "refutes" | "context";
+
+export type WorkflowTimelineEventKind =
+  | "artifact_created"
+  | "artifact_updated"
+  | "attempt_recorded"
+  | "claim_evaluated"
+  | "evidence_recorded";
+
+export interface WorkflowTimelineContext {
+  taskId: string;
+  projectId: string;
+  workflowPackId: string | null;
+  workflowKind: string;
+  roadmapAlias: string | null;
+  sourceKind: WorkflowTimelineSourceKind;
+  sourceId: string | null;
+  status: string;
+  generatedAt: string;
+}
+
+export interface WorkflowTimelineArtifact {
+  id: string;
+  taskId: string;
+  kind: string;
+  label: string;
+  path: string | null;
+  state: WorkflowTimelineArtifactState;
+  currentAttemptNumber: number;
+  createdAt: string;
+  updatedAt: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkflowTimelineAttempt {
+  id: string;
+  artifactId: string;
+  taskId: string;
+  attemptNumber: number;
+  state: WorkflowTimelineArtifactState;
+  outcome: WorkflowTimelineClaimOutcome;
+  trustLevel: WorkflowTimelineTrustLevel;
+  sourceSnapshotId: string | null;
+  createdAt: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkflowTimelineClaim {
+  id: string;
+  artifactId: string;
+  taskId: string;
+  attemptId: string | null;
+  label: string;
+  outcome: WorkflowTimelineClaimOutcome;
+  trustLevel: WorkflowTimelineTrustLevel;
+  evaluatedAt: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkflowTimelineEvidence {
+  id: string;
+  taskId: string;
+  kind: string;
+  grade: string;
+  toolName: string;
+  summary: string | null;
+  createdAt: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkflowTimelineEvidenceLink {
+  id: string;
+  evidenceId: string;
+  artifactId: string | null;
+  claimId: string | null;
+  relation: WorkflowTimelineEvidenceLinkRelation;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkflowTimelineEvent {
+  id: string;
+  kind: WorkflowTimelineEventKind;
+  occurredAt: string;
+  title: string;
+  artifactId: string | null;
+  attemptId: string | null;
+  claimId: string | null;
+  evidenceId: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkflowTimeline {
+  context: WorkflowTimelineContext;
+  artifacts: WorkflowTimelineArtifact[];
+  attempts: WorkflowTimelineAttempt[];
+  claims: WorkflowTimelineClaim[];
+  evidence: WorkflowTimelineEvidence[];
+  evidenceLinks: WorkflowTimelineEvidenceLink[];
+  events: WorkflowTimelineEvent[];
+}
+
 /** POST /tasks/:id/comments body */
 export interface CreateTaskCommentInput {
   message: string;

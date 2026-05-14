@@ -9,7 +9,13 @@ import {
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+  validateGeneratedAuditCard,
 } from "../auditRoadmapContract.js";
+import {
+  WORKFLOW_PACKS,
+  getWorkflowPack,
+  validateGeneratedWorkflowTask,
+} from "../workflowPacks.js";
 
 function completeAuditDescription(options: { synthesis?: boolean } = {}) {
   const synthesis = options.synthesis ?? false;
@@ -81,6 +87,41 @@ describe("taskIntent", () => {
     expect(inferTaskIntent({ taskIntent: "docs", isFix: true, title: "Fix README" })).toBe("fix");
     expect(inferTaskIntent({ title: "Investigate storage options" })).toBe("spike");
     expect(inferTaskIntent({ title: "Add checkout flow" })).toBe("feature");
+  });
+
+  it("exposes immutable workflow packs backed by task contracts", () => {
+    expect(Object.isFrozen(WORKFLOW_PACKS)).toBe(true);
+    expect(Object.isFrozen(getWorkflowPack("audit"))).toBe(true);
+    expect(Object.isFrozen(getWorkflowPack("feature"))).toBe(true);
+    expect(getWorkflowPack("audit")).toMatchObject({
+      id: "audit",
+      label: TASK_INTENT_CONTRACTS.audit.label,
+      taskContract: TASK_INTENT_CONTRACTS.audit,
+    });
+    expect(getWorkflowPack("feature")).toMatchObject({
+      id: "feature",
+      label: TASK_INTENT_CONTRACTS.feature.label,
+      taskContract: TASK_INTENT_CONTRACTS.feature,
+    });
+  });
+
+  it("routes audit generated task validation through the audit workflow pack", () => {
+    const input = {
+      taskIntent: "audit" as const,
+      title: "Audit: security configuration",
+      description: completeAuditDescription().replace(
+        "Allowed changes: only create/update one report artifact.",
+        "Allowed changes: only create/update audit/config-audit.md and packages/api/src/index.ts.",
+      ),
+    };
+
+    expect(validateGeneratedWorkflowTask(input)).toEqual(validateGeneratedTaskIntent(input));
+    expect(getWorkflowPack("audit").validateGeneratedTask(input).issues).toEqual(
+      validateGeneratedAuditCard(input).issues,
+    );
+    expect(validateGeneratedTaskIntent(input).issues).toContain(
+      "audit task allowed changes must be limited to the report artifact",
+    );
   });
 
   it("rejects implementation-shaped audit cards", () => {
@@ -196,5 +237,47 @@ describe("taskIntent", () => {
     });
 
     expect(result).toEqual({ ok: true, issues: [] });
+  });
+
+  it("accepts a non-audit feature canary without audit-only markers", () => {
+    const input = {
+      taskIntent: "feature" as const,
+      title: "Add workflow pack registry",
+      description: [
+        "Scope: packages/shared/src/workflowPacks.ts and packages/shared/src/taskIntent.ts.",
+        "Dependencies: accepted workflow contract pack plan.",
+        "Acceptance criteria: generated feature tasks route through the workflow pack registry.",
+        "Evidence requirements: focused task-intent tests cover the feature canary.",
+        "Allowed changes: source, tests, and docs for the shared registry slice.",
+        "Verification: npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskIntent.test.ts passes.",
+      ].join("\n"),
+    };
+
+    const result = validateGeneratedTaskIntent(input);
+
+    expect(validateGeneratedWorkflowTask(input)).toEqual(result);
+    expect(result).toEqual({ ok: true, issues: [] });
+    expect(result.issues).not.toEqual(
+      expect.arrayContaining([
+        "audit task is missing diagnostic report markers",
+        "audit source task must include parseable Risk hypotheses with risk-* ids",
+        "audit task allowed changes must be limited to the report artifact",
+        "audit task report artifact must be a concrete .md report path",
+        "audit synthesis task is missing outcome requirements",
+      ]),
+    );
+  });
+
+  it("keeps feature pack validation focused on feature markers", () => {
+    const result = getWorkflowPack("feature").validateGeneratedTask({
+      taskIntent: "feature",
+      title: "Add checkout flow",
+      description: "Verification: npm test -- checkout passes.",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      issues: ["feature task is missing Acceptance criteria"],
+    });
   });
 });

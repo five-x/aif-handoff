@@ -38,3 +38,4 @@
 | [work-20260513-bridge-audit-roadmap-batches-to-hierarchy](work/work-20260513-bridge-audit-roadmap-batches-to-hierarchy.md)                   | queued | high     | yes  | Bridge Audit Roadmap Batches To Hierarchy                 |
 | [work-20260513-plan-b-audit-decomposition-regression-suite](work/work-20260513-plan-b-audit-decomposition-regression-suite.md)               | done   | high     | yes  | Plan B Audit Decomposition Regression Suite               |
 | [work-20260513-plan-b-v13-audit-runbook](work/work-20260513-plan-b-v13-audit-runbook.md)                                                     | done   | medium   | yes  | Plan B V13 Audit Runbook And Prompt Pack                  |
+| [work-20260513-make-audit-report-rework-deterministic-until-valid](work/work-20260513-make-audit-report-rework-deterministic-until-valid.md) | queued | critical | yes  | Make Audit Report Rework Deterministic Until Valid        |

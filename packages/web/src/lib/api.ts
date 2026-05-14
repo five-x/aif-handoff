@@ -1,5 +1,6 @@
 import type {
   Task,
+  WorkflowTimeline,
   CreateTaskInput,
   UpdateTaskInput,
   TaskEvent,
@@ -366,6 +367,11 @@ export const api = {
   getTask(id: string): Promise<Task> {
     console.debug("[api] GET /tasks/%s", id);
     return request<Task>(`${API_BASE}/${id}`);
+  },
+
+  getTaskTimeline(id: string): Promise<WorkflowTimeline> {
+    console.debug("[api] GET /tasks/%s/timeline", id);
+    return request<WorkflowTimeline>(`${API_BASE}/${id}/timeline`);
   },
 
   createTask(input: CreateTaskInput): Promise<Task> {

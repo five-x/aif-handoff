@@ -939,7 +939,11 @@ export async function executeSubagentQuery(
       executionIntent.onEvent = (event) => {
         wd.markActivity();
         if (event.type === AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE) {
-          persistAuditEvidencePayload(taskId, projectRoot, event.data?.auditEvidence);
+          persistAuditEvidencePayload(
+            taskId,
+            projectRoot,
+            event.data?.auditEvidence ?? event.data?.evidenceUnit,
+          );
         }
         if (runtimeUsageLimitsEnabled) {
           latestLimitSnapshot = observeRuntimeLimitEvent(event, latestLimitSnapshot, {

@@ -34,6 +34,7 @@ const {
   importGeneratedTasks,
   buildTaskTags,
   commitGeneratedRoadmapIfNeeded,
+  rejectReusedRoadmapAlias,
   RoadmapGenerationError,
 } = await import("../services/roadmapGeneration.js");
 const {
@@ -1186,6 +1187,16 @@ describe("roadmapGeneration", () => {
       expect(importGeneratedTasks(projectId, generation).created).toBe(2);
       expect(() => importGeneratedTasks(projectId, generation)).toThrow(RoadmapGenerationError);
       expect(() => importGeneratedTasks(projectId, generation)).toThrow(/already has 2 task\(s\)/);
+      expect(
+        rejectReusedRoadmapAlias({ projectId, roadmapAlias: "audit", taskIntent: "audit" }),
+      ).toMatch(/already has 2 task\(s\)/);
+      expect(
+        rejectReusedRoadmapAlias({
+          projectId,
+          roadmapAlias: "feature-checkout",
+          taskIntent: "feature",
+        }),
+      ).toBeNull();
     });
 
     it("should ignore per-task typed intent when import batch intent is omitted", () => {
@@ -1243,6 +1254,8 @@ describe("roadmapGeneration", () => {
       expect(task.planTests).toBe(true);
       expect(task.skipReview).toBe(false);
       expect(task.tags).toContain("kind:feature");
+      expect(task.tags).not.toContain("diagnostic-only");
+      expect(result.batchSummary).toBeUndefined();
     });
 
     it("should reject per-task intent mismatches in explicitly typed import batches", () => {

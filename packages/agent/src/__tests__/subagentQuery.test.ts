@@ -482,7 +482,7 @@ describe("executeSubagentQuery attribution", () => {
       timestamp: new Date().toISOString(),
       level: "info" as const,
       message: "Audit evidence captured",
-      data: { auditEvidence: auditPayload },
+      data: { evidenceUnit: auditPayload },
     };
     const adapter: RuntimeAdapter = {
       descriptor: {

@@ -50,6 +50,7 @@ import {
   resolveEffectiveRuntimeProfile,
   resolveEffectiveRuntimeProfilesForTasks,
   updateTaskPositionOnly,
+  buildTaskWorkflowTimeline,
   type TaskRow,
 } from "@aif/data";
 import { validateProjectScopedRuntimeProfileSelections } from "../services/runtimeProfileScope.js";
@@ -124,7 +125,19 @@ tasksRouter.get("/", (c) => {
   );
 });
 
-// POST /tasks — create
+// GET /tasks/:id/timeline - generic task workflow timeline
+tasksRouter.get("/:id/timeline", (c) => {
+  const { id } = c.req.param();
+  const timeline = buildTaskWorkflowTimeline(id);
+  if (!timeline) {
+    log.debug({ taskId: id }, "Task timeline not found");
+    return c.json({ error: "Task not found" }, 404);
+  }
+
+  return c.json(timeline);
+});
+
+// POST /tasks - create
 tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
   const body = c.req.valid("json");
   const runtimeValidation = validateProjectScopedRuntimeProfileSelections({

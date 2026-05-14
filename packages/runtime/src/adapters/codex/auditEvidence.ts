@@ -223,21 +223,24 @@ export function buildCodexAuditEvidenceEvent(
   }
   if (!descriptor) return null;
 
+  const evidenceUnit = buildAuditEvidencePayload({
+    toolName: descriptor.toolName,
+    evidenceKind: descriptor.evidenceKind,
+    evidenceGrade: descriptor.evidenceGrade,
+    paths: descriptor.paths,
+    command: descriptor.command,
+    exitCode: descriptor.exitCode,
+    output: descriptor.output,
+  });
+
   return {
     type: AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
     timestamp,
     level: descriptor.exitCode && descriptor.exitCode !== 0 ? "warn" : "info",
     message: `${descriptor.toolName} audit evidence captured`,
     data: {
-      auditEvidence: buildAuditEvidencePayload({
-        toolName: descriptor.toolName,
-        evidenceKind: descriptor.evidenceKind,
-        evidenceGrade: descriptor.evidenceGrade,
-        paths: descriptor.paths,
-        command: descriptor.command,
-        exitCode: descriptor.exitCode,
-        output: descriptor.output,
-      }),
+      auditEvidence: evidenceUnit,
+      evidenceUnit,
     },
   };
 }

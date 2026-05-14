@@ -16,7 +16,6 @@ import {
   expireStaleRuntimeWarmupSessions,
   findActiveReadyRuntimeWarmupSession,
   findRuntimeProfileById,
-  findTasksByRoadmapAlias,
   findTaskById,
   markRuntimeWarmupSessionFailed,
   markRuntimeWarmupSessionReady,
@@ -47,6 +46,7 @@ import {
   importGeneratedTasks,
   commitGeneratedRoadmapIfNeeded,
   assertRoadmapIntentMatchesRequest,
+  rejectReusedRoadmapAlias,
   RoadmapGenerationError,
 } from "../services/roadmapGeneration.js";
 import { validateProjectScopedRuntimeProfileSelections } from "../services/runtimeProfileScope.js";
@@ -63,17 +63,6 @@ export const projectsRouter = new Hono();
 
 const WARMUP_PROMPT =
   "Study the current project context, including its structure, architecture layers, package boundaries, conventions, and relevant documentation, so this session can be forked for future tasks. Do not edit files. Do not summarize the context; if a final response is required, reply only that warmup is complete.";
-
-function rejectReusedAuditRoadmapAlias(
-  projectId: string,
-  roadmapAlias: string,
-  taskIntent?: TaskIntent,
-): string | null {
-  if ((taskIntent ?? "general") !== "audit") return null;
-  const existingCount = findTasksByRoadmapAlias(projectId, roadmapAlias).length;
-  if (existingCount === 0) return null;
-  return `Audit roadmap alias "${roadmapAlias}" already has ${existingCount} task(s). Use a new roadmap alias for a fresh audit run.`;
-}
 
 function getWarmupEnabled(): boolean {
   return getEnv().AIF_WARMUP_ENABLED;
@@ -344,7 +333,7 @@ projectsRouter.post("/:id/roadmap/generate", jsonValidator(roadmapGenerateSchema
     }
     throw err;
   }
-  const aliasError = rejectReusedAuditRoadmapAlias(id, roadmapAlias, taskIntent);
+  const aliasError = rejectReusedRoadmapAlias({ projectId: id, roadmapAlias, taskIntent });
   if (aliasError) {
     return c.json({ error: aliasError, code: "ROADMAP_ALIAS_EXISTS" }, 409);
   }
@@ -379,7 +368,7 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
     }
     throw err;
   }
-  const aliasError = rejectReusedAuditRoadmapAlias(id, roadmapAlias, taskIntent);
+  const aliasError = rejectReusedRoadmapAlias({ projectId: id, roadmapAlias, taskIntent });
   if (aliasError) {
     return c.json({ error: aliasError, code: "ROADMAP_ALIAS_EXISTS" }, 409);
   }

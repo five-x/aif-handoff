@@ -4,15 +4,22 @@ import { redactProviderText } from "./runtimeLimitUtils.js";
 import { isInventoryAuditCommand } from "./auditSourceEvidence.js";
 
 export const AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE = "audit:evidence" as const;
+export const EVIDENCE_UNIT_RUNTIME_EVENT_TYPE = AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE;
 
 export const AUDIT_EVIDENCE_KINDS = ["file_read", "search", "shell_command"] as const;
 export type AuditEvidenceKind = (typeof AUDIT_EVIDENCE_KINDS)[number];
+export const EVIDENCE_UNIT_KINDS = AUDIT_EVIDENCE_KINDS;
+export type EvidenceUnitKind = AuditEvidenceKind;
 
 export const AUDIT_EVIDENCE_GRADES = ["discovery", "substantive"] as const;
 export type AuditEvidenceGrade = (typeof AUDIT_EVIDENCE_GRADES)[number];
+export const EVIDENCE_UNIT_GRADES = AUDIT_EVIDENCE_GRADES;
+export type EvidenceUnitGrade = AuditEvidenceGrade;
 
 export const AUDIT_EVIDENCE_REDACTION_STATUSES = ["clean", "redacted"] as const;
 export type AuditEvidenceRedactionStatus = (typeof AUDIT_EVIDENCE_REDACTION_STATUSES)[number];
+export const EVIDENCE_UNIT_REDACTION_STATUSES = AUDIT_EVIDENCE_REDACTION_STATUSES;
+export type EvidenceUnitRedactionStatus = AuditEvidenceRedactionStatus;
 
 export interface AuditEvidenceCommandMetadata {
   command: string;
@@ -85,6 +92,14 @@ export interface BuildAuditEvidenceUnitContext {
   scopeIds?: string[];
   riskHypothesisIds?: string[];
 }
+
+export type EvidenceUnitCommandMetadata = AuditEvidenceCommandMetadata;
+export type EvidenceUnitPathRange = AuditEvidencePathRange;
+export type EvidenceUnitParsedSummary = AuditEvidenceParsedSummary;
+export type EvidenceUnitRuntimePayload = AuditEvidenceRuntimePayload;
+export type EvidenceUnit = AuditEvidenceUnit;
+export type BuildEvidenceUnitPayloadInput = BuildAuditEvidencePayloadInput;
+export type BuildEvidenceUnitContext = BuildAuditEvidenceUnitContext;
 
 const DEFAULT_PREVIEW_CHARS = 512;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/i;
@@ -437,3 +452,14 @@ export function readAuditEvidenceRuntimePayload(
     createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString(),
   };
 }
+
+export const normalizeEvidenceUnitIds = normalizeAuditEvidenceIds;
+export const normalizeEvidenceUnitPath = normalizeAuditEvidencePath;
+export const hashEvidenceUnitPath = hashAuditEvidencePath;
+export const hashEvidenceUnitPathRange = hashAuditEvidencePathRange;
+export const deriveEvidenceUnitScopeIdsFromPaths = deriveAuditEvidenceScopeIdsFromPaths;
+export const resolveEvidencePlanId = resolveAuditPlanId;
+export const deriveEvidenceSourceSnapshotId = deriveAuditSourceSnapshotId;
+export const buildEvidenceUnitPayload = buildAuditEvidencePayload;
+export const buildEvidenceUnit = buildAuditEvidenceUnit;
+export const readEvidenceUnitRuntimePayload = readAuditEvidenceRuntimePayload;

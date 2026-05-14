@@ -221,7 +221,7 @@
     {
       "taskId": "work-20260513-implement-workflow-pack-registry-feature-canary",
       "title": "Implement Workflow Pack Registry And Feature Canary",
-      "status": "queued",
+      "status": "done",
       "priority": "critical",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260513-implement-workflow-pack-registry-feature-canary"
@@ -229,34 +229,38 @@
     {
       "taskId": "work-20260513-move-audit-roadmap-hooks-behind-pack",
       "title": "Move Audit Roadmap Hooks Behind Workflow Pack",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-move-audit-roadmap-hooks-behind-pack"
+      "rdpiPath": "docs/rdpi/work/work-20260513-move-audit-roadmap-hooks-behind-pack",
+      "updated": "2026-05-13"
     },
     {
       "taskId": "work-20260513-generalize-evidence-unit-aliases",
       "title": "Generalize Evidence Unit Aliases For Audit Ledger",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-generalize-evidence-unit-aliases"
+      "rdpiPath": "docs/rdpi/work/work-20260513-generalize-evidence-unit-aliases",
+      "updated": "2026-05-13"
     },
     {
       "taskId": "work-20260513-design-generic-artifact-claim-persistence",
       "title": "Design Generic Artifact Claim Persistence",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-design-generic-artifact-claim-persistence"
+      "rdpiPath": "docs/rdpi/work/work-20260513-design-generic-artifact-claim-persistence",
+      "updated": "2026-05-13"
     },
     {
       "taskId": "work-20260513-add-artifact-claim-evidence-timelines",
       "title": "Add Artifact Claim And Evidence Timelines",
-      "status": "queued",
+      "status": "done",
       "priority": "medium",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines"
+      "rdpiPath": "docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines",
+      "updated": "2026-05-13"
     },
     {
       "taskId": "work-20260513-terminalize-stalled-audit-rework-loops",

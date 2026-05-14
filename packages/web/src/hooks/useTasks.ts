@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type {
   Task,
+  WorkflowTimeline,
   CreateTaskInput,
   UpdateTaskInput,
   TaskEvent,
@@ -22,6 +23,14 @@ export function useTask(id: string | null) {
   return useQuery<Task>({
     queryKey: ["task", id],
     queryFn: () => api.getTask(id!),
+    enabled: !!id,
+  });
+}
+
+export function useTaskTimeline(id: string | null) {
+  return useQuery<WorkflowTimeline>({
+    queryKey: ["task-timeline", id],
+    queryFn: () => api.getTaskTimeline(id!),
     enabled: !!id,
   });
 }

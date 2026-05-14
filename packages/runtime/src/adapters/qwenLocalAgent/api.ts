@@ -320,21 +320,23 @@ function emitAuditEvidenceResult(input, events, toolCall, args, result) {
   const output = [result.output, result.error ? `error:\n${result.error}` : ""]
     .filter(Boolean)
     .join("\n");
+  const evidenceUnit = buildAuditEvidencePayload({
+    toolName,
+    evidenceKind,
+    evidenceGrade,
+    paths,
+    command,
+    exitCode: result.exitCode ?? null,
+    output,
+  });
   emitEvent(input, events, {
     type: AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
     timestamp: new Date().toISOString(),
     level: result.ok ? "info" : "warn",
     message: `${toolName} audit evidence captured`,
     data: {
-      auditEvidence: buildAuditEvidencePayload({
-        toolName,
-        evidenceKind,
-        evidenceGrade,
-        paths,
-        command,
-        exitCode: result.exitCode ?? null,
-        output,
-      }),
+      auditEvidence: evidenceUnit,
+      evidenceUnit,
     },
   });
 }

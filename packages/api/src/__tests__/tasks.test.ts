@@ -5,7 +5,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appSettings, projects, runtimeProfiles, taskComments, tasks } from "@aif/shared";
+import {
+  appSettings,
+  buildEvidenceUnit,
+  buildEvidenceUnitPayload,
+  projects,
+  runtimeProfiles,
+  taskComments,
+  tasks,
+} from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 // Mock the shared db module to use test db
@@ -63,6 +71,7 @@ const { tasksRouter } = await import("../routes/tasks.js");
 const { broadcast: mockBroadcast } = await import("../ws.js");
 const {
   createRoadmapBatchContract,
+  appendEvidenceUnitEvent,
   listRoadmapBatchArtifacts,
   listRoadmapBatchArtifactAttempts,
   updateRoadmapBatchArtifactState,
@@ -866,6 +875,136 @@ describe("tasks API", () => {
       expect(body.runtimeLimitSnapshot.providerMeta).toEqual({
         providerLabel: "Anthropic",
       });
+    });
+  });
+
+  describe("GET /tasks/:id/timeline", () => {
+    it("returns audit-compatible data as a generic timeline", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "timeline-audit",
+          projectId: "test-project",
+          title: "Timeline audit",
+          taskIntent: "audit",
+          roadmapAlias: "audit-pack",
+          status: "done",
+        })
+        .run();
+      createRoadmapBatchContract({
+        projectId: "test-project",
+        roadmapAlias: "audit-pack",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["timeline-audit"],
+        artifacts: [
+          {
+            taskId: "timeline-audit",
+            role: "report",
+            artifactPath: "docs/audit/report.md",
+          },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "timeline-audit",
+        state: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        validationDetails: { sourceClassification: "insufficient_evidence" },
+      });
+      appendEvidenceUnitEvent(
+        buildEvidenceUnit(
+          {
+            taskId: "timeline-audit",
+            auditPlanId: "task:timeline-audit",
+            sourceSnapshotId: "git:test",
+          },
+          buildEvidenceUnitPayload({
+            id: "timeline-ev",
+            toolName: "Search",
+            evidenceKind: "search",
+            output: "No stable source was found",
+          }),
+        ),
+      );
+
+      const res = await app.request("/tasks/timeline-audit/timeline");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.context).toEqual(
+        expect.objectContaining({
+          taskId: "timeline-audit",
+          workflowPackId: "audit",
+          sourceKind: "roadmap_batch",
+        }),
+      );
+      expect(body.artifacts[0]).toEqual(
+        expect.objectContaining({
+          kind: "audit.source_report",
+          state: "inconclusive",
+        }),
+      );
+      expect(body.claims[0]).toEqual(
+        expect.objectContaining({
+          outcome: "inconclusive",
+          trustLevel: "untrusted",
+        }),
+      );
+      expect(body.evidence[0]).toEqual(expect.objectContaining({ id: "timeline-ev" }));
+      expect(body.events.map((event: { kind: string }) => event.kind)).toContain(
+        "evidence_recorded",
+      );
+    });
+
+    it("returns an empty generic timeline for non-audit tasks", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "timeline-feature",
+          projectId: "test-project",
+          title: "Timeline feature",
+          taskIntent: "feature",
+          status: "backlog",
+        })
+        .run();
+      appendEvidenceUnitEvent(
+        buildEvidenceUnit(
+          {
+            taskId: "timeline-feature",
+            auditPlanId: "task:timeline-feature",
+            sourceSnapshotId: "git:feature",
+          },
+          buildEvidenceUnitPayload({
+            id: "timeline-feature-ev",
+            toolName: "Search",
+            evidenceKind: "search",
+            output: "Compatibility evidence should not appear on non-audit timelines",
+          }),
+        ),
+      );
+
+      const res = await app.request("/tasks/timeline-feature/timeline");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.context).toEqual(
+        expect.objectContaining({
+          taskId: "timeline-feature",
+          workflowPackId: "feature",
+          workflowKind: "feature",
+          sourceKind: "none",
+        }),
+      );
+      expect(body.artifacts).toEqual([]);
+      expect(body.claims).toEqual([]);
+      expect(body.evidence).toEqual([]);
+      expect(body.evidenceLinks).toEqual([]);
+      expect(body.events).toEqual([]);
+    });
+
+    it("returns 404 for missing tasks", async () => {
+      const res = await app.request("/tasks/missing-task/timeline");
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Task not found" });
     });
   });
 

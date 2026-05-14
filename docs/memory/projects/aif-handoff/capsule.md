@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260513-plan-b-v13-audit-runbook::project-capsule
+memory_id: task::aif-handoff::work::work-20260513-add-artifact-claim-evidence-timelines::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260513-plan-b-v13-audit-runbook
-source_path: docs/rdpi/work/work-20260513-plan-b-v13-audit-runbook
+task_id: work-20260513-add-artifact-claim-evidence-timelines
+source_path: docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -24,10 +24,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260513-plan-b-v13-audit-runbook/research.md
-- docs/rdpi/work/work-20260513-plan-b-v13-audit-runbook/design.md
-- docs/rdpi/work/work-20260513-plan-b-v13-audit-runbook/plan.md
-- docs/rdpi/work/work-20260513-plan-b-v13-audit-runbook/result.md
+- docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines/research.md
+- docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines/design.md
+- docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines/plan.md
+- docs/rdpi/work/work-20260513-add-artifact-claim-evidence-timelines/result.md
   created_at: 2026-05-13
   last_verified_at: 2026-05-13
 
@@ -35,7 +35,7 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260513-plan-b-v13-audit-runbook.
+Current capsule for project aif-handoff, refreshed by task work-20260513-add-artifact-claim-evidence-timelines.
 
 # Why it matters
 
@@ -48,3 +48,11 @@ Reuse before starting related work in this repository.
 # When not to reuse
 
 Do not reuse blindly if the project architecture changed after this task.
+
+## Current stable facts
+
+- The timeline API shape is generic and available through `GET /tasks/:id/timeline`.
+- Audit roadmap compatibility rows surface as generic artifacts, attempts, claims, evidence units, evidence links, and timeline events.
+- Non-audit tasks receive the same generic timeline envelope with empty timeline arrays until durable generic persistence exists.
+- Inconclusive, blocked, missing, rejected, manual exception, and expected compatibility states are not mapped as trusted success.
+- Evidence links are display-oriented task-scoped compatibility links until durable claim/evidence link rows exist.

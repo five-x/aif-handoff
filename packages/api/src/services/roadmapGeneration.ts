@@ -39,9 +39,11 @@ import {
   setTaskFields,
   type RoadmapBatchExecutionPolicy,
   type RoadmapBatchSummary,
+  type TaskRow,
 } from "@aif/data";
 import { UsageSource } from "@aif/runtime";
 import { resolveApiLightModel, runApiRuntimeOneShot } from "./runtime.js";
+import { createRoadmapWorkflowPackResolver } from "./roadmapWorkflowPacks.js";
 
 const log = logger("roadmap-generation");
 
@@ -119,6 +121,92 @@ export interface RoadmapGitCommitResult {
   commitSha?: string;
   skippedReason?: string;
 }
+
+type RoadmapGenerationPromptContext = {
+  description: string | null;
+  architecture: string | null;
+  vision: string | null;
+  roadmapAlias?: string | null;
+  auditDecomposition?: AuditDecompositionClassification | null;
+};
+
+type RoadmapContentNormalizationContext = {
+  projectRoot: string;
+  description: string | null;
+  architecture: string | null;
+  vision: string | null;
+  roadmapAlias?: string | null;
+};
+
+type RoadmapImportArtifactInput = {
+  taskId: string;
+  role: "report" | "synthesis";
+  artifactPath: string;
+  branchName?: string | null;
+  worktreePath?: string | null;
+  projectRoot?: string | null;
+};
+
+type RoadmapImportTaskOverrides = {
+  extraTags?: string[];
+  skipReview?: boolean;
+  useSubagents?: boolean;
+  paused?: boolean;
+  blockedReason?: string | null;
+};
+
+type RoadmapWorkflowHooks = {
+  assertIntentMatchesRequest?: (
+    input: {
+      roadmapAlias?: string | null;
+      taskIntent?: string | null;
+      vision?: string | null;
+    },
+    resolvedIntent: TaskIntent,
+  ) => void;
+  rejectReusedAlias?: (input: { projectId: string; roadmapAlias: string }) => string | null;
+  classifyGenerationRequest?: (
+    ctx: RoadmapGenerationPromptContext,
+  ) => AuditDecompositionClassification | undefined;
+  buildGenerationPrompt?: (ctx: RoadmapGenerationPromptContext) => string;
+  normalizeGeneratedRoadmapContent?: (input: {
+    content: string;
+    context: RoadmapContentNormalizationContext;
+    source: "file" | "output";
+  }) => string;
+  convertRoadmapContentToTasks?: (input: {
+    roadmapContent: string;
+    roadmapAlias: string;
+    priorContext?: string | null;
+  }) => RoadmapGenerationResult;
+  buildExtractionPrompt?: (input: { roadmapContent: string; alias: string }) => string;
+  extractPriorContext?: (input: {
+    roadmapAlias?: string | null;
+    vision?: string | null;
+    description?: string | null;
+    architecture?: string | null;
+    roadmapContent?: string | null;
+  }) => string | null;
+  validateGeneratedBatch?: (input: {
+    generation: RoadmapGenerationResult;
+    priorContext?: string | null;
+  }) => string[];
+  getImportTaskOverrides?: (input: { task: GeneratedTask }) => RoadmapImportTaskOverrides;
+  collectImportArtifact?: (input: {
+    generatedTask: GeneratedTask;
+    task: TaskRow;
+    projectRoot: string;
+  }) => RoadmapImportArtifactInput;
+  createImportBatchSummary?: (input: {
+    projectId: string;
+    roadmapAlias: string;
+    taskIntent: TaskIntent;
+    projectRoot: string;
+    createdTaskIds: string[];
+    synthesisTaskId: string | null;
+    artifacts: RoadmapImportArtifactInput[];
+  }) => RoadmapBatchSummary;
+};
 
 /**
  * Generate a ROADMAP.md file for the project using Agent SDK.
@@ -216,16 +304,24 @@ export function assertRoadmapIntentMatchesRequest(input: {
   vision?: string | null;
 }): TaskIntent {
   const intent = resolveExplicitRoadmapIntent(input.taskIntent);
-  if (
-    intent !== "audit" &&
-    (isAuditShapedRoadmapAlias(input.roadmapAlias) || isAuditOnlyRoadmapVision(input.vision))
-  ) {
-    throw new RoadmapGenerationError(
-      "ROADMAP_INTENT_MISMATCH",
-      'Audit-shaped roadmap requests must set taskIntent: "audit".',
-    );
+  for (const pack of roadmapWorkflowPacks.list()) {
+    pack.hooks?.assertIntentMatchesRequest?.(input, intent);
   }
   return intent;
+}
+
+export function rejectReusedRoadmapAlias(input: {
+  projectId: string;
+  roadmapAlias: string;
+  taskIntent?: string | null;
+}): string | null {
+  const intent = resolveExplicitRoadmapIntent(input.taskIntent);
+  return (
+    roadmapWorkflowPacks.get(intent).hooks?.rejectReusedAlias?.({
+      projectId: input.projectId,
+      roadmapAlias: input.roadmapAlias,
+    }) ?? null
+  );
 }
 
 const AUDIT_ROADMAP_VALIDATION_MESSAGE =
@@ -1017,6 +1113,102 @@ function buildAuditRoadmapGenerationResult(
   };
 }
 
+function collectAuditImportArtifact(input: {
+  generatedTask: GeneratedTask;
+  task: TaskRow;
+  projectRoot: string;
+}): RoadmapImportArtifactInput {
+  const artifactPath = parseExpectedAuditReportArtifactPath(input.generatedTask.description ?? "");
+  if (!artifactPath) {
+    throw new RoadmapGenerationError(
+      "VALIDATION_ERROR",
+      `Audit task "${input.generatedTask.title}" is missing a concrete report artifact path`,
+    );
+  }
+  return {
+    taskId: input.task.id,
+    role: isAuditSynthesisTitle(input.generatedTask.title) ? "synthesis" : "report",
+    artifactPath,
+    branchName: input.task.branchName,
+    worktreePath: input.task.worktreePath,
+    projectRoot: input.projectRoot,
+  };
+}
+
+const auditRoadmapHooks: RoadmapWorkflowHooks = Object.freeze({
+  assertIntentMatchesRequest(input, resolvedIntent) {
+    if (
+      resolvedIntent !== "audit" &&
+      (isAuditShapedRoadmapAlias(input.roadmapAlias) || isAuditOnlyRoadmapVision(input.vision))
+    ) {
+      throw new RoadmapGenerationError(
+        "ROADMAP_INTENT_MISMATCH",
+        'Audit-shaped roadmap requests must set taskIntent: "audit".',
+      );
+    }
+  },
+  rejectReusedAlias(input) {
+    const existingCount = findTasksByRoadmapAlias(input.projectId, input.roadmapAlias).length;
+    if (existingCount === 0) return null;
+    return `Audit roadmap alias "${input.roadmapAlias}" already has ${existingCount} task(s). Use a new roadmap alias for a fresh audit run.`;
+  },
+  classifyGenerationRequest(ctx) {
+    return classifyAuditDecompositionRequest({
+      title: ctx.roadmapAlias ?? "Audit roadmap",
+      description: [ctx.vision ?? null, ctx.description, ctx.architecture]
+        .filter(Boolean)
+        .join("\n"),
+    });
+  },
+  buildGenerationPrompt: buildAuditRoadmapGenerationPrompt,
+  normalizeGeneratedRoadmapContent(input) {
+    return ensureGeneratedAuditRoadmapContent(input.content, input.context, input.source);
+  },
+  convertRoadmapContentToTasks(input) {
+    const auditRoadmapContent = applyPriorAuditContextToRoadmapContent(
+      input.roadmapContent,
+      input.priorContext ?? null,
+    );
+    validateAuditRoadmapSource(auditRoadmapContent);
+    return buildAuditRoadmapGenerationResult(auditRoadmapContent, input.roadmapAlias);
+  },
+  buildExtractionPrompt(input) {
+    return buildAuditExtractionPrompt(input.roadmapContent, input.alias);
+  },
+  extractPriorContext: extractPriorInconclusiveAuditContext,
+  validateGeneratedBatch(input) {
+    return validateAuditGeneratedBatch(input.generation.tasks, input.priorContext ?? null);
+  },
+  getImportTaskOverrides(input) {
+    const synthesis = isAuditSynthesisTitle(input.task.title);
+    return {
+      extraTags: ["diagnostic-only"],
+      skipReview: false,
+      useSubagents: true,
+      paused: synthesis,
+      blockedReason: synthesis
+        ? "synthesis_not_ready: waiting for validated audit batch artifacts"
+        : null,
+    };
+  },
+  collectImportArtifact: collectAuditImportArtifact,
+  createImportBatchSummary(input) {
+    return createRoadmapBatchContract({
+      projectId: input.projectId,
+      roadmapAlias: input.roadmapAlias,
+      taskIntent: input.taskIntent,
+      executionPolicy: resolveAuditBatchExecutionPolicy(input.projectRoot),
+      createdTaskIds: input.createdTaskIds,
+      synthesisTaskId: input.synthesisTaskId,
+      artifacts: input.artifacts,
+    });
+  },
+});
+
+const roadmapWorkflowPacks = createRoadmapWorkflowPackResolver<RoadmapWorkflowHooks>({
+  audit: auditRoadmapHooks,
+});
+
 export async function generateRoadmapFile(
   input: GenerateRoadmapFileInput,
 ): Promise<GenerateRoadmapFileResult> {
@@ -1037,13 +1229,14 @@ export async function generateRoadmapFile(
 
   const description = existsSync(descriptionPath) ? readFileSync(descriptionPath, "utf8") : null;
   const architecture = existsSync(architecturePath) ? readFileSync(architecturePath, "utf8") : null;
-  const auditDecomposition =
-    intent === "audit"
-      ? classifyAuditDecompositionRequest({
-          title: roadmapAlias ?? "Audit roadmap",
-          description: [vision ?? null, description, architecture].filter(Boolean).join("\n"),
-        })
-      : undefined;
+  const roadmapHooks = roadmapWorkflowPacks.get(intent).hooks;
+  const generationContext: RoadmapGenerationPromptContext = {
+    description,
+    architecture,
+    vision: vision ?? null,
+    roadmapAlias: roadmapAlias ?? null,
+  };
+  const auditDecomposition = roadmapHooks?.classifyGenerationRequest?.(generationContext);
 
   if (!description && !vision) {
     throw new RoadmapGenerationError(
@@ -1063,10 +1256,7 @@ export async function generateRoadmapFile(
 
   const basePrompt = buildRoadmapGenerationPrompt(
     {
-      description,
-      architecture,
-      vision: vision ?? null,
-      roadmapAlias: roadmapAlias ?? null,
+      ...generationContext,
       auditDecomposition,
     },
     intent,
@@ -1105,29 +1295,28 @@ export async function generateRoadmapFile(
     vision: vision ?? null,
     roadmapAlias: roadmapAlias ?? null,
   };
+  const normalizeRoadmapContent = (input: { content: string; source: "file" | "output" }) =>
+    roadmapHooks?.normalizeGeneratedRoadmapContent?.({
+      content: input.content,
+      context: auditContext,
+      source: input.source,
+    }) ?? input.content;
+
   if (existsSync(roadmapPath)) {
     const fileContent = readFileSync(roadmapPath, "utf8").trim();
     // Verify agent wrote a real roadmap, not just a stub
     if (fileContent.length > 100 && (fileContent.includes("- [") || fileContent.includes("##"))) {
-      if (intent === "audit") {
-        content = ensureGeneratedAuditRoadmapContent(fileContent, auditContext, "file");
-        writeFileSync(roadmapPath, content, "utf8");
-      } else {
-        content = fileContent;
-      }
+      content = normalizeRoadmapContent({ content: fileContent, source: "file" });
+      if (content !== fileContent) writeFileSync(roadmapPath, content, "utf8");
       log.info({ projectId, roadmapPath, source: "file" }, "Using roadmap file written by agent");
     } else {
       content = extractRoadmapContent(rawResult);
-      if (intent === "audit") {
-        content = ensureGeneratedAuditRoadmapContent(content, auditContext, "output");
-      }
+      content = normalizeRoadmapContent({ content, source: "output" });
       writeFileSync(roadmapPath, content, "utf8");
     }
   } else if (rawResult) {
     content = extractRoadmapContent(rawResult);
-    if (intent === "audit") {
-      content = ensureGeneratedAuditRoadmapContent(content, auditContext, "output");
-    }
+    content = normalizeRoadmapContent({ content, source: "output" });
     writeFileSync(roadmapPath, content, "utf8");
   } else {
     throw new RoadmapGenerationError("EMPTY_RESPONSE", "Agent returned empty roadmap");
@@ -1138,16 +1327,7 @@ export async function generateRoadmapFile(
   return { roadmapPath, content, auditDecomposition };
 }
 
-function buildRoadmapGenerationPrompt(
-  ctx: {
-    description: string | null;
-    architecture: string | null;
-    vision: string | null;
-    roadmapAlias?: string | null;
-    auditDecomposition?: AuditDecompositionClassification | null;
-  },
-  intent: TaskIntent,
-): string {
+function buildAuditRoadmapGenerationPrompt(ctx: RoadmapGenerationPromptContext): string {
   const sections: string[] = [];
 
   if (ctx.description) {
@@ -1160,21 +1340,18 @@ function buildRoadmapGenerationPrompt(
     sections.push(`USER VISION / REQUIREMENTS:\n<<<VISION\n${ctx.vision}\nVISION`);
   }
 
-  if (intent === "audit") {
-    const reportDate = new Date().toISOString().slice(0, 10);
-    const priorContext = extractPriorInconclusiveAuditContext(ctx);
-    const priorContextRule = priorContext
-      ? `- Preserve this prior context in every audit and synthesis card: ${formatPriorAuditContextLine(priorContext)}`
-      : "- If the alias, vision, description, or roadmap context mentions a prior inconclusive audit, preserve that context in every report and synthesis card as `Prior audit context: ...`.";
-    const priorContextLine = priorContext
-      ? `  - ${formatPriorAuditContextLine(priorContext)}\n`
-      : "";
-    const decompositionRule = ctx.auditDecomposition
-      ? `Request decomposition mode: ${ctx.auditDecomposition.mode}; requires decomposition: ${
-          ctx.auditDecomposition.requiresDecomposition ? "yes" : "no"
-        }; reasons: ${ctx.auditDecomposition.reasonCodes.join(", ") || "none"}.`
-      : "Request decomposition mode: decomposed_report_batch; reasons: audit roadmap generation.";
-    return `You are creating an owner-grade diagnostic audit decomposition roadmap based on the project context below.
+  const reportDate = new Date().toISOString().slice(0, 10);
+  const priorContext = extractPriorInconclusiveAuditContext(ctx);
+  const priorContextRule = priorContext
+    ? `- Preserve this prior context in every audit and synthesis card: ${formatPriorAuditContextLine(priorContext)}`
+    : "- If the alias, vision, description, or roadmap context mentions a prior inconclusive audit, preserve that context in every report and synthesis card as `Prior audit context: ...`.";
+  const priorContextLine = priorContext ? `  - ${formatPriorAuditContextLine(priorContext)}\n` : "";
+  const decompositionRule = ctx.auditDecomposition
+    ? `Request decomposition mode: ${ctx.auditDecomposition.mode}; requires decomposition: ${
+        ctx.auditDecomposition.requiresDecomposition ? "yes" : "no"
+      }; reasons: ${ctx.auditDecomposition.reasonCodes.join(", ") || "none"}.`
+    : "Request decomposition mode: decomposed_report_batch; reasons: audit roadmap generation.";
+  return `You are creating an owner-grade diagnostic audit decomposition roadmap based on the project context below.
 
 ${sections.join("\n\n")}
 
@@ -1236,6 +1413,25 @@ Rules:
 - Each audit task must be independently runnable and must have exactly one report artifact.
 - The final synthesis task must list every child report artifact with a passed, failed, or inconclusive status before stating the overall audit outcome.
 - Output ONLY the markdown content for ROADMAP.md, nothing else`;
+}
+
+function buildRoadmapGenerationPrompt(
+  ctx: RoadmapGenerationPromptContext,
+  intent: TaskIntent,
+): string {
+  const hookPrompt = roadmapWorkflowPacks.get(intent).hooks?.buildGenerationPrompt?.(ctx);
+  if (hookPrompt) return hookPrompt;
+
+  const sections: string[] = [];
+
+  if (ctx.description) {
+    sections.push(`PROJECT DESCRIPTION:\n<<<DESC\n${ctx.description}\nDESC`);
+  }
+  if (ctx.architecture) {
+    sections.push(`ARCHITECTURE:\n<<<ARCH\n${ctx.architecture}\nARCH`);
+  }
+  if (ctx.vision) {
+    sections.push(`USER VISION / REQUIREMENTS:\n<<<VISION\n${ctx.vision}\nVISION`);
   }
 
   if (intent !== "general") {
@@ -1332,21 +1528,27 @@ export async function generateRoadmapTasks(
   const roadmapContent = readFileSync(roadmapPath, "utf8");
   log.debug({ roadmapPath, contentLength: roadmapContent.length }, "Roadmap file read");
 
-  // 2. Query Agent SDK for strict JSON conversion
-  if (intent === "audit") {
-    const priorContext = extractPriorInconclusiveAuditContext({ roadmapAlias, roadmapContent });
-    const auditRoadmapContent = applyPriorAuditContextToRoadmapContent(
-      roadmapContent,
-      priorContext,
-    );
-    validateAuditRoadmapSource(auditRoadmapContent);
-    const result = buildAuditRoadmapGenerationResult(auditRoadmapContent, roadmapAlias);
-    validateRoadmapTasks(result, intent, { priorContext });
+  // 2. Query Agent SDK for strict JSON conversion, unless the pack owns a deterministic path.
+  const roadmapHooks = roadmapWorkflowPacks.get(intent).hooks;
+  const priorContext = roadmapHooks?.extractPriorContext?.({ roadmapAlias, roadmapContent });
+  const deterministicResult = roadmapHooks?.convertRoadmapContentToTasks?.({
+    roadmapContent,
+    roadmapAlias,
+    priorContext,
+  });
+  if (deterministicResult) {
+    validateRoadmapTasks(deterministicResult, intent, { priorContext });
     log.info(
-      { projectId, roadmapAlias, taskCount: result.tasks.length, source: "deterministic-audit" },
-      "Audit roadmap generation complete",
+      {
+        projectId,
+        roadmapAlias,
+        taskCount: deterministicResult.tasks.length,
+        workflowPack: roadmapWorkflowPacks.get(intent).workflowPack.id,
+        source: "deterministic-workflow-pack",
+      },
+      "Roadmap generation complete through workflow pack",
     );
-    return result;
+    return deterministicResult;
   }
   const prompt = buildExtractionPrompt(roadmapContent, roadmapAlias, intent);
 
@@ -1402,16 +1604,15 @@ export async function generateRoadmapTasks(
   return result;
 }
 
-function buildExtractionPrompt(roadmapContent: string, alias: string, intent: TaskIntent): string {
-  if (intent === "audit") {
-    const priorContext = extractPriorInconclusiveAuditContext({
-      roadmapAlias: alias,
-      roadmapContent,
-    });
-    const priorContextRule = priorContext
-      ? `- Preserve this prior context in every task description: ${formatPriorAuditContextLine(priorContext)}`
-      : "- Preserve any prior inconclusive audit context from the roadmap in every task description as `Prior audit context: ...`.";
-    return `You are converting a diagnostic audit roadmap markdown into structured JSON for task creation.
+function buildAuditExtractionPrompt(roadmapContent: string, alias: string): string {
+  const priorContext = extractPriorInconclusiveAuditContext({
+    roadmapAlias: alias,
+    roadmapContent,
+  });
+  const priorContextRule = priorContext
+    ? `- Preserve this prior context in every task description: ${formatPriorAuditContextLine(priorContext)}`
+    : "- Preserve any prior inconclusive audit context from the roadmap in every task description as `Prior audit context: ...`.";
+  return `You are converting a diagnostic audit roadmap markdown into structured JSON for task creation.
 
 ROADMAP CONTENT:
 <<<ROADMAP
@@ -1455,7 +1656,13 @@ Rules:
 ${priorContextRule}
 - Every task description must require Evidence: <path>:<line>, Risk:, Proposed fix:, Verification: Command ... output ..., git status --short, git commit, and git log -1 --name-only --oneline.
 - Return ONLY valid JSON, no explanatory text`;
-  }
+}
+
+function buildExtractionPrompt(roadmapContent: string, alias: string, intent: TaskIntent): string {
+  const hookPrompt = roadmapWorkflowPacks
+    .get(intent)
+    .hooks?.buildExtractionPrompt?.({ roadmapContent, alias });
+  if (hookPrompt) return hookPrompt;
 
   if (intent !== "general") {
     const contract = TASK_INTENT_CONTRACTS[intent];
@@ -1644,10 +1851,12 @@ function validateRoadmapTasks(
   requestedIntent: TaskIntent,
   options: { priorContext?: string | null } = {},
 ): void {
-  const auditBatchIssues =
-    requestedIntent === "audit"
-      ? validateAuditGeneratedBatch(generation.tasks, options.priorContext ?? null)
-      : [];
+  const roadmapHooks = roadmapWorkflowPacks.get(requestedIntent).hooks;
+  const packBatchIssues =
+    roadmapHooks?.validateGeneratedBatch?.({
+      generation,
+      priorContext: options.priorContext ?? null,
+    }) ?? [];
   const invalid = generation.tasks
     .map((task) => {
       const taskIntent = task.taskIntent ?? generation.taskIntent ?? "general";
@@ -1663,13 +1872,13 @@ function validateRoadmapTasks(
     })
     .filter((entry) => entry.issues.length > 0);
 
-  if (invalid.length > 0 || auditBatchIssues.length > 0) {
+  if (invalid.length > 0 || packBatchIssues.length > 0) {
     const details = invalid
       .slice(0, 5)
       .map((entry) => `${entry.task.title} (${entry.issues.join("; ")})`)
       .join(", ");
-    const allDetails = [details, ...auditBatchIssues].filter(Boolean).join("; ");
-    if (requestedIntent === "audit") {
+    const allDetails = [details, ...packBatchIssues].filter(Boolean).join("; ");
+    if (roadmapHooks?.validateGeneratedBatch) {
       throw new RoadmapGenerationError(
         "VALIDATION_ERROR",
         `${AUDIT_ROADMAP_VALIDATION_MESSAGE} ${allDetails}`,
@@ -1755,8 +1964,8 @@ export function importGeneratedTasks(
     throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
   }
   assertRoadmapIntentMatchesRequest({ roadmapAlias: alias, taskIntent: generation.taskIntent });
-  const priorContext =
-    importIntent === "audit" ? extractPriorInconclusiveAuditContext({ roadmapAlias: alias }) : null;
+  const roadmapHooks = roadmapWorkflowPacks.get(importIntent).hooks;
+  const priorContext = roadmapHooks?.extractPriorContext?.({ roadmapAlias: alias }) ?? null;
   const cfg = getProjectConfig(project.rootPath);
 
   const validationGeneration: RoadmapGenerationResult = hasExplicitTypedImportIntent
@@ -1770,11 +1979,9 @@ export function importGeneratedTasks(
 
   // Load existing tasks for this alias for dedupe
   const existing = findTasksByRoadmapAlias(projectId, alias);
-  if (importIntent === "audit" && existing.length > 0) {
-    throw new RoadmapGenerationError(
-      "ROADMAP_ALIAS_EXISTS",
-      `Audit roadmap alias "${alias}" already has ${existing.length} task(s). Use a new roadmap alias for a fresh audit run.`,
-    );
+  const reusedAliasError = roadmapHooks?.rejectReusedAlias?.({ projectId, roadmapAlias: alias });
+  if (reusedAliasError) {
+    throw new RoadmapGenerationError("ROADMAP_ALIAS_EXISTS", reusedAliasError);
   }
   const existingByTitle = new Map(existing.map((task) => [normalizeTitle(task.title), task]));
   const existingTitles = new Set(existingByTitle.keys());
@@ -1830,14 +2037,7 @@ export function importGeneratedTasks(
     .sort(compareRoadmapImportOrder);
 
   let createdPositionIndex = 0;
-  const auditArtifactInputs: Array<{
-    taskId: string;
-    role: "report" | "synthesis";
-    artifactPath: string;
-    branchName?: string | null;
-    worktreePath?: string | null;
-    projectRoot?: string | null;
-  }> = [];
+  const workflowArtifactInputs: RoadmapImportArtifactInput[] = [];
   let synthesisTaskId: string | null = null;
 
   for (const { task: genTask } of orderedTasks) {
@@ -1847,24 +2047,16 @@ export function importGeneratedTasks(
     const normalized = normalizeTitle(genTask.title);
     if (existingTitles.has(normalized)) {
       const existingTask = existingByTitle.get(normalized);
-      if (importIntent === "audit" && existingTask) {
-        const artifactPath = parseExpectedAuditReportArtifactPath(genTask.description ?? "");
-        if (!artifactPath) {
-          throw new RoadmapGenerationError(
-            "VALIDATION_ERROR",
-            `Audit task "${genTask.title}" is missing a concrete report artifact path`,
-          );
-        }
-        const role = isAuditSynthesisTitle(genTask.title) ? "synthesis" : "report";
-        auditArtifactInputs.push({
-          taskId: existingTask.id,
-          role,
-          artifactPath,
-          branchName: existingTask.branchName,
-          worktreePath: existingTask.worktreePath,
+      if (existingTask) {
+        const artifact = roadmapHooks?.collectImportArtifact?.({
+          generatedTask: genTask,
+          task: existingTask,
           projectRoot: project.rootPath,
         });
-        if (role === "synthesis") synthesisTaskId = existingTask.id;
+        if (artifact) {
+          workflowArtifactInputs.push(artifact);
+          if (artifact.role === "synthesis") synthesisTaskId = existingTask.id;
+        }
       }
       log.debug({ title: genTask.title, alias, phase: genTask.phase }, "Task skipped (duplicate)");
       phaseStats.skipped++;
@@ -1875,9 +2067,8 @@ export function importGeneratedTasks(
     const taskIntent = hasExplicitTypedImportIntent ? importIntent : "general";
     const tags = buildTaskTags(alias, genTask);
     tags.push(`kind:${taskIntent}`);
-    if (taskIntent === "audit") {
-      tags.push("diagnostic-only");
-    }
+    const importOverrides = roadmapHooks?.getImportTaskOverrides?.({ task: genTask }) ?? {};
+    tags.push(...(importOverrides.extraTags ?? []));
     // Roadmap import bypasses POST /tasks, so mode-driven defaults must be
     // applied here too. Intent defaults keep generated cards aligned with the
     // typed task contract; general roadmap imports preserve the historical
@@ -1903,10 +2094,11 @@ export function importGeneratedTasks(
       plannerMode,
       planDocs: defaults.planDocs,
       planTests: defaults.planTests,
-      skipReview: taskIntent === "audit" ? false : defaults.skipReview,
-      useSubagents: taskIntent === "audit" || taskIntent === "spike" ? true : defaults.useSubagents,
+      skipReview: importOverrides.skipReview ?? defaults.skipReview,
+      useSubagents:
+        importOverrides.useSubagents ?? (taskIntent === "spike" ? true : defaults.useSubagents),
       position: importPositionStart + createdPositionIndex * 100,
-      paused: taskIntent === "audit" && isAuditSynthesisTitle(genTask.title),
+      paused: importOverrides.paused ?? false,
     });
 
     if (created) {
@@ -1916,44 +2108,33 @@ export function importGeneratedTasks(
       result.created++;
       existingTitles.add(normalized);
       existingByTitle.set(normalized, created);
-      if (taskIntent === "audit") {
-        const artifactPath = parseExpectedAuditReportArtifactPath(genTask.description ?? "");
-        if (!artifactPath) {
-          throw new RoadmapGenerationError(
-            "VALIDATION_ERROR",
-            `Audit task "${genTask.title}" is missing a concrete report artifact path`,
-          );
-        }
-        const role = isAuditSynthesisTitle(genTask.title) ? "synthesis" : "report";
-        auditArtifactInputs.push({
-          taskId: created.id,
-          role,
-          artifactPath,
-          branchName: created.branchName,
-          worktreePath: created.worktreePath,
-          projectRoot: project.rootPath,
+      const artifact = roadmapHooks?.collectImportArtifact?.({
+        generatedTask: genTask,
+        task: created,
+        projectRoot: project.rootPath,
+      });
+      if (artifact) {
+        workflowArtifactInputs.push(artifact);
+        if (artifact.role === "synthesis") synthesisTaskId = created.id;
+      }
+      if (importOverrides.blockedReason) {
+        setTaskFields(created.id, {
+          blockedReason: importOverrides.blockedReason,
         });
-        if (role === "synthesis") {
-          synthesisTaskId = created.id;
-          setTaskFields(created.id, {
-            blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
-          });
-        }
       }
     }
   }
 
-  if (importIntent === "audit") {
-    result.batchSummary = createRoadmapBatchContract({
-      projectId,
-      roadmapAlias: alias,
-      taskIntent: importIntent,
-      executionPolicy: resolveAuditBatchExecutionPolicy(project.rootPath),
-      createdTaskIds: result.taskIds,
-      synthesisTaskId,
-      artifacts: auditArtifactInputs,
-    });
-  }
+  const batchSummary = roadmapHooks?.createImportBatchSummary?.({
+    projectId,
+    roadmapAlias: alias,
+    taskIntent: importIntent,
+    projectRoot: project.rootPath,
+    createdTaskIds: result.taskIds,
+    synthesisTaskId,
+    artifacts: workflowArtifactInputs,
+  });
+  if (batchSummary) result.batchSummary = batchSummary;
 
   log.info(
     {
