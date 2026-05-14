@@ -592,7 +592,7 @@ function terminalizeRoadmapSourceReportAsInconclusive(input: {
   projectRoot: string;
   fromStatus: TaskStatus;
   title: string;
-  reason: "stalled_rework_loop" | "no_substantive_rework_delta";
+  reason: "stalled_rework_loop" | "no_substantive_rework_delta" | "plan_quality_exhausted";
   blockedReason: string;
   reviewIterationCount: number;
   autoReviewState?: TaskWithHydratedFields["autoReviewState"];
@@ -975,6 +975,7 @@ function isPlanQualityRetryState(task: TaskRow): boolean {
 
 function handlePlanQualityFailure(input: {
   task: TaskRow;
+  projectRoot: string;
   stageInProgress: TaskStatus;
   taskTitle: string;
   error: TaskPlanQualityError;
@@ -1015,6 +1016,35 @@ function handlePlanQualityFailure(input: {
   }
 
   const blockedReason = `${input.error.message} Retry limit reached (${PLAN_QUALITY_MAX_RETRIES}). Operator next step: edit the task prompt or plan constraints, then retry from blocked.`;
+  if (
+    terminalizeRoadmapSourceReportAsInconclusive({
+      task: latestTask,
+      projectRoot: input.projectRoot,
+      fromStatus: input.stageInProgress,
+      title: input.taskTitle,
+      reason: "plan_quality_exhausted",
+      blockedReason,
+      reviewIterationCount: latestTask.reviewIterationCount ?? 0,
+      autoReviewState: null,
+      validationDetails: {
+        planQualityCategories: input.error.result.categories,
+        retryCount: nextRetryCount,
+        maxRetries: PLAN_QUALITY_MAX_RETRIES,
+      },
+    })
+  ) {
+    log.error(
+      {
+        taskId: input.task.id,
+        retryCount: nextRetryCount,
+        maxRetries: PLAN_QUALITY_MAX_RETRIES,
+        categories: input.error.result.categories,
+      },
+      "Plan quality guard terminalized roadmap source report after retry limit",
+    );
+    return;
+  }
+
   clearTaskRuntimeLimitSnapshot(input.task.id);
   updateTaskStatus(
     input.task.id,
@@ -1356,6 +1386,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     if (planQualityError) {
       handlePlanQualityFailure({
         task,
+        projectRoot: executionRoot,
         stageInProgress: stage.inProgress,
         taskTitle,
         error: planQualityError,

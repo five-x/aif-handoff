@@ -368,6 +368,15 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260514-terminalize-roadmap-audit-stalls-as-inconclusive",
       "updated": "2026-05-14"
+    },
+    {
+      "taskId": "work-20260514-terminalize-roadmap-audit-plan-quality-exhaustion",
+      "title": "Terminalize Roadmap Audit Plan Quality Exhaustion",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260514-terminalize-roadmap-audit-plan-quality-exhaustion",
+      "updated": "2026-05-14"
     }
   ]
 }

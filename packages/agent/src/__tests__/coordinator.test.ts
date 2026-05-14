@@ -2138,7 +2138,7 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("Plan quality guard replan 2/2");
   });
 
-  it("should block invalid plan quality after retry limit", async () => {
+  it("should block non-roadmap invalid plan quality after retry limit", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -2164,6 +2164,95 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("Retry limit reached");
     expect(task!.blockedReason).toContain("Operator next step");
     expect(runImplementer).not.toHaveBeenCalled();
+  });
+
+  it("should terminalize roadmap source reports when plan quality retries are exhausted", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-roadmap-plan-quality-limit",
+        projectId: "test-project",
+        title: "Audit weak plan limit",
+        description: "Report artifact: audit/plan-quality-limit.md",
+        taskIntent: "audit",
+        status: "plan_ready",
+        autoMode: true,
+        retryCount: 2,
+        plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-roadmap-plan-quality-synthesis",
+        projectId: "test-project",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "backlog",
+        paused: true,
+        blockedReason: "synthesis_not_ready: waiting for validated audit batch artifacts",
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-plan-quality-limit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-roadmap-plan-quality-limit", "task-roadmap-plan-quality-synthesis"],
+      synthesisTaskId: "task-roadmap-plan-quality-synthesis",
+      artifacts: [
+        {
+          taskId: "task-roadmap-plan-quality-limit",
+          role: "report",
+          artifactPath: "audit/plan-quality-limit.md",
+          projectRoot: "/tmp/test",
+        },
+        {
+          taskId: "task-roadmap-plan-quality-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot: "/tmp/test",
+        },
+      ],
+    });
+
+    vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());
+
+    await pollAndProcess();
+
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-roadmap-plan-quality-limit"))
+      .get();
+    expect(task!.status).toBe("done");
+    expect(task!.blockedReason).toBeNull();
+    expect(task!.blockedFromStatus).toBeNull();
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.retryCount).toBe(0);
+    expect(runImplementer).not.toHaveBeenCalled();
+
+    const reportArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (artifact) => artifact.taskId === "task-roadmap-plan-quality-limit",
+    );
+    expect(reportArtifact?.state).toBe("source_inconclusive");
+    expect(reportArtifact?.failureFamily).toBe("source_inconclusive");
+    const attempts = listRoadmapBatchArtifactAttempts(reportArtifact!.id);
+    expect(attempts.at(-1)?.reworkStatus).toBe("terminal_inconclusive");
+    expect(attempts.at(-1)?.classification).toBe("source_inconclusive");
+    expect(attempts.at(-1)?.validationDetailsJson).toContain("plan_quality_exhausted");
+    expect(attempts.at(-1)?.validationDetailsJson).toContain("planQualityCategories");
+
+    const summary = summarizeRoadmapBatch(batch.batchId);
+    expect(summary?.synthesisReady).toBe(true);
+    const synthesis = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-roadmap-plan-quality-synthesis"))
+      .get();
+    expect(synthesis?.paused).toBe(false);
+    expect(synthesis?.blockedReason).toBeNull();
   });
 
   it("should skip review stage when skipReview=true and go directly to done", async () => {
