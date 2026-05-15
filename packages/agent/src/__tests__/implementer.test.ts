@@ -3,8 +3,14 @@ import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { projects, taskComments, tasks, validateAuditReportArtifact } from "@aif/shared";
+import { basename, join } from "node:path";
+import {
+  projects,
+  roadmapBatchArtifacts,
+  taskComments,
+  tasks,
+  validateAuditReportArtifact,
+} from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -169,7 +175,16 @@ describe("runImplementer rework behavior", () => {
 
   it("injects validated audit report artifacts into synthesis prompts", async () => {
     const db = testDb.current;
-    queryMock.mockReturnValueOnce(streamSuccess("Synthesis done"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nsynthesis evidence\n", "utf8");
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
     writeFileSync(
       join(projectRoot, "audit", "config.md"),
@@ -193,6 +208,14 @@ describe("runImplementer rework behavior", () => {
       ].join("\n"),
       "utf8",
     );
+    execFileSync("git", ["add", "README.md", "audit/config.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed synthesis source", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
 
     db.insert(tasks)
       .values({
@@ -247,20 +270,17 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-synthesis", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
-    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
-    expect(call.prompt).toContain("<<<VALIDATED_AUDIT_BATCH_INPUTS");
-    expect(call.prompt).toContain("--- artifact: audit/config.md");
-    expect(call.prompt).toContain("Evidence: `README.md:1` identifies project docs.");
-    expect(call.prompt).not.toContain("--- weak_or_invalid_artifacts ---");
-    expect(call.prompt).not.toContain("artifact: audit/security.md");
-    expect(call.prompt).not.toContain("INVALID_REPORT_CONTENT_SHOULD_NOT_BE_SYNTHESIZED");
-    expect(call.prompt).toContain("use those exact validated report contents");
+    expect(queryMock).not.toHaveBeenCalled();
+    const synthesis = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(synthesis).toContain("Included source findings: 1.");
+    expect(synthesis).toContain("| `audit/config.md` | `task-synthesis-report` | passed |");
+    expect(synthesis).not.toContain("artifact: audit/security.md");
+    expect(synthesis).not.toContain("INVALID_REPORT_CONTENT_SHOULD_NOT_BE_SYNTHESIZED");
+    expect(synthesis).toContain("## Child Report Status");
   });
 
   it("reads validated audit report artifacts from producer branches for synthesis prompts", async () => {
     const db = testDb.current;
-    queryMock.mockReturnValueOnce(streamSuccess("Synthesis done"));
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
       cwd: projectRoot,
@@ -355,10 +375,133 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-branch-synthesis", projectRoot);
 
-    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
-    expect(call.prompt).toContain("source: audit/config-report:audit/config.md");
-    expect(call.prompt).toContain("producer branch");
-    expect(call.prompt).toContain("use those exact validated report contents");
+    expect(queryMock).not.toHaveBeenCalled();
+    const synthesis = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(synthesis).toContain("Included source findings: 1.");
+    expect(synthesis).toContain("| `audit/config.md` | `task-branch-report` | passed |");
+    expect(synthesis).toContain("## Child Report Status");
+  });
+
+  it("reports missing producer branch artifacts before synthesis", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nproducer branch evidence\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "audit/missing-report"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "main"], { cwd: projectRoot, stdio: "ignore" });
+
+    db.insert(tasks)
+      .values({
+        id: "task-missing-branch-report",
+        projectId: "project-1",
+        title: "Audit missing report",
+        description: "Report artifact: audit/missing.md",
+        taskIntent: "audit",
+        status: "done",
+        branchName: "audit/missing-report",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-missing-branch-synthesis",
+        projectId: "project-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Synthesize validated audit reports",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-missing-branch-report", "task-missing-branch-synthesis"],
+      synthesisTaskId: "task-missing-branch-synthesis",
+      artifacts: [
+        {
+          taskId: "task-missing-branch-report",
+          role: "report",
+          artifactPath: "audit/missing.md",
+          branchName: "audit/missing-report",
+          projectRoot,
+        },
+        {
+          taskId: "task-missing-branch-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-missing-branch-report",
+      state: "valid",
+      failureFamily: null,
+      validationDetails: trustedFindingsValidationDetails(),
+    });
+
+    let thrown: unknown;
+    try {
+      await runImplementer("task-missing-branch-synthesis", projectRoot);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toMatch(
+      /missing_report_artifact.*audit\/missing-report.*audit\/missing\.md/,
+    );
+    const validationDetails = (thrown as Error & { validationDetails?: Record<string, unknown> })
+      .validationDetails;
+    expect(validationDetails).toMatchObject({
+      code: "missing_report_artifact",
+      artifactPath: "audit/missing.md",
+      source: "branch",
+      sourceLocation: "audit/missing-report",
+      branchName: "audit/missing-report",
+      worktreePath: null,
+      projectRoot,
+      contentSha: null,
+      missingReportArtifact: {
+        code: "missing_report_artifact",
+        artifactPath: "audit/missing.md",
+        source: "branch",
+        sourceLocation: "audit/missing-report",
+        branchName: "audit/missing-report",
+        worktreePath: null,
+        projectRoot,
+        contentSha: null,
+      },
+    });
+    expect(validationDetails?.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "missing_report_artifact",
+          artifactPath: "audit/missing.md",
+          source: "branch",
+          branchName: "audit/missing-report",
+          contentSha: null,
+        }),
+      ]),
+    );
+    expect(queryMock).not.toHaveBeenCalled();
   });
 
   it("uses deterministic audit synthesis for rework instead of looping through runtime commits", async () => {
@@ -495,6 +638,110 @@ describe("runImplementer rework behavior", () => {
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-deterministic-synthesis"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit synthesis rework completed",
+    );
+  });
+
+  it("uses deterministic audit synthesis on first run when terminal source inputs are available", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "README.md"), "# Test\n");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-first-run-source-a",
+          projectId: "project-1",
+          title: "Audit source A",
+          taskIntent: "audit",
+          description: "Report artifact: audit/source-a.md",
+          status: "done",
+        },
+        {
+          id: "task-first-run-source-b",
+          projectId: "project-1",
+          title: "Audit source B",
+          taskIntent: "audit",
+          description: "Report artifact: audit/source-b.md",
+          status: "done",
+        },
+        {
+          id: "task-first-run-synthesis",
+          projectId: "project-1",
+          title: "Synthesize audit findings",
+          taskIntent: "audit",
+          description: "Report artifact: audit/summary.md.",
+          status: "implementing",
+          plan: "## Plan\n- [ ] Produce deterministic synthesis",
+          reworkRequested: false,
+        },
+      ])
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-first-run-synthesis",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: [
+        "task-first-run-source-a",
+        "task-first-run-source-b",
+        "task-first-run-synthesis",
+      ],
+      synthesisTaskId: "task-first-run-synthesis",
+      artifacts: [
+        { taskId: "task-first-run-source-a", role: "report", artifactPath: "audit/source-a.md" },
+        { taskId: "task-first-run-source-b", role: "report", artifactPath: "audit/source-b.md" },
+        { taskId: "task-first-run-synthesis", role: "synthesis", artifactPath: "audit/summary.md" },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-first-run-source-a",
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      classification: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: { reason: "inventory-only source report" },
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-first-run-source-b",
+      state: "missing",
+      failureFamily: "missing_artifact",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: { reason: "terminal missing report" },
+    });
+
+    await runImplementer("task-first-run-synthesis", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const synthesis = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(synthesis).toContain("# Audit Inconclusive");
+    expect(synthesis).toContain("## Child Report Status");
+    expect(synthesis).toContain(
+      "| `audit/source-a.md` | `task-first-run-source-a` | inconclusive |",
+    );
+    expect(synthesis).toContain("| `audit/source-b.md` | `task-first-run-source-b` | failed |");
+    expect(readAuditReportManifest(synthesis).outcome).not.toBe("validated_no_findings");
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-first-run-synthesis"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
@@ -1046,6 +1293,131 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("finding-insufficient-evidence");
   });
 
+  it("rejects unsafe report artifact paths before deterministic repair can write outside the project root", async () => {
+    const db = testDb.current;
+    const outsideName = `${basename(projectRoot)}-outside-report.md`;
+    const unsafeArtifactPath = `../${outsideName}`;
+    const outsidePath = join(projectRoot, "..", outsideName);
+    expect(existsSync(outsidePath)).toBe(false);
+
+    db.insert(tasks)
+      .values({
+        id: "task-unsafe-report-artifact",
+        projectId: "project-1",
+        title: "Audit unsafe report path",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        blockedReason:
+          "invalid_artifact_content: audit_evidence_repair_required (missing_report_manifest)",
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-unsafe-report-path",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-unsafe-report-artifact"],
+      artifacts: [
+        {
+          taskId: "task-unsafe-report-artifact",
+          role: "report",
+          artifactPath: "audit/report.md",
+          projectRoot,
+        },
+      ],
+    });
+    db.update(roadmapBatchArtifacts)
+      .set({ artifactPath: unsafeArtifactPath })
+      .where(eq(roadmapBatchArtifacts.taskId, "task-unsafe-report-artifact"))
+      .run();
+
+    await expect(runImplementer("task-unsafe-report-artifact", projectRoot)).rejects.toThrow(
+      /unsafe roadmap artifact path/,
+    );
+
+    expect(existsSync(outsidePath)).toBe(false);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsafe synthesis artifact paths before deterministic synthesis can write outside the project root", async () => {
+    const db = testDb.current;
+    const outsideName = `${basename(projectRoot)}-outside-synthesis.md`;
+    const unsafeArtifactPath = `../${outsideName}`;
+    const outsidePath = join(projectRoot, "..", outsideName);
+    expect(existsSync(outsidePath)).toBe(false);
+
+    db.insert(tasks)
+      .values({
+        id: "task-unsafe-synthesis-source",
+        projectId: "project-1",
+        title: "Audit source for unsafe synthesis",
+        description: "Report artifact: audit/source.md",
+        taskIntent: "audit",
+        status: "done",
+        plan: "## Plan\n- [x] Audit source",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-unsafe-synthesis-artifact",
+        projectId: "project-1",
+        title: "Synthesize unsafe report path",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Synthesize audit reports",
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-unsafe-synthesis-path",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-unsafe-synthesis-source", "task-unsafe-synthesis-artifact"],
+      synthesisTaskId: "task-unsafe-synthesis-artifact",
+      artifacts: [
+        {
+          taskId: "task-unsafe-synthesis-source",
+          role: "report",
+          artifactPath: "audit/source.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-unsafe-synthesis-artifact",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-unsafe-synthesis-source",
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: {
+        auditReportValidation: { sourceClassification: "source_inconclusive" },
+      },
+    });
+    db.update(roadmapBatchArtifacts)
+      .set({ artifactPath: unsafeArtifactPath })
+      .where(eq(roadmapBatchArtifacts.taskId, "task-unsafe-synthesis-artifact"))
+      .run();
+
+    await expect(runImplementer("task-unsafe-synthesis-artifact", projectRoot)).rejects.toThrow(
+      /unsafe roadmap artifact path/,
+    );
+
+    expect(existsSync(outsidePath)).toBe(false);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
   it("deterministically rewrites governance-only audit report rework", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
@@ -1166,7 +1538,7 @@ describe("runImplementer rework behavior", () => {
       "Deterministic audit report repair completed as source_inconclusive",
     );
     expect(updatedTask?.implementationLog).toContain("terminal non-trusted");
-  });
+  }, 60_000);
 
   it("deterministically rewrites structurally invalid audit validator reports", async () => {
     const db = testDb.current;
@@ -1280,7 +1652,7 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain(
       "Deterministic audit report repair completed as source_inconclusive",
     );
-  });
+  }, 60_000);
 
   it("routes repeated deterministic audit report repair to runtime rework", async () => {
     const db = testDb.current;

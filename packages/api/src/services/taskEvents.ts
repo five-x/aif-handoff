@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import {
   applyHumanTaskEvent,
   assertCurrentBranch,
@@ -20,6 +20,7 @@ import {
   type TaskEvent,
 } from "@aif/shared";
 import {
+  assertSafeRoadmapArtifactPath,
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
@@ -213,8 +214,24 @@ function readAuditArtifactText(
 ): string | null {
   if (!auditArtifact) return null;
   try {
-    const reportPath = resolve(projectRoot, auditArtifact.artifactPath);
+    const reportPath = resolveSafeArtifactPath(projectRoot, auditArtifact.artifactPath);
+    if (!reportPath) return null;
     return existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveSafeArtifactPath(projectRoot: string, artifactPath: string): string | null {
+  try {
+    const normalizedArtifactPath = assertSafeRoadmapArtifactPath(artifactPath);
+    const root = resolve(projectRoot);
+    const candidate = resolve(root, normalizedArtifactPath);
+    const relativePath = relative(root, candidate);
+    if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+      return null;
+    }
+    return candidate;
   } catch {
     return null;
   }

@@ -189,6 +189,7 @@ export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailure
   speculative_audit_claim: "invalid_artifact_content",
   non_actionable_audit_observation: "invalid_artifact_content",
   governance_observation_as_finding: "invalid_artifact_content",
+  malformed_report_artifact: "invalid_artifact_content",
   contradictory_findings_and_no_findings: "invalid_artifact_content",
   fake_or_placeholder_command_output: "invalid_artifact_content",
   false_missing_path_claim: "invalid_artifact_content",
@@ -381,6 +382,16 @@ export function isAuditReportArtifactPath(path: string): boolean {
   if (
     /^(?:src|test|tests|__tests__|config)\//i.test(lower) ||
     /^packages\/[^/]+\/(?:src|test|tests|__tests__|config)\//i.test(lower)
+  ) {
+    return false;
+  }
+  if (
+    /^docs\/rdpi\/.+\/(?:research|design|plan|result)\.md$/i.test(lower) ||
+    lower.startsWith("docs/intake/") ||
+    lower === "docs/work_status.json" ||
+    lower === "docs/work_index.md" ||
+    lower === "docs/intake/work_status.json" ||
+    lower === "docs/intake/work_index.md"
   ) {
     return false;
   }

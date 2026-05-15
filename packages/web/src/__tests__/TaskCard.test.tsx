@@ -46,6 +46,45 @@ const mockTask: Task = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
+function withArtifactTrust(overrides: Partial<NonNullable<Task["artifactTrust"]>>): Task {
+  return {
+    ...mockTask,
+    status: "done",
+    artifactTrust: {
+      taskStatus: "done",
+      artifactRole: "report",
+      artifactState: "valid",
+      artifactTrustLevel: "trusted",
+      claimOutcome: "supported",
+      failureFamily: null,
+      reasonCodes: ["valid"],
+      latestAttemptOutcome: "accepted",
+      trustedSynthesisInput: true,
+      synthesisReady: true,
+      nextAction: "none",
+      nextActionLabel: "No action needed",
+      summary: "Done with trusted valid artifact",
+      artifactPath: "audit/source.md",
+      batchId: "batch-1",
+      roadmapAlias: "audit-roadmap",
+      attemptNumber: 1,
+      failureSignature: null,
+      branchName: "audit/source",
+      worktreePath: "C:/tmp/audit",
+      batchCounts: {
+        trustedValid: 1,
+        inconclusive: 0,
+        rejected: 0,
+        missing: 0,
+        externalBlocked: 0,
+        synthesisPending: 0,
+        total: 1,
+      },
+      ...overrides,
+    },
+  };
+}
+
 describe("TaskCard", () => {
   it("should render task title", () => {
     render(<TaskCard task={mockTask} onClick={vi.fn()} />);
@@ -90,6 +129,56 @@ describe("TaskCard", () => {
 
     expect(screen.getByText("Manual Review")).toBeDefined();
     expect(screen.getByText("Auto-review stopped. Human review required.")).toBeDefined();
+  });
+
+  it("renders done with trusted valid artifact distinctly", () => {
+    render(<TaskCard task={withArtifactTrust({})} onClick={vi.fn()} />);
+
+    expect(screen.getByText("Done / trusted artifact")).toBeDefined();
+    expect(screen.getByText("Done with trusted valid artifact")).toBeDefined();
+  });
+
+  it("renders done with source inconclusive artifact as untrusted", () => {
+    render(
+      <TaskCard
+        task={withArtifactTrust({
+          artifactState: "source_inconclusive",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "inconclusive",
+          trustedSynthesisInput: false,
+          nextAction: "inspect_untrusted_source",
+          nextActionLabel: "Inspect untrusted source",
+          summary: "Done with untrusted inconclusive artifact",
+        })}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Done / untrusted artifact")).toBeDefined();
+    expect(screen.getByText("Done with untrusted inconclusive artifact")).toBeDefined();
+    expect(screen.getByText("Inspect untrusted source")).toBeDefined();
+  });
+
+  it("renders done with rejected artifact as untrusted", () => {
+    render(
+      <TaskCard
+        task={withArtifactTrust({
+          artifactState: "invalid",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "refuted",
+          failureFamily: "invalid_artifact_content",
+          trustedSynthesisInput: false,
+          nextAction: "retry_source_rework",
+          nextActionLabel: "Retry source artifact rework",
+          summary: "Done with untrusted rejected artifact",
+        })}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Done / untrusted artifact")).toBeDefined();
+    expect(screen.getByText("Done with untrusted rejected artifact")).toBeDefined();
+    expect(screen.getByText("Retry source artifact rework")).toBeDefined();
   });
 
   it("should render structured runtime auto-pause messaging for blocked tasks", () => {

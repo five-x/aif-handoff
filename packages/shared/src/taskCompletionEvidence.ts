@@ -8,8 +8,10 @@ import {
 } from "./auditRoadmapContract.js";
 import {
   classifyAuditSynthesisOutput,
+  parseAuditSynthesisOutcomeFromText,
   type AuditSynthesisOutcome,
 } from "./auditSynthesisClassifier.js";
+import { countValidatedAuditFindings } from "./auditSourceEvidence.js";
 import {
   validateAuditReportArtifact,
   type AuditReportValidationIssueCode,
@@ -369,7 +371,9 @@ function isPlanArtifact(path: string, task: TaskCompletionEvidenceTask): boolean
   if (normalized === taskPlanPath) return true;
   if (name === "plan.md" || name === "fix_plan.md") return true;
   if (normalized.includes("/plans/")) return true;
-  if (/^docs\/rdpi\/.+\/(research|design|plan)\.md$/i.test(normalized)) return true;
+  if (/^docs\/rdpi\/.+\/(?:research|design|plan|result)\.md$/i.test(normalized)) return true;
+  if (normalized.startsWith("docs/intake/")) return true;
+  if (normalized === "docs/work_status.json" || normalized === "docs/work_index.md") return true;
   return false;
 }
 
@@ -1142,6 +1146,65 @@ function isLedgerOrManifestValidationIssue(code: string): boolean {
   );
 }
 
+function hasVisibleValidatedFindingSection(text: string): boolean {
+  return /(^|\n)\s*#{2,6}\s+(?:Validated\s+)?Finding\s+\d+(?:[.:)\s-]|$)/i.test(text);
+}
+
+function hasVisibleValidatedNoFindingsClaim(text: string): boolean {
+  return (
+    /(^|\n)\s*(?:[-*]\s*)?(?:Audit|Final) outcome\s*:\s*Validated\b/i.test(text) ||
+    /\bvalidated\s+no[- ]findings\s+with\b/i.test(text) ||
+    /\bfinal\s+validated\s+no[- ]findings\b/i.test(text) ||
+    /\bsubstantive\s+no[- ]findings\s+evidence\b/i.test(text)
+  );
+}
+
+function hasStrongerSynthesisClaim(input: {
+  text: string;
+  projectRoot: string;
+  auditReportValidation: AuditReportValidationResult;
+}): boolean {
+  const sourceOutcome = parseAuditSynthesisOutcomeFromText(input.text);
+  if (
+    sourceOutcome?.kind === "validated_findings_present" ||
+    sourceOutcome?.kind === "validated_no_findings"
+  ) {
+    return true;
+  }
+  const manifestOutcome = input.auditReportValidation.manifest?.outcome;
+  if (
+    manifestOutcome === "validated_findings_present" ||
+    manifestOutcome === "validated_no_findings"
+  ) {
+    return true;
+  }
+  if (
+    countValidatedAuditFindings({
+      text: input.text,
+      projectRoot: input.projectRoot,
+      requireProposedFix: true,
+    }) > 0
+  ) {
+    return true;
+  }
+  return (
+    hasVisibleValidatedFindingSection(input.text) || hasVisibleValidatedNoFindingsClaim(input.text)
+  );
+}
+
+function hasExplicitAuditInconclusiveSynthesisConclusion(input: {
+  text: string;
+  projectRoot: string;
+  auditReportValidation: AuditReportValidationResult;
+}): boolean {
+  const { text } = input;
+  const normalized = text.replace(/\r/g, "");
+  const explicitInconclusive =
+    /(^|\n)\s*#{1,6}\s*Audit Inconclusive\b/i.test(normalized) ||
+    /(^|\n)\s*(?:[-*]\s*)?(?:Audit|Final) outcome\s*:\s*Audit inconclusive\b/i.test(normalized);
+  return explicitInconclusive && !hasStrongerSynthesisClaim(input);
+}
+
 function formatPathExamples(paths: string[], limit = 8): string {
   const shown = paths.slice(0, limit).map((path) => `\`${path}\``);
   const remaining = paths.length - shown.length;
@@ -1246,9 +1309,12 @@ export function evaluateTaskCompletionEvidence(
   );
   const validatorEvidenceBlockingIssues = auditReportValidation.issues.filter(
     (entry) =>
-      ["invalid_line_reference", "missing_declared_scope_root", "missing_scope_coverage"].includes(
-        entry.code,
-      ) ||
+      [
+        "malformed_report_artifact",
+        "invalid_line_reference",
+        "missing_declared_scope_root",
+        "missing_scope_coverage",
+      ].includes(entry.code) ||
       (entry.code === "missing_substantive_evidence" &&
         (auditReportValidation.scopeRoots.length > 0 ||
           auditReportValidation.sourceClassification === "inventory_only_invalid")) ||
@@ -1319,7 +1385,14 @@ export function evaluateTaskCompletionEvidence(
         ),
       );
     }
-    if (auditSynthesisOutcome?.kind === "inconclusive_batch_evidence") {
+    if (
+      auditSynthesisOutcome?.kind === "inconclusive_batch_evidence" &&
+      !hasExplicitAuditInconclusiveSynthesisConclusion({
+        text: reportText,
+        projectRoot,
+        auditReportValidation,
+      })
+    ) {
       issues.push(
         issue("audit_inconclusive", `Audit inconclusive: ${auditSynthesisOutcome.reason}`),
       );
@@ -1374,6 +1447,11 @@ export function evaluateTaskCompletionEvidence(
       issues.push(issue("invalid_or_missing_file_references", invalidEvidenceMessage));
     }
     for (const validationIssue of ledgerOrManifestBlockingIssues) {
+      issues.push(issue(validationIssue.code, validationIssue.message));
+    }
+    for (const validationIssue of validatorEvidenceBlockingIssues.filter(
+      (entry) => entry.code === "malformed_report_artifact",
+    )) {
       issues.push(issue(validationIssue.code, validationIssue.message));
     }
     if (

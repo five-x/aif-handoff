@@ -213,6 +213,48 @@ describe("taskCompletionEvidence", () => {
     expect(formatTaskCompletionBlockedReason(result)).toContain("Completion evidence guard");
   });
 
+  it("does not treat RDPI close-out files for audit-named tasks as audit report artifacts", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/rdpi-result"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const resultDir = join(
+      root,
+      "docs",
+      "rdpi",
+      "work",
+      "work-20260514-harden-source-audit-report-production",
+    );
+    mkdirSync(resultDir, { recursive: true });
+    writeFileSync(join(resultDir, "result.md"), "TEST PASS\nREVIEW PASS\n", "utf8");
+    execFileSync(
+      "git",
+      ["add", "docs/rdpi/work/work-20260514-harden-source-audit-report-production/result.md"],
+      { cwd: root, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "add rdpi result", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "rdpi-audit-closeout",
+        title: "Harden Source Audit Report Production",
+        plan: "## Plan\n- Harden audit report production",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.evidence.reportArtifactFiles).toEqual([]);
+    expect(codes(result)).toContain("missing_report_artifact");
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).not.toContain(
+      "malformed_report_artifact",
+    );
+  });
+
   it("requires report artifacts for audit tasks even when source files changed", () => {
     const root = initRepo();
     mkdirSync(join(root, "src"), { recursive: true });
@@ -2113,6 +2155,213 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("insufficient_report_evidence");
   });
 
+  it("allows audit synthesis that explicitly closes as audit inconclusive", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-explicit-inconclusive"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "summary.md"),
+      [
+        "# Audit Inconclusive",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "inconclusive_batch_evidence",
+          reason: "Audit inconclusive: source reports did not contain trusted evidence.",
+          sourceReportCount: 2,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 0,
+          weakReportCount: 2,
+        }),
+        "",
+        "Audit outcome: Audit inconclusive",
+        "",
+        "## Child Report Status",
+        "",
+        "| Task | Report | State | Trust | Decision |",
+        "| --- | --- | --- | --- | --- |",
+        "| source-one | `audit/source-1.md` | source_inconclusive | untrusted | Excluded from validated no-findings. |",
+        "| source-two | `audit/source-2.md` | missing | untrusted | Excluded from validated no-findings. |",
+        "",
+        "## Checked Files",
+        "",
+        "- `README.md:1`",
+        "",
+        "## Checked Commands",
+        "",
+        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add explicit inconclusive synthesis", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-explicit-inconclusive-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        allowedEvidenceArtifactPaths: ["audit/source-1.md", "audit/source-2.md"],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(codes(result)).not.toContain("audit_inconclusive");
+  });
+
+  it("blocks explicit inconclusive audit synthesis that also includes a validated finding", () => {
+    const root = initRepo();
+    writeFileSync(join(root, "README.md"), "# test\nruntime evidence marker\n", "utf8");
+    execFileSync("git", ["add", "README.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add runtime evidence", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-conflicting-finding"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "summary.md"),
+      [
+        "# Audit Inconclusive",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "inconclusive_batch_evidence",
+          reason: "Audit inconclusive: source reports did not contain trusted evidence.",
+          sourceReportCount: 2,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 0,
+          weakReportCount: 2,
+        }),
+        "",
+        "Audit outcome: Audit inconclusive",
+        "",
+        "## Finding 1",
+        "",
+        "Evidence: `README.md:2` contains the runtime evidence marker.",
+        "Risk: A visible validated finding contradicts the inconclusive source outcome.",
+        "Proposed fix: Remove the contradictory finding or use a validated finding outcome.",
+        'Verification: Command `rg -n "runtime evidence" README.md` output: `README.md:2:runtime evidence marker`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add conflicting synthesis", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-conflicting-finding-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(codes(result)).toContain("audit_inconclusive");
+  });
+
+  it("blocks explicit inconclusive audit synthesis when source outcome metadata is stronger", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/audit-conflicting-source-outcome"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "summary.md"),
+      [
+        "# Audit Inconclusive",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "validated_no_findings",
+          reason:
+            "No findings survived validation and all source reports included substantive no-findings evidence.",
+          sourceReportCount: 1,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 1,
+          inventoryOnlyNoFindingsReportCount: 0,
+          weakReportCount: 0,
+        }),
+        "",
+        "Audit outcome: Audit inconclusive",
+        "",
+        "## Child Report Status",
+        "",
+        "| Task | Report | State | Trust | Decision |",
+        "| --- | --- | --- | --- | --- |",
+        "| source-one | `audit/source-1.md` | source_inconclusive | untrusted | Excluded from validated no-findings. |",
+        "",
+        "## Checked Files",
+        "",
+        "- `README.md:1`",
+        "",
+        "## Checked Commands",
+        "",
+        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add conflicting synthesis metadata", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-conflicting-source-outcome-synthesis",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        allowedEvidenceArtifactPaths: ["audit/source-1.md"],
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(codes(result)).toContain("audit_inconclusive");
+  });
+
   it("blocks audit synthesis when persisted source outcome is inconclusive despite stronger final text", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/audit-inconclusive-synthesis"], {
@@ -2722,6 +2971,59 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
       "missing_substantive_evidence",
     );
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
+  it("propagates malformed report artifacts as concrete completion blockers", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "app.ts"), "export const value = 1;\n", "utf8");
+    execFileSync("git", ["add", "src/app.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/malformed-source-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "# Runtime Audit",
+        "No validated findings.",
+        "Risk hypotheses: risk-src-1 for `src/app.ts:1` source value drift was covered and absent.",
+        "Checked files:",
+        "- `src/app.ts:1`",
+        "Checked commands:",
+        '- Command `rg -n "value" src/app.ts` output: `src/app.ts:1:export const value = 1;`',
+      ].join("\\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add malformed audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-malformed-source-report",
+        title: "Audit source report",
+        description: "Scope: src\nReport artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
+      "malformed_report_artifact",
+    );
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(codes(result)).toContain("malformed_report_artifact");
     expect(codes(result)).toContain("insufficient_report_evidence");
   });
 

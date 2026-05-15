@@ -2,6 +2,7 @@ import {
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
+  listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
 } from "@aif/data";
 import {
@@ -26,10 +27,21 @@ function toAuditArtifactRole(role: string | null | undefined): "report" | "synth
 
 function buildPlanQualityTaskContext(task: PlanCheckerTask): PlanCheckerTask & TaskPlanQualityTask {
   const artifact = findRoadmapBatchArtifactByTaskId(task.id);
+  const sourceReportArtifacts =
+    artifact?.role === "synthesis"
+      ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => ({
+          taskId: entry.taskId,
+          artifactPath: entry.artifactPath,
+          state: entry.state,
+          failureFamily: entry.failureFamily,
+          trusted: entry.state === "valid",
+        }))
+      : null;
   return {
     ...task,
     auditArtifactRole: toAuditArtifactRole(artifact?.role),
     roadmapBatchId: artifact?.batchId ?? null,
+    sourceReportArtifacts,
   };
 }
 

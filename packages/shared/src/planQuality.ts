@@ -36,6 +36,15 @@ export interface TaskPlanQualityTask {
   planPath?: string | null;
   auditArtifactRole?: "report" | "synthesis" | null;
   roadmapBatchId?: string | null;
+  sourceReportArtifacts?: TaskPlanQualitySourceReportArtifact[] | null;
+}
+
+export interface TaskPlanQualitySourceReportArtifact {
+  taskId: string;
+  artifactPath: string;
+  state: string;
+  failureFamily?: string | null;
+  trusted?: boolean | null;
 }
 
 export interface TaskPlanQualityIssue {
@@ -243,6 +252,46 @@ export function buildDeterministicDiagnosticPlan(
   const reportPath = findDeterministicDiagnosticReportPath(input);
   if (!reportPath) return null;
 
+  if (input.task.auditArtifactRole === "synthesis" && input.task.sourceReportArtifacts?.length) {
+    const sourceArtifacts = [...input.task.sourceReportArtifacts]
+      .map((artifact) => ({
+        ...artifact,
+        artifactPath: normalizePath(artifact.artifactPath),
+      }))
+      .sort((a, b) => a.artifactPath.localeCompare(b.artifactPath));
+    const sourcePaths = [...new Set(sourceArtifacts.map((artifact) => artifact.artifactPath))];
+    const sourcePathText = formatInlinePaths(sourcePaths);
+    const trustedCount = sourceArtifacts.filter((artifact) => artifact.trusted === true).length;
+    const weakCount = sourceArtifacts.length - trustedCount;
+    const statusLines = sourceArtifacts.map(
+      (artifact) =>
+        `- ${artifact.artifactPath} | task: ${artifact.taskId} | state: ${artifact.state} | trust: ${
+          artifact.trusted ? "trusted" : "untrusted"
+        } | failure family: ${artifact.failureFamily ?? "none"}`,
+    );
+    const plan = [
+      "## Deterministic audit synthesis plan",
+      "",
+      `Report artifact: \`${reportPath}\``,
+      "Scope: existing completed source audit reports from this roadmap batch.",
+      `Scoped evidence targets: ${sourcePathText}.`,
+      `Source report status: ${trustedCount} trusted, ${weakCount} untrusted or terminal weak.`,
+      ...statusLines,
+      "Excluded areas: source files, config files, tests, generated files, dependency caches, build output, and non-batch audit artifacts.",
+      "Expected report structure: child report, artifact state, trust level, finding ID, severity, evidence, risk, proposed fix, confidence, verification, and final outcome.",
+      "Child/source reports: required existing completed source audit reports; preserve every source report in the child status table and do not create child reports.",
+      "",
+      "- [ ] Keep the run diagnostic-only: do not implement fixes; do not patch source, config, or test files; do not create child implementation tasks.",
+      `- [ ] Read only the registry-listed source report artifacts ${sourcePathText} as existing inputs for synthesis.`,
+      "- [ ] Preserve each child/source report artifact path, task id, artifact state, trust level, evidence, risk, proposed fix, and verification status in the final child report status table.",
+      `- [ ] Create or update \`${reportPath}\` as the final synthesis report, carrying forward trusted validated findings and marking the final outcome audit inconclusive when source artifacts are missing, rejected, source_inconclusive, terminal_inconclusive, manual_exception, or otherwise untrusted.`,
+      `- [ ] Verify \`${reportPath}\` is the only written artifact and that no source/config/test edits are included.`,
+    ].join("\n");
+
+    const quality = evaluateTaskPlanQuality({ task: input.task, plan });
+    return quality.ok ? plan : null;
+  }
+
   const taskPaths = concreteAuditBoundariesFromText(taskText);
   if (taskPaths.length === 0) return null;
 
@@ -324,7 +373,10 @@ function hasDecomposedAuditStructure(plan: string, reportPaths: string[]): boole
   return hasChildReports && hasSynthesis && (hasMultipleReports || namesSourceAndSynthesisReports);
 }
 
-function hasSynthesisOnlyReportEvidenceTarget(plan: string): boolean {
+function hasSynthesisOnlyReportEvidenceTarget(
+  plan: string,
+  sourceReportArtifacts?: TaskPlanQualitySourceReportArtifact[] | null,
+): boolean {
   if (!AUDIT_SYNTHESIS_PATTERN.test(plan) || !AUDIT_EXISTING_CHILD_REPORTS_PATTERN.test(plan)) {
     return false;
   }
@@ -339,6 +391,19 @@ function hasSynthesisOnlyReportEvidenceTarget(plan: string): boolean {
     (path) => !finalReportPaths.has(path),
   );
   if (childReportPaths.length === 0) return false;
+  const requiredSourcePaths = [
+    ...new Set(
+      (sourceReportArtifacts ?? [])
+        .map((artifact) => normalizePath(artifact.artifactPath))
+        .filter(Boolean),
+    ),
+  ].sort();
+  if (
+    requiredSourcePaths.length > 0 &&
+    !requiredSourcePaths.every((path) => childReportPaths.includes(path))
+  ) {
+    return false;
+  }
 
   const nonReportPaths = [
     ...extractRepoPaths(boundaryText).filter((path) => !isAuditReportArtifactPath(path)),
@@ -472,7 +537,10 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
     const concreteAuditBoundaries = concreteAuditBoundariesFromText(
       [taskText, plan].filter(Boolean).join("\n"),
     );
-    const hasSynthesisOnlyException = hasSynthesisOnlyReportEvidenceTarget(plan);
+    const hasSynthesisOnlyException = hasSynthesisOnlyReportEvidenceTarget(
+      plan,
+      input.task.sourceReportArtifacts,
+    );
     const missingConcreteAuditBoundaries =
       concreteAuditBoundaries.length === 0 && !hasSynthesisOnlyException;
     const missingChildDecision = !hasNoChildDecision && !hasDecompositionDecision;

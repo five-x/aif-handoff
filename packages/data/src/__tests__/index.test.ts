@@ -45,6 +45,7 @@ const {
   updateTaskStatus,
   incrementTaskTokenUsage,
   findTasksByRoadmapAlias,
+  buildTaskArtifactTrustRollup,
   createRoadmapBatchContract,
   listRoadmapBatchArtifacts,
   listRoadmapBatchArtifactAttempts,
@@ -388,6 +389,230 @@ describe("data layer", () => {
   });
 
   describe("roadmap batch contracts", () => {
+    it.each([
+      ["report traversal", "report", "../outside-report.md"],
+      ["report Windows traversal", "report", "..\\outside-report.md"],
+      ["synthesis traversal", "synthesis", "audit/../outside-summary.md"],
+      ["synthesis absolute POSIX", "synthesis", "/tmp/outside-summary.md"],
+      ["synthesis absolute Windows", "synthesis", "C:\\tmp\\outside-summary.md"],
+    ] as const)("rejects unsafe roadmap artifact paths at creation: %s", (_name, role, path) => {
+      const reportTask = createTask({
+        projectId: "proj-1",
+        title: "Audit report",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+      });
+      const synthesisTask = createTask({
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+      });
+      const reportPath = role === "report" ? path : "audit/report.md";
+      const synthesisPath = role === "synthesis" ? path : "audit/summary.md";
+
+      expect(() =>
+        createRoadmapBatchContract({
+          projectId: "proj-1",
+          roadmapAlias: "audit-unsafe-path",
+          taskIntent: "audit",
+          executionPolicy: "serialized_shared_checkout",
+          createdTaskIds: [reportTask!.id, synthesisTask!.id],
+          synthesisTaskId: synthesisTask!.id,
+          artifacts: [
+            { taskId: reportTask!.id, role: "report", artifactPath: reportPath },
+            { taskId: synthesisTask!.id, role: "synthesis", artifactPath: synthesisPath },
+          ],
+        }),
+      ).toThrow(/unsafe roadmap artifact path/);
+    });
+
+    it("builds task artifact trust rollups for trusted and terminal source artifacts", () => {
+      const validTask = createTask({
+        projectId: "proj-1",
+        title: "Audit trusted source",
+        description: "Report artifact: audit/valid.md",
+        taskIntent: "audit",
+      });
+      const inconclusiveTask = createTask({
+        projectId: "proj-1",
+        title: "Audit inconclusive source",
+        description: "Report artifact: audit/inconclusive.md",
+        taskIntent: "audit",
+      });
+      const rejectedTask = createTask({
+        projectId: "proj-1",
+        title: "Audit rejected source",
+        description: "Report artifact: audit/rejected.md",
+        taskIntent: "audit",
+      });
+      const synthesisTask = createTask({
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/final.md",
+        taskIntent: "audit",
+      });
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-trust-rollup",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [
+          validTask!.id,
+          inconclusiveTask!.id,
+          rejectedTask!.id,
+          synthesisTask!.id,
+        ],
+        synthesisTaskId: synthesisTask!.id,
+        artifacts: [
+          { taskId: validTask!.id, role: "report", artifactPath: "audit/valid.md" },
+          {
+            taskId: inconclusiveTask!.id,
+            role: "report",
+            artifactPath: "audit/inconclusive.md",
+          },
+          { taskId: rejectedTask!.id, role: "report", artifactPath: "audit/rejected.md" },
+          { taskId: synthesisTask!.id, role: "synthesis", artifactPath: "audit/final.md" },
+        ],
+      });
+
+      updateTaskStatus(validTask!.id, "done");
+      updateTaskStatus(inconclusiveTask!.id, "done");
+      updateTaskStatus(rejectedTask!.id, "done");
+      updateRoadmapBatchArtifactState({
+        taskId: validTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          auditReportValidation: {
+            sourceClassification: "validated_no_findings",
+            manifestStatus: "valid",
+          },
+        },
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: inconclusiveTask!.id,
+        state: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        reworkStatus: "terminal_inconclusive",
+        validationDetails: {
+          auditReportValidation: { sourceClassification: "source_inconclusive" },
+        },
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: rejectedTask!.id,
+        state: "invalid",
+        failureFamily: "invalid_artifact_content",
+        reworkStatus: "manual_review_required",
+        validationDetails: { issues: [{ code: "malformed_report_artifact" }] },
+      });
+
+      expect(buildTaskArtifactTrustRollup(validTask!.id)).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactState: "valid",
+          artifactTrustLevel: "trusted",
+          trustedSynthesisInput: true,
+          nextAction: "none",
+          summary: "Done with trusted valid artifact",
+        }),
+      );
+      expect(buildTaskArtifactTrustRollup(inconclusiveTask!.id)).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactState: "source_inconclusive",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "inconclusive",
+          nextAction: "inspect_untrusted_source",
+          latestAttemptOutcome: "terminal_inconclusive",
+          batchCounts: expect.objectContaining({ trustedValid: 1, inconclusive: 1, rejected: 1 }),
+        }),
+      );
+      expect(buildTaskArtifactTrustRollup(rejectedTask!.id)).toEqual(
+        expect.objectContaining({
+          artifactState: "invalid",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "refuted",
+          nextAction: "retry_source_rework",
+        }),
+      );
+    });
+
+    it("surfaces synthesis waiting and terminal inconclusive next actions", () => {
+      const sourceTask = createTask({
+        projectId: "proj-1",
+        title: "Audit pending source",
+        description: "Report artifact: audit/source.md",
+        taskIntent: "audit",
+      });
+      const synthesisTask = createTask({
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/final.md",
+        taskIntent: "audit",
+      });
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-synthesis-rollup",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [sourceTask!.id, synthesisTask!.id],
+        synthesisTaskId: synthesisTask!.id,
+        artifacts: [
+          { taskId: sourceTask!.id, role: "report", artifactPath: "audit/source.md" },
+          { taskId: synthesisTask!.id, role: "synthesis", artifactPath: "audit/final.md" },
+        ],
+      });
+      updateTaskStatus(synthesisTask!.id, "blocked_external");
+      updateRoadmapBatchArtifactState({
+        taskId: synthesisTask!.id,
+        state: "synthesis_not_ready",
+        failureFamily: "synthesis_not_ready",
+        validationDetails: { reason: "plan_quality" },
+      });
+
+      expect(buildTaskArtifactTrustRollup(synthesisTask!.id)).toEqual(
+        expect.objectContaining({
+          taskStatus: "blocked_external",
+          artifactRole: "synthesis",
+          artifactState: "synthesis_not_ready",
+          artifactTrustLevel: "weak",
+          nextAction: "retry_synthesis",
+          reasonCodes: expect.arrayContaining(["plan_quality", "synthesis_not_ready"]),
+          batchCounts: expect.objectContaining({ synthesisPending: 1 }),
+        }),
+      );
+
+      updateRoadmapBatchArtifactState({
+        taskId: sourceTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          auditReportValidation: {
+            sourceClassification: "validated_findings_present",
+            manifestStatus: "valid",
+          },
+        },
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: synthesisTask!.id,
+        state: "terminal_inconclusive",
+        failureFamily: "inconclusive_batch_evidence",
+        reworkStatus: "terminal_inconclusive",
+        validationDetails: { auditSynthesisOutcome: { kind: "inconclusive_batch_evidence" } },
+      });
+
+      expect(buildTaskArtifactTrustRollup(synthesisTask!.id)).toEqual(
+        expect.objectContaining({
+          artifactState: "terminal_inconclusive",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "inconclusive",
+          nextAction: "inspect_untrusted_source",
+          latestAttemptOutcome: "terminal_inconclusive",
+        }),
+      );
+    });
+
     it("tracks artifact states and unpauses synthesis when reports are valid", () => {
       const reportTask = createTask({
         projectId: "proj-1",

@@ -246,4 +246,65 @@ describe("useWebSocket", () => {
 
     unmount();
   });
+
+  it("invalidates task caches after partial task broadcasts so artifact trust is refetched", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const staleAuditTask = createTask({
+      status: "implementing",
+      artifactTrust: {
+        taskStatus: "implementing",
+        artifactRole: "report",
+        artifactState: "expected",
+        artifactTrustLevel: "weak",
+        claimOutcome: "not_evaluated",
+        failureFamily: null,
+        reasonCodes: ["expected"],
+        latestAttemptOutcome: null,
+        trustedSynthesisInput: false,
+        synthesisReady: false,
+        nextAction: "wait_for_source_artifacts",
+        nextActionLabel: "Wait for source artifacts",
+        summary: "implementing with expected artifact",
+        artifactPath: "audit/source.md",
+        batchId: "batch-1",
+        roadmapAlias: "audit-roadmap",
+        attemptNumber: 0,
+        failureSignature: null,
+        branchName: null,
+        worktreePath: null,
+        batchCounts: {
+          trustedValid: 0,
+          inconclusive: 0,
+          rejected: 0,
+          missing: 0,
+          externalBlocked: 0,
+          synthesisPending: 1,
+          total: 1,
+        },
+      },
+    });
+    queryClient.setQueryData<Task[]>(["tasks", "project-1"], [staleAuditTask]);
+    queryClient.setQueryData<Task>(["task", "task-1"], staleAuditTask);
+
+    const { unmount } = renderHook(() => useWebSocket(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    act(() => {
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "task:updated",
+          payload: { id: "task-1", title: "Task 1", status: "done" },
+        }),
+      });
+    });
+
+    expect(queryClient.getQueryData<Task[]>(["tasks", "project-1"])?.[0]?.status).toBe("done");
+    expect(queryClient.getQueryData<Task>(["task", "task-1"])?.status).toBe("done");
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["tasks"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task", "task-1"] });
+
+    unmount();
+  });
 });

@@ -377,6 +377,33 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260514-terminalize-roadmap-audit-plan-quality-exhaustion",
       "updated": "2026-05-14"
+    },
+    {
+      "taskId": "work-20260514-deterministic-audit-synthesis-closeout",
+      "title": "Deterministic Audit Synthesis Closeout",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260514-deterministic-audit-synthesis-closeout",
+      "updated": "2026-05-14"
+    },
+    {
+      "taskId": "work-20260514-harden-source-audit-report-production",
+      "title": "Harden Source Audit Report Production",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260514-harden-source-audit-report-production",
+      "updated": "2026-05-15"
+    },
+    {
+      "taskId": "work-20260514-surface-audit-trust-state-and-next-actions",
+      "title": "Surface Audit Trust State And Next Actions",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260514-surface-audit-trust-state-and-next-actions",
+      "updated": "2026-05-14"
     }
   ]
 }

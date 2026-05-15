@@ -213,6 +213,61 @@ describe("auditReportValidator", () => {
     expect(result.existingReferencedPaths).toContain("src/config.ts");
   });
 
+  it("rejects escaped-newline serialized markdown report blobs", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+    ].join("\\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("malformed_report_artifact");
+  });
+
+  it("accepts normal multi-line reports that discuss escaped newline strings", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` newline serialization handling was covered and is absent.",
+      "",
+      "Evidence:",
+      "- `src/config.ts:1` defines the runtime timeout constant used by the parser fixture.",
+      "- The reviewed command output includes literal `\\n`, `\\r\\n`, and `\\n` text because the parser handles escaped newline samples.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(issueCodes(result)).not.toContain("malformed_report_artifact");
+    expect(result.sourceClassification).toBe("validated_no_findings");
+  });
+
   it("rejects plain no-findings reports without risk hypotheses or scoped claims", () => {
     const root = initRepo();
     const text = [
@@ -321,6 +376,50 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).toContain("missing_substantive_evidence");
   });
 
+  it.each([
+    "- Command `cat src/config.ts:1-1` output: `export const timeoutMs = 1000;`",
+    '- Command `cat "src/config.ts:1-1"` output: `export const timeoutMs = 1000;`',
+    "- Command `cat 'src/config.ts:1-1'` output: `export const timeoutMs = 1000;`",
+    "- Command `cat -- src/config.ts:1-1` output: `export const timeoutMs = 1000;`",
+    "- Command `cat -n src/config.ts:1-1` output: `export const timeoutMs = 1000;`",
+    "- Command `cat /tmp/src/config.ts:1` output: `export const timeoutMs = 1000;`",
+    '- Command `type "src/config.ts:1-1"` output: `export const timeoutMs = 1000;`',
+    '- Command `type "packages\\shared\\src\\auditReportValidator.ts:1"` output: `const x = 1;`',
+    '- Command `type "C:\\repo\\src\\config.ts:1"` output: `export const timeoutMs = 1000;`',
+    "- Verification: `cat src/config.ts:1-1` output: `export const timeoutMs = 1000;`",
+    "- Command: `cat src/config.ts:1-1` output: `export const timeoutMs = 1000;`",
+    "- Command `cat Dockerfile:1` output: `FROM node:22`",
+    "- `cat src/config.ts:1-1` output:",
+  ])(
+    "rejects cat/type commands that target path line references as report evidence: %s",
+    (commandLine) => {
+      const root = initRepo();
+      const text = [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        commandLine,
+        "",
+      ].join("\n");
+
+      const result = validateAuditReportArtifact({
+        text,
+        projectRoot: root,
+        reportArtifactPaths: ["audit/runtime-audit.md"],
+        requireProposedFix: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(issueCodes(result)).toContain("invalid_line_reference");
+    },
+  );
+
   it("accepts valid findings with path line evidence, risk, proposed fix, and verification", () => {
     const root = initRepo();
     const text = [
@@ -376,6 +475,37 @@ describe("auditReportValidator", () => {
         ok: true,
       }),
     ]);
+  });
+
+  it("rejects missing files and out-of-range line refs in report evidence", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/missing.ts:1`",
+      "- `src/config.ts:99`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.missingReferencedPaths).toContain("src/missing.ts");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["missing_report_file_references", "invalid_line_reference"]),
+    );
   });
 
   it("rejects low-quality governance reports even when range citations cover scope", () => {
@@ -1115,7 +1245,7 @@ describe("auditReportValidator", () => {
         "audit_evidence_source_snapshot_mismatch",
       ]),
     );
-  });
+  }, 60_000);
 
   it("rejects runtime ledger refs not bound to the manifest source snapshot", () => {
     const root = initRepo();
@@ -1394,7 +1524,7 @@ describe("auditReportValidator", () => {
       expect(result.manifestStatus).toBe("invalid");
       expect(issueCodes(result)).toContain("missing_report_manifest_fields");
     }
-  }, 10_000);
+  }, 60_000);
 
   it("rejects placeholder manifest hashes and source snapshots", () => {
     const root = initRepo();

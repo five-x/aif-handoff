@@ -57,6 +57,43 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
+function artifactTrust(
+  overrides: Partial<NonNullable<Task["artifactTrust"]>> = {},
+): NonNullable<Task["artifactTrust"]> {
+  return {
+    taskStatus: "done",
+    artifactRole: "report",
+    artifactState: "source_inconclusive",
+    artifactTrustLevel: "untrusted",
+    claimOutcome: "inconclusive",
+    failureFamily: "source_inconclusive",
+    reasonCodes: ["source_inconclusive", "untrusted_artifact"],
+    latestAttemptOutcome: "terminal_inconclusive",
+    trustedSynthesisInput: false,
+    synthesisReady: true,
+    nextAction: "inspect_untrusted_source",
+    nextActionLabel: "Inspect untrusted source",
+    summary: "Done with untrusted inconclusive artifact",
+    artifactPath: "audit/source.md",
+    batchId: "batch-1",
+    roadmapAlias: "audit-roadmap",
+    attemptNumber: 1,
+    failureSignature: "role:report|family:source_inconclusive",
+    branchName: null,
+    worktreePath: null,
+    batchCounts: {
+      trustedValid: 0,
+      inconclusive: 1,
+      rejected: 0,
+      missing: 0,
+      externalBlocked: 0,
+      synthesisPending: 0,
+      total: 1,
+    },
+    ...overrides,
+  };
+}
+
 describe("TaskListTable", () => {
   beforeEach(() => {
     mutateReorder.mockClear();
@@ -144,6 +181,18 @@ describe("TaskListTable", () => {
     const t = makeTask({ id: "t1", scheduledAt: future });
     render(<TaskListTable tasks={[t]} isCompact={false} onTaskClick={vi.fn()} />);
     expect(screen.getByText(/Starts/)).toBeDefined();
+  });
+
+  it("renders compact artifact trust status in the status cell", () => {
+    const t = makeTask({
+      id: "t1",
+      status: "done",
+      artifactTrust: artifactTrust(),
+    });
+    render(<TaskListTable tasks={[t]} isCompact={false} onTaskClick={vi.fn()} />);
+
+    expect(screen.getByText("Done")).toBeDefined();
+    expect(screen.getByText("untrusted source inconclusive")).toBeDefined();
   });
 
   it("clicking a row triggers onTaskClick (not blocked by Order cell stopPropagation)", () => {

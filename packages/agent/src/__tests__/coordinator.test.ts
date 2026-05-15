@@ -229,6 +229,96 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
+  it("recovers synthesis plan-quality retry exhaustion with a deterministic exact-source plan", async () => {
+    const db = testDb.current;
+    const projectRoot = initGitFixture("aif-coordinator-synthesis-plan-");
+    db.update(projects).set({ rootPath: projectRoot }).where(eq(projects.id, "test-project")).run();
+    vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-source-valid",
+          projectId: "test-project",
+          title: "Audit source valid",
+          taskIntent: "audit",
+          description: "Report artifact: audit/source-valid.md",
+          status: "done",
+        },
+        {
+          id: "task-source-missing",
+          projectId: "test-project",
+          title: "Audit source missing",
+          taskIntent: "audit",
+          description: "Report artifact: audit/source-missing.md",
+          status: "done",
+        },
+        {
+          id: "task-synthesis-plan-recovery",
+          projectId: "test-project",
+          title: "Synthesize audit findings",
+          taskIntent: "audit",
+          description: "Report artifact: audit/final-synthesis.md.",
+          status: "plan_ready",
+          retryCount: 2,
+          plan: "Short task\n/aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+        },
+      ])
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-plan-recovery",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-valid", "task-source-missing", "task-synthesis-plan-recovery"],
+      synthesisTaskId: "task-synthesis-plan-recovery",
+      artifacts: [
+        { taskId: "task-source-valid", role: "report", artifactPath: "audit/source-valid.md" },
+        { taskId: "task-source-missing", role: "report", artifactPath: "audit/source-missing.md" },
+        {
+          taskId: "task-synthesis-plan-recovery",
+          role: "synthesis",
+          artifactPath: "audit/final-synthesis.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-valid",
+      state: "valid",
+      validationDetails: {
+        evidence: {
+          auditReportValidation: {
+            sourceClassification: "validated_no_findings",
+            manifestStatus: "valid",
+          },
+        },
+      },
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-missing",
+      state: "missing",
+      failureFamily: "missing_artifact",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: { reason: "terminal missing source report" },
+    });
+
+    await pollAndProcess();
+
+    const recovered = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-synthesis-plan-recovery"))
+      .get();
+    expect(recovered?.status).toBe("implementing");
+    expect(recovered?.blockedReason).toBeNull();
+    expect(recovered?.retryCount).toBe(0);
+    expect(recovered?.plan).toContain("## Deterministic audit synthesis plan");
+    expect(recovered?.plan).toContain("audit/source-valid.md");
+    expect(recovered?.plan).toContain("audit/source-missing.md");
+    expect(recovered?.plan).toContain("child report status table");
+    expect(runImplementer).not.toHaveBeenCalled();
+  });
+
   it("should use task worktreePath as cwd for all downstream stages", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -682,9 +772,9 @@ describe("coordinator", () => {
     synthesis = db.select().from(tasks).where(eq(tasks.id, "task-canary-synthesis")).get();
     expect(synthesis?.paused).toBe(false);
     expect(synthesis?.blockedReason ?? "").not.toContain("synthesis_not_ready");
-  });
+  }, 60_000);
 
-  it("blocks audit synthesis as inconclusive from persisted source outcome", async () => {
+  it("closes audit synthesis as explicit inconclusive from persisted source outcome", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-audit-inconclusive-");
     execFileSync("git", ["checkout", "-b", "feature/audit-inconclusive"], {
@@ -707,7 +797,18 @@ describe("coordinator", () => {
           weakReportCount: 0,
         }),
         "",
-        "No validated findings.",
+        "# Audit Inconclusive",
+        "",
+        "Audit outcome: Audit inconclusive",
+        "",
+        "## Child Report Status",
+        "",
+        "| Task | Report | State | Trust | Decision |",
+        "| --- | --- | --- | --- | --- |",
+        ...Array.from({ length: 6 }, (_, index) => {
+          const number = index + 1;
+          return `| task-inconclusive-report-${number} | \`audit/source-${number}.md\` | source_inconclusive | untrusted | Excluded from validated no-findings. |`;
+        }),
         "",
         "## Checked Files",
         "- `README.md:1`",
@@ -811,15 +912,16 @@ describe("coordinator", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-inconclusive-synthesis"))
       .get();
-    expect(synthesis?.status).toBe("blocked_external");
-    expect(synthesis?.blockedReason).toContain("inconclusive_batch_evidence");
-    expect(synthesis?.blockedReason).toContain("audit_inconclusive");
+    expect(synthesis?.status).toBe("done");
+    expect(synthesis?.blockedReason).toBeNull();
     const synthesisArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
       (artifact) => artifact.taskId === "task-inconclusive-synthesis",
     );
-    expect(synthesisArtifact?.state).toBe("terminal_inconclusive");
-    expect(synthesisArtifact?.failureFamily).toBe("inconclusive_batch_evidence");
-    expect(summarizeRoadmapBatch(batch.batchId)?.failureFamily).toBe("inconclusive_batch_evidence");
+    expect(synthesisArtifact?.state).toBe("valid");
+    expect(synthesisArtifact?.failureFamily).toBeNull();
+    const summary = summarizeRoadmapBatch(batch.batchId);
+    expect(summary?.status).toBe("complete");
+    expect(summary?.failureFamily).toBeNull();
   });
 
   it("should pause synthesis when validated branch artifacts are unavailable during implementation", async () => {
@@ -872,11 +974,44 @@ describe("coordinator", () => {
       failureFamily: null,
       validationDetails: trustedFindingsValidationDetails(),
     });
-    vi.mocked(runImplementer).mockRejectedValueOnce(
-      new Error(
-        "synthesis_not_ready: validated artifact is unavailable on branch audit/config-report: audit/config.md",
-      ),
-    );
+    const missingReportError = new Error(
+      "synthesis_not_ready: missing_report_artifact: validated artifact is unavailable on branch audit/config-report: audit/config.md",
+    ) as Error & { validationDetails?: Record<string, unknown> };
+    missingReportError.validationDetails = {
+      reason: missingReportError.message,
+      code: "missing_report_artifact",
+      artifactPath: "audit/config.md",
+      source: "branch",
+      sourceLocation: "audit/config-report",
+      branchName: "audit/config-report",
+      worktreePath: null,
+      projectRoot: "/tmp/test",
+      contentSha: null,
+      missingReportArtifact: {
+        code: "missing_report_artifact",
+        artifactPath: "audit/config.md",
+        source: "branch",
+        sourceLocation: "audit/config-report",
+        branchName: "audit/config-report",
+        worktreePath: null,
+        projectRoot: "/tmp/test",
+        contentSha: null,
+      },
+      issues: [
+        {
+          code: "missing_report_artifact",
+          message: missingReportError.message,
+          artifactPath: "audit/config.md",
+          source: "branch",
+          sourceLocation: "audit/config-report",
+          branchName: "audit/config-report",
+          worktreePath: null,
+          projectRoot: "/tmp/test",
+          contentSha: null,
+        },
+      ],
+    };
+    vi.mocked(runImplementer).mockRejectedValueOnce(missingReportError);
 
     await pollAndProcess();
 
@@ -895,6 +1030,64 @@ describe("coordinator", () => {
     );
     expect(synthesisArtifact?.state).toBe("synthesis_not_ready");
     expect(synthesisArtifact?.failureFamily).toBe("synthesis_not_ready");
+    const validationDetails = JSON.parse(synthesisArtifact?.validationDetailsJson ?? "{}") as {
+      code?: string;
+      artifactPath?: string;
+      source?: string;
+      sourceLocation?: string;
+      branchName?: string | null;
+      worktreePath?: string | null;
+      projectRoot?: string;
+      contentSha?: string | null;
+      missingReportArtifact?: {
+        code?: string;
+        artifactPath?: string;
+        source?: string;
+        sourceLocation?: string;
+        branchName?: string | null;
+        worktreePath?: string | null;
+        projectRoot?: string;
+        contentSha?: string | null;
+      };
+      issues?: Array<{
+        code?: string;
+        artifactPath?: string;
+        source?: string;
+        branchName?: string | null;
+        contentSha?: string | null;
+      }>;
+    };
+    expect(validationDetails).toMatchObject({
+      code: "missing_report_artifact",
+      artifactPath: "audit/config.md",
+      source: "branch",
+      sourceLocation: "audit/config-report",
+      branchName: "audit/config-report",
+      worktreePath: null,
+      projectRoot: "/tmp/test",
+      contentSha: null,
+      missingReportArtifact: {
+        code: "missing_report_artifact",
+        artifactPath: "audit/config.md",
+        source: "branch",
+        sourceLocation: "audit/config-report",
+        branchName: "audit/config-report",
+        worktreePath: null,
+        projectRoot: "/tmp/test",
+        contentSha: null,
+      },
+    });
+    expect(validationDetails.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "missing_report_artifact",
+          artifactPath: "audit/config.md",
+          source: "branch",
+          branchName: "audit/config-report",
+          contentSha: null,
+        }),
+      ]),
+    );
   });
 
   it("should run synthesis rework even when completion evidence is already satisfied", async () => {
@@ -2243,6 +2436,9 @@ describe("coordinator", () => {
     expect(attempts.at(-1)?.classification).toBe("source_inconclusive");
     expect(attempts.at(-1)?.validationDetailsJson).toContain("plan_quality_exhausted");
     expect(attempts.at(-1)?.validationDetailsJson).toContain("planQualityCategories");
+    expect(attempts.at(-1)?.validationDetailsJson).toContain("missing_report_artifact");
+    expect(attempts.at(-1)?.validationDetailsJson).toContain("audit/plan-quality-limit.md");
+    expect(attempts.at(-1)?.validationDetailsJson).toContain('"contentSha":null');
 
     const summary = summarizeRoadmapBatch(batch.batchId);
     expect(summary?.synthesisReady).toBe(true);
@@ -2776,6 +2972,81 @@ describe("coordinator", () => {
     const attempts = listRoadmapBatchArtifactAttempts(artifact!.id);
     expect(attempts.at(-1)?.reworkStatus).toBe("terminal_inconclusive");
     expect(attempts.at(-1)?.validationDetailsJson).toContain("no_substantive_rework_delta");
+  });
+
+  it("should not terminalize no-delta rework by hashing unsafe snapshot paths outside the project", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-unsafe-snapshot-rework-");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const reportText = "# Audit\n\nFinding still needs evidence.\n";
+    const outsideText = "# Outside\n\nDo not hash this file.\n";
+    const outsideName = `outside-${Date.now()}.md`;
+    writeFileSync(join(rootPath, "audit", "report.md"), reportText, "utf8");
+    writeFileSync(join(rootPath, "..", outsideName), outsideText, "utf8");
+
+    db.insert(projects)
+      .values({ id: "unsafe-snapshot-project", name: "Unsafe Snapshot", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-unsafe-snapshot-rework",
+        projectId: "unsafe-snapshot-project",
+        title: "Audit unsafe snapshot rework",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+        status: "implementing",
+        autoMode: true,
+        reworkRequested: true,
+        reviewIterationCount: 2,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "fix-a",
+              source: "code_review",
+              text: "Replace weak audit evidence",
+              firstSeenIteration: 1,
+              lastSeenIteration: 2,
+              streak: 2,
+            },
+          ],
+          reworkSnapshot: {
+            iteration: 2,
+            artifactPath: `../${outsideName}`,
+            artifactContentSha: computeAuditReportArtifactSha256(outsideText),
+            findingIds: ["fix-a"],
+          },
+        }),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "unsafe-snapshot-project",
+      roadmapAlias: "unsafe-snapshot",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-unsafe-snapshot-rework"],
+      artifacts: [
+        {
+          taskId: "task-unsafe-snapshot-rework",
+          role: "report",
+          artifactPath: "audit/report.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-unsafe-snapshot-rework", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-unsafe-snapshot-rework", rootPath);
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-unsafe-snapshot-rework")).get();
+    expect(task?.blockedReason).not.toContain("no_substantive_rework_delta");
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    expect(artifact?.state).not.toBe("source_inconclusive");
+    expect(listRoadmapBatchArtifactAttempts(artifact!.id).at(-1)?.reworkStatus).not.toBe(
+      "terminal_inconclusive",
+    );
   });
 
   it("should preserve implementer terminalization instead of moving back to review", async () => {

@@ -299,6 +299,86 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).toContain("audit_without_concrete_boundaries");
   });
 
+  it("rejects synthesis plans that omit registry-provided exact source report artifacts", () => {
+    const task = {
+      title: "Synthesize audit findings",
+      description: "Report artifact: audit/final-synthesis.md.",
+      taskIntent: "audit" as const,
+      auditArtifactRole: "synthesis" as const,
+      roadmapBatchId: "batch-1",
+      sourceReportArtifacts: [
+        {
+          taskId: "source-a",
+          artifactPath: "audit/source-a.md",
+          state: "valid",
+          trusted: true,
+        },
+        {
+          taskId: "source-b",
+          artifactPath: "audit/source-b.md",
+          state: "source_inconclusive",
+          failureFamily: "source_inconclusive",
+          trusted: false,
+        },
+      ],
+    };
+
+    const result = evaluateTaskPlanQuality({
+      task,
+      plan: [
+        "## Decomposed audit synthesis plan",
+        "Report artifact: `audit/final-synthesis.md`",
+        "Scope: existing completed child audit reports.",
+        "Scoped evidence targets: `audit/source-a.md`.",
+        "Excluded areas: generated files, dependency caches, and build output.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child reports: required existing completed child audit reports plus final synthesis.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Produce synthesis report `audit/final-synthesis.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("audit_without_concrete_boundaries");
+  });
+
+  it("builds deterministic synthesis fallback with exact source report paths and child status context", () => {
+    const task = {
+      title: "Synthesize audit findings",
+      description: "Report artifact: audit/final-synthesis.md.",
+      taskIntent: "audit" as const,
+      auditArtifactRole: "synthesis" as const,
+      roadmapBatchId: "batch-1",
+      sourceReportArtifacts: [
+        {
+          taskId: "source-a",
+          artifactPath: "audit/source-a.md",
+          state: "valid",
+          trusted: true,
+        },
+        {
+          taskId: "source-b",
+          artifactPath: "audit/source-b.md",
+          state: "missing",
+          failureFamily: "missing_artifact",
+          trusted: false,
+        },
+      ],
+    };
+
+    const plan = buildDeterministicDiagnosticPlan({
+      task,
+      extraText: ["</think>\n/aif-plan fast"],
+    });
+
+    expect(plan).toContain("audit/source-a.md");
+    expect(plan).toContain("audit/source-b.md");
+    expect(plan).toContain("Source report status: 1 trusted, 1 untrusted");
+    expect(plan).toContain("child report status table");
+    expect(plan).toContain("audit inconclusive");
+    expect(evaluateTaskPlanQuality({ task, plan }).ok).toBe(true);
+  });
+
   it("rejects synthesis-only broad audit plans that target only the final report artifact", () => {
     const result = evaluateTaskPlanQuality({
       task: {

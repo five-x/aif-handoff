@@ -29,7 +29,12 @@ const auditTimeline: WorkflowTimeline = {
       metadata: {
         role: "report",
         roadmapAlias: "audit-roadmap",
+        originalState: "valid",
         failureFamily: null,
+        reasonCodes: ["valid"],
+        failureSignature: "role:report|classification:validated_no_findings",
+        branchName: "audit/source",
+        worktreePath: "C:/tmp/audit-source",
       },
     },
   ],
@@ -44,7 +49,13 @@ const auditTimeline: WorkflowTimeline = {
       trustLevel: "trusted",
       sourceSnapshotId: "git:abc",
       createdAt: "2026-05-13T00:05:00.000Z",
-      metadata: { role: "report" },
+      metadata: {
+        role: "report",
+        originalState: "valid",
+        reworkStatus: "accepted",
+        reasonCodes: ["accepted", "valid"],
+        failureSignature: "role:report|classification:validated_no_findings",
+      },
     },
   ],
   claims: [
@@ -57,7 +68,12 @@ const auditTimeline: WorkflowTimeline = {
       outcome: "supported",
       trustLevel: "trusted",
       evaluatedAt: "2026-05-13T00:05:00.000Z",
-      metadata: { role: "report" },
+      metadata: {
+        role: "report",
+        originalState: "valid",
+        reasonCodes: ["valid"],
+        failureSignature: "role:report|classification:validated_no_findings",
+      },
     },
   ],
   evidence: [
@@ -162,6 +178,14 @@ describe("WorkflowTimelinePanel", () => {
     expect(screen.getAllByText("Evidence").length).toBeGreaterThan(0);
     expect(screen.getByText("source evidence preview")).toBeDefined();
     expect(screen.getAllByText("Role: report").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Original: valid").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Reason codes: valid").length).toBeGreaterThan(0);
+    expect(screen.getByText("Branch: audit/source")).toBeDefined();
+    expect(screen.getByText("Worktree: C:/tmp/audit-source")).toBeDefined();
+    expect(screen.getAllByText("Snapshot: git:abc").length).toBeGreaterThan(0);
+    expect(screen.getByText("Link: supports artifact-1")).toBeDefined();
+    expect(screen.getByText("Rework: accepted")).toBeDefined();
+    expect(screen.getAllByText(/Failure signature:/).length).toBeGreaterThan(0);
     expect(screen.getByText("Roadmap: audit-roadmap")).toBeDefined();
   });
 

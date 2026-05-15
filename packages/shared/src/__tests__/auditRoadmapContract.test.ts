@@ -103,6 +103,18 @@ describe("auditRoadmapContract", () => {
     expect(isAuditReportArtifactPath("../audit/security-audit.md")).toBe(false);
     expect(isAuditReportArtifactPath(".ai-factory/plans/audit-security.md")).toBe(false);
     expect(isAuditReportArtifactPath("aif-plan/audit-security.md")).toBe(false);
+    expect(
+      isAuditReportArtifactPath(
+        "docs/rdpi/work/work-20260514-harden-source-audit-report-production/result.md",
+      ),
+    ).toBe(false);
+    expect(
+      isAuditReportArtifactPath(
+        "docs/intake/work/work-20260514-harden-source-audit-report-production.md",
+      ),
+    ).toBe(false);
+    expect(isAuditReportArtifactPath("docs/intake/work_status.json")).toBe(false);
+    expect(isAuditReportArtifactPath("docs/intake/work_index.md")).toBe(false);
   });
 
   it("identifies audit synthesis titles", () => {
@@ -363,6 +375,9 @@ describe("auditRoadmapContract", () => {
       "invalid_artifact_content",
     );
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("low_quality_report_evidence")).toBe(
+      "invalid_artifact_content",
+    );
+    expect(mapTaskCompletionIssueCodeToAuditFailureFamily("malformed_report_artifact")).toBe(
       "invalid_artifact_content",
     );
     expect(mapTaskCompletionIssueCodeToAuditFailureFamily("unexpected_non_report_changes")).toBe(

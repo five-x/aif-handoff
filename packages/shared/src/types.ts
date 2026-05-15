@@ -161,6 +161,7 @@ export interface Task {
   sessionId: string | null;
   runtimeLimitSnapshot?: RuntimeLimitSnapshot | null;
   runtimeLimitUpdatedAt?: string | null;
+  artifactTrust?: TaskArtifactTrustRollup | null;
   scheduledAt: string | null;
   branchName: string | null;
   worktreePath: string | null;
@@ -197,6 +198,52 @@ export type WorkflowTimelineClaimOutcome =
   | "not_evaluated";
 
 export type WorkflowTimelineTrustLevel = "trusted" | "weak" | "untrusted";
+
+export type TaskArtifactTrustLevel = WorkflowTimelineTrustLevel;
+
+export type TaskArtifactTrustClaimOutcome = WorkflowTimelineClaimOutcome;
+
+export type TaskArtifactTrustNextAction =
+  | "none"
+  | "retry_source_rework"
+  | "retry_synthesis"
+  | "provide_operator_input"
+  | "inspect_untrusted_source"
+  | "wait_for_source_artifacts";
+
+export interface TaskArtifactTrustBatchCounts {
+  trustedValid: number;
+  inconclusive: number;
+  rejected: number;
+  missing: number;
+  externalBlocked: number;
+  synthesisPending: number;
+  total: number;
+}
+
+export interface TaskArtifactTrustRollup {
+  taskStatus: TaskStatus;
+  artifactRole: string;
+  artifactState: string;
+  artifactTrustLevel: TaskArtifactTrustLevel;
+  claimOutcome: TaskArtifactTrustClaimOutcome;
+  failureFamily: string | null;
+  reasonCodes: string[];
+  latestAttemptOutcome: string | null;
+  trustedSynthesisInput: boolean;
+  synthesisReady: boolean;
+  nextAction: TaskArtifactTrustNextAction;
+  nextActionLabel: string;
+  summary: string;
+  artifactPath: string | null;
+  batchId: string;
+  roadmapAlias: string | null;
+  attemptNumber: number;
+  failureSignature: string | null;
+  branchName: string | null;
+  worktreePath: string | null;
+  batchCounts: TaskArtifactTrustBatchCounts;
+}
 
 export type WorkflowTimelineEvidenceLinkRelation = "supports" | "refutes" | "context";
 

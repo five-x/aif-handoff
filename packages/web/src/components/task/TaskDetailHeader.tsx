@@ -10,6 +10,7 @@ import { formatTokenCount, formatUsd } from "@/lib/formatters";
 import { Tabs } from "@/components/ui/tabs";
 import { AlertBox } from "@/components/ui/alert-box";
 import { getRuntimeLimitDisplay } from "@/lib/runtimeLimits";
+import { getArtifactTrustPresentation } from "@/lib/artifactTrust";
 import { useUsageLimitsEnabled } from "@/hooks/useSettings";
 
 export type TaskDetailTab = "implementation" | "review" | "comments" | "activity" | "timeline";
@@ -87,6 +88,7 @@ export function TaskDetailHeader({
         checkedAt: task.runtimeLimitUpdatedAt ?? null,
       })
     : null;
+  const artifactTrust = getArtifactTrustPresentation(task.artifactTrust);
   // Pause is also shown in `backlog` so users can park a task that auto-queue
   // would otherwise advance — paused backlog tasks are skipped by both the
   // scheduler and the auto-queue advancer.
@@ -114,6 +116,11 @@ export function TaskDetailHeader({
               className="border-yellow-500/35 bg-yellow-500/15 text-yellow-600 dark:text-yellow-300"
             >
               PAUSED
+            </Badge>
+          )}
+          {artifactTrust && (
+            <Badge size="sm" className={artifactTrust.className}>
+              {artifactTrust.label}
             </Badge>
           )}
           {task.priority > 0 && (
@@ -163,6 +170,45 @@ export function TaskDetailHeader({
           <span>{runtimeLimitDisplay.summary}</span>
           {runtimeLimitDisplay.resetText && <span>{runtimeLimitDisplay.resetText}</span>}
           {runtimeLimitDisplay.taskRetryText && <span>{runtimeLimitDisplay.taskRetryText}</span>}
+        </AlertBox>
+      )}
+
+      {task.artifactTrust && (
+        <AlertBox
+          variant={task.artifactTrust.trustedSynthesisInput ? "success" : "warning"}
+          className="mb-3 px-3 py-2 text-xs"
+        >
+          <div className="font-medium">{task.artifactTrust.summary}</div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+            <span>Role: {task.artifactTrust.artifactRole}</span>
+            <span>State: {task.artifactTrust.artifactState}</span>
+            <span>Trust: {task.artifactTrust.artifactTrustLevel}</span>
+            <span>Claim: {task.artifactTrust.claimOutcome}</span>
+            <span>Next: {task.artifactTrust.nextActionLabel}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+            <span>Sources: {task.artifactTrust.batchCounts.total}</span>
+            <span>Trusted: {task.artifactTrust.batchCounts.trustedValid}</span>
+            <span>Inconclusive: {task.artifactTrust.batchCounts.inconclusive}</span>
+            <span>Rejected: {task.artifactTrust.batchCounts.rejected}</span>
+            <span>Missing: {task.artifactTrust.batchCounts.missing}</span>
+            <span>External: {task.artifactTrust.batchCounts.externalBlocked}</span>
+            <span>Synthesis pending: {task.artifactTrust.batchCounts.synthesisPending}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-3xs text-muted-foreground">
+            <span>batch {task.artifactTrust.batchId}</span>
+            {task.artifactTrust.artifactPath && <span>{task.artifactTrust.artifactPath}</span>}
+            {task.artifactTrust.failureSignature && (
+              <span>{task.artifactTrust.failureSignature}</span>
+            )}
+            {task.artifactTrust.branchName && <span>{task.artifactTrust.branchName}</span>}
+            {task.artifactTrust.worktreePath && <span>{task.artifactTrust.worktreePath}</span>}
+          </div>
+          {task.artifactTrust.reasonCodes.length > 0 && (
+            <div className="mt-1 text-muted-foreground">
+              Reasons: {task.artifactTrust.reasonCodes.join(", ")}
+            </div>
+          )}
         </AlertBox>
       )}
 

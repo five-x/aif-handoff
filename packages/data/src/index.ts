@@ -74,6 +74,9 @@ import {
   type UpdateRuntimeProfileInput,
   type RuntimeWarmupSessionStatus,
   type Task,
+  type TaskArtifactTrustBatchCounts,
+  type TaskArtifactTrustNextAction,
+  type TaskArtifactTrustRollup,
   type TaskIntent,
   type TaskStatus,
   type WorkflowTimeline,
@@ -2986,6 +2989,34 @@ export interface CreateRoadmapBatchContractInput {
   artifacts: RoadmapBatchArtifactInput[];
 }
 
+export function normalizeRoadmapArtifactPath(artifactPath: string): string {
+  return artifactPath.replaceAll("\\", "/");
+}
+
+export function assertSafeRoadmapArtifactPath(artifactPath: string): string {
+  const trimmed = artifactPath.trim();
+  const normalized = normalizeRoadmapArtifactPath(trimmed);
+  if (
+    !trimmed ||
+    trimmed !== artifactPath ||
+    normalized.includes("\0") ||
+    normalized.includes(":") ||
+    normalized.startsWith("/") ||
+    /^[A-Za-z]:\//.test(normalized) ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../") ||
+    normalized.endsWith("/..") ||
+    normalized.startsWith("./../") ||
+    normalized.includes("/./") ||
+    normalized.endsWith("/.")
+  ) {
+    throw new Error(`unsafe roadmap artifact path: ${artifactPath}`);
+  }
+  return normalized;
+}
+
 export interface RoadmapBatchSummary {
   batchId: string;
   projectId: string;
@@ -3086,11 +3117,14 @@ function roadmapArtifactCountsAsValid(artifact: RoadmapBatchArtifactRow): boolea
 
 function roadmapSourceArtifactTerminalForSynthesis(artifact: RoadmapBatchArtifactRow): boolean {
   if (artifact.role !== "report") return false;
-  return (
-    artifact.state === "source_inconclusive" ||
-    artifact.state === "terminal_inconclusive" ||
-    artifact.state === "manual_exception"
-  );
+  if (!isTerminalAuditArtifactState(artifact.state as AuditArtifactState)) return false;
+  if (artifact.state === "external_blocked") return false;
+  const latestReworkStatus = listRoadmapBatchArtifactAttempts(artifact.id).at(-1)
+    ?.reworkStatus as AuditArtifactReworkStatus | null | undefined;
+  if (artifact.state === "manual_exception") {
+    return latestReworkStatus === "manual_exception";
+  }
+  return latestReworkStatus === "terminal_inconclusive";
 }
 
 function roadmapSourceArtifactReadyForSynthesis(artifact: RoadmapBatchArtifactRow): boolean {
@@ -3151,6 +3185,223 @@ function summarizeRoadmapArtifacts(
   };
 }
 
+function buildArtifactTrustBatchCounts(
+  artifacts: RoadmapBatchArtifactRow[],
+): TaskArtifactTrustBatchCounts {
+  const sourceArtifacts = artifacts.filter((artifact) => artifact.role === "report");
+  const synthesisArtifacts = artifacts.filter((artifact) => artifact.role === "synthesis");
+  return {
+    trustedValid: sourceArtifacts.filter(roadmapArtifactCountsAsValid).length,
+    inconclusive: sourceArtifacts.filter((artifact) =>
+      ["source_inconclusive", "terminal_inconclusive"].includes(artifact.state),
+    ).length,
+    rejected: sourceArtifacts.filter((artifact) => artifact.state === "invalid").length,
+    missing: sourceArtifacts.filter((artifact) => artifact.state === "missing").length,
+    externalBlocked: sourceArtifacts.filter((artifact) => artifact.state === "external_blocked")
+      .length,
+    synthesisPending: synthesisArtifacts.filter((artifact) =>
+      ["expected", "synthesis_not_ready", "missing"].includes(artifact.state),
+    ).length,
+    total: sourceArtifacts.length,
+  };
+}
+
+function collectValidationReasonCodes(value: unknown): string[] {
+  const codes = new Set<string>();
+  const visit = (candidate: unknown) => {
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) visit(item);
+      return;
+    }
+    if (!isObjectRecord(candidate)) return;
+    for (const [key, nested] of Object.entries(candidate)) {
+      if (
+        ["reason", "code", "kind", "category", "failureFamily"].includes(key) &&
+        typeof nested === "string" &&
+        nested.trim().length > 0
+      ) {
+        codes.add(nested.trim());
+      }
+      if (Array.isArray(nested) || isObjectRecord(nested)) visit(nested);
+    }
+  };
+  visit(value);
+  return [...codes].sort();
+}
+
+function artifactTrustedForSynthesisInput(artifact: RoadmapBatchArtifactRow): boolean {
+  if (artifact.role === "report") return roadmapArtifactCountsAsValid(artifact);
+  return artifact.role === "synthesis" && artifact.state === "valid" && !artifact.failureFamily;
+}
+
+function mapArtifactTrustLevel(artifact: RoadmapBatchArtifactRow): WorkflowTimelineTrustLevel {
+  if (artifactTrustedForSynthesisInput(artifact)) return "trusted";
+  if (artifact.state === "expected" || artifact.state === "synthesis_not_ready") return "weak";
+  if (artifact.state === "manual_exception") return "weak";
+  return "untrusted";
+}
+
+function buildArtifactTrustReasonCodes(input: {
+  artifact: RoadmapBatchArtifactRow;
+  latestAttempt: RoadmapBatchArtifactAttemptRow | null;
+  synthesisReady: boolean;
+  trustedSynthesisInput: boolean;
+}): string[] {
+  const codes = new Set<string>();
+  codes.add(input.artifact.state);
+  if (input.artifact.failureFamily) codes.add(input.artifact.failureFamily);
+  for (const code of collectValidationReasonCodes(
+    parseValidationDetails(input.artifact.validationDetailsJson),
+  )) {
+    codes.add(code);
+  }
+  if (!input.trustedSynthesisInput) codes.add("untrusted_artifact");
+  if (!input.synthesisReady) codes.add("synthesis_not_ready");
+  if (input.latestAttempt?.classification) codes.add(input.latestAttempt.classification);
+  if (input.latestAttempt?.reworkStatus) codes.add(input.latestAttempt.reworkStatus);
+  return [...codes].sort();
+}
+
+function artifactHasSynthesisPlanFixReason(artifact: RoadmapBatchArtifactRow): boolean {
+  if (artifact.role !== "synthesis") return false;
+  const codes = new Set([
+    artifact.failureFamily,
+    ...collectValidationReasonCodes(parseValidationDetails(artifact.validationDetailsJson)),
+  ]);
+  return ["generic_plan", "plan_quality", "plan_quality_exhausted"].some((code) =>
+    codes.has(code),
+  );
+}
+
+function buildArtifactTrustNextAction(input: {
+  artifact: RoadmapBatchArtifactRow;
+  synthesisReady: boolean;
+  trustedSynthesisInput: boolean;
+}): TaskArtifactTrustNextAction {
+  const { artifact, synthesisReady, trustedSynthesisInput } = input;
+  if (trustedSynthesisInput) return "none";
+  if (artifactHasSynthesisPlanFixReason(artifact)) return "retry_synthesis";
+  if (artifact.state === "external_blocked" || artifact.failureFamily === "external_blocker") {
+    return "provide_operator_input";
+  }
+  if (artifact.state === "source_inconclusive" || artifact.state === "terminal_inconclusive") {
+    return "inspect_untrusted_source";
+  }
+  if (!synthesisReady && artifact.role === "synthesis") return "wait_for_source_artifacts";
+  if (!synthesisReady && artifact.state === "synthesis_not_ready") return "wait_for_source_artifacts";
+  if (artifact.role === "synthesis") return "retry_synthesis";
+  if (artifact.state === "invalid" || artifact.state === "missing") return "retry_source_rework";
+  if (artifact.failureFamily === "manual_review_required") return "provide_operator_input";
+  return "inspect_untrusted_source";
+}
+
+function artifactTrustNextActionLabel(action: TaskArtifactTrustNextAction): string {
+  switch (action) {
+    case "none":
+      return "No action needed";
+    case "retry_source_rework":
+      return "Retry source artifact rework";
+    case "retry_synthesis":
+      return "Retry synthesis";
+    case "provide_operator_input":
+      return "Provide operator input";
+    case "inspect_untrusted_source":
+      return "Inspect untrusted source";
+    case "wait_for_source_artifacts":
+      return "Wait for source artifacts";
+  }
+}
+
+function artifactStateDisplayName(state: string): string {
+  switch (state) {
+    case "valid":
+      return "valid";
+    case "invalid":
+      return "rejected";
+    case "source_inconclusive":
+    case "terminal_inconclusive":
+      return "inconclusive";
+    case "synthesis_not_ready":
+      return "synthesis pending";
+    case "external_blocked":
+      return "externally blocked";
+    case "manual_exception":
+      return "manual exception";
+    default:
+      return state.replaceAll("_", " ");
+  }
+}
+
+function buildArtifactTrustSummary(input: {
+  task: TaskRow;
+  artifact: RoadmapBatchArtifactRow;
+  trustedSynthesisInput: boolean;
+}): string {
+  const state = artifactStateDisplayName(input.artifact.state);
+  if (input.task.status === "done") {
+    return input.trustedSynthesisInput
+      ? `Done with trusted ${state} artifact`
+      : `Done with untrusted ${state} artifact`;
+  }
+  if (input.task.status === "blocked_external") {
+    return `Blocked with ${state} artifact`;
+  }
+  return `${input.task.status.replaceAll("_", " ")} with ${state} artifact`;
+}
+
+export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustRollup | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const artifact = findRoadmapBatchArtifactByTaskId(taskId);
+  if (!artifact) return null;
+  const batch = getDb()
+    .select()
+    .from(roadmapBatches)
+    .where(eq(roadmapBatches.id, artifact.batchId))
+    .get();
+  if (!batch) return null;
+
+  const artifacts = listRoadmapBatchArtifacts(batch.id);
+  const latestAttempt = listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null;
+  const summary = summarizeRoadmapArtifacts(batch, artifacts);
+  const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
+  const nextAction = buildArtifactTrustNextAction({
+    artifact,
+    synthesisReady: summary.synthesisReady,
+    trustedSynthesisInput,
+  });
+
+  return {
+    taskStatus: task.status as TaskStatus,
+    artifactRole: artifact.role,
+    artifactState: artifact.state,
+    artifactTrustLevel: mapArtifactTrustLevel(artifact),
+    claimOutcome: mapWorkflowClaimOutcome(artifact.state),
+    failureFamily: artifact.failureFamily,
+    reasonCodes: buildArtifactTrustReasonCodes({
+      artifact,
+      latestAttempt,
+      synthesisReady: summary.synthesisReady,
+      trustedSynthesisInput,
+    }),
+    latestAttemptOutcome:
+      latestAttempt?.reworkStatus ?? (latestAttempt ? mapWorkflowClaimOutcome(latestAttempt.state) : null),
+    trustedSynthesisInput,
+    synthesisReady: summary.synthesisReady,
+    nextAction,
+    nextActionLabel: artifactTrustNextActionLabel(nextAction),
+    summary: buildArtifactTrustSummary({ task, artifact, trustedSynthesisInput }),
+    artifactPath: artifact.artifactPath,
+    batchId: artifact.batchId,
+    roadmapAlias: artifact.roadmapAlias,
+    attemptNumber: artifact.attemptNumber,
+    failureSignature: artifact.failureSignature,
+    branchName: artifact.branchName,
+    worktreePath: artifact.worktreePath,
+    batchCounts: buildArtifactTrustBatchCounts(artifacts),
+  };
+}
+
 function computeRoadmapBatchStatus(input: {
   artifacts: RoadmapBatchArtifactRow[];
   synthesisReady: boolean;
@@ -3198,7 +3449,11 @@ export function createRoadmapBatchContract(
   const db = getDb();
   const nowIso = new Date().toISOString();
   const batchId = crypto.randomUUID();
-  const expectedArtifactCount = input.artifacts.length;
+  const artifacts = input.artifacts.map((artifact) => ({
+    ...artifact,
+    artifactPath: assertSafeRoadmapArtifactPath(artifact.artifactPath),
+  }));
+  const expectedArtifactCount = artifacts.length;
   db.transaction((tx) => {
     tx.insert(roadmapBatches)
       .values({
@@ -3215,7 +3470,7 @@ export function createRoadmapBatchContract(
         updatedAt: nowIso,
       })
       .run();
-    for (const artifact of input.artifacts) {
+    for (const artifact of artifacts) {
       tx.insert(roadmapBatchArtifacts)
         .values({
           id: crypto.randomUUID(),
@@ -3375,12 +3630,13 @@ export function updateRoadmapBatchArtifactState(input: {
   const classification =
     input.classification ?? readAuditSourceClassification(input.validationDetails);
   const failureFamily =
-    input.failureFamily ??
-    selectAuditArtifactFailureFamily({
-      sourceClassification: classification,
-      validationDetails: input.validationDetails,
-      fallback: null,
-    });
+    input.failureFamily !== undefined
+      ? input.failureFamily
+      : selectAuditArtifactFailureFamily({
+          sourceClassification: classification,
+          validationDetails: input.validationDetails,
+          fallback: null,
+        });
   const failureSignature =
     input.failureSignature ??
     buildAuditFailureSignature({
@@ -3547,6 +3803,12 @@ function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimel
       batchId: artifact.batchId,
       originalState: artifact.state,
       failureFamily: artifact.failureFamily,
+      reasonCodes: buildArtifactTrustReasonCodes({
+        artifact,
+        latestAttempt: listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null,
+        synthesisReady: true,
+        trustedSynthesisInput: artifactTrustedForSynthesisInput(artifact),
+      }),
       failureSignature: artifact.failureSignature,
       attemptBoundaryId: artifact.attemptBoundaryId,
       contentSha: artifact.contentSha,
@@ -3578,6 +3840,9 @@ function buildWorkflowAttempt(attempt: RoadmapBatchArtifactAttemptRow): Workflow
       originalState: attempt.state,
       classification: attempt.classification,
       failureFamily: attempt.failureFamily,
+      reasonCodes: [attempt.state, attempt.classification, attempt.failureFamily, attempt.reworkStatus]
+        .filter((value): value is string => typeof value === "string" && value.length > 0)
+        .sort(),
       failureSignature: attempt.failureSignature,
       reworkStatus: attempt.reworkStatus,
       attemptBoundaryId: attempt.attemptBoundaryId,
@@ -3694,6 +3959,12 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
         roadmapAlias: artifact.roadmapAlias,
         originalState: artifact.state,
         failureFamily: artifact.failureFamily,
+        reasonCodes: buildArtifactTrustReasonCodes({
+          artifact,
+          latestAttempt: listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null,
+          synthesisReady: true,
+          trustedSynthesisInput: artifactTrustedForSynthesisInput(artifact),
+        }),
         failureSignature: artifact.failureSignature,
       },
     }),
@@ -3714,6 +3985,9 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
         originalState: attempt.state,
         classification: attempt.classification,
         failureFamily: attempt.failureFamily,
+        reasonCodes: [attempt.state, attempt.classification, attempt.failureFamily, attempt.reworkStatus]
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+          .sort(),
         failureSignature: attempt.failureSignature,
         reworkStatus: attempt.reworkStatus,
       },

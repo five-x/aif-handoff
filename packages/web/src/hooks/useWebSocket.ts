@@ -107,6 +107,11 @@ function patchTaskInCache(queryClient: QueryClient, patch: TaskCachePatch): void
   }
 }
 
+function invalidateTaskCaches(queryClient: QueryClient, taskId: string): void {
+  queryClient.invalidateQueries({ queryKey: ["tasks"] });
+  queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+}
+
 function resolveWsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 
@@ -284,6 +289,8 @@ export function useWebSocket() {
         isTaskCachePatchPayload(data.payload)
       ) {
         patchTaskInCache(queryClient, data.payload);
+        invalidateTaskCaches(queryClient, data.payload.id);
+        return;
       }
 
       // Activity-only update: refresh task detail without touching the board list

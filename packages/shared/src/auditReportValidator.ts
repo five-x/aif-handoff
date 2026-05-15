@@ -19,6 +19,7 @@ export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "speculative_audit_claim",
   "non_actionable_audit_observation",
   "governance_observation_as_finding",
+  "malformed_report_artifact",
   "contradictory_findings_and_no_findings",
   "fake_or_placeholder_command_output",
   "false_missing_path_claim",
@@ -196,6 +197,13 @@ const DIRECTORY_LINE_REFERENCE_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)+\d(?:[\d-]*))(?=$|[\s`'"\]),.;])/g;
 const MANIFEST_BLOCK_PATTERN = /(?:^|\n)```audit-report-manifest\s*\r?\n([\s\S]*?)\r?\n```/gi;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
+const REPORT_STRUCTURE_MARKER_PATTERN =
+  /(?:#{1,6}\s+\S|\b(?:No validated findings|Checked files|Checked commands|Evidence|Risk|Proposed fix|Verification|Audit outcome|Finding)\s*:|\bNo validated findings\b|```audit-report-manifest\b)/gi;
+const BACKTICKED_SNIPPET_PATTERN = /`([^`\r\n]+)`/g;
+const CAT_LINE_REFERENCE_OPERAND_PATTERN =
+  /^(?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+:\d+(?:(?::|[-\u2013])\d+)?$/i;
+const ABSOLUTE_CAT_LINE_REFERENCE_OPERAND_PATTERN =
+  /^(?:\/|[A-Za-z]:\/).+:\d+(?:(?::|[-\u2013])\d+)?$/i;
 
 type SourcePathKind = "file" | "directory" | "missing" | "other";
 
@@ -984,6 +992,69 @@ function hasInvalidExistingLineReference(
   return false;
 }
 
+function countReportStructureMarkers(text: string): number {
+  REPORT_STRUCTURE_MARKER_PATTERN.lastIndex = 0;
+  return [...text.matchAll(REPORT_STRUCTURE_MARKER_PATTERN)].length;
+}
+
+function hasMalformedReportArtifact(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  const escapedNewlinePattern = /\\r\\n|\\n/g;
+  const escapedNewlineCount = (trimmed.match(escapedNewlinePattern) ?? []).length;
+  const physicalLineCount = trimmed.split(/\r?\n/).length;
+  const physicalNewlineCount = Math.max(0, physicalLineCount - 1);
+  const looksPhysicallySerialized =
+    physicalNewlineCount <= 2 || escapedNewlineCount >= Math.max(4, physicalNewlineCount * 2);
+  if (
+    escapedNewlineCount >= 2 &&
+    looksPhysicallySerialized &&
+    countReportStructureMarkers(trimmed.replace(escapedNewlinePattern, "\n")) >= 3
+  ) {
+    return true;
+  }
+
+  return trimmed
+    .split(/\r?\n/)
+    .some((line) => line.length >= 160 && countReportStructureMarkers(line) >= 4);
+}
+
+function hasInvalidCatLineReferenceCommand(text: string): boolean {
+  for (const match of text.matchAll(BACKTICKED_SNIPPET_PATTERN)) {
+    const commandText = match[1] ?? "";
+    const tokens = tokenizeShellCommand(commandText);
+    const command = tokens[0]?.toLowerCase();
+    if (command !== "cat" && command !== "type") continue;
+    for (const token of tokens.slice(1)) {
+      if (token === "--") continue;
+      if (command === "cat" && /^-[A-Za-z]+$/.test(token)) continue;
+      const normalizedToken = normalizeShellPathToken(token);
+      if (
+        CAT_LINE_REFERENCE_OPERAND_PATTERN.test(normalizedToken) ||
+        ABSOLUTE_CAT_LINE_REFERENCE_OPERAND_PATTERN.test(normalizedToken)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function normalizeShellPathToken(token: string): string {
+  return token.replaceAll("\\", "/");
+}
+
+function tokenizeShellCommand(commandText: string): string[] {
+  const tokens: string[] = [];
+  const tokenPattern = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|([^\s]+)/g;
+  for (const match of commandText.matchAll(tokenPattern)) {
+    const token = match[1] ?? match[2] ?? match[3] ?? "";
+    if (token) tokens.push(token);
+  }
+  return tokens;
+}
+
 function collectExistingRefsWithLineNumbers(
   text: string,
   projectRoot: string,
@@ -1583,6 +1654,22 @@ export function validateAuditReportArtifact(
   }
 
   if (text.trim()) {
+    if (hasMalformedReportArtifact(text)) {
+      issues.push(
+        issue(
+          "malformed_report_artifact",
+          "Report artifact appears to be serialized markdown instead of readable report text.",
+        ),
+      );
+    }
+    if (hasInvalidCatLineReferenceCommand(text)) {
+      issues.push(
+        issue(
+          "invalid_line_reference",
+          "Report artifact uses cat/type with a path:line reference as a command target; cite line ranges in Evidence and run commands against real file paths.",
+        ),
+      );
+    }
     for (const { code, pattern, message } of LOW_QUALITY_REPORT_PATTERNS) {
       if (pattern.test(text)) issues.push(issue(code, message));
     }

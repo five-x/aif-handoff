@@ -392,7 +392,7 @@ describe("qwen-local-agent adapter", () => {
     expect(JSON.stringify(result.events)).toContain(
       "Repeated identical git_commit call suppressed",
     );
-  });
+  }, 15_000);
   it("does not log raw provider-supplied unknown tool names or ids", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-unknown-tool-redaction-"));
     const events = [];

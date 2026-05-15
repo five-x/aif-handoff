@@ -50,6 +50,43 @@ const baseTask: Task = {
   costUsd: 0.042,
 };
 
+function artifactTrust(
+  overrides: Partial<NonNullable<Task["artifactTrust"]>> = {},
+): NonNullable<Task["artifactTrust"]> {
+  return {
+    taskStatus: "blocked_external",
+    artifactRole: "synthesis",
+    artifactState: "synthesis_not_ready",
+    artifactTrustLevel: "weak",
+    claimOutcome: "inconclusive",
+    failureFamily: "synthesis_not_ready",
+    reasonCodes: ["plan_quality", "synthesis_not_ready", "untrusted_artifact"],
+    latestAttemptOutcome: "not_applicable",
+    trustedSynthesisInput: false,
+    synthesisReady: false,
+    nextAction: "wait_for_source_artifacts",
+    nextActionLabel: "Wait for source artifacts",
+    summary: "Blocked with synthesis pending artifact",
+    artifactPath: "audit/final.md",
+    batchId: "batch-1",
+    roadmapAlias: "audit-roadmap",
+    attemptNumber: 1,
+    failureSignature: "role:synthesis|family:synthesis_not_ready",
+    branchName: "audit/synthesis",
+    worktreePath: "C:/tmp/audit-synthesis",
+    batchCounts: {
+      trustedValid: 1,
+      inconclusive: 1,
+      rejected: 1,
+      missing: 1,
+      externalBlocked: 1,
+      synthesisPending: 1,
+      total: 5,
+    },
+    ...overrides,
+  };
+}
+
 describe("TaskDetailHeader", () => {
   it("should render task title and status badge", () => {
     render(
@@ -346,5 +383,97 @@ describe("TaskDetailHeader", () => {
     ).toBeDefined();
     expect(screen.getByText(/Provider reset/)).toBeDefined();
     expect(screen.getByText(/Task retry .*scheduled/)).toBeDefined();
+  });
+
+  it("renders blocked external plan quality artifact trust details", () => {
+    render(
+      <TaskDetailHeader
+        task={{
+          ...baseTask,
+          status: "blocked_external",
+          artifactTrust: artifactTrust({
+            nextAction: "retry_synthesis",
+            nextActionLabel: "Retry synthesis",
+            reasonCodes: ["plan_quality", "synthesis_not_ready", "untrusted_artifact"],
+          }),
+        }}
+        activeTab="timeline"
+        onTabChange={vi.fn()}
+        onActionClick={vi.fn()}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("weak artifact")).toBeDefined();
+    expect(screen.getByText("Blocked with synthesis pending artifact")).toBeDefined();
+    expect(screen.getByText(/Next: Retry synthesis/)).toBeDefined();
+    expect(
+      screen.getByText(/Reasons: plan_quality, synthesis_not_ready, untrusted_artifact/),
+    ).toBeDefined();
+  });
+
+  it("renders synthesis not ready batch counts and identifiers", () => {
+    render(
+      <TaskDetailHeader
+        task={{ ...baseTask, status: "blocked_external", artifactTrust: artifactTrust() }}
+        activeTab="timeline"
+        onTabChange={vi.fn()}
+        onActionClick={vi.fn()}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Sources: 5")).toBeDefined();
+    expect(screen.getByText("Trusted: 1")).toBeDefined();
+    expect(screen.getByText("Inconclusive: 1")).toBeDefined();
+    expect(screen.getByText("Rejected: 1")).toBeDefined();
+    expect(screen.getByText("Missing: 1")).toBeDefined();
+    expect(screen.getByText("External: 1")).toBeDefined();
+    expect(screen.getByText("Synthesis pending: 1")).toBeDefined();
+    expect(screen.getByText("audit/final.md")).toBeDefined();
+    expect(screen.getByText("role:synthesis|family:synthesis_not_ready")).toBeDefined();
+  });
+
+  it("renders final audit inconclusive without blind retry guidance", () => {
+    render(
+      <TaskDetailHeader
+        task={{
+          ...baseTask,
+          status: "done",
+          artifactTrust: artifactTrust({
+            taskStatus: "done",
+            artifactState: "terminal_inconclusive",
+            artifactTrustLevel: "untrusted",
+            claimOutcome: "inconclusive",
+            failureFamily: "inconclusive_batch_evidence",
+            nextAction: "inspect_untrusted_source",
+            nextActionLabel: "Inspect untrusted source",
+            summary: "Done with untrusted inconclusive artifact",
+            reasonCodes: ["inconclusive_batch_evidence", "terminal_inconclusive"],
+          }),
+        }}
+        activeTab="timeline"
+        onTabChange={vi.fn()}
+        onActionClick={vi.fn()}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Done / untrusted artifact")).toBeDefined();
+    expect(screen.getByText("Done with untrusted inconclusive artifact")).toBeDefined();
+    expect(screen.getByText(/Next: Inspect untrusted source/)).toBeDefined();
+    expect(screen.queryByText(/Next: Retry source artifact rework/)).toBeNull();
   });
 });

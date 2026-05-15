@@ -281,13 +281,6 @@ function classifyVisibleSynthesisOutput(text: string, projectRoot: string): Audi
     weakReportCount: 0,
   };
 
-  if (/\bAudit inconclusive\b/i.test(text)) {
-    return inconclusive(
-      "Audit inconclusive: synthesis artifact declares inconclusive evidence.",
-      base,
-    );
-  }
-
   if (validatedFindingCount > 0) {
     return {
       kind: "validated_findings_present",
@@ -302,6 +295,13 @@ function classifyVisibleSynthesisOutput(text: string, projectRoot: string): Audi
       reason: "Synthesis artifact claims no findings with substantive evidence.",
       ...base,
     };
+  }
+
+  if (/\bAudit inconclusive\b/i.test(text)) {
+    return inconclusive(
+      "Audit inconclusive: synthesis artifact declares inconclusive evidence.",
+      base,
+    );
   }
 
   return inconclusive(
@@ -324,7 +324,22 @@ export function combineAuditSynthesisOutcomes(input: {
     );
   }
 
-  if (input.sourceOutcome.kind === "inconclusive_batch_evidence") return input.sourceOutcome;
+  if (input.sourceOutcome.kind === "inconclusive_batch_evidence") {
+    if (input.visibleOutcome.kind !== "inconclusive_batch_evidence") {
+      return inconclusive(
+        "Audit inconclusive: synthesis artifact visible conclusion disagrees with source-report outcome.",
+        {
+          sourceReportCount: input.sourceOutcome.sourceReportCount,
+          validatedFindingCount: input.sourceOutcome.validatedFindingCount,
+          substantiveNoFindingsReportCount: input.sourceOutcome.substantiveNoFindingsReportCount,
+          inventoryOnlyNoFindingsReportCount:
+            input.sourceOutcome.inventoryOnlyNoFindingsReportCount,
+          weakReportCount: input.sourceOutcome.weakReportCount,
+        },
+      );
+    }
+    return input.sourceOutcome;
+  }
   if (input.visibleOutcome.kind === "inconclusive_batch_evidence") return input.visibleOutcome;
   if (input.sourceOutcome.kind !== input.visibleOutcome.kind) {
     return inconclusive(

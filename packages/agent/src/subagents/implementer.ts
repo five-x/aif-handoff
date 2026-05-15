@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import {
+  assertSafeRoadmapArtifactPath,
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
@@ -293,7 +294,74 @@ function getChecklistProgress(planText: string | null): {
 }
 
 function normalizeArtifactGitPath(path: string): string {
-  return path.replaceAll("\\", "/");
+  return assertSafeRoadmapArtifactPath(path);
+}
+
+function resolveSafeArtifactPath(rootPath: string, artifactPath: string): string {
+  const gitPath = normalizeArtifactGitPath(artifactPath);
+  const root = resolve(rootPath);
+  const resolvedPath = resolve(root, gitPath);
+  const relativePath = relative(root, resolvedPath);
+  if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+    throw new Error(`unsafe roadmap artifact path: ${artifactPath}`);
+  }
+  return resolvedPath;
+}
+
+type MissingReportArtifactSource = "worktree" | "branch" | "project_root";
+
+interface SynthesisNotReadyError extends Error {
+  validationDetails?: Record<string, unknown>;
+}
+
+function createSynthesisNotReadyError(
+  message: string,
+  validationDetails?: Record<string, unknown>,
+): SynthesisNotReadyError {
+  const error = new Error(message) as SynthesisNotReadyError;
+  if (validationDetails) {
+    error.validationDetails = validationDetails;
+  }
+  return error;
+}
+
+function missingReportArtifactValidationDetails(input: {
+  reason: string;
+  artifactPath: string;
+  source: MissingReportArtifactSource;
+  sourceLocation: string;
+  branchName: string | null;
+  worktreePath: string | null;
+  projectRoot: string;
+}): Record<string, unknown> {
+  const missingReportArtifact = {
+    code: "missing_report_artifact",
+    reason: input.reason,
+    artifactPath: input.artifactPath,
+    source: input.source,
+    sourceLocation: input.sourceLocation,
+    branchName: input.branchName,
+    worktreePath: input.worktreePath,
+    projectRoot: input.projectRoot,
+    contentSha: null,
+  };
+  return {
+    ...missingReportArtifact,
+    missingReportArtifact,
+    issues: [
+      {
+        code: "missing_report_artifact",
+        message: input.reason,
+        artifactPath: input.artifactPath,
+        source: input.source,
+        sourceLocation: input.sourceLocation,
+        branchName: input.branchName,
+        worktreePath: input.worktreePath,
+        projectRoot: input.projectRoot,
+        contentSha: null,
+      },
+    ],
+  };
 }
 
 function readValidatedArtifactContent(input: {
@@ -303,20 +371,22 @@ function readValidatedArtifactContent(input: {
   worktreePath: string | null;
 }): { content: string; source: string } {
   const gitPath = normalizeArtifactGitPath(input.artifactPath);
-  if (
-    isAbsolute(input.artifactPath) ||
-    gitPath === ".." ||
-    gitPath.startsWith("../") ||
-    gitPath.includes("/../")
-  ) {
-    throw new Error(`synthesis_not_ready: invalid validated artifact path: ${input.artifactPath}`);
-  }
 
   if (input.worktreePath) {
-    const artifactPath = resolve(input.worktreePath, input.artifactPath);
+    const artifactPath = resolveSafeArtifactPath(input.worktreePath, gitPath);
     if (!existsSync(artifactPath)) {
-      throw new Error(
-        `synthesis_not_ready: validated artifact is unavailable: ${input.artifactPath}`,
+      const reason = `synthesis_not_ready: missing_report_artifact: validated artifact is unavailable in worktree ${input.worktreePath}: ${input.artifactPath}`;
+      throw createSynthesisNotReadyError(
+        reason,
+        missingReportArtifactValidationDetails({
+          reason,
+          artifactPath: input.artifactPath,
+          source: "worktree",
+          sourceLocation: input.worktreePath,
+          branchName: input.branchName,
+          worktreePath: input.worktreePath,
+          projectRoot: input.projectRoot,
+        }),
       );
     }
     return {
@@ -340,16 +410,36 @@ function readValidatedArtifactContent(input: {
         source: `${input.branchName}:${gitPath}`,
       };
     } catch {
-      throw new Error(
-        `synthesis_not_ready: validated artifact is unavailable on branch ${input.branchName}: ${input.artifactPath}`,
+      const reason = `synthesis_not_ready: missing_report_artifact: validated artifact is unavailable on branch ${input.branchName}: ${input.artifactPath}`;
+      throw createSynthesisNotReadyError(
+        reason,
+        missingReportArtifactValidationDetails({
+          reason,
+          artifactPath: input.artifactPath,
+          source: "branch",
+          sourceLocation: input.branchName,
+          branchName: input.branchName,
+          worktreePath: input.worktreePath,
+          projectRoot: input.projectRoot,
+        }),
       );
     }
   }
 
-  const artifactPath = resolve(input.projectRoot, input.artifactPath);
+  const artifactPath = resolveSafeArtifactPath(input.projectRoot, gitPath);
   if (!existsSync(artifactPath)) {
-    throw new Error(
-      `synthesis_not_ready: validated artifact is unavailable: ${input.artifactPath}`,
+    const reason = `synthesis_not_ready: missing_report_artifact: validated artifact is unavailable in project root ${input.projectRoot}: ${input.artifactPath}`;
+    throw createSynthesisNotReadyError(
+      reason,
+      missingReportArtifactValidationDetails({
+        reason,
+        artifactPath: input.artifactPath,
+        source: "project_root",
+        sourceLocation: input.projectRoot,
+        branchName: input.branchName,
+        worktreePath: input.worktreePath,
+        projectRoot: input.projectRoot,
+      }),
     );
   }
   return {
@@ -1677,6 +1767,32 @@ function buildDeterministicAuditSynthesisContent(
             .join("\n")
         : "- No validated source reports were available.",
       "",
+      "## Findings By Source Report",
+      "",
+      ...(totalIncluded > 0
+        ? sourceSummaries.flatMap((summary, sourceIndex) => {
+            const lines = [
+              `### Source Report ${sourceIndex + 1}: ${summary.artifact.artifactPath}`,
+              "",
+            ];
+            if (summary.includedFindings.length === 0) {
+              lines.push(
+                "No findings from this source report passed the synthesis evidence filter.",
+              );
+              lines.push("");
+              return lines;
+            }
+            summary.includedFindings.forEach((finding, findingIndex) => {
+              lines.push(`#### Finding ${sourceIndex + 1}.${findingIndex + 1}`);
+              lines.push("");
+              lines.push(`Source report: \`${finding.artifactPath}\` (task ${finding.taskId})`);
+              lines.push("");
+              lines.push(finding.content.trim());
+              lines.push("");
+            });
+            return lines;
+          })
+        : ["No trusted source findings were available for carry-forward.", ""]),
       "## Weak Or Invalid Reports",
       "",
     ];
@@ -1982,14 +2098,18 @@ function runDeterministicAuditSynthesisRework(input: {
   artifacts: ValidatedAuditArtifactContent[];
   weakArtifacts: WeakAuditArtifactSummary[];
 }): string {
-  const artifactPath = resolve(input.projectRoot, input.artifactPath);
+  const gitPath = normalizeArtifactGitPath(input.artifactPath);
+  const artifactPath = resolveSafeArtifactPath(input.projectRoot, gitPath);
   mkdirSync(dirname(artifactPath), { recursive: true });
-  const content = buildDeterministicAuditSynthesisContentWithManifest(input);
+  const content = buildDeterministicAuditSynthesisContentWithManifest({
+    ...input,
+    artifactPath: gitPath,
+  });
   writeFileSync(artifactPath, content, "utf8");
-  const gitLog = commitArtifactIfChanged(input.projectRoot, input.artifactPath);
+  const gitLog = commitArtifactIfChanged(input.projectRoot, gitPath);
   return [
     "Deterministic audit synthesis rework completed from validated report artifacts.",
-    `Report artifact: ${input.artifactPath}`,
+    `Report artifact: ${gitPath}`,
     "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
     gitLog,
   ].join("\n");
@@ -2010,19 +2130,23 @@ function runDeterministicAuditReportRepair(input: {
   projectRoot: string;
   artifactPath: string;
 }): DeterministicAuditReportRepairResult {
-  const artifactPath = resolve(input.projectRoot, input.artifactPath);
+  const gitPath = normalizeArtifactGitPath(input.artifactPath);
+  const artifactPath = resolveSafeArtifactPath(input.projectRoot, gitPath);
   mkdirSync(dirname(artifactPath), { recursive: true });
-  const repair = buildDeterministicAuditReportRepairContent(input);
+  const repair = buildDeterministicAuditReportRepairContent({
+    ...input,
+    artifactPath: gitPath,
+  });
   writeFileSync(artifactPath, repair.content, "utf8");
   const gitLog = commitArtifactIfChanged(
     input.projectRoot,
-    input.artifactPath,
+    gitPath,
     "Audit: repair report evidence",
   );
   const validation = validateAuditReportArtifactWithTaskContext({
     task: input.task,
     projectRoot: input.projectRoot,
-    artifactPath: input.artifactPath,
+    artifactPath: gitPath,
     requireLedgerEvidence: true,
   });
   if (!validation) {
@@ -2226,7 +2350,8 @@ function validateAuditReportArtifactWithTaskContext(input: {
   requireLedgerEvidence?: boolean;
 }): ReturnType<typeof validateAuditReportArtifact> | null {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
-  const artifactPath = resolve(input.projectRoot, input.artifactPath);
+  const gitPath = normalizeArtifactGitPath(input.artifactPath);
+  const artifactPath = resolveSafeArtifactPath(input.projectRoot, gitPath);
   if (!existsSync(artifactPath)) return null;
   const auditPlanId = resolveAuditPlanId({
     taskId: input.task.id,
@@ -2244,8 +2369,8 @@ function validateAuditReportArtifactWithTaskContext(input: {
     roadmapAlias: artifact?.roadmapAlias ?? input.task.roadmapAlias,
     auditPlanId,
     taskDescription: input.task.description,
-    reportArtifactPaths: [input.artifactPath],
-    expectedReportArtifactPath: input.artifactPath,
+    reportArtifactPaths: [gitPath],
+    expectedReportArtifactPath: gitPath,
     requireProposedFix: true,
     auditEvidenceUnits,
     requireLedgerEvidence: input.requireLedgerEvidence ?? false,
@@ -2520,7 +2645,13 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   );
   let deterministicRepairFallbackResultText: string | null = null;
 
-  if (selectedPlan && parsedTaskCount > 0 && pendingTaskCount === 0 && !task.reworkRequested) {
+  if (
+    selectedPlan &&
+    parsedTaskCount > 0 &&
+    pendingTaskCount === 0 &&
+    !task.reworkRequested &&
+    !expectedSynthesisArtifactPath
+  ) {
     const nowIso = new Date().toISOString();
     const noOpResult =
       "No pending tasks detected in plan (all tasks already completed). " +
@@ -2685,7 +2816,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
 
   log.info({ taskId, title: task.title, useSubagents }, "Starting implementation stage");
 
-  if (expectedSynthesisArtifactPath && task.reworkRequested) {
+  if (expectedSynthesisArtifactPath) {
     const nowIso = new Date().toISOString();
     const resultText = runDeterministicAuditSynthesisRework({
       task,
@@ -2703,7 +2834,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     logActivity(taskId, "Agent", "Deterministic audit synthesis rework complete");
     log.info(
       { taskId, artifactPath: expectedSynthesisArtifactPath },
-      "Audit synthesis rework completed deterministically",
+      "Audit synthesis completed deterministically",
     );
     return;
   }

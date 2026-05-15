@@ -10,15 +10,19 @@ const mockAppendTaskActivityLog = vi.fn();
 const mockFindRoadmapBatchArtifactByTaskId = vi.fn();
 const mockListRoadmapReportArtifactsForSynthesis = vi.fn();
 
-vi.mock("@aif/data", () => ({
-  findTaskById: (...args: unknown[]) => mockFindTaskById(...args),
-  findRoadmapBatchArtifactByTaskId: (...args: unknown[]) =>
-    mockFindRoadmapBatchArtifactByTaskId(...args),
-  listRoadmapReportArtifactsForSynthesis: (...args: unknown[]) =>
-    mockListRoadmapReportArtifactsForSynthesis(...args),
-  createTaskComment: (...args: unknown[]) => mockCreateTaskComment(...args),
-  appendTaskActivityLog: (...args: unknown[]) => mockAppendTaskActivityLog(...args),
-}));
+vi.mock("@aif/data", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@aif/data")>();
+  return {
+    ...actual,
+    findTaskById: (...args: unknown[]) => mockFindTaskById(...args),
+    findRoadmapBatchArtifactByTaskId: (...args: unknown[]) =>
+      mockFindRoadmapBatchArtifactByTaskId(...args),
+    listRoadmapReportArtifactsForSynthesis: (...args: unknown[]) =>
+      mockListRoadmapReportArtifactsForSynthesis(...args),
+    createTaskComment: (...args: unknown[]) => mockCreateTaskComment(...args),
+    appendTaskActivityLog: (...args: unknown[]) => mockAppendTaskActivityLog(...args),
+  };
+});
 
 vi.mock("../reviewGate.js", () => ({
   evaluateReviewCommentsForAutoMode: vi.fn(),
@@ -206,6 +210,66 @@ describe("handleAutoReviewGate", () => {
             iteration: 1,
             artifactPath: "audit/report.md",
             artifactContentSha: sha256(reportText),
+            findingIds: ["finding-1"],
+          },
+        }),
+      }),
+    );
+  });
+
+  it("does not hash unsafe roadmap artifact paths for rework snapshots", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-auto-review-unsafe-snapshot-"));
+    const outsideName = `outside-${Date.now()}.md`;
+    writeFileSync(join(projectRoot, "..", outsideName), "outside artifact\n", "utf8");
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      reviewComments: "needs fixes",
+      reviewIterationCount: 0,
+      maxReviewIterations: 10,
+      autoReviewState: null,
+    });
+    mockFindRoadmapBatchArtifactByTaskId.mockReturnValue({
+      taskId: "task-1",
+      batchId: "batch-1",
+      role: "report",
+      artifactPath: `../${outsideName}`,
+      contentSha: "row-sha-must-not-mask-unsafe-path",
+    });
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "request_changes",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      blockingFindings: [
+        { id: "finding-1", source: "code_review", text: "Replace stale evidence", streak: 1 },
+      ],
+      fixesMarkdown: "- [finding-1] code_review | Replace stale evidence",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 1,
+        findings: [
+          { id: "finding-1", source: "code_review", text: "Replace stale evidence", streak: 1 },
+        ],
+      },
+    });
+
+    const result = await handleAutoReviewGate({ taskId: "task-1", projectRoot });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: "rework_requested",
+        autoReviewState: expect.objectContaining({
+          reworkSnapshot: {
+            iteration: 1,
+            artifactPath: `../${outsideName}`,
+            artifactContentSha: null,
             findingIds: ["finding-1"],
           },
         }),

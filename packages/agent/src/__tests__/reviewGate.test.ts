@@ -6,13 +6,28 @@ import { join } from "node:path";
 import { createAutoReviewFindingId } from "../reviewContract.js";
 import { formatAuditSynthesisOutcomeForArtifact } from "@aif/shared";
 
-const { executeSubagentQueryMock } = vi.hoisted(() => ({
+const {
+  executeSubagentQueryMock,
+  findRoadmapBatchArtifactByTaskIdMock,
+  listAuditEvidenceEventsMock,
+} = vi.hoisted(() => ({
   executeSubagentQueryMock: vi.fn(),
+  findRoadmapBatchArtifactByTaskIdMock: vi.fn(),
+  listAuditEvidenceEventsMock: vi.fn(),
 }));
 
 vi.mock("../subagentQuery.js", () => ({
   executeSubagentQuery: executeSubagentQueryMock,
 }));
+
+vi.mock("@aif/data", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@aif/data")>();
+  return {
+    ...actual,
+    findRoadmapBatchArtifactByTaskId: findRoadmapBatchArtifactByTaskIdMock,
+    listAuditEvidenceEvents: listAuditEvidenceEventsMock,
+  };
+});
 
 import { evaluateReviewCommentsForAutoMode } from "../reviewGate.js";
 
@@ -42,6 +57,10 @@ describe("evaluateReviewCommentsForAutoMode", () => {
 
   beforeEach(() => {
     executeSubagentQueryMock.mockReset();
+    findRoadmapBatchArtifactByTaskIdMock.mockReset();
+    findRoadmapBatchArtifactByTaskIdMock.mockReturnValue(null);
+    listAuditEvidenceEventsMock.mockReset();
+    listAuditEvidenceEventsMock.mockReturnValue([]);
     delete process.env.ANTHROPIC_BASE_URL;
   });
 
@@ -771,6 +790,50 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     });
 
     expect(result.status).toBe("request_changes");
+    expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+      "(missing_report_artifact)",
+    );
+  });
+
+  it("does not read unsafe persisted artifact paths while collecting review evidence refs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aif-review-gate-"));
+    const outsideName = `outside-audit-${Date.now()}-${Math.random().toString(16).slice(2)}.md`;
+    writeFileSync(
+      join(root, "..", outsideName),
+      [
+        "```audit-report-manifest",
+        JSON.stringify({ version: 1, evidenceRefs: ["outside-ref"] }),
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    findRoadmapBatchArtifactByTaskIdMock.mockReturnValue({
+      id: "artifact-1",
+      batchId: "batch-1",
+      taskId: "audit-task",
+      artifactPath: `../${outsideName}`,
+      role: "report",
+      state: "expected",
+    });
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      taskId: "audit-task",
+      projectRoot: root,
+      reviewComments: structuredAdvisoryOnlyReviewComments(),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        taskIntent: "audit",
+        agentActivityLog: agentActivityLog(),
+      },
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(listAuditEvidenceEventsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ evidenceIds: undefined, limit: undefined }),
+    );
     expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
       "(missing_report_artifact)",
     );

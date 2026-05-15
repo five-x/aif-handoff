@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import {
   evaluateTaskCompletionEvidence,
@@ -11,7 +11,11 @@ import {
   type AutoReviewStrategy,
   type TaskCompletionEvidenceTask,
 } from "@aif/shared";
-import { findRoadmapBatchArtifactByTaskId, listAuditEvidenceEvents } from "@aif/data";
+import {
+  assertSafeRoadmapArtifactPath,
+  findRoadmapBatchArtifactByTaskId,
+  listAuditEvidenceEvents,
+} from "@aif/data";
 import {
   createAutoReviewFindingId,
   parseStructuredReviewComments,
@@ -215,8 +219,24 @@ function readAuditArtifactText(
 ): string | null {
   if (!artifact) return null;
   try {
-    const reportPath = resolve(projectRoot, artifact.artifactPath);
+    const reportPath = resolveSafeArtifactPath(projectRoot, artifact.artifactPath);
+    if (!reportPath) return null;
     return existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveSafeArtifactPath(projectRoot: string, artifactPath: string): string | null {
+  try {
+    const normalizedArtifactPath = assertSafeRoadmapArtifactPath(artifactPath);
+    const root = resolve(projectRoot);
+    const candidate = resolve(root, normalizedArtifactPath);
+    const relativePath = relative(root, candidate);
+    if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+      return null;
+    }
+    return candidate;
   } catch {
     return null;
   }

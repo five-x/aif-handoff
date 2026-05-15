@@ -5,8 +5,9 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import {
+  assertSafeRoadmapArtifactPath,
   createTaskComment,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
@@ -160,10 +161,33 @@ function buildActivityMessage(input: {
   return `${base}, reason=${input.handoffReason}`;
 }
 
-function readArtifactSha(projectRoot: string, artifactPath: string): string | null {
-  const absolutePath = resolve(projectRoot, artifactPath);
-  if (!existsSync(absolutePath)) return null;
-  return createHash("sha256").update(readFileSync(absolutePath)).digest("hex");
+function resolveSafeArtifactPath(projectRoot: string, artifactPath: string): string | null {
+  let gitPath: string;
+  try {
+    gitPath = assertSafeRoadmapArtifactPath(artifactPath);
+  } catch {
+    return null;
+  }
+  const root = resolve(projectRoot);
+  const absolutePath = resolve(root, gitPath);
+  const relativePath = relative(root, absolutePath);
+  if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+    return null;
+  }
+  return absolutePath;
+}
+
+function readArtifactSha(input: { projectRoot: string; artifactPath: string }): {
+  contentSha: string | null;
+  safe: boolean;
+} {
+  const absolutePath = resolveSafeArtifactPath(input.projectRoot, input.artifactPath);
+  if (!absolutePath) return { contentSha: null, safe: false };
+  if (!existsSync(absolutePath)) return { contentSha: null, safe: true };
+  return {
+    contentSha: createHash("sha256").update(readFileSync(absolutePath)).digest("hex"),
+    safe: true,
+  };
 }
 
 function withReworkSnapshot(input: {
@@ -176,14 +200,19 @@ function withReworkSnapshot(input: {
   if (!artifact || (artifact.role !== "report" && artifact.role !== "synthesis")) {
     return input.autoReviewState;
   }
+  const artifactSha = readArtifactSha({
+    projectRoot: input.projectRoot,
+    artifactPath: artifact.artifactPath,
+  });
 
   return {
     ...input.autoReviewState,
     reworkSnapshot: {
       iteration: input.iteration,
       artifactPath: artifact.artifactPath,
-      artifactContentSha:
-        readArtifactSha(input.projectRoot, artifact.artifactPath) ?? artifact.contentSha ?? null,
+      artifactContentSha: artifactSha.safe
+        ? (artifactSha.contentSha ?? artifact.contentSha ?? null)
+        : null,
       findingIds: input.autoReviewState.findings.map((finding) => finding.id),
     },
   };

@@ -22,6 +22,8 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: queryMock,
 }));
 
+const { createRoadmapBatchContract, updateRoadmapBatchArtifactState } = await import("@aif/data");
+
 const {
   runPlanChecker,
   normalizeMarkdownFence,
@@ -342,6 +344,101 @@ describe("runPlanChecker", () => {
       runPlanChecker("task-final-report-only-synthesis", "/tmp/plan-checker-test"),
     ).rejects.toThrow(TaskPlanQualityError);
     expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("replaces weak synthesis plans with exact registry-derived source report artifact paths", async () => {
+    testDb.current
+      .insert(tasks)
+      .values([
+        {
+          id: "task-source-a",
+          projectId: "project-1",
+          title: "Audit source A",
+          taskIntent: "audit",
+          description: "Report artifact: audit/source-a.md",
+          status: "done",
+        },
+        {
+          id: "task-source-b",
+          projectId: "project-1",
+          title: "Audit source B",
+          taskIntent: "audit",
+          description: "Report artifact: audit/source-b.md",
+          status: "done",
+        },
+        {
+          id: "task-synthesis-exact",
+          projectId: "project-1",
+          title: "Synthesize audit findings",
+          taskIntent: "audit",
+          description: "Report artifact: audit/final-synthesis.md.",
+          status: "plan_ready",
+          plan: [
+            "## Decomposed audit synthesis plan",
+            "Report artifact: `audit/final-synthesis.md`",
+            "Scope: existing completed child audit reports.",
+            "Scoped evidence targets: `audit/final-synthesis.md`; existing completed child audit reports.",
+            "Excluded areas: generated files, dependency caches, and build output.",
+            "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+            "Child reports: required existing completed child audit reports plus final synthesis.",
+            "- [ ] Keep this diagnostic-only and do not implement fixes.",
+            "- [ ] Produce synthesis report `audit/final-synthesis.md`.",
+          ].join("\n"),
+        },
+      ])
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-exact",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-a", "task-source-b", "task-synthesis-exact"],
+      synthesisTaskId: "task-synthesis-exact",
+      artifacts: [
+        { taskId: "task-source-a", role: "report", artifactPath: "audit/source-a.md" },
+        { taskId: "task-source-b", role: "report", artifactPath: "audit/source-b.md" },
+        {
+          taskId: "task-synthesis-exact",
+          role: "synthesis",
+          artifactPath: "audit/final-synthesis.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-a",
+      state: "valid",
+      validationDetails: {
+        evidence: {
+          auditReportValidation: {
+            sourceClassification: "validated_no_findings",
+            manifestStatus: "valid",
+          },
+        },
+      },
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-b",
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      classification: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: { reason: "terminal source inconclusive" },
+    });
+
+    await runPlanChecker("task-synthesis-exact", "/tmp/plan-checker-test");
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-synthesis-exact"))
+      .get();
+    expect(row?.plan).toContain("## Deterministic audit synthesis plan");
+    expect(row?.plan).toContain("audit/source-a.md");
+    expect(row?.plan).toContain("audit/source-b.md");
+    expect(row?.plan).toContain("Source report status: 1 trusted, 1 untrusted");
+    expect(row?.plan).toContain("child report status table");
   });
 
   it("replaces invalid diagnostic audit plans with a deterministic fallback", async () => {

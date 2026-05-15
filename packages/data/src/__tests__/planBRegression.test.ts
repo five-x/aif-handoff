@@ -130,6 +130,59 @@ describe("Plan B data regression contract", () => {
     expect(findTaskById(synthesis.id)?.blockedReason).toContain("synthesis_not_ready");
   });
 
+  it("releases synthesis for terminal rejected and missing source artifacts without trusting them", () => {
+    const { batch, reportA, reportB, synthesis } = seedAuditBatch();
+    updateRoadmapBatchArtifactState({
+      taskId: reportA.id,
+      state: "invalid",
+      failureFamily: "invalid_artifact_content",
+      classification: "inventory_only_invalid",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: { issues: [{ code: "missing_substantive_evidence" }] },
+    });
+    const ready = updateRoadmapBatchArtifactState({
+      taskId: reportB.id,
+      state: "missing",
+      failureFamily: "missing_artifact",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: { reason: "report file absent after terminal attempt" },
+    });
+
+    expect(ready?.synthesisReady).toBe(true);
+    expect(ready?.counts.valid).toBe(0);
+    expect(listValidatedRoadmapReportArtifacts(batch.batchId)).toHaveLength(0);
+    expect(listRoadmapReportArtifactsForSynthesis(batch.batchId).map((item) => item.state).sort()).toEqual([
+      "invalid",
+      "missing",
+    ]);
+    expect(findTaskById(synthesis.id)?.paused).toBe(false);
+    expect(findTaskById(synthesis.id)?.blockedReason).toBeNull();
+  });
+
+  it("preserves external_blocked as a synthesis blocker", () => {
+    const { batch, reportA, reportB, synthesis } = seedAuditBatch();
+    updateRoadmapBatchArtifactState({
+      taskId: reportA.id,
+      state: "valid",
+      validationDetails: trustedNoFindings,
+    });
+    const blocked = updateRoadmapBatchArtifactState({
+      taskId: reportB.id,
+      state: "external_blocked",
+      failureFamily: "external_blocker",
+      reworkStatus: "manual_review_required",
+      validationDetails: { reason: "operator input required" },
+    });
+
+    expect(blocked?.synthesisReady).toBe(false);
+    expect(summarizeRoadmapBatch(batch.batchId)?.status).toBe("external_blocked");
+    expect(listRoadmapReportArtifactsForSynthesis(batch.batchId).map((item) => item.state)).toEqual([
+      "valid",
+    ]);
+    expect(findTaskById(synthesis.id)?.paused).toBe(true);
+    expect(findTaskById(synthesis.id)?.blockedReason).toContain("synthesis_not_ready");
+  });
+
   it("ignores stale boundary updates and cannot promote a reopened child report", () => {
     const { batch, reportA, reportB, synthesis } = seedAuditBatch();
     updateRoadmapBatchArtifactState({

@@ -10,6 +10,7 @@ import {
   buildEvidenceUnit,
   buildEvidenceUnitPayload,
   projects,
+  roadmapBatchArtifacts,
   runtimeProfiles,
   taskComments,
   tasks,
@@ -195,6 +196,172 @@ describe("tasks API", () => {
           profileName: "App Task Default",
         },
       ]);
+    });
+
+    it("attaches audit artifact trust rollups to list and detail responses", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values([
+          {
+            id: "audit-valid",
+            projectId: "test-project",
+            title: "Audit valid source",
+            taskIntent: "audit",
+            roadmapAlias: "audit-rollup",
+            status: "done",
+          },
+          {
+            id: "audit-rejected",
+            projectId: "test-project",
+            title: "Audit rejected source",
+            taskIntent: "audit",
+            roadmapAlias: "audit-rollup",
+            status: "done",
+          },
+          {
+            id: "audit-inconclusive",
+            projectId: "test-project",
+            title: "Audit inconclusive source",
+            taskIntent: "audit",
+            roadmapAlias: "audit-rollup",
+            status: "done",
+          },
+          {
+            id: "audit-synthesis",
+            projectId: "test-project",
+            title: "Synthesize audit",
+            taskIntent: "audit",
+            roadmapAlias: "audit-rollup",
+            status: "blocked_external",
+          },
+        ])
+        .run();
+      createRoadmapBatchContract({
+        projectId: "test-project",
+        roadmapAlias: "audit-rollup",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["audit-valid", "audit-rejected", "audit-inconclusive", "audit-synthesis"],
+        synthesisTaskId: "audit-synthesis",
+        artifacts: [
+          { taskId: "audit-valid", role: "report", artifactPath: "audit/valid.md" },
+          { taskId: "audit-rejected", role: "report", artifactPath: "audit/rejected.md" },
+          {
+            taskId: "audit-inconclusive",
+            role: "report",
+            artifactPath: "audit/inconclusive.md",
+          },
+          { taskId: "audit-synthesis", role: "synthesis", artifactPath: "audit/final.md" },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "audit-valid",
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          auditReportValidation: {
+            sourceClassification: "validated_findings_present",
+            manifestStatus: "valid",
+          },
+        },
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "audit-rejected",
+        state: "invalid",
+        failureFamily: "invalid_artifact_content",
+        reworkStatus: "manual_review_required",
+        validationDetails: { issues: [{ code: "malformed_report_artifact" }] },
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "audit-inconclusive",
+        state: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        reworkStatus: "terminal_inconclusive",
+        validationDetails: {
+          auditReportValidation: { sourceClassification: "source_inconclusive" },
+        },
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "audit-synthesis",
+        state: "synthesis_not_ready",
+        failureFamily: "synthesis_not_ready",
+        validationDetails: { reason: "plan_quality" },
+      });
+
+      const listRes = await app.request("/tasks");
+      expect(listRes.status).toBe(200);
+      const listBody = await listRes.json();
+      expect(
+        listBody.find((task: { id: string }) => task.id === "audit-valid").artifactTrust,
+      ).toEqual(
+        expect.objectContaining({
+          artifactState: "valid",
+          artifactTrustLevel: "trusted",
+          trustedSynthesisInput: true,
+          nextAction: "none",
+        }),
+      );
+      expect(
+        listBody.find((task: { id: string }) => task.id === "audit-rejected").artifactTrust,
+      ).toEqual(
+        expect.objectContaining({
+          artifactState: "invalid",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "refuted",
+          nextAction: "retry_source_rework",
+        }),
+      );
+      expect(
+        listBody.find((task: { id: string }) => task.id === "audit-inconclusive").artifactTrust,
+      ).toEqual(
+        expect.objectContaining({
+          artifactState: "source_inconclusive",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "inconclusive",
+          latestAttemptOutcome: "terminal_inconclusive",
+          nextAction: "inspect_untrusted_source",
+        }),
+      );
+
+      const detailRes = await app.request("/tasks/audit-synthesis");
+      expect(detailRes.status).toBe(200);
+      const detailBody = await detailRes.json();
+      expect(detailBody.artifactTrust).toEqual(
+        expect.objectContaining({
+          taskStatus: "blocked_external",
+          artifactRole: "synthesis",
+          artifactState: "synthesis_not_ready",
+          failureFamily: "synthesis_not_ready",
+          nextAction: "retry_synthesis",
+          reasonCodes: expect.arrayContaining([
+            "plan_quality",
+            "synthesis_not_ready",
+            "untrusted_artifact",
+          ]),
+        }),
+      );
+
+      updateRoadmapBatchArtifactState({
+        taskId: "audit-synthesis",
+        state: "terminal_inconclusive",
+        failureFamily: "inconclusive_batch_evidence",
+        reworkStatus: "terminal_inconclusive",
+        validationDetails: { auditSynthesisOutcome: { kind: "inconclusive_batch_evidence" } },
+      });
+      const inconclusiveRes = await app.request("/tasks/audit-synthesis");
+      expect(inconclusiveRes.status).toBe(200);
+      const inconclusiveBody = await inconclusiveRes.json();
+      expect(inconclusiveBody.artifactTrust).toEqual(
+        expect.objectContaining({
+          artifactState: "terminal_inconclusive",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "inconclusive",
+          nextAction: "inspect_untrusted_source",
+          reasonCodes: expect.arrayContaining(["inconclusive_batch_evidence"]),
+          batchCounts: expect.objectContaining({ trustedValid: 1, inconclusive: 1, rejected: 1 }),
+        }),
+      );
     });
 
     it("should return 400 for invalid projectId format", async () => {
@@ -2190,6 +2357,121 @@ describe("tasks API", () => {
       expect(maxedBody.blockedReason).toContain(
         "Manual review required: audit evidence guard failed after 3/3 review iterations",
       );
+    });
+
+    it("should not read unsafe roadmap artifact paths while approving audit tasks", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-unsafe-"));
+      initGitProject(rootPath);
+      const outsideName = `outside-audit-${Date.now()}-${Math.random().toString(16).slice(2)}.md`;
+      writeFileSync(
+        join(rootPath, "..", outsideName),
+        [
+          "```audit-report-manifest",
+          JSON.stringify({ evidenceRefs: ["outside-ref"] }),
+          "```",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      db.insert(projects)
+        .values({ id: "project-audit-unsafe", name: "Audit Unsafe", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-audit-unsafe-1",
+          projectId: "project-audit-unsafe",
+          title: "Audit configuration",
+          taskIntent: "audit",
+          status: "done",
+          plan: "## Plan\n- Inspect configuration\n- Write report",
+        })
+        .run();
+
+      createRoadmapBatchContract({
+        projectId: "project-audit-unsafe",
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["ev-audit-unsafe-1"],
+        artifacts: [
+          {
+            taskId: "ev-audit-unsafe-1",
+            role: "report",
+            artifactPath: "audit/config.md",
+            projectRoot: rootPath,
+          },
+        ],
+      });
+      db.update(roadmapBatchArtifacts)
+        .set({ artifactPath: `../${outsideName}` })
+        .where(eq(roadmapBatchArtifacts.taskId, "ev-audit-unsafe-1"))
+        .run();
+
+      const res = await app.request("/tasks/ev-audit-unsafe-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+      expect(body.blockedReason).toContain("missing_report_artifact");
+      expect(body.blockedReason).not.toContain("missing_report_manifest");
+    });
+
+    it("should not treat RDPI close-out result files as audit reports during approve_done", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-rdpi-result-"));
+      initGitProject(rootPath);
+      execFileSync("git", ["checkout", "-b", "feature/rdpi-result"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      const resultDir = join(
+        rootPath,
+        "docs",
+        "rdpi",
+        "work",
+        "work-20260514-harden-source-audit-report-production",
+      );
+      mkdirSync(resultDir, { recursive: true });
+      writeFileSync(join(resultDir, "result.md"), "TEST PASS\nREVIEW PASS\n", "utf8");
+      execFileSync(
+        "git",
+        ["add", "docs/rdpi/work/work-20260514-harden-source-audit-report-production/result.md"],
+        { cwd: rootPath, stdio: "ignore" },
+      );
+      execFileSync("git", ["commit", "-m", "add rdpi result", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      db.insert(projects)
+        .values({ id: "project-rdpi-result", name: "RDPI Result", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-rdpi-result-1",
+          projectId: "project-rdpi-result",
+          title: "Harden Source Audit Report Production",
+          taskIntent: "audit",
+          status: "done",
+          plan: "## Plan\n- Harden audit report production",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-rdpi-result-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedReason).toContain("missing_report_artifact");
+      expect(body.blockedReason).not.toContain("malformed_report_artifact");
     });
 
     it("should block approve_done when audit report references missing files only", async () => {

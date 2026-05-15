@@ -1,7 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import {
+  assertSafeRoadmapArtifactPath,
   clearTaskRuntimeLimitSnapshot,
   blockTaskForRuntimeGateIfEligible,
   evaluateRuntimeLimitGate,
@@ -20,6 +22,7 @@ import {
   countActivePipelineTasksForProject,
   hasActiveBranchBoundTasksForProject,
   claimBacklogTaskForAdvance,
+  persistTaskPlanForTask,
   persistTaskRuntimeLimitSnapshot,
   resolveEffectiveRuntimeProfile,
   findRoadmapBatchArtifactByTaskId,
@@ -48,6 +51,7 @@ import {
   selectTaskCompletionAuditFailureFamily,
   resolveAuditPlanId,
   TaskPlanQualityError,
+  buildDeterministicDiagnosticPlan,
   withTimeout,
   type AuditFailureFamily,
   type AutoReviewFinding,
@@ -462,8 +466,8 @@ function returnAuditTaskToRework(input: {
     createAttemptBoundary: true,
     validationDetails: auditValidationDetails(input.result),
     contentSha: input.result.evidence.auditReportValidation.artifactSha256,
-    branchName: input.task.branchName,
-    worktreePath: input.task.worktreePath,
+    branchName: input.task.branchName ?? input.artifact.branchName,
+    worktreePath: input.task.worktreePath ?? input.artifact.worktreePath,
     projectRoot: input.projectRoot,
   });
   clearTaskRuntimeLimitSnapshot(input.task.id);
@@ -539,6 +543,11 @@ function isSynthesisNotReadyError(err: unknown): err is Error {
   return err instanceof Error && err.message.startsWith("synthesis_not_ready:");
 }
 
+function synthesisNotReadyValidationDetails(err: Error): unknown {
+  const detailed = err as Error & { validationDetails?: unknown };
+  return detailed.validationDetails ?? { reason: err.message };
+}
+
 function auditEvidenceForArtifact(
   task: TaskRow,
   artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>,
@@ -560,23 +569,204 @@ function readAuditArtifactText(
   projectRoot: string,
   artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>,
 ): string | null {
-  if (!artifact) return null;
+  return readAuditArtifact(projectRoot, artifact).text;
+}
+
+function normalizeArtifactGitPath(path: string): string | null {
   try {
-    const reportPath = resolve(projectRoot, artifact.artifactPath);
-    return existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
+    return assertSafeRoadmapArtifactPath(path);
   } catch {
     return null;
   }
 }
 
-function readRelativeFileSha(projectRoot: string, relativePath: string): string | null {
+function isSafeRelativeArtifactPath(artifactPath: string): boolean {
+  return normalizeArtifactGitPath(artifactPath) !== null;
+}
+
+function isPathInsideRoot(root: string, candidate: string): boolean {
+  const relativePath = relative(root, candidate);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+function resolveSafeArtifactPath(rootPath: string, gitPath: string): string | null {
+  const root = resolve(rootPath);
+  const absolutePath = resolve(root, gitPath);
+  return isPathInsideRoot(root, absolutePath) ? absolutePath : null;
+}
+
+function sha256Buffer(buffer: Buffer): string {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function readAuditArtifact(
+  projectRoot: string,
+  artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>,
+  overrides?: {
+    branchName?: string | null;
+    worktreePath?: string | null;
+    projectRoot?: string | null;
+  },
+): {
+  text: string | null;
+  contentSha: string | null;
+  source: "none" | "project_root" | "worktree" | "branch";
+  branchName: string | null;
+  worktreePath: string | null;
+  projectRoot: string;
+  missingReason: string | null;
+} {
+  if (!artifact) {
+    return {
+      text: null,
+      contentSha: null,
+      source: "none",
+      branchName: null,
+      worktreePath: null,
+      projectRoot,
+      missingReason: "No roadmap report artifact is declared for this task.",
+    };
+  }
+
+  const artifactRoot = overrides?.projectRoot ?? artifact.projectRoot ?? projectRoot;
+  const branchName = overrides?.branchName ?? artifact.branchName ?? null;
+  const worktreePath = overrides?.worktreePath ?? artifact.worktreePath ?? null;
+  const gitPath = normalizeArtifactGitPath(artifact.artifactPath);
+
+  if (!gitPath || !isSafeRelativeArtifactPath(artifact.artifactPath)) {
+    return {
+      text: null,
+      contentSha: null,
+      source: "none",
+      branchName,
+      worktreePath,
+      projectRoot: artifactRoot,
+      missingReason: `Declared audit report artifact path is invalid: ${artifact.artifactPath}`,
+    };
+  }
+
+  if (worktreePath) {
+    try {
+      const absolutePath = resolveSafeArtifactPath(worktreePath, gitPath);
+      if (!absolutePath || !existsSync(absolutePath)) {
+        return {
+          text: null,
+          contentSha: null,
+          source: "worktree",
+          branchName,
+          worktreePath,
+          projectRoot: artifactRoot,
+          missingReason: `Declared audit report artifact is missing from worktree ${worktreePath}: ${artifact.artifactPath}`,
+        };
+      }
+      const buffer = readFileSync(absolutePath);
+      return {
+        text: buffer.toString("utf8"),
+        contentSha: sha256Buffer(buffer),
+        source: "worktree",
+        branchName,
+        worktreePath,
+        projectRoot: artifactRoot,
+        missingReason: null,
+      };
+    } catch {
+      return {
+        text: null,
+        contentSha: null,
+        source: "worktree",
+        branchName,
+        worktreePath,
+        projectRoot: artifactRoot,
+        missingReason: `Declared audit report artifact could not be read from worktree ${worktreePath}: ${artifact.artifactPath}`,
+      };
+    }
+  }
+
+  if (branchName) {
+    try {
+      const buffer = execFileSync(
+        "git",
+        ["-c", `safe.directory=${artifactRoot}`, "show", `${branchName}:${gitPath}`],
+        { cwd: artifactRoot, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      return {
+        text: buffer.toString("utf8"),
+        contentSha: sha256Buffer(buffer),
+        source: "branch",
+        branchName,
+        worktreePath,
+        projectRoot: artifactRoot,
+        missingReason: null,
+      };
+    } catch {
+      return {
+        text: null,
+        contentSha: null,
+        source: "branch",
+        branchName,
+        worktreePath,
+        projectRoot: artifactRoot,
+        missingReason: `Declared audit report artifact is missing from branch ${branchName}: ${artifact.artifactPath}`,
+      };
+    }
+  }
+
   try {
-    const absolutePath = resolve(projectRoot, relativePath);
-    return existsSync(absolutePath)
-      ? createHash("sha256").update(readFileSync(absolutePath)).digest("hex")
-      : null;
+    const reportPath = resolveSafeArtifactPath(artifactRoot, gitPath);
+    if (!reportPath || !existsSync(reportPath)) {
+      return {
+        text: null,
+        contentSha: null,
+        source: "project_root",
+        branchName,
+        worktreePath,
+        projectRoot: artifactRoot,
+        missingReason: `Declared audit report artifact is missing from project root ${artifactRoot}: ${artifact.artifactPath}`,
+      };
+    }
+    const buffer = readFileSync(reportPath);
+    return {
+      text: buffer.toString("utf8"),
+      contentSha: sha256Buffer(buffer),
+      source: "project_root",
+      branchName,
+      worktreePath,
+      projectRoot: artifactRoot,
+      missingReason: null,
+    };
   } catch {
-    return null;
+    return {
+      text: null,
+      contentSha: null,
+      source: "project_root",
+      branchName,
+      worktreePath,
+      projectRoot: artifactRoot,
+      missingReason: `Declared audit report artifact could not be read from project root ${artifactRoot}: ${artifact.artifactPath}`,
+    };
+  }
+}
+
+function readRelativeFileSha(
+  projectRoot: string,
+  relativePath: string,
+): {
+  contentSha: string | null;
+  safe: boolean;
+} {
+  try {
+    const gitPath = normalizeArtifactGitPath(relativePath);
+    if (!gitPath) return { contentSha: null, safe: false };
+    const absolutePath = resolveSafeArtifactPath(projectRoot, gitPath);
+    if (!absolutePath) return { contentSha: null, safe: false };
+    return {
+      contentSha: existsSync(absolutePath)
+        ? createHash("sha256").update(readFileSync(absolutePath)).digest("hex")
+        : null,
+      safe: true,
+    };
+  } catch {
+    return { contentSha: null, safe: false };
   }
 }
 
@@ -602,8 +792,26 @@ function terminalizeRoadmapSourceReportAsInconclusive(input: {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   if (!artifact || artifact.role !== "report") return false;
 
-  const artifactSha =
-    input.contentSha ?? readRelativeFileSha(input.projectRoot, artifact.artifactPath);
+  const artifactRead = readAuditArtifact(input.projectRoot, artifact, {
+    branchName: input.task.branchName,
+    worktreePath: input.task.worktreePath,
+    projectRoot: input.projectRoot,
+  });
+  const artifactSha = input.contentSha ?? artifactRead.contentSha;
+  const extraDetails = input.validationDetails ?? {};
+  const extraIssues = Array.isArray(extraDetails.issues) ? extraDetails.issues : [];
+  const missingReportIssue = artifactRead.missingReason
+    ? [
+        {
+          code: "missing_report_artifact",
+          message: artifactRead.missingReason,
+          artifactPath: artifact.artifactPath,
+          branchName: artifactRead.branchName,
+          worktreePath: artifactRead.worktreePath,
+          projectRoot: artifactRead.projectRoot,
+        },
+      ]
+    : [];
   updateRoadmapBatchArtifactState({
     taskId: input.task.id,
     state: "source_inconclusive",
@@ -611,12 +819,35 @@ function terminalizeRoadmapSourceReportAsInconclusive(input: {
     classification: "source_inconclusive",
     reworkStatus: "terminal_inconclusive",
     validationDetails: {
+      ...extraDetails,
       sourceClassification: "source_inconclusive",
       terminalizationReason: input.reason,
       blockedReason: input.blockedReason,
       artifactPath: artifact.artifactPath,
+      contentSha: artifactSha,
+      artifactVisibility: {
+        artifactPath: artifact.artifactPath,
+        source: artifactRead.source,
+        readable: artifactRead.text !== null,
+        branchName: artifactRead.branchName,
+        worktreePath: artifactRead.worktreePath,
+        projectRoot: artifactRead.projectRoot,
+        contentSha: artifactSha,
+      },
+      ...(missingReportIssue.length > 0
+        ? {
+            issues: [...extraIssues, ...missingReportIssue],
+            missingReportArtifact: {
+              artifactPath: artifact.artifactPath,
+              reason: artifactRead.missingReason,
+              branchName: artifactRead.branchName,
+              worktreePath: artifactRead.worktreePath,
+              projectRoot: artifactRead.projectRoot,
+              contentSha: artifactSha,
+            },
+          }
+        : {}),
       autoReviewState: input.autoReviewState ?? null,
-      ...(input.validationDetails ?? {}),
     },
     contentSha: artifactSha,
     branchName: input.task.branchName,
@@ -705,7 +936,9 @@ function blockTaskForNoSubstantiveReworkDeltaIfNeeded(input: {
   if (!snapshot?.artifactPath) return false;
 
   const baselineSha = snapshot.artifactContentSha ?? null;
-  const currentSha = readRelativeFileSha(input.projectRoot, snapshot.artifactPath);
+  const currentArtifact = readRelativeFileSha(input.projectRoot, snapshot.artifactPath);
+  if (!currentArtifact.safe) return false;
+  const currentSha = currentArtifact.contentSha;
   if (baselineSha !== currentSha) return false;
 
   const shaDisplay = currentSha ?? "missing";
@@ -973,6 +1206,83 @@ function isPlanQualityRetryState(task: TaskRow): boolean {
   );
 }
 
+function recoverSynthesisPlanQualityFailure(input: {
+  task: TaskRow;
+  projectRoot: string;
+  stageInProgress: TaskStatus;
+  taskTitle: string;
+  error: TaskPlanQualityError;
+  retryCount: number;
+}): boolean {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  if (!artifact || artifact.role !== "synthesis") return false;
+  const summary = summarizeRoadmapBatch(artifact.batchId);
+  if (!summary?.synthesisReady) return false;
+  const sourceReportArtifacts = listRoadmapReportArtifactsForSynthesis(artifact.batchId).map(
+    (entry) => ({
+      taskId: entry.taskId,
+      artifactPath: entry.artifactPath,
+      state: entry.state,
+      failureFamily: entry.failureFamily,
+      trusted: entry.state === "valid",
+    }),
+  );
+  if (sourceReportArtifacts.length === 0) return false;
+
+  const planTask = {
+    ...input.task,
+    description: [input.task.description, `Report artifact: ${artifact.artifactPath}`]
+      .filter(Boolean)
+      .join("\n"),
+    auditArtifactRole: "synthesis" as const,
+    roadmapBatchId: artifact.batchId,
+    sourceReportArtifacts,
+  };
+  const fallbackPlan = buildDeterministicDiagnosticPlan({
+    task: planTask,
+    extraText: [input.task.plan, artifact.artifactPath],
+  });
+  if (!fallbackPlan) return false;
+
+  const nowIso = new Date().toISOString();
+  persistTaskPlanForTask({
+    taskId: input.task.id,
+    planText: fallbackPlan,
+    projectRoot: input.projectRoot,
+    isFix: input.task.isFix,
+    planPath: input.task.planPath ?? undefined,
+    updatedAt: nowIso,
+  });
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "implementing",
+    {
+      blockedReason: null,
+      blockedFromStatus: null,
+      retryAfter: null,
+      retryCount: 0,
+      reworkRequested: false,
+      manualReviewRequired: false,
+    },
+    { title: input.taskTitle, fromStatus: input.stageInProgress },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] Plan quality guard exhausted for synthesis; persisted deterministic registry-derived synthesis plan and routed to implementation. Previous categories: ${input.error.result.categories.join(", ")}. Previous retry count: ${input.retryCount}.`,
+  );
+  log.warn(
+    {
+      taskId: input.task.id,
+      batchId: artifact.batchId,
+      sourceReportCount: sourceReportArtifacts.length,
+      categories: input.error.result.categories,
+    },
+    "Plan quality guard recovered synthesis task with deterministic registry-derived plan",
+  );
+  return true;
+}
+
 function handlePlanQualityFailure(input: {
   task: TaskRow;
   projectRoot: string;
@@ -1016,6 +1326,16 @@ function handlePlanQualityFailure(input: {
   }
 
   const blockedReason = `${input.error.message} Retry limit reached (${PLAN_QUALITY_MAX_RETRIES}). Operator next step: edit the task prompt or plan constraints, then retry from blocked.`;
+  if (
+    recoverSynthesisPlanQualityFailure({
+      ...input,
+      task: latestTask,
+      retryCount: nextRetryCount,
+    })
+  ) {
+    return;
+  }
+
   if (
     terminalizeRoadmapSourceReportAsInconclusive({
       task: latestTask,
@@ -1402,7 +1722,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         task: findTaskById(task.id) ?? task,
         projectRoot: executionRoot,
         reason: err.message,
-        validationDetails: { reason: err.message },
+        validationDetails: synthesisNotReadyValidationDetails(err),
         fromStatus: stage.inProgress,
       })
     ) {

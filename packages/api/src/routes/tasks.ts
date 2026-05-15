@@ -50,6 +50,7 @@ import {
   resolveEffectiveRuntimeProfile,
   resolveEffectiveRuntimeProfilesForTasks,
   updateTaskPositionOnly,
+  buildTaskArtifactTrustRollup,
   buildTaskWorkflowTimeline,
   type TaskRow,
 } from "@aif/data";
@@ -73,6 +74,7 @@ function toTaskRouteResponse(
 
   return {
     ...response,
+    artifactTrust: buildTaskArtifactTrustRollup(task.id),
     effectiveRuntime: {
       source: effectiveRuntime.source,
       profileId: effectiveRuntime.profile?.id ?? null,

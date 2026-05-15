@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { TaskTagsList } from "@/components/ui/task-tags-list";
 import { timeAgo } from "@/lib/utils";
 import { getRuntimeLimitDisplay } from "@/lib/runtimeLimits";
+import { getArtifactTrustPresentation } from "@/lib/artifactTrust";
 import { useUsageLimitsEnabled } from "@/hooks/useSettings";
 
 const PRIORITY_LABELS: Record<number, { label: string; className: string }> = {
@@ -55,6 +56,7 @@ export function TaskCard({
         checkedAt: task.runtimeLimitUpdatedAt ?? null,
       })
     : null;
+  const artifactTrust = getArtifactTrustPresentation(task.artifactTrust);
 
   const stop = (e: MouseEvent) => {
     e.stopPropagation();
@@ -101,6 +103,11 @@ export function TaskCard({
               className="border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-300"
             >
               Manual Review
+            </Badge>
+          )}
+          {artifactTrust && (
+            <Badge size={isCompact ? "xs" : "sm"} className={artifactTrust.className}>
+              {artifactTrust.label}
             </Badge>
           )}
           {priority.label !== "None" && (
@@ -222,6 +229,17 @@ export function TaskCard({
       {task.manualReviewRequired && (
         <div className="mt-2 ml-2 border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-3xs text-amber-700 dark:text-amber-300 line-clamp-2">
           Auto-review stopped. Human review required.
+        </div>
+      )}
+
+      {task.artifactTrust && (
+        <div
+          className={`mt-2 ml-2 border px-2 py-1 ${isCompact ? "text-3xs" : "text-xs"} ${artifactTrust?.className ?? ""}`}
+        >
+          <div className="font-medium">{task.artifactTrust.summary}</div>
+          {task.artifactTrust.nextAction !== "none" && (
+            <div className="line-clamp-1">{task.artifactTrust.nextActionLabel}</div>
+          )}
         </div>
       )}
 
