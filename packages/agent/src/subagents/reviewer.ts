@@ -145,6 +145,9 @@ Rules:
 - For audit/report artifacts whose task description requires Proposed fix, block any finding that has Evidence/Risk/Verification but no Proposed fix.
 - For audit/report artifacts, block non-actionable findings: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims without a concrete technical failure mode.
 - Reuse only IDs provided in the Previous Findings input below.
+- For every ID in Previous Findings input, compare the current implementation log, changed files, and relevant artifact content against the original finding. Mark resolved only when concrete closure evidence is present.
+- If a previous finding lacks closure evidence, repeats the same validator failure, or the required self-check was not performed, mark that same ID still_blocking and state the evidence gap.
+- For audit/report artifact rework, do not mark prior review_gate findings resolved unless the artifact proves valid manifest requirements, bound evidenceRefs, declared scope coverage, and substantive evidence.
 - Do not add any headings before, between, or after these sections.
 - Do not use code fences.`;
 

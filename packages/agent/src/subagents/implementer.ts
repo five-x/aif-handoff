@@ -3025,7 +3025,10 @@ Rework handling protocol:
 8) In diagnostic audit/report tasks, every Evidence reference must be an existing file under the project root with a concrete line or line range. Do not cite directories such as src:1-2 or src/bot_intevra:1-20; cite specific files instead.
 9) If REWORK_BLOCKED_REASON says low_quality_report_evidence, remove every placeholder, speculative claim, and fake command output from the report artifact. Replace it with exact output from tools you actually ran, or remove the finding.
 10) If the exact invalid tokens from REWORK_BLOCKED_REASON still appear in the report artifact, the rework is not complete. Continue editing until they are gone or explicitly report why the report cannot be corrected.
-11) In the final result text, explicitly list which blocking finding IDs from BLOCKING_FINDINGS_SNAPSHOT were addressed and which IDs remain unresolved, and include the git log verification for any report artifact commit.`
+11) Before handing back to review, perform a pre-review self-check against every blocking finding ID in BLOCKING_FINDINGS_SNAPSHOT. For each ID, identify the concrete closure condition, the file/artifact change or observed evidence that satisfies it, and whether the same finding remains unresolved.
+12) When a deterministic validator or guard exists, run the relevant self-check before closing. For audit/report artifacts, prove valid manifest requirements, bound evidenceRefs, declared scope coverage, and substantive evidence before review handoff.
+13) Do not claim a finding is addressed unless the final result text names its exact ID and includes closure evidence. If any finding ID remains unresolved or lacks proof, say so explicitly and leave the task for blocked/manual handling rather than presenting the rework as complete.
+14) In the final result text, explicitly list which blocking finding IDs from BLOCKING_FINDINGS_SNAPSHOT were addressed and which IDs remain unresolved, and include the git log verification for any report artifact commit.`
     : "";
 
   const reworkSystemAppend = isRework

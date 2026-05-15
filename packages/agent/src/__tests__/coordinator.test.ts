@@ -2418,12 +2418,12 @@ describe("coordinator", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-roadmap-plan-quality-limit"))
       .get();
-    expect(task!.status).toBe("done");
-    expect(task!.blockedReason).toBeNull();
-    expect(task!.blockedFromStatus).toBeNull();
-    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedReason).toContain("manual_review_required: plan_quality_exhausted");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.manualReviewRequired).toBe(true);
     expect(task!.reworkRequested).toBe(false);
-    expect(task!.retryCount).toBe(0);
+    expect(task!.retryCount).toBe(2);
     expect(runImplementer).not.toHaveBeenCalled();
 
     const reportArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
@@ -2703,6 +2703,201 @@ describe("coordinator", () => {
     task = db.select().from(tasks).where(eq(tasks.id, "task-rework-flag")).get();
     expect(task!.status).toBe("done");
     expect(task!.reworkRequested).toBe(false);
+    expect(task!.autoReviewStateJson).toBeNull();
+    expect(task!.manualReviewRequired).toBe(false);
+  });
+
+  it("should block non-audit rework manual handoffs with exact unresolved finding ids", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-code-rework-manual",
+        projectId: "test-project",
+        title: "Code rework manual handoff",
+        status: "review",
+        autoMode: true,
+        reviewIterationCount: 1,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "closure_first",
+          iteration: 1,
+          findings: [
+            {
+              id: "old-fix",
+              source: "code_review",
+              text: "Add null guard before plan sync",
+              firstSeenIteration: 1,
+              lastSeenIteration: 1,
+              streak: 1,
+            },
+          ],
+        }),
+      })
+      .run();
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "manual_review_required",
+      currentIteration: 2,
+      handoffReason: "new_blockers_after_rework",
+      metrics: {
+        strategy: "closure_first",
+        iteration: 2,
+        previousBlockingCount: 1,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      autoReviewState: {
+        strategy: "closure_first",
+        iteration: 2,
+        findings: [
+          {
+            id: "new-fix",
+            source: "code_review",
+            text: "Preserve retry metadata after rework",
+            firstSeenIteration: 2,
+            lastSeenIteration: 2,
+            streak: 1,
+          },
+        ],
+      },
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-code-rework-manual")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("manual_review_required: new_blockers_after_rework");
+    expect(task!.blockedReason).toContain("[new-fix] code_review: Preserve retry metadata");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.reviewIterationCount).toBe(2);
+    expect(task!.autoReviewStateJson).toContain("new-fix");
+  });
+
+  it("should not route audit report manual handoffs back into rework before max iterations", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-manual-handoff-");
+    execFileSync("git", ["checkout", "-b", "feature/audit-manual-handoff"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "security.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository fixture heading.",
+        "Risk: Placeholder git output can make a weak audit report look verified.",
+        "Proposed fix: Replace placeholder verification with observed command output.",
+        "Verification: Command `git log -1 --name-only --oneline` output:",
+        "```",
+        "commit 1234567890abcdef1234567890abcdef12345678",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/security.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-manual-handoff-project", name: "Audit Manual", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-manual-handoff",
+        projectId: "audit-manual-handoff-project",
+        title: "Audit security controls",
+        description:
+          "Report artifact: audit/security.md\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-manual-handoff",
+        reviewIterationCount: 1,
+        maxReviewIterations: 5,
+        agentActivityLog: [
+          "[2026-05-10T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-10T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-10T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-10T15:54:03.000Z] Tool: git_commit git commit",
+          "[2026-05-10T15:54:04.000Z] Agent: implement-coordinator complete",
+          "[2026-05-10T15:54:05.000Z] Agent: review-sidecar started",
+          "[2026-05-10T15:54:06.000Z] Tool: read_file audit/security.md",
+          "[2026-05-10T15:54:07.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-manual-handoff-project",
+      roadmapAlias: "audit-manual-handoff",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-manual-handoff"],
+      artifacts: [
+        {
+          taskId: "task-audit-manual-handoff",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "manual_review_required",
+      currentIteration: 2,
+      handoffReason: "new_blockers_after_rework",
+      metrics: {
+        strategy: "closure_first",
+        iteration: 2,
+        previousBlockingCount: 1,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      autoReviewState: {
+        strategy: "closure_first",
+        iteration: 2,
+        findings: [
+          {
+            id: "audit-fix-a",
+            source: "review_gate",
+            text: "Replace placeholder audit verification output",
+            firstSeenIteration: 2,
+            lastSeenIteration: 2,
+            streak: 1,
+          },
+        ],
+      },
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-audit-manual-handoff")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("manual_review_required: new_blockers_after_rework");
+    expect(task!.blockedReason).toContain(
+      "[audit-fix-a] review_gate: Replace placeholder audit verification output",
+    );
+    expect(task!.blockedReason).toContain("placeholder commit hashes");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.reviewIterationCount).toBe(2);
+    expect(task!.autoReviewStateJson).toContain("audit-fix-a");
+
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    const attempts = listRoadmapBatchArtifactAttempts(artifact!.id);
+    expect(attempts.at(-1)?.reworkStatus).toBe("manual_review_required");
   });
 
   it("should block non-roadmap stalled auto-review loops instead of reworking again", async () => {
@@ -2873,11 +3068,14 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-roadmap-stalled-report")).get();
-    expect(task!.status).toBe("done");
-    expect(task!.blockedReason).toBeNull();
-    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("manual_review_required: stalled_rework_loop");
+    expect(task!.blockedReason).toContain("[fix-a] review_gate: Fix missing audit evidence");
+    expect(task!.manualReviewRequired).toBe(true);
     expect(task!.reworkRequested).toBe(false);
     expect(task!.reviewIterationCount).toBe(3);
+    expect(task!.autoReviewStateJson).toContain("fix-a");
 
     const reportArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
       (artifact) => artifact.taskId === "task-roadmap-stalled-report",
@@ -2961,11 +3159,13 @@ describe("coordinator", () => {
     const task = db.select().from(tasks).where(eq(tasks.id, "task-no-delta-rework")).get();
     expect(runImplementer).toHaveBeenCalledWith("task-no-delta-rework", rootPath);
     expect(runReviewer).not.toHaveBeenCalledWith("task-no-delta-rework", rootPath);
-    expect(task!.status).toBe("done");
-    expect(task!.blockedReason).toBeNull();
-    expect(task!.blockedFromStatus).toBeNull();
-    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedReason).toContain("manual_review_required: no_substantive_rework_delta");
+    expect(task!.blockedReason).toContain("blocker ids: fix-a");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.manualReviewRequired).toBe(true);
     expect(task!.reworkRequested).toBe(false);
+    expect(task!.autoReviewStateJson).toContain("fix-a");
     const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
     expect(artifact?.state).toBe("source_inconclusive");
     expect(artifact?.failureFamily).toBe("source_inconclusive");

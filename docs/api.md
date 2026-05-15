@@ -690,12 +690,12 @@ GET /tasks/:id
 
 Notable task fields in the response:
 
-| Field                   | Type         | Description                                                                                                                                                                     |
-| ----------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `manualReviewRequired`  | boolean      | `true` when auto-review stopped and explicit human review is required; this can appear on `done` manual handoffs or `blocked_external` stalled/no-delta handoffs                |
-| `autoReviewState`       | object\|null | Latest persisted auto-review snapshot: `strategy`, `iteration`, `findings[]`, optional finding `firstSeenIteration`/`lastSeenIteration`/`streak`, and optional `reworkSnapshot` |
-| `runtimeLimitSnapshot`  | object\|null | Persisted runtime-limit snapshot copied onto the task when quota gating or quota failure blocks execution                                                                       |
-| `runtimeLimitUpdatedAt` | string\|null | ISO timestamp for the last task-level runtime-limit snapshot write                                                                                                              |
+| Field                   | Type         | Description                                                                                                                                                                                  |
+| ----------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manualReviewRequired`  | boolean      | `true` when auto-review stopped and explicit human review is required; unresolved auto-review findings are surfaced on `blocked_external` tasks with preserved `autoReviewState` diagnostics |
+| `autoReviewState`       | object\|null | Latest persisted auto-review snapshot: `strategy`, `iteration`, `findings[]`, optional finding `firstSeenIteration`/`lastSeenIteration`/`streak`, and optional `reworkSnapshot`              |
+| `runtimeLimitSnapshot`  | object\|null | Persisted runtime-limit snapshot copied onto the task when quota gating or quota failure blocks execution                                                                                    |
+| `runtimeLimitUpdatedAt` | string\|null | ISO timestamp for the last task-level runtime-limit snapshot write                                                                                                                           |
 
 ### Download Task Attachment
 
@@ -745,7 +745,7 @@ PUT /tasks/:id
 | `plan` | string\|null | Generated plan (markdown) |
 | `implementationLog` | string\|null | Implementation output |
 | `reviewComments` | string\|null | Review feedback |
-| `manualReviewRequired` | boolean | Explicit human-review handoff flag for `done` or `blocked_external` tasks |
+| `manualReviewRequired` | boolean | Explicit human-review handoff flag for blocked tasks that need operator triage |
 | `agentActivityLog` | string\|null | Agent activity timeline |
 | `blockedReason` | string\|null | Why the task is blocked |
 | `blockedFromStatus` | string\|null | Status before being blocked |
@@ -802,8 +802,7 @@ Additional constraints:
 - `fast_fix` requires `autoMode=false` and at least one human comment on the task.
 - `request_changes` transitions `done -> implementing`, sets `reworkRequested=true`, and resets watchdog retry state (`retryCount=0`).
 - With `autoMode=true`, coordinator can trigger this same `request_changes`-style rework loop automatically after review if blocking findings are extracted from `reviewComments`.
-- If auto-review stops at the broad max-iteration/manual-handoff path, the coordinator can leave the task in `done`, set `manualReviewRequired=true`, and wait for a human `approve_done` or `request_changes` action.
-- If auto-review detects a repeated same-blocker stall or an unchanged audit/report artifact after rework, the coordinator moves the task to `blocked_external`, sets `manualReviewRequired=true`, preserves `autoReviewState` diagnostics, and waits for `retry_from_blocked`.
+- If auto-review stops at the broad max-iteration/manual-handoff path, detects a repeated same-blocker stall, or sees an unchanged audit/report artifact after rework, the coordinator moves the task to `blocked_external`, sets `manualReviewRequired=true`, preserves `autoReviewState` diagnostics, and waits for operator triage.
 
 **Response:** `200 OK` — the updated task object.
 

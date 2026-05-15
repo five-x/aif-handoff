@@ -458,6 +458,10 @@ function returnAuditTaskToRework(input: {
   projectRoot: string;
   extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
 }): boolean {
+  const { blockedReason: extraBlockedReason, ...extraFields } = input.extra ?? {};
+  const statusBlockedReason = [`${input.family}: ${input.blockedReason}`, extraBlockedReason]
+    .filter(Boolean)
+    .join("; ");
   updateRoadmapBatchArtifactState({
     taskId: input.task.id,
     state: artifactStateForFailureFamily(input.family),
@@ -475,11 +479,11 @@ function returnAuditTaskToRework(input: {
     input.task.id,
     "implementing",
     {
-      blockedReason: `${input.family}: ${input.blockedReason}`,
       blockedFromStatus: input.fromStatus,
       retryAfter: null,
       retryCount: input.task.retryCount ?? 0,
-      ...input.extra,
+      ...extraFields,
+      blockedReason: statusBlockedReason,
       reworkRequested: true,
       manualReviewRequired: false,
     },
@@ -777,6 +781,17 @@ function formatAutoReviewFindingsForBlockedReason(
   return findings.map((finding) => `[${finding.id}] ${finding.source}: ${finding.text}`).join("; ");
 }
 
+function buildManualAutoReviewBlockedReason(
+  outcome: Extract<ReviewGateOutcome, { status: "manual_review_required" }>,
+): string {
+  return (
+    `manual_review_required: ${outcome.handoffReason}; ` +
+    `closure evidence gap for unresolved blockers: ${formatAutoReviewFindingsForBlockedReason(
+      outcome.autoReviewState.findings,
+    )}`
+  );
+}
+
 function terminalizeRoadmapSourceReportAsInconclusive(input: {
   task: TaskWithHydratedFields;
   projectRoot: string;
@@ -792,6 +807,9 @@ function terminalizeRoadmapSourceReportAsInconclusive(input: {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   if (!artifact || artifact.role !== "report") return false;
 
+  const taskBlockedReason = input.blockedReason.startsWith("manual_review_required:")
+    ? input.blockedReason
+    : `manual_review_required: ${input.reason}; ${input.blockedReason}`;
   const artifactRead = readAuditArtifact(input.projectRoot, artifact, {
     branchName: input.task.branchName,
     worktreePath: input.task.worktreePath,
@@ -822,7 +840,7 @@ function terminalizeRoadmapSourceReportAsInconclusive(input: {
       ...extraDetails,
       sourceClassification: "source_inconclusive",
       terminalizationReason: input.reason,
-      blockedReason: input.blockedReason,
+      blockedReason: taskBlockedReason,
       artifactPath: artifact.artifactPath,
       contentSha: artifactSha,
       artifactVisibility: {
@@ -858,16 +876,22 @@ function terminalizeRoadmapSourceReportAsInconclusive(input: {
   clearTaskRuntimeLimitSnapshot(input.task.id);
   updateTaskStatus(
     input.task.id,
-    "done",
+    "blocked_external",
     {
       ...CLEAN_STATE_RESET,
+      blockedReason: taskBlockedReason,
+      blockedFromStatus: input.fromStatus,
+      retryCount: input.task.retryCount ?? 0,
+      reworkRequested: false,
       reviewIterationCount: input.reviewIterationCount,
+      manualReviewRequired: true,
+      autoReviewState: input.autoReviewState ?? null,
     },
     { title: input.title, fromStatus: input.fromStatus },
   );
   appendTaskActivityLog(
     input.task.id,
-    `[${new Date().toISOString()}] Roadmap audit source report terminalized as source_inconclusive after ${input.reason}: ${input.blockedReason}`,
+    `[${new Date().toISOString()}] Roadmap audit source report blocked as source_inconclusive after ${input.reason}: ${taskBlockedReason}`,
   );
   return true;
 }
@@ -1011,6 +1035,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   title: string;
   requireManualReview?: boolean;
   phase?: "pre_implementation" | "completion";
+  preventAuditRework?: boolean;
   extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
 }): boolean {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
@@ -1076,8 +1101,11 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       ? repeatedAuditFailureCount({ artifact, family, result }) > 0
       : false;
   const shouldReturnToRework =
-    recoverableAuditArtifactFailure && auditReviewIteration < auditMaxReviewIterations;
-  const auditReworkLimitReached = recoverableAuditArtifactFailure && !shouldReturnToRework;
+    !input.preventAuditRework &&
+    recoverableAuditArtifactFailure &&
+    auditReviewIteration < auditMaxReviewIterations;
+  const auditReworkLimitReached =
+    recoverableAuditArtifactFailure && auditReviewIteration >= auditMaxReviewIterations;
   const baseBlockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
@@ -1093,6 +1121,8 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       ? `${actionableBlockedReason} Rework requested again for repeated audit artifact failure signature; local rework continues until the no-progress guard or review budget proves it is unproductive.`
       : actionableBlockedReason;
   const terminalBlockedReason = artifact ? `${family}: ${blockedReason}` : blockedReason;
+  const { blockedReason: extraBlockedReason, ...extraFields } = input.extra ?? {};
+  const finalBlockedReason = [terminalBlockedReason, extraBlockedReason].filter(Boolean).join("; ");
   if (shouldReturnToRework && artifact) {
     return returnAuditTaskToRework({
       task: input.task,
@@ -1130,12 +1160,13 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     input.task.id,
     "blocked_external",
     {
-      blockedReason: terminalBlockedReason,
+      blockedReason: finalBlockedReason,
       blockedFromStatus: input.fromStatus,
       retryAfter: null,
       retryCount: input.task.retryCount ?? 0,
-      ...input.extra,
+      ...extraFields,
       manualReviewRequired:
+        input.requireManualReview ||
         auditReworkLimitReached ||
         result.issues.some((entry) => entry.code === "manual_review_required"),
     },
@@ -1143,7 +1174,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   );
   appendTaskActivityLog(
     input.task.id,
-    `[${nowIso}] Completion evidence guard blocked terminal transition: ${terminalBlockedReason}`,
+    `[${nowIso}] Completion evidence guard blocked terminal transition: ${finalBlockedReason}`,
   );
   log.warn(
     {
@@ -1535,6 +1566,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
       if (outcome?.status === "manual_review_required") {
         latestTask = findTaskById(task.id) ?? latestTask;
+        const manualBlockedReason = buildManualAutoReviewBlockedReason(outcome);
         if (
           blockTaskForStalledAutoReview({
             task: latestTask,
@@ -1553,7 +1585,9 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
             fromStatus: stage.inProgress,
             title: taskTitle,
             requireManualReview: true,
+            preventAuditRework: true,
             extra: {
+              blockedReason: manualBlockedReason,
               reworkRequested: false,
               reviewIterationCount: outcome.currentIteration,
               autoReviewState: outcome.autoReviewState,
@@ -1565,10 +1599,10 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         clearTaskRuntimeLimitSnapshot(task.id);
         updateTaskStatus(
           task.id,
-          "done",
+          "blocked_external",
           {
-            blockedReason: null,
-            blockedFromStatus: null,
+            blockedReason: manualBlockedReason,
+            blockedFromStatus: stage.inProgress,
             retryAfter: null,
             retryCount: 0,
             reworkRequested: false,
@@ -1585,13 +1619,13 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           {
             taskId: task.id,
             from: stage.inProgress,
-            to: "done",
+            to: "blocked_external",
             reviewIteration: outcome.currentIteration,
             handoffReason: outcome.handoffReason,
           },
-          "Auto review gate stopped at manual review handoff",
+          "Auto review gate blocked unresolved manual review handoff",
         );
-        return true;
+        return false;
       }
 
       if (outcome?.status === "rework_requested") {

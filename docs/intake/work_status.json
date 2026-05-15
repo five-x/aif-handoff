@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-14",
+  "updated": "2026-05-15",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -404,6 +404,15 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260514-surface-audit-trust-state-and-next-actions",
       "updated": "2026-05-14"
+    },
+    {
+      "taskId": "work-20260515-enforce-exact-rework-closure",
+      "title": "Enforce Exact Rework Closure Before Done",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-enforce-exact-rework-closure",
+      "updated": "2026-05-15"
     }
   ]
 }

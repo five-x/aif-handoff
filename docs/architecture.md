@@ -135,11 +135,11 @@ Backlog ──[start_ai]──► Planning ──► Plan Ready ──► Implem
                      plan-coordinator          implement-coordinator        review + security sidecars
 ```
 
-| Stage Transition                                                                                 | Agent                                                                     | Description                                                                                                                                            |
-| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Backlog → Planning → Plan Ready                                                                  | `plan-coordinator`                                                        | Iterative plan refinement via `plan-polisher`                                                                                                          |
-| Plan Ready → Implementing → Review                                                               | `implement-coordinator`                                                   | Parallel execution with worktrees + quality sidecars                                                                                                   |
-| Review → Done / Review → request_changes → Implementing / Review → Done + manual review required | `review-sidecar` + `security-sidecar` (+ auto review gate in coordinator) | Code review and security audit in parallel; in auto mode, structured blocking findings drive automatic rework until success or explicit manual handoff |
+| Stage Transition                                                                                             | Agent                                                                     | Description                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Backlog → Planning → Plan Ready                                                                              | `plan-coordinator`                                                        | Iterative plan refinement via `plan-polisher`                                                                                                          |
+| Plan Ready → Implementing → Review                                                                           | `implement-coordinator`                                                   | Parallel execution with worktrees + quality sidecars                                                                                                   |
+| Review → Done / Review → request_changes → Implementing / Review → blocked_external + manual review required | `review-sidecar` + `security-sidecar` (+ auto review gate in coordinator) | Code review and security audit in parallel; in auto mode, structured blocking findings drive automatic rework until success or explicit manual handoff |
 
 ### Reliability Guards
 
@@ -187,7 +187,7 @@ Auto-review strategy is controlled globally by `AGENT_AUTO_REVIEW_STRATEGY`:
 
 - `full_re_review` (default): every review cycle can trigger another automatic rework if current blocking findings exist.
 - `closure_first`: rework cycles verify previously-blocking findings first; only `still_blocking` previous findings can trigger another automatic loop.
-- If `closure_first` resolves previous blockers but the reviewer finds new blockers, or if max review iterations are reached, the task moves to `done` with `manualReviewRequired=true` and preserved `autoReviewState` for explicit human triage. If the same blocker fingerprint repeats past `AGENT_AUTO_REVIEW_STALL_THRESHOLD`, or audit/report rework resubmits an unchanged artifact, the task moves to `blocked_external` with preserved diagnostics instead of starting another loop.
+- If `closure_first` resolves previous blockers but the reviewer finds new blockers, max review iterations are reached, the same blocker fingerprint repeats past `AGENT_AUTO_REVIEW_STALL_THRESHOLD`, or audit/report rework resubmits an unchanged artifact, the task moves to `blocked_external` with `manualReviewRequired=true` and preserved `autoReviewState` diagnostics instead of being labeled `done`.
 
 Tasks also have a `skipReview` flag (default `false`). When `true`, the coordinator bypasses the review stage entirely — after successful implementation the task moves directly to `done`, skipping the `review-sidecar` and `security-sidecar` runs. This is useful for small changes or tasks where code review is unnecessary.
 

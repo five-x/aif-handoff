@@ -6,9 +6,9 @@
 
 > This project was built using [AI Factory](https://github.com/lee-to/ai-factory) — an open-source framework for AI-driven development.
 
-Built on top of [AI Factory](https://github.com/lee-to/ai-factory) workflow and powered by runtime profiles through `@aif/runtime` (Claude and Codex adapters included). Tasks flow through stages automatically: **Backlog → Planning → Plan Ready → Implementing → Review → Done** — each stage orchestrated by specialized AI subagents following the AIF methodology. In auto mode, review feedback can also trigger an automatic rework loop: **Review → request_changes → Implementing**. When that loop stops converging, the task is handed off explicitly as **Done + manual review required** instead of silently passing.
+Built on top of [AI Factory](https://github.com/lee-to/ai-factory) workflow and powered by runtime profiles through `@aif/runtime` (Claude and Codex adapters included). Tasks flow through stages automatically: **Backlog → Planning → Plan Ready → Implementing → Review → Done** — each stage orchestrated by specialized AI subagents following the AIF methodology. In auto mode, review feedback can also trigger an automatic rework loop: **Review → request_changes → Implementing**. When that loop stops converging, the task is handed off explicitly as **Blocked + manual review required** instead of silently passing.
 
-Auto-review is now convergence-aware. You can keep the default `full_re_review` loop or switch to `closure_first` via `AGENT_AUTO_REVIEW_STRATEGY`. When auto-review no longer converges, the task moves to `done` with `manualReviewRequired=true`, and the UI surfaces that explicit human handoff instead of silently treating the review as passed.
+Auto-review is now convergence-aware. You can keep the default `full_re_review` loop or switch to `closure_first` via `AGENT_AUTO_REVIEW_STRATEGY`. When auto-review no longer converges, the task moves to `blocked_external` with `manualReviewRequired=true`, and the UI surfaces that explicit human handoff instead of silently treating the review as passed.
 
 ## Runtime Providers Out of the Box
 
@@ -153,17 +153,17 @@ Database access is centralized in `packages/data`. `api` and `agent` must use `@
 
 The coordinator polls every 30 seconds and delegates to `.claude/agents/` definitions:
 
-| Stage                                                                                            | Agent                                                                     | What it does                                                                                                                                 |
-| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backlog → Planning → Plan Ready                                                                  | `plan-coordinator`                                                        | Iterative plan refinement via `plan-polisher`                                                                                                |
-| Plan Ready → Implementing → Review                                                               | `implement-coordinator`                                                   | Parallel task execution with worktrees + quality sidecars                                                                                    |
-| Review → Done / Review → request_changes → Implementing / Review → Done + manual review required | `review-sidecar` + `security-sidecar` (+ auto review gate in coordinator) | Code review and security audit in parallel; in auto mode, structured blocking findings drive rework until success or explicit manual handoff |
+| Stage                                                                                               | Agent                                                                     | What it does                                                                                                                                 |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backlog → Planning → Plan Ready                                                                     | `plan-coordinator`                                                        | Iterative plan refinement via `plan-polisher`                                                                                                |
+| Plan Ready → Implementing → Review                                                                  | `implement-coordinator`                                                   | Parallel task execution with worktrees + quality sidecars                                                                                    |
+| Review → Done / Review → request_changes → Implementing / Review → Blocked + manual review required | `review-sidecar` + `security-sidecar` (+ auto review gate in coordinator) | Code review and security audit in parallel; in auto mode, structured blocking findings drive rework until success or explicit manual handoff |
 
 ### Auto-Review Convergence
 
 - `AGENT_AUTO_REVIEW_STRATEGY=full_re_review` keeps the broad re-review loop and is the default.
 - `AGENT_AUTO_REVIEW_STRATEGY=closure_first` only auto-reworks unresolved previous blockers; if new blockers appear after previous ones are resolved, the coordinator stops and asks for human review.
-- Hitting the review-iteration limit also stops automation at `done` with `manualReviewRequired=true`.
+- Hitting the review-iteration limit also stops automation at `blocked_external` with `manualReviewRequired=true`.
 
 ### Fault Tolerance
 

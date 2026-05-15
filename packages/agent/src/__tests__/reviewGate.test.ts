@@ -406,6 +406,344 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     );
   });
 
+  it("does not accept a previous finding marked still_blocking when the blocking section is empty", async () => {
+    const blockerId = createAutoReviewFindingId("code_review", "Keep the audit report scoped");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Keep the audit report scoped",
+          firstSeenIteration: 1,
+          lastSeenIteration: 1,
+          streak: 1,
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] code_review | still_blocking | Closure evidence is missing`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
+    }
+    expect(result.blockingFindings).toEqual([
+      expect.objectContaining({
+        id: blockerId,
+        text: "Closure evidence is missing",
+        streak: 2,
+      }),
+    ]);
+  });
+
+  it("accepts exact previous-finding closure when the structured review marks it resolved", async () => {
+    const blockerId = createAutoReviewFindingId("code_review", "Add null guard before plan sync");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Add null guard before plan sync",
+          firstSeenIteration: 1,
+          lastSeenIteration: 1,
+          streak: 1,
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] code_review | resolved | Guard is present in \`packages/agent/src/planSync.ts\` around the changed plan sync path`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Reviewed the changed guard path.",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.metrics).toEqual(
+      expect.objectContaining({
+        previousBlockingCount: 1,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      }),
+    );
+  });
+
+  it("does not accept a vague resolved note as previous-finding closure evidence", async () => {
+    const blockerId = createAutoReviewFindingId("code_review", "Add null guard before plan sync");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Add null guard before plan sync",
+          firstSeenIteration: 1,
+          lastSeenIteration: 1,
+          streak: 1,
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] code_review | resolved | fixed`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.handoffReason).toBe("malformed_review_output_fallback");
+    expect(result.autoReviewState.findings).toEqual([
+      expect.objectContaining({
+        id: blockerId,
+        source: "code_review",
+        text: "Add null guard before plan sync",
+        streak: 2,
+      }),
+    ]);
+  });
+
+  it("does not accept keyword-only resolved notes as concrete closure evidence", async () => {
+    const blockerId = createAutoReviewFindingId("code_review", "Add null guard before plan sync");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Add null guard before plan sync",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] code_review | resolved | verified in tests after applying the fix`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual([blockerId]);
+  });
+
+  it.each([
+    {
+      name: "strategy",
+      metadata: ["- Strategy: closure_first", "- Review Iteration: 2"],
+    },
+    {
+      name: "iteration",
+      metadata: ["- Strategy: full_re_review", "- Review Iteration: 1"],
+    },
+  ])("does not accept stale structured review metadata for $name", async ({ metadata }) => {
+    const blockerId = createAutoReviewFindingId("code_review", "Add null guard before plan sync");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Add null guard before plan sync",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        ...metadata,
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] code_review | resolved | Guard is present in \`packages/agent/src/planSync.ts\` around the changed plan sync path`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual([blockerId]);
+  });
+
+  it("does not accept structured success when previous findings are omitted", async () => {
+    const blockerId = createAutoReviewFindingId("code_review", "Add null guard before plan sync");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Add null guard before plan sync",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Looks good.",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.handoffReason).toBe("malformed_review_output_fallback");
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual([blockerId]);
+    expect(result.metrics).toEqual(
+      expect.objectContaining({
+        previousBlockingCount: 1,
+        stillBlockingCount: 1,
+        totalBlockingCount: 1,
+      }),
+    );
+  });
+
+  it("does not accept structured success when one of multiple previous findings is missing", async () => {
+    const firstId = createAutoReviewFindingId("code_review", "Add null guard before plan sync");
+    const secondId = createAutoReviewFindingId("security_audit", "Validate shell argument");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: firstId,
+          source: "code_review",
+          text: "Add null guard before plan sync",
+        },
+        {
+          id: secondId,
+          source: "security_audit",
+          text: "Validate shell argument",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${firstId}] code_review | resolved | Guard is present in \`packages/agent/src/planSync.ts\``,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual([
+      firstId,
+      secondId,
+    ]);
+  });
+
+  it("does not accept structured success when a previous finding has the wrong source", async () => {
+    const blockerId = createAutoReviewFindingId("code_review", "Add null guard before plan sync");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "code_review",
+          text: "Add null guard before plan sync",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] security_audit | resolved | Guard is present in \`packages/agent/src/planSync.ts\``,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.autoReviewState.findings).toEqual([
+      expect.objectContaining({
+        id: blockerId,
+        source: "code_review",
+      }),
+    ]);
+  });
+
   it("starts a fresh streak for a new blocker", async () => {
     const oldId = createAutoReviewFindingId("code_review", "Remove stale evidence");
     const newId = createAutoReviewFindingId("code_review", "Add current verification output");
@@ -428,7 +766,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "- Review Iteration: 2",
         "",
         "## Previous Findings",
-        `- [${oldId}] code_review | resolved | Stale evidence removed`,
+        `- [${oldId}] code_review | resolved | Stale evidence was removed from \`reports/audit.md\``,
         "",
         "## Blocking Findings",
         `- [${newId}] code_review | Add current verification output`,
@@ -472,7 +810,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "- Review Iteration: 2",
         "",
         "## Previous Findings",
-        `- [${previousId}] code_review | resolved | Banner is now shown in detail view`,
+        `- [${previousId}] code_review | resolved | Banner is now shown in \`packages/web/src/components/tasks/TaskDetail.tsx\``,
         "",
         "## Blocking Findings",
         `- [${newId}] code_review | Add manual review badge to done tasks`,
@@ -576,7 +914,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(executeSubagentQueryMock).not.toHaveBeenCalled();
   });
 
-  it("treats legacy blocking-none comments as resolved after previous fallback blockers when report evidence is substantive", async () => {
+  it("does not accept legacy blocking-none comments as closure proof after previous blockers", async () => {
     const root = initReportRepo();
     const previous = {
       id: createAutoReviewFindingId("review_gate", "Fix the report evidence citation"),
@@ -605,13 +943,17 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       },
     });
 
-    expect(result.status).toBe("success");
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.handoffReason).toBe("malformed_review_output_fallback");
     expect(result.metrics).toEqual(
       expect.objectContaining({
         previousBlockingCount: 1,
-        stillBlockingCount: 0,
+        stillBlockingCount: 1,
         newBlockingCount: 0,
-        totalBlockingCount: 0,
+        totalBlockingCount: 1,
         parserMode: "fallback",
       }),
     );

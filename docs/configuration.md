@@ -318,7 +318,7 @@ Auto-review persists its latest blocking snapshot on the task (`autoReviewState`
 - `full_re_review` keeps the legacy broad loop and remains the default.
 - `closure_first` verifies prior blockers before allowing another autonomous loop.
 - `AGENT_AUTO_REVIEW_STALL_THRESHOLD` defaults to `3` and counts consecutive appearances of the same persisted finding id. When a blocker reaches the threshold, the task is handed off for manual review instead of starting another identical rework loop.
-- When convergence needs human judgment, the task is marked `manualReviewRequired=true`. Stalled same-blocker loops and unchanged audit/report artifact rework are blocked as `blocked_external`; other manual handoffs may remain in `done` for explicit human triage.
+- When convergence needs human judgment, the task is marked `manualReviewRequired=true` and blocked as `blocked_external`. Unresolved findings, stalled same-blocker loops, and unchanged audit/report artifact rework do not move to `done`.
 
 ## Agent Permissions
 

@@ -45,3 +45,4 @@
 | [work-20260514-deterministic-audit-synthesis-closeout](work/work-20260514-deterministic-audit-synthesis-closeout.md)                           | done   | critical | yes  | Deterministic Audit Synthesis Closeout                    |
 | [work-20260514-harden-source-audit-report-production](work/work-20260514-harden-source-audit-report-production.md)                             | done   | critical | yes  | Harden Source Audit Report Production                     |
 | [work-20260514-surface-audit-trust-state-and-next-actions](work/work-20260514-surface-audit-trust-state-and-next-actions.md)                   | done   | high     | yes  | Surface Audit Trust State And Next Actions                |
+| [work-20260515-enforce-exact-rework-closure](work/work-20260515-enforce-exact-rework-closure.md)                                               | done   | critical | yes  | Enforce Exact Rework Closure Before Done                  |

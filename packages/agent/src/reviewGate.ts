@@ -360,13 +360,108 @@ function buildMetrics(input: {
   };
 }
 
+function buildMissingPreviousFindingHandoff(
+  input: ReviewGateInput,
+  metrics: ReviewGateMetrics,
+): ReviewGateResult {
+  const enrichedPreviousFindings = enrichBlockingFindings({
+    findings: input.previousFindings,
+    previousFindings: input.previousFindings,
+    iteration: input.iteration,
+  });
+  return {
+    status: "manual_review_required",
+    handoffReason: "malformed_review_output_fallback",
+    metrics: {
+      ...metrics,
+      stillBlockingCount: enrichedPreviousFindings.length,
+      totalBlockingCount: enrichedPreviousFindings.length,
+    },
+    blockingFindings: enrichedPreviousFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedPreviousFindings),
+    autoReviewState: toAutoReviewState({
+      strategy: input.strategy,
+      iteration: input.iteration,
+      findings: enrichedPreviousFindings,
+    }),
+  };
+}
+
+function parsedPreviousFindingsMatchInput(
+  input: ReviewGateInput,
+  parsed: ParsedStructuredReviewComments,
+): boolean {
+  if (input.previousFindings.length === 0) {
+    return parsed.previousFindings.length === 0;
+  }
+  if (parsed.previousFindings.length !== input.previousFindings.length) return false;
+
+  const expected = new Map(input.previousFindings.map((finding) => [finding.id, finding.source]));
+  const seen = new Set<string>();
+  for (const finding of parsed.previousFindings) {
+    if (seen.has(finding.id)) return false;
+    seen.add(finding.id);
+    if (expected.get(finding.id) !== finding.source) return false;
+  }
+
+  return seen.size === expected.size;
+}
+
+function parsedStructuredMetadataMatchesInput(
+  input: ReviewGateInput,
+  parsed: ParsedStructuredReviewComments,
+): boolean {
+  return parsed.strategy === input.strategy && parsed.iteration === input.iteration;
+}
+
+function resolvedPreviousFindingHasClosureEvidence(note: string): boolean {
+  const normalized = note.trim();
+  if (normalized.length < 24) return false;
+  if (
+    /^(fixed|done|resolved|addressed|handled|complete|completed|ok|okay|looks good|all good|verified|passes|pass|n\/a|none)\.?$/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+
+  return [
+    /`[^`]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|py|sh|ps1|css|scss|html)(?::\d+)?`/i,
+    /\b[\w./\\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|py|sh|ps1|css|scss|html)(?::\d+)?\b/i,
+    /\b(?:command|test|tests|lint|build|validator|git log)\b[^.]*\b(?:output|exit code|status|passed|failed|green)\b/i,
+    /\b(?:manifest|evidenceRefs?|scope coverage)\b[^.]*\b(?:present|bound|covered|validated|`[^`]+`|\[[^\]]+\]|ev-\w+)\b/i,
+    /\b(?:blocked_external|manualReviewRequired|autoReviewState)\b[^.]*\b(?:true|false|null|set|cleared|preserved|contains|=|:)\b/i,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function resolvedPreviousFindingsHaveClosureEvidence(
+  parsed: ParsedStructuredReviewComments,
+): boolean {
+  return parsed.previousFindings.every(
+    (finding) =>
+      finding.status === "still_blocking" ||
+      resolvedPreviousFindingHasClosureEvidence(finding.note),
+  );
+}
+
 function buildStructuredDecision(
   input: ReviewGateInput,
   parsed: ParsedStructuredReviewComments,
   deterministicFindings: AutoReviewFinding[],
 ): ReviewGateResult {
   const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
-  const blockingFindings = mergeFindings(parsed.blockingFindings, deterministicFindings);
+  const stillBlockingPreviousFindings = parsed.previousFindings
+    .filter((finding) => finding.status === "still_blocking")
+    .map((finding) => ({
+      id: finding.id,
+      source: finding.source,
+      text: finding.note,
+    }));
+  const blockingFindings = mergeFindings(
+    stillBlockingPreviousFindings,
+    parsed.blockingFindings,
+    deterministicFindings,
+  );
   const stillBlockingIds = new Set(
     parsed.previousFindings
       .filter((finding) => finding.status === "still_blocking")
@@ -385,6 +480,14 @@ function buildStructuredDecision(
     totalBlockingCount: blockingFindings.length,
     parserMode: "structured",
   });
+
+  if (
+    !parsedStructuredMetadataMatchesInput(input, parsed) ||
+    !parsedPreviousFindingsMatchInput(input, parsed) ||
+    !resolvedPreviousFindingsHaveClosureEvidence(parsed)
+  ) {
+    return buildMissingPreviousFindingHandoff(input, metrics);
+  }
 
   if (blockingFindings.length === 0) {
     if (requiresSubstantiveReviewEvidence(input)) {
@@ -538,6 +641,9 @@ function buildLegacyBlockingSectionDecision(
   });
 
   if (mergedBlockingFindings.length === 0) {
+    if (input.previousFindings.length > 0) {
+      return buildMissingPreviousFindingHandoff(input, metrics);
+    }
     if (requiresSubstantiveReviewEvidence(input)) {
       return buildSubstantiveEvidenceHandoff(input, metrics);
     }
