@@ -3089,6 +3089,140 @@ describe("coordinator", () => {
     expect(task!.autoReviewStateJson).toContain("new-fix");
   });
 
+  it("should route malformed audit report manual handoffs back into artifact rework", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-malformed-manual-handoff-");
+    execFileSync("git", ["checkout", "-b", "feature/audit-malformed-handoff"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "security.md"),
+      [
+        "# Audit",
+        "",
+        "## No validated findings",
+        "",
+        "Risk hypotheses: ownership boundaries are covered by the README fixture.",
+        "Checked files:",
+        "- `README.md:1`",
+        "Checked commands:",
+        '- Command `rg -n "audit fixture" README.md` output: `README.md:1:# audit fixture`',
+        "",
+        "```audit-report-manifest",
+        "{",
+        '  "version": 1,',
+        '  "auditPlanId": "task:task-audit-malformed-handoff",',
+        '  "taskId": "task-audit-malformed-handoff",',
+        '  "artifactPath": "audit/security.md"',
+        '  "contentSha256": "<computed_sha256>"',
+        "}",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/security.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add malformed audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-malformed-handoff-project", name: "Audit Malformed", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-malformed-handoff",
+        projectId: "audit-malformed-handoff-project",
+        title: "Audit architecture boundaries",
+        description: "Report artifact: audit/security.md",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-malformed-handoff",
+        reviewIterationCount: 1,
+        maxReviewIterations: 5,
+        agentActivityLog: [
+          "[2026-05-10T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-10T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-10T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-10T15:54:03.000Z] Tool: git_commit git commit",
+          "[2026-05-10T15:54:04.000Z] Agent: implement-coordinator complete",
+          "[2026-05-10T15:54:05.000Z] Agent: review-sidecar started",
+          "[2026-05-10T15:54:06.000Z] Tool: read_file audit/security.md",
+          "[2026-05-10T15:54:07.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-malformed-handoff-project",
+      roadmapAlias: "audit-malformed-handoff",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-malformed-handoff"],
+      artifacts: [
+        {
+          taskId: "task-audit-malformed-handoff",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "manual_review_required",
+      currentIteration: 2,
+      handoffReason: "malformed_review_output_fallback",
+      metrics: {
+        strategy: "closure_first",
+        iteration: 2,
+        previousBlockingCount: 1,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "fallback",
+      },
+      autoReviewState: {
+        strategy: "closure_first",
+        iteration: 2,
+        findings: [
+          {
+            id: "audit-contract-a",
+            source: "review_gate",
+            text: "Repair malformed audit report manifest",
+            firstSeenIteration: 2,
+            lastSeenIteration: 2,
+            streak: 1,
+          },
+        ],
+      },
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-audit-malformed-handoff")).get();
+    expect(task!.status).toBe("implementing");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("invalid_artifact_contract");
+    expect(task!.blockedReason).toContain("invalid_report_manifest");
+    expect(task!.blockedReason).toContain(
+      "manual_review_required: malformed_review_output_fallback",
+    );
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.reworkRequested).toBe(true);
+    expect(task!.reviewIterationCount).toBe(2);
+    expect(task!.autoReviewStateJson).toContain("audit-contract-a");
+
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    expect(artifact?.state).toBe("invalid");
+    expect(artifact?.failureFamily).toBe("invalid_artifact_contract");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact!.id);
+    expect(attempts.at(-1)?.reworkStatus).toBe("rework_requested");
+  });
+
   it("should not route audit report manual handoffs back into rework before max iterations", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-audit-manual-handoff-");

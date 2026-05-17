@@ -1745,7 +1745,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
             fromStatus: stage.inProgress,
             title: taskTitle,
             requireManualReview: true,
-            preventAuditRework: true,
+            preventAuditRework: outcome.handoffReason !== "malformed_review_output_fallback",
             extra: {
               blockedReason: manualBlockedReason,
               reworkRequested: false,
