@@ -33,6 +33,7 @@ let appSettingsState: RuntimeDefaultsState = {
 };
 let eligibleAppDefaultProfileIds = new Set<string>();
 const mockBroadcast = vi.fn();
+const mockAppendConfigAuditEvent = vi.fn();
 
 function resolveMockAppDefaultRuntimeProfileId(
   mode: "task" | "plan" | "review" | "chat",
@@ -92,6 +93,9 @@ vi.mock("@aif/data", () => ({
     }
     return undefined;
   },
+  listProjects: () => [],
+  listRuntimeProfiles: () => [],
+  appendConfigAuditEvent: (...args: unknown[]) => mockAppendConfigAuditEvent(...args),
   getAppSettings: () => appSettingsState,
   getAppDefaultRuntimeProfileId: (mode: "task" | "plan" | "review" | "chat") =>
     resolveMockAppDefaultRuntimeProfileId(mode),
@@ -147,6 +151,7 @@ describe("settings API — config routes", () => {
     };
     eligibleAppDefaultProfileIds = new Set(["global-task", "global-chat"]);
     mockBroadcast.mockReset();
+    mockAppendConfigAuditEvent.mockReset();
     // Clean up config file between tests
     try {
       rmSync(configPath);
