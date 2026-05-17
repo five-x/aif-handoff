@@ -2370,6 +2370,139 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain("passed strict validation");
   });
 
+  it("keeps incidental paths inside scoped command output out of repaired audit references", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, ".ai-factory", "config.yaml"),
+      [
+        "owner-area: runtime-audit",
+        "audit_mode: strict",
+        "description: .ai-factory/DESCRIPTION.md",
+        "architecture: .ai-factory/ARCHITECTURE.md",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "audit", "generic.md"),
+      [
+        "# Audit",
+        "",
+        "No validated findings.",
+        "",
+        "## Finding: Candidate",
+        "Evidence: `.ai-factory/config.yaml:1`",
+        "Risk: This was not verified.",
+        "Verification: expected command output would show the issue.",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", ".ai-factory/config.yaml", "audit/generic.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = [
+      "Scope: .ai-factory/config.yaml",
+      "Risk hypotheses:",
+      "- risk-config: .ai-factory/config.yaml owner-area defects are covered.",
+      "Report artifact: audit/generic.md",
+    ].join("\n");
+    db.insert(tasks)
+      .values({
+        id: "task-audit-scoped-config-repair",
+        projectId: "project-1",
+        title: "Audit scoped config",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "finding-missing-manifest",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (missing_report_manifest): missing source report manifest.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-scoped-config-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-scoped-config-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-scoped-config-repair",
+          role: "report",
+          artifactPath: "audit/generic.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-scoped-config-repair", projectRoot);
+
+    const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("`.ai-factory/config.yaml:1`");
+    expect(repaired).not.toContain(".ai-factory/DESCRIPTION.md");
+    expect(repaired).not.toContain(".ai-factory/ARCHITECTURE.md");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-scoped-config-repair");
+    if (!artifact) throw new Error("missing scoped config repair artifact");
+    const auditEvidenceUnits = listAuditEvidenceEvents({
+      taskId: "task-audit-scoped-config-repair",
+      auditPlanId: `batch:${artifact.batchId}:task:task-audit-scoped-config-repair`,
+    });
+    const validation = validateAuditReportArtifact({
+      text: repaired,
+      projectRoot,
+      taskId: "task-audit-scoped-config-repair",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/generic.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits,
+      requireLedgerEvidence: true,
+    });
+    expect(validation.ok).toBe(true);
+    expect(validation.missingReferencedPaths).toEqual([]);
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
+    expect(listRoadmapBatchArtifactAttempts(artifact.id)[0]?.classification).toBe(
+      "validated_no_findings",
+    );
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-scoped-config-repair"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain("passed strict validation");
+  });
+
   it("keeps deterministic no-findings repair trusted when evidence is risk-specific", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });

@@ -1579,7 +1579,7 @@ function buildDeterministicAuditReportRepairContent(input: {
     const lineRefs = inspectionTargets
       .map((file) => firstAuditRepairLineEvidenceRef(input.projectRoot, file))
       .filter((ref): ref is string => Boolean(ref));
-    const gitArgs = ["grep", "-n", "-m", "5", ".", "--", root];
+    const gitArgs = ["grep", "-n", "-m", "1", ".", "--", root];
     const command = runGitCapture(input.projectRoot, gitArgs);
     const evidenceUnit =
       lineRefs.length > 0 && command.exitCode === 0
@@ -1623,7 +1623,7 @@ function buildDeterministicAuditReportRepairContent(input: {
                 "grep",
                 "-n",
                 "-m",
-                "5",
+                "1",
                 "-E",
                 pattern,
                 "--",
