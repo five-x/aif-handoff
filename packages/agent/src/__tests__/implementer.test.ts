@@ -1473,6 +1473,8 @@ describe("runImplementer rework behavior", () => {
         status: "implementing",
         plan: "## Plan\n- [ ] Repair audit report",
         reworkRequested: true,
+        blockedReason:
+          "Audit report validator blocked completion (missing_report_manifest): missing source report manifest.",
         useSubagents: true,
         autoReviewStateJson: JSON.stringify({
           strategy: "full_re_review",
@@ -2500,6 +2502,7 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-audit-scoped-config-repair"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.blockedReason).toBeNull();
     expect(updatedTask?.implementationLog).toContain("passed strict validation");
   });
 
@@ -2558,6 +2561,8 @@ describe("runImplementer rework behavior", () => {
         status: "implementing",
         plan: "## Plan\n- [ ] Repair audit report",
         reworkRequested: true,
+        blockedReason:
+          "Audit report validator blocked completion (missing_report_manifest): missing source report manifest.",
         useSubagents: true,
         reviewComments: "## Blocking Findings\n- Generic candidate finding must be repaired.",
         autoReviewStateJson: JSON.stringify({
@@ -2619,6 +2624,13 @@ describe("runImplementer rework behavior", () => {
       requireLedgerEvidence: true,
     });
     expect(validation.ok).toBe(true);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-risk-specific-repair"))
+      .get();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.blockedReason).toBeNull();
   });
 
   it("skips runtime repair when retrying an already-valid audit report after timeout", async () => {
@@ -2702,6 +2714,8 @@ describe("runImplementer rework behavior", () => {
         status: "implementing",
         plan: "## Plan\n- [ ] Repair audit report",
         reworkRequested: true,
+        blockedReason:
+          "Audit report validator blocked completion (missing_report_file_references): retry after timeout.",
         useSubagents: true,
         reviewComments: [
           "## Auto Review Metadata",
@@ -2738,6 +2752,7 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-audit-timeout-valid-report"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.blockedReason).toBeNull();
     expect(updatedTask?.implementationLog).toContain("already valid before rework");
   });
 

@@ -3079,6 +3079,10 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
+      blockedReason: null,
+      blockedFromStatus: null,
+      retryAfter: null,
+      manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
@@ -3173,9 +3177,18 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       artifactPath: expectedAuditReportArtifactPath,
     });
     const resultText = repairResult.resultText;
+    const acceptedRepair = repairResult.status === "accepted";
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
+      ...(acceptedRepair
+        ? {
+            blockedReason: null,
+            blockedFromStatus: null,
+            retryAfter: null,
+            manualReviewRequired: false,
+          }
+        : {}),
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
