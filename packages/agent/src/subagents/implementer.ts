@@ -594,6 +594,7 @@ interface AuditFindingSection {
 interface AuditSourceReportSummary {
   artifact: ValidatedAuditArtifactContent;
   includedFindings: AuditFindingSection[];
+  omittedFindings: AuditFindingSection[];
   omittedFindingCount: number;
 }
 
@@ -673,13 +674,13 @@ function formatAuditCardDecisionRow(input: {
     `\`${formatMarkdownTableCell(input.taskId)}\``,
     formatMarkdownTableCell(input.decision.otzRequirement),
     formatMarkdownTableCell(formatAuditCardList(input.decision.acceptanceCriteria)),
+    `\`${input.decision.requirementCompletion}\``,
     formatMarkdownTableCell(formatAuditCardList(input.decision.implementationEvidence)),
     formatMarkdownTableCell(formatAuditCardList(input.decision.verificationEvidence)),
+    `\`${input.decision.verificationStrength}\``,
     String(input.decision.auditFindingValidity.validFindings),
-    String(
-      input.decision.auditFindingValidity.weakFindings +
-        input.decision.auditFindingValidity.discardedFindings,
-    ),
+    String(input.decision.auditFindingValidity.weakFindings),
+    String(input.decision.auditFindingValidity.discardedFindings),
     formatMarkdownTableCell(formatAuditCardList(input.decision.residualRisks)),
     `\`${input.decision.finalStatus}\``,
   ].join(" | ");
@@ -751,11 +752,56 @@ function buildAuditCardDecisionSection(
   return [
     "## Card Decision Matrix",
     "",
-    "| Source report | Task | OTZ requirement | Acceptance criteria | Implementation evidence | Verification evidence | Valid findings | Weak/discarded findings | Residual risks | Final decision |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Source report | Task | OTZ requirement | Acceptance criteria | Requirement completion | Implementation evidence | Verification evidence | Verification strength | Valid findings | Weak findings | Discarded findings | Residual risks | Final decision |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...rows.map((row) => `| ${row} |`),
     "",
   ];
+}
+
+function buildWeakOrDiscardedFindingsSection(
+  sourceSummaries: AuditSourceReportSummary[],
+  weakArtifacts: WeakAuditArtifactSummary[],
+): string[] {
+  const lines = ["## Weak/discarded findings", ""];
+  let entryCount = 0;
+
+  sourceSummaries.forEach((summary) => {
+    summary.omittedFindings.forEach((finding) => {
+      entryCount += 1;
+      lines.push(`### Omitted Finding ${entryCount}`);
+      lines.push("");
+      lines.push(`Source report: \`${finding.artifactPath}\` (task ${finding.taskId})`);
+      lines.push(
+        `Decision: discarded from synthesis output because the finding did not satisfy the strict evidence contract.`,
+      );
+      lines.push("");
+      lines.push(finding.content.trim());
+      lines.push("");
+    });
+  });
+
+  weakArtifacts.forEach((artifact) => {
+    entryCount += 1;
+    lines.push(`### Weak Source Report ${entryCount}`);
+    lines.push("");
+    lines.push(`Source report: \`${artifact.artifactPath}\` (task ${artifact.taskId})`);
+    lines.push(
+      `Decision: discarded from synthesis findings because the source report state is \`${artifact.state}\`.`,
+    );
+    lines.push(`Failure family: ${artifact.failureFamily ?? "none"}`);
+    if (artifact.validationDetails) {
+      lines.push(`Validation details: ${artifact.validationDetails.replace(/\n/g, "\n")}`);
+    }
+    lines.push("");
+  });
+
+  if (entryCount === 0) {
+    lines.push("No weak or discarded findings were omitted from the synthesis output.");
+    lines.push("");
+  }
+
+  return lines;
 }
 
 const AUDIT_EVIDENCE_REPAIR_MARKER = "audit_evidence_repair_required";
@@ -2044,10 +2090,19 @@ function summarizeValidatedAuditArtifactsForSynthesis(
         taskId: artifact.taskId,
         content: section,
       }));
+    const includedContent = new Set(includedFindings.map((finding) => finding.content));
+    const omittedFindings = findingSections
+      .filter((section) => !includedContent.has(section))
+      .map((section) => ({
+        artifactPath: artifact.artifactPath,
+        taskId: artifact.taskId,
+        content: section,
+      }));
     return {
       artifact,
       includedFindings,
-      omittedFindingCount: findingSections.length - includedFindings.length,
+      omittedFindings,
+      omittedFindingCount: omittedFindings.length,
     };
   });
 }
@@ -2127,6 +2182,7 @@ function buildDeterministicAuditSynthesisContent(
       "",
       ...childReportStatusSection,
       ...cardDecisionSection,
+      ...buildWeakOrDiscardedFindingsSection(sourceSummaries, weakArtifacts),
       "## Source Reports Checked",
       "",
       sourceSummaries.length > 0
@@ -2229,6 +2285,7 @@ function buildDeterministicAuditSynthesisContent(
       "",
       ...childReportStatusSection,
       ...cardDecisionSection,
+      ...buildWeakOrDiscardedFindingsSection(sourceSummaries, weakArtifacts),
       "## Source Reports Checked",
       "",
       sourceSummaries.length > 0
@@ -2323,6 +2380,7 @@ function buildDeterministicAuditSynthesisContent(
     "",
     ...childReportStatusSection,
     ...cardDecisionSection,
+    ...buildWeakOrDiscardedFindingsSection(sourceSummaries, weakArtifacts),
     "## Source Reports",
     "",
     sourceSummaries.length > 0

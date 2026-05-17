@@ -33,6 +33,7 @@ import { AlertBox } from "@/components/ui/alert-box";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { getPlanQualityPresentation } from "@/lib/planQuality";
+import { getAuditCardDecisionRows } from "@/lib/artifactTrust";
 import { formatTokenCount, formatUsd } from "@/lib/formatters";
 import {
   redactProviderText,
@@ -466,6 +467,9 @@ function OverviewView({
   projectQueue?: ProjectQueueStateResponse | null;
 }) {
   const trust = task.artifactTrust;
+  const auditCardDecisionRows = trust?.auditCardDecision
+    ? getAuditCardDecisionRows(trust.auditCardDecision)
+    : [];
   const memoryCount = task.memoryCandidateCount ?? 0;
   const activeQueueCount =
     (projectQueue?.countsByStatus.backlog ?? 0) +
@@ -493,6 +497,12 @@ function OverviewView({
       {trust?.summary && (
         <div className="border border-border/70 bg-muted/20 p-3 text-xs text-muted-foreground">
           {trust.summary}
+        </div>
+      )}
+      {auditCardDecisionRows.length > 0 && (
+        <div className="border border-border/70 bg-muted/20 p-3 text-xs">
+          <div className="mb-2 font-semibold text-foreground">Audit card decision</div>
+          <DetailRows rows={auditCardDecisionRows} />
         </div>
       )}
       <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4">

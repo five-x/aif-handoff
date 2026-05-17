@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260517-wire-audit-card-decision-output::project-capsule
+memory_id: task::aif-handoff::work::work-20260517-wire-audit-card-decision-output::decision-6f6f5bd3c226b8e7
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: work-20260517-wire-audit-card-decision-output
 source_path: docs/rdpi/work/work-20260517-wire-audit-card-decision-output
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: decision
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- decision
   source_refs:
 - docs/rdpi/work/work-20260517-wire-audit-card-decision-output/research.md
 - docs/rdpi/work/work-20260517-wire-audit-card-decision-output/design.md
@@ -35,16 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260517-wire-audit-card-decision-output.
+Treat `classifyAuditCardDecision()` as the final audit-card decision layer, while keeping strict evidence validation as the gate that decides whether an artifact is acceptable.
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable decision made during the task.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same design pressure appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
+Do not reuse when the constraints that justified the decision changed.

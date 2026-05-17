@@ -151,9 +151,13 @@ import {
   type AuditEvidenceGrade,
   type AuditEvidenceRedactionStatus,
   buildAuditFailureSignature,
+  AUDIT_CARD_VERIFICATION_STRENGTHS,
+  classifyAuditCardDecision,
   isTerminalAuditArtifactState,
   isTerminalAuditReworkStatus,
   selectAuditArtifactFailureFamily,
+  type AuditCardDecision,
+  type AuditCardVerificationStrength,
   type AuditArtifactState,
   type AuditArtifactReworkStatus,
   type AuditFailureFamily,
@@ -4662,6 +4666,7 @@ const TRUSTED_AUDIT_SOURCE_CLASSIFICATIONS = new Set([
   "validated_findings_present",
   "validated_no_findings",
 ]);
+const AUDIT_CARD_VERIFICATION_STRENGTH_SET = new Set<string>(AUDIT_CARD_VERIFICATION_STRENGTHS);
 
 function parseValidationDetails(raw: string | null | undefined): unknown {
   if (!raw) return null;
@@ -4670,6 +4675,93 @@ function parseValidationDetails(raw: string | null | undefined): unknown {
   } catch {
     return null;
   }
+}
+
+function readStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function readNonNegativeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizePersistedAuditCardDecision(value: unknown): AuditCardDecision | null {
+  if (!isObjectRecord(value)) return null;
+  const verificationStrength = AUDIT_CARD_VERIFICATION_STRENGTH_SET.has(
+    String(value.verificationStrength),
+  )
+    ? (value.verificationStrength as AuditCardVerificationStrength)
+    : "missing";
+  const auditFindingValidity = isObjectRecord(value.auditFindingValidity)
+    ? value.auditFindingValidity
+    : {};
+  const requirementCompletion =
+    typeof value.requirementCompletion === "string" ? value.requirementCompletion : null;
+  return classifyAuditCardDecision({
+    otzRequirement:
+      typeof value.otzRequirement === "string" && value.otzRequirement.trim().length > 0
+        ? value.otzRequirement
+        : "Produce an accepted audit artifact for the scoped OTZ card.",
+    acceptanceCriteria: readStringList(value.acceptanceCriteria),
+    otzAcceptanceSatisfied: requirementCompletion === "satisfied",
+    implementationEvidence: readStringList(value.implementationEvidence),
+    verificationEvidence: readStringList(value.verificationEvidence),
+    verificationStrength,
+    validFindingCount: readNonNegativeInteger(auditFindingValidity.validFindings),
+    weakFindingCount: readNonNegativeInteger(auditFindingValidity.weakFindings),
+    discardedFindingCount: readNonNegativeInteger(auditFindingValidity.discardedFindings),
+    residualRisks: readStringList(value.residualRisks),
+  });
+}
+
+function readAuditCardDecision(value: unknown): AuditCardDecision | null {
+  if (!isObjectRecord(value)) return null;
+  const direct = normalizePersistedAuditCardDecision(value.auditCardDecision);
+  if (direct) return direct;
+  const evidence = value.evidence;
+  if (isObjectRecord(evidence)) return readAuditCardDecision(evidence);
+  return null;
+}
+
+function fallbackAuditCardDecisionForArtifact(input: {
+  artifact: RoadmapBatchArtifactRow;
+  trustedSynthesisInput: boolean;
+}): AuditCardDecision | null {
+  if (!input.trustedSynthesisInput) return null;
+  return classifyAuditCardDecision({
+    otzRequirement:
+      input.artifact.role === "synthesis"
+        ? "Produce an accepted audit synthesis for the scoped OTZ card."
+        : "Produce an accepted audit source report for the scoped OTZ card.",
+    acceptanceCriteria: [
+      "Artifact state is valid.",
+      "Artifact evidence is trusted for the audit workflow.",
+    ],
+    otzAcceptanceSatisfied: true,
+    implementationEvidence: [input.artifact.artifactPath],
+    verificationEvidence: ["artifact trust validation accepted this artifact"],
+    verificationStrength: "verified",
+    validFindingCount: 0,
+    weakFindingCount: 0,
+    discardedFindingCount: 0,
+    residualRisks: [],
+  });
+}
+
+function auditCardDecisionForArtifact(input: {
+  artifact: RoadmapBatchArtifactRow;
+  validationDetails: unknown;
+  trustedSynthesisInput: boolean;
+}): AuditCardDecision | null {
+  return (
+    readAuditCardDecision(input.validationDetails) ??
+    fallbackAuditCardDecisionForArtifact({
+      artifact: input.artifact,
+      trustedSynthesisInput: input.trustedSynthesisInput,
+    })
+  );
 }
 
 function readAuditSourceClassification(value: unknown): string | null {
@@ -5569,6 +5661,7 @@ function buildGenericTaskArtifactTrustRollup(task: TaskRow): TaskArtifactTrustRo
     branchName: task.branchName,
     worktreePath: task.worktreePath,
     batchCounts: buildGenericArtifactTrustBatchCounts(projection.artifacts, projection.claims),
+    auditCardDecision: null,
   };
 }
 
@@ -5588,6 +5681,12 @@ export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustR
   const latestAttempt = listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null;
   const summary = summarizeRoadmapArtifacts(batch, artifacts);
   const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
+  const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
+  const auditCardDecision = auditCardDecisionForArtifact({
+    artifact,
+    validationDetails,
+    trustedSynthesisInput,
+  });
   const nextAction = buildArtifactTrustNextAction({
     artifact,
     synthesisReady: summary.synthesisReady,
@@ -5622,6 +5721,7 @@ export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustR
     branchName: artifact.branchName,
     worktreePath: artifact.worktreePath,
     batchCounts: buildArtifactTrustBatchCounts(artifacts),
+    auditCardDecision,
   };
 }
 
@@ -6009,6 +6109,8 @@ function listRoadmapBatchArtifactsByTaskId(taskId: string): RoadmapBatchArtifact
 }
 
 function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimelineArtifact {
+  const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
+  const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
   return {
     id: artifact.id,
     taskId: artifact.taskId,
@@ -6026,12 +6128,17 @@ function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimel
       batchId: artifact.batchId,
       originalState: artifact.state,
       failureFamily: artifact.failureFamily,
-      validationDetails: parseValidationDetails(artifact.validationDetailsJson),
+      validationDetails,
+      auditCardDecision: auditCardDecisionForArtifact({
+        artifact,
+        validationDetails,
+        trustedSynthesisInput,
+      }),
       reasonCodes: buildArtifactTrustReasonCodes({
         artifact,
         latestAttempt: listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null,
         synthesisReady: true,
-        trustedSynthesisInput: artifactTrustedForSynthesisInput(artifact),
+        trustedSynthesisInput,
       }),
       failureSignature: artifact.failureSignature,
       attemptBoundaryId: artifact.attemptBoundaryId,
@@ -6154,8 +6261,10 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
 
   const workflowArtifacts = artifacts.map(buildWorkflowArtifact);
   const workflowAttempts = attempts.map(buildWorkflowAttempt);
-  const currentClaims = artifacts.map((artifact) =>
-    buildWorkflowClaim({
+  const currentClaims = artifacts.map((artifact) => {
+    const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
+    const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
+    return buildWorkflowClaim({
       id: `${artifact.id}:claim:current`,
       artifactId: artifact.id,
       taskId: artifact.taskId,
@@ -6169,17 +6278,22 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
         roadmapAlias: artifact.roadmapAlias,
         originalState: artifact.state,
         failureFamily: artifact.failureFamily,
-        validationDetails: parseValidationDetails(artifact.validationDetailsJson),
+        validationDetails,
+        auditCardDecision: auditCardDecisionForArtifact({
+          artifact,
+          validationDetails,
+          trustedSynthesisInput,
+        }),
         reasonCodes: buildArtifactTrustReasonCodes({
           artifact,
           latestAttempt: listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null,
           synthesisReady: true,
-          trustedSynthesisInput: artifactTrustedForSynthesisInput(artifact),
+          trustedSynthesisInput,
         }),
         failureSignature: artifact.failureSignature,
       },
-    }),
-  );
+    });
+  });
   const attemptClaims = attempts.map((attempt) =>
     buildWorkflowClaim({
       id: `${attempt.id}:claim`,

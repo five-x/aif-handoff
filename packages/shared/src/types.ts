@@ -1,4 +1,5 @@
 import type { ImplementationManifest } from "./implementationManifest.js";
+import type { AuditCardDecision } from "./auditCardDecision.js";
 import type { TaskIntent } from "./taskIntent.js";
 
 export const TASK_STATUSES = [
@@ -343,6 +344,7 @@ export interface TaskArtifactTrustRollup {
   branchName: string | null;
   worktreePath: string | null;
   batchCounts: TaskArtifactTrustBatchCounts;
+  auditCardDecision?: AuditCardDecision | null;
 }
 
 export type WorkflowTimelineEvidenceLinkRelation = "supports" | "refutes" | "context";

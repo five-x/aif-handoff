@@ -238,6 +238,19 @@ export {
 export { HUMAN_ACTIONS_BY_STATUS } from "./stateMachine.js";
 export { withTimeout } from "./withTimeout.js";
 export {
+  AUDIT_CARD_FINAL_STATUSES,
+  AUDIT_CARD_VERIFICATION_STRENGTHS,
+  buildAuditCardDecisionFromReport,
+  classifyAuditCardDecision,
+  extractWeakOrDiscardedAuditFindings,
+  type AuditCardDecision,
+  type AuditCardDecisionInput,
+  type AuditCardFinalStatus,
+  type AuditCardVerificationStrength,
+  type BuildAuditCardDecisionFromReportInput,
+  type WeakOrDiscardedAuditFinding,
+} from "./auditCardDecision.js";
+export {
   buildRuntimeLimitSignature,
   normalizeRuntimeLimitSnapshot,
   redactProviderText,

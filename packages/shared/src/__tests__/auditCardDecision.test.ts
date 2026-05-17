@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyAuditCardDecision } from "../auditCardDecision.js";
+import {
+  buildAuditCardDecisionFromReport,
+  classifyAuditCardDecision,
+  extractWeakOrDiscardedAuditFindings,
+} from "../auditCardDecision.js";
 
 function baseInput() {
   return {
@@ -75,6 +79,57 @@ describe("auditCardDecision", () => {
     expect(decision.auditFindingValidity).toEqual({
       validFindings: 2,
       weakFindings: 3,
+      discardedFindings: 1,
+    });
+  });
+
+  it("builds final report decisions without promoting weak/discarded sections to status blockers", () => {
+    const reportText = [
+      "# Audit",
+      "",
+      "## No validated findings",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `README.md:2`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
+      "",
+      "## Weak/discarded findings",
+      "- Weak unsupported claim references missing file `missing.ts:99`.",
+      "- Discarded claim was omitted because it had no verification output.",
+      "",
+    ].join("\n");
+
+    expect(extractWeakOrDiscardedAuditFindings(reportText)).toEqual([
+      {
+        kind: "weak",
+        text: "Weak unsupported claim references missing file `missing.ts:99`.",
+      },
+      {
+        kind: "discarded",
+        text: "Discarded claim was omitted because it had no verification output.",
+      },
+    ]);
+
+    const decision = buildAuditCardDecisionFromReport({
+      otzRequirement: "Complete the OTZ card.",
+      acceptanceCriteria: ["AC1 is satisfied."],
+      otzAcceptanceSatisfied: true,
+      implementationEvidence: ["commit abc123"],
+      verificationEvidence: ["npm test passed"],
+      verificationStrength: "verified",
+      residualRisks: [],
+      reportText,
+    });
+
+    expect(decision.finalStatus).toBe("closed_verified");
+    expect(decision.requirementCompletion).toBe("satisfied");
+    expect(decision.verificationStrength).toBe("verified");
+    expect(decision.auditFindingValidity).toEqual({
+      validFindings: 0,
+      weakFindings: 1,
       discardedFindings: 1,
     });
   });

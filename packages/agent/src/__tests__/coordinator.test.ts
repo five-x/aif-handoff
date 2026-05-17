@@ -9,6 +9,8 @@ import {
   usageEvents,
   resetEnvCache,
   formatAuditSynthesisOutcomeForArtifact,
+  buildAuditEvidencePayload,
+  buildAuditEvidenceUnit,
   computeAuditReportContentSha256,
   computeAuditReportArtifactSha256,
 } from "@aif/shared";
@@ -100,6 +102,8 @@ const { runReviewer } = await import("../subagents/reviewer.js");
 const { handleAutoReviewGate } = await import("../autoReviewHandler.js");
 const { readGitWorktreeReworkSnapshot } = await import("../reworkSnapshot.js");
 const {
+  appendEvidenceUnitEvent,
+  buildTaskArtifactTrustRollup,
   createRoadmapBatchContract,
   listRoadmapBatchArtifactAttempts,
   listRoadmapBatchArtifacts,
@@ -1871,6 +1875,182 @@ describe("coordinator", () => {
       issues?: Array<{ code: string }>;
     };
     expect(details.issues?.map((issue) => issue.code)).toContain("missing_audit_evidence_ref");
+  });
+
+  it("persists closed_verified audit card decisions for valid no-findings reports with weak sections", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-card-decision-");
+    execFileSync("git", ["checkout", "-b", "feature/audit-card-decision"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    const taskId = "task-audit-card-decision";
+    const artifactPath = "audit/security.md";
+    db.insert(projects)
+      .values({ id: "audit-card-decision-project", name: "Audit Card Decision", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: taskId,
+        projectId: "audit-card-decision-project",
+        title: "Audit weak discarded card output",
+        description:
+          "Scope: README.md\nReport artifact: audit/security.md\nEvidence requirements: every no-findings claim must cite runtime ledger evidence.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-card-decision",
+        agentActivityLog: [
+          "[2026-05-10T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-10T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-10T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-10T15:54:03.000Z] Tool: git_commit git commit",
+          "[2026-05-10T15:54:04.000Z] Agent: implement-coordinator complete",
+          "[2026-05-10T15:54:05.000Z] Agent: review-sidecar started",
+          "[2026-05-10T15:54:06.000Z] Tool: read_file audit/security.md",
+          "[2026-05-10T15:54:07.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-card-decision-project",
+      roadmapAlias: "audit-card-decision",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: [taskId],
+      artifacts: [
+        {
+          taskId,
+          role: "report",
+          artifactPath,
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    const snapshot = currentGitSnapshot(rootPath);
+    const auditPlanId = `batch:${batch.batchId}:task:${taskId}`;
+    appendEvidenceUnitEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId,
+          auditPlanId,
+          sourceSnapshotId: snapshot.id,
+          scopeIds: ["README.md"],
+          riskHypothesisIds: ["risk-1"],
+        },
+        buildAuditEvidencePayload({
+          id: "ev-1",
+          toolName: "rg",
+          evidenceKind: "shell_command",
+          evidenceGrade: "substantive",
+          paths: ["README.md"],
+          pathRanges: [{ path: "README.md", startLine: 2, endLine: 2 }],
+          command: 'rg -n "runtime audit" README.md',
+          exitCode: 0,
+          output: "README.md:2:runtime audit evidence",
+        }),
+      ),
+    );
+
+    const body = [
+      "# Audit",
+      "",
+      "## No validated findings",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `README.md:2` runtime evidence refs were covered and absent.",
+      "",
+      "Checked files:",
+      "- `README.md:2`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
+      "",
+      "## Weak/discarded findings",
+      "- Weak unsupported claim references missing file `missing.ts:99` and lacks command output.",
+      "- Discarded claim was omitted because it only cited unsupported external notes.",
+      "",
+    ].join("\n");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, artifactPath),
+      withAuditManifest({
+        body,
+        taskId,
+        batchId: batch.batchId,
+        artifactPath,
+        snapshot,
+      }),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add valid audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+    expect(task?.status).toBe("done");
+    expect(task?.manualReviewRequired).toBe(false);
+    expect(task?.blockedReason ?? "").not.toMatch(
+      /rework_required|blocked_external|source_inconclusive|weak_sources|manual_review/i,
+    );
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    expect(artifact?.state).toBe("valid");
+    expect(artifact?.failureFamily).toBeNull();
+    const details = JSON.parse(artifact?.validationDetailsJson ?? "{}") as {
+      auditCardDecision?: {
+        requirementCompletion: string;
+        verificationStrength: string;
+        auditFindingValidity: {
+          validFindings: number;
+          weakFindings: number;
+          discardedFindings: number;
+        };
+        residualRisks: string[];
+        finalStatus: string;
+      };
+      issues?: Array<{ code: string }>;
+    };
+    expect(details.issues ?? []).toEqual([]);
+    expect(details.auditCardDecision).toEqual(
+      expect.objectContaining({
+        requirementCompletion: "satisfied",
+        verificationStrength: "verified",
+        auditFindingValidity: {
+          validFindings: 0,
+          weakFindings: 1,
+          discardedFindings: 1,
+        },
+        residualRisks: [],
+        finalStatus: "closed_verified",
+      }),
+    );
+    const trust = buildTaskArtifactTrustRollup(taskId);
+    expect(trust).toEqual(
+      expect.objectContaining({
+        taskStatus: "done",
+        artifactState: "valid",
+        artifactTrustLevel: "trusted",
+        auditCardDecision: expect.objectContaining({
+          requirementCompletion: "satisfied",
+          verificationStrength: "verified",
+          auditFindingValidity: {
+            validFindings: 0,
+            weakFindings: 1,
+            discardedFindings: 1,
+          },
+          residualRisks: [],
+          finalStatus: "closed_verified",
+        }),
+      }),
+    );
+    expect(trust?.reasonCodes).not.toEqual(
+      expect.arrayContaining(["rework_required", "source_inconclusive", "weak_sources"]),
+    );
   });
 
   it("should auto-recover stale implementing task to blocked_external", async () => {

@@ -418,6 +418,55 @@ describe("TaskDetailHeader", () => {
     ).toBeDefined();
   });
 
+  it("renders audit card decision fields without manual review from weak counts", () => {
+    render(
+      <TaskDetailHeader
+        task={{
+          ...baseTask,
+          status: "done",
+          manualReviewRequired: false,
+          artifactTrust: artifactTrust({
+            taskStatus: "done",
+            trustedSynthesisInput: true,
+            artifactTrustLevel: "trusted",
+            artifactState: "valid",
+            auditCardDecision: {
+              otzRequirement: "Ship deterministic audit synthesis.",
+              acceptanceCriteria: ["Decision fields are visible."],
+              implementationEvidence: ["packages/agent/src/subagents/implementer.ts"],
+              verificationEvidence: ["npm test"],
+              requirementCompletion: "satisfied",
+              verificationStrength: "verified",
+              auditFindingValidity: {
+                validFindings: 1,
+                weakFindings: 2,
+                discardedFindings: 3,
+              },
+              residualRisks: ["Weak findings were omitted."],
+              finalStatus: "closed_verified",
+            },
+          }),
+        }}
+        activeTab="timeline"
+        onTabChange={vi.fn()}
+        onActionClick={vi.fn()}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Audit decision: closed_verified")).toBeDefined();
+    expect(screen.getByText("Requirement: satisfied")).toBeDefined();
+    expect(screen.getByText("Verification: verified")).toBeDefined();
+    expect(screen.getByText("Weak: 2")).toBeDefined();
+    expect(screen.getByText("Discarded: 3")).toBeDefined();
+    expect(screen.getByText("Residual risks: Weak findings were omitted.")).toBeDefined();
+    expect(screen.queryByText("MANUAL REVIEW")).toBeNull();
+  });
+
   it("renders plan quality replan feedback outside blocked status", () => {
     render(
       <TaskDetailHeader

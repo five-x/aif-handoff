@@ -152,6 +152,58 @@ const mockBlockedTask: Task = {
   blockedReason: "rate limit",
 };
 
+const mockAuditDecisionTask: Task = {
+  ...mockTask,
+  id: "detail-audit-decision",
+  title: "Audit Decision Task",
+  artifactTrust: {
+    taskStatus: "done",
+    artifactRole: "synthesis",
+    artifactState: "valid",
+    artifactTrustLevel: "trusted",
+    claimOutcome: "supported",
+    failureFamily: null,
+    reasonCodes: [],
+    latestAttemptOutcome: "accepted",
+    trustedSynthesisInput: true,
+    synthesisReady: true,
+    nextAction: "none",
+    nextActionLabel: "None",
+    summary: "Done with trusted audit decision",
+    artifactPath: "audit/summary.md",
+    batchId: "batch-audit",
+    roadmapAlias: "audit",
+    attemptNumber: 1,
+    failureSignature: null,
+    branchName: null,
+    worktreePath: null,
+    batchCounts: {
+      trustedValid: 1,
+      inconclusive: 0,
+      rejected: 0,
+      missing: 0,
+      externalBlocked: 0,
+      synthesisPending: 0,
+      total: 1,
+    },
+    auditCardDecision: {
+      otzRequirement: "Synthesize audit cards.",
+      acceptanceCriteria: ["Decision fields are present."],
+      implementationEvidence: ["audit/summary.md"],
+      verificationEvidence: ["npm test"],
+      requirementCompletion: "satisfied",
+      verificationStrength: "verified",
+      auditFindingValidity: {
+        validFindings: 1,
+        weakFindings: 2,
+        discardedFindings: 3,
+      },
+      residualRisks: ["Omitted weak findings remain listed."],
+      finalStatus: "closed_verified",
+    },
+  },
+};
+
 const mockPlanReadyManualTask: Task = {
   ...mockTask,
   id: "detail-plan-ready-manual",
@@ -237,17 +289,19 @@ vi.mock("@/hooks/useTasks", () => ({
                   ? mockBacklogTask
                   : id === "detail-blocked"
                     ? mockBlockedTask
-                    : id === "detail-plan-ready-manual"
-                      ? mockPlanReadyManualTask
-                      : id === "detail-review"
-                        ? mockReviewTask
-                        : id === "detail-with-attachment"
-                          ? mockTaskWithAttachment
-                          : id === "detail-no-plan-no-log"
-                            ? mockTaskNoPlanNoLog
-                            : id === "detail-planning-activity"
-                              ? mockPlanningTaskWithActivityOnly
-                              : null,
+                    : id === "detail-audit-decision"
+                      ? mockAuditDecisionTask
+                      : id === "detail-plan-ready-manual"
+                        ? mockPlanReadyManualTask
+                        : id === "detail-review"
+                          ? mockReviewTask
+                          : id === "detail-with-attachment"
+                            ? mockTaskWithAttachment
+                            : id === "detail-no-plan-no-log"
+                              ? mockTaskNoPlanNoLog
+                              : id === "detail-planning-activity"
+                                ? mockPlanningTaskWithActivityOnly
+                                : null,
   }),
   useTaskTimeline: () => ({ data: null, isLoading: false }),
   useTaskEvidence: () => ({ data: null, isLoading: false }),
@@ -478,6 +532,25 @@ describe("TaskDetail", () => {
     expect(screen.getByText(/Plan quality retries are exhausted/i)).toBeDefined();
     expect(screen.getByText("PLAN QUALITY")).toBeDefined();
     expect(screen.getByText(/missing_plan_manifest/)).toBeDefined();
+  });
+
+  it("renders audit card decision in the overview without manual review guidance", () => {
+    render(<TaskDetail taskId="detail-audit-decision" onClose={vi.fn()} />, {
+      wrapper: Wrapper,
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
+
+    expect(screen.getByText("Audit card decision")).toBeDefined();
+    expect(screen.getByText("Final status")).toBeDefined();
+    expect(screen.getByText("closed_verified")).toBeDefined();
+    expect(screen.getByText("Requirement completion")).toBeDefined();
+    expect(screen.getByText("satisfied")).toBeDefined();
+    expect(screen.getByText("Weak findings")).toBeDefined();
+    expect(screen.getByText("2")).toBeDefined();
+    expect(screen.getByText("Discarded findings")).toBeDefined();
+    expect(screen.getByText("3")).toBeDefined();
+    expect(screen.queryByText(/human review is required/i)).toBeNull();
   });
 
   it("confirms approve_done without commit closes the modal immediately", () => {

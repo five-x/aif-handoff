@@ -1,4 +1,4 @@
-import type { TaskArtifactTrustRollup } from "@aif/shared/browser";
+import type { AuditCardDecision, TaskArtifactTrustRollup } from "@aif/shared/browser";
 
 export interface ArtifactTrustPresentation {
   label: string;
@@ -26,4 +26,20 @@ export function getArtifactTrustPresentation(
       ? "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-300"
       : "border-red-500/35 bg-red-500/15 text-red-700 dark:text-red-300";
   return { label, compactLabel, className };
+}
+
+export function formatAuditCardDecisionList(values: string[]): string {
+  return values.length > 0 ? values.join(", ") : "none";
+}
+
+export function getAuditCardDecisionRows(decision: AuditCardDecision): Array<[string, string]> {
+  return [
+    ["Final status", decision.finalStatus],
+    ["Requirement completion", decision.requirementCompletion],
+    ["Verification strength", decision.verificationStrength],
+    ["Valid findings", String(decision.auditFindingValidity.validFindings)],
+    ["Weak findings", String(decision.auditFindingValidity.weakFindings)],
+    ["Discarded findings", String(decision.auditFindingValidity.discardedFindings)],
+    ["Residual risks", formatAuditCardDecisionList(decision.residualRisks)],
+  ];
 }

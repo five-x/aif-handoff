@@ -4,6 +4,7 @@ import {
   applyHumanTaskEvent,
   assertCurrentBranch,
   ensureFeatureBranch,
+  buildAuditCardDecisionFromReport,
   evaluateTaskCompletionEvidence,
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
@@ -16,6 +17,7 @@ import {
   selectTaskCompletionAuditFailureFamily,
   resolveAuditPlanId,
   restorePersistedBranch,
+  type AuditCardDecision,
   type AuditFailureFamily,
   type TaskEvent,
 } from "@aif/shared";
@@ -185,11 +187,53 @@ function artifactStateForFailureFamily(
   return "invalid";
 }
 
-function auditValidationDetails(result: ReturnType<typeof evaluateTaskCompletionEvidence>) {
+function auditValidationDetails(
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>,
+  auditCardDecision?: AuditCardDecision | null,
+) {
   return {
     issues: result.issues,
     evidence: result.evidence,
+    ...(auditCardDecision ? { auditCardDecision } : {}),
   };
+}
+
+function acceptedAuditCardDecision(input: {
+  task: TaskRow;
+  auditArtifact: RoadmapBatchArtifactRow;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+  projectRoot: string;
+}): AuditCardDecision {
+  const validation = input.result.evidence.auditReportValidation;
+  const reportText = readAuditArtifactText(input.projectRoot, input.auditArtifact) ?? "";
+  const implementationEvidence =
+    input.result.evidence.reportArtifactFiles.length > 0
+      ? input.result.evidence.reportArtifactFiles
+      : input.result.evidence.meaningfulChangedFiles;
+  const verificationEvidence = [
+    "completion evidence guard accepted audit artifact",
+    validation.manifestStatus === "valid" ? "audit report manifest valid" : null,
+    input.result.evidence.substantiveReportEvidence ? "substantive report evidence accepted" : null,
+    validation.sourceClassification
+      ? `source classification: ${validation.sourceClassification}`
+      : null,
+  ].filter((entry): entry is string => Boolean(entry));
+
+  return buildAuditCardDecisionFromReport({
+    otzRequirement:
+      input.auditArtifact.role === "synthesis"
+        ? "Produce an accepted audit synthesis for the scoped OTZ card."
+        : "Produce an accepted audit source report for the scoped OTZ card.",
+    acceptanceCriteria: [
+      "Report artifact exists and is trusted valid.",
+      "Accepted findings meet the evidence contract or no-findings evidence is substantive.",
+    ],
+    otzAcceptanceSatisfied: true,
+    implementationEvidence,
+    verificationEvidence,
+    verificationStrength: "verified",
+    reportText,
+  });
 }
 
 function repeatedAuditFailureCount(input: {
@@ -752,6 +796,12 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
       });
     }
     if (auditArtifact) {
+      const auditCardDecision = acceptedAuditCardDecision({
+        task,
+        auditArtifact,
+        result,
+        projectRoot: executionRoot,
+      });
       updateRoadmapBatchArtifactState({
         taskId: task.id,
         state: "valid",
@@ -761,6 +811,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         validationDetails: {
           action: "approve_done",
           evidence: result.evidence,
+          auditCardDecision,
         },
         contentSha: result.evidence.auditReportValidation.artifactSha256,
         branchName: task.branchName ?? auditArtifact.branchName,

@@ -14,7 +14,7 @@ import { formatTokenCount, formatUsd } from "@/lib/formatters";
 import { Tabs } from "@/components/ui/tabs";
 import { AlertBox } from "@/components/ui/alert-box";
 import { getRuntimeLimitDisplay } from "@/lib/runtimeLimits";
-import { getArtifactTrustPresentation } from "@/lib/artifactTrust";
+import { formatAuditCardDecisionList, getArtifactTrustPresentation } from "@/lib/artifactTrust";
 import { getPlanQualityPresentation } from "@/lib/planQuality";
 import { useUsageLimitsEnabled } from "@/hooks/useSettings";
 
@@ -264,6 +264,35 @@ export function TaskDetailHeader({
           {task.artifactTrust.reasonCodes.length > 0 && (
             <div className="mt-1 text-muted-foreground">
               Reasons: {task.artifactTrust.reasonCodes.join(", ")}
+            </div>
+          )}
+          {task.artifactTrust.auditCardDecision && (
+            <div className="mt-2 border-t border-border/60 pt-2 text-muted-foreground">
+              <div className="font-medium text-foreground">
+                Audit decision: {task.artifactTrust.auditCardDecision.finalStatus}
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                <span>
+                  Requirement: {task.artifactTrust.auditCardDecision.requirementCompletion}
+                </span>
+                <span>
+                  Verification: {task.artifactTrust.auditCardDecision.verificationStrength}
+                </span>
+                <span>
+                  Valid: {task.artifactTrust.auditCardDecision.auditFindingValidity.validFindings}
+                </span>
+                <span>
+                  Weak: {task.artifactTrust.auditCardDecision.auditFindingValidity.weakFindings}
+                </span>
+                <span>
+                  Discarded:{" "}
+                  {task.artifactTrust.auditCardDecision.auditFindingValidity.discardedFindings}
+                </span>
+              </div>
+              <div className="mt-1">
+                Residual risks:{" "}
+                {formatAuditCardDecisionList(task.artifactTrust.auditCardDecision.residualRisks)}
+              </div>
             </div>
           )}
         </AlertBox>

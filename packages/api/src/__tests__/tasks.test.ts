@@ -312,6 +312,21 @@ describe("tasks API", () => {
             sourceClassification: "validated_findings_present",
             manifestStatus: "valid",
           },
+          auditCardDecision: {
+            otzRequirement: "Produce an accepted audit source report.",
+            acceptanceCriteria: ["Report artifact exists and is trusted valid."],
+            implementationEvidence: ["audit/valid.md"],
+            verificationEvidence: ["completion evidence guard accepted audit artifact"],
+            requirementCompletion: "satisfied",
+            verificationStrength: "verified",
+            auditFindingValidity: {
+              validFindings: 0,
+              weakFindings: 1,
+              discardedFindings: 1,
+            },
+            residualRisks: [],
+            finalStatus: "closed_verified",
+          },
         },
       });
       updateRoadmapBatchArtifactState({
@@ -348,6 +363,27 @@ describe("tasks API", () => {
           artifactTrustLevel: "trusted",
           trustedSynthesisInput: true,
           nextAction: "none",
+          auditCardDecision: expect.objectContaining({
+            requirementCompletion: "satisfied",
+            verificationStrength: "verified",
+            auditFindingValidity: {
+              validFindings: 0,
+              weakFindings: 1,
+              discardedFindings: 1,
+            },
+            residualRisks: [],
+            finalStatus: "closed_verified",
+          }),
+        }),
+      );
+      const trustRes = await app.request("/tasks/audit-valid/artifact-trust");
+      expect(trustRes.status).toBe(200);
+      const trustBody = await trustRes.json();
+      expect(trustBody.auditCardDecision).toEqual(
+        expect.objectContaining({
+          requirementCompletion: "satisfied",
+          verificationStrength: "verified",
+          finalStatus: "closed_verified",
         }),
       );
       expect(

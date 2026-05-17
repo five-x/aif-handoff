@@ -610,7 +610,15 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("Proposed fix: carry source report branch content");
     expect(summary).toContain("Included findings: 1");
     expect(summary).toContain("Omitted findings: 1");
-    expect(summary).not.toContain("file is too large");
+    expect(summary).toContain("Requirement completion");
+    expect(summary).toContain("Verification strength");
+    expect(summary).toContain("Weak findings");
+    expect(summary).toContain("Discarded findings");
+    expect(summary).toContain("Residual risks");
+    expect(summary).toContain("Final decision");
+    expect(summary).toContain("## Weak/discarded findings");
+    expect(summary).toContain("Decision: discarded from synthesis output");
+    expect(summary).toContain("file is too large");
     expect(summary).toContain("```audit-report-manifest");
     const artifact = findRoadmapBatchArtifactByTaskId("task-deterministic-synthesis");
     if (!artifact) throw new Error("missing deterministic synthesis artifact");
