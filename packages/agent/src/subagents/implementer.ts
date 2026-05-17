@@ -25,6 +25,7 @@ import {
   getProjectConfig,
   validateAuditReportArtifact,
   buildAuditEvidencePayload,
+  classifyAuditCardDecision,
   classifyAuditSourceEvidence,
   classifyAuditSynthesisSourceReports,
   computeAuditReportContentSha256,
@@ -33,6 +34,8 @@ import {
   hashAifPlanManifest,
   resolveAuditPlanId,
   toAuditPublicReportOutcome,
+  type AuditCardDecision,
+  type AuditCardVerificationStrength,
   type AuditEvidenceUnit,
   type AuditPublicReportOutcome,
   type AuditReportSourceSnapshot,
@@ -640,6 +643,117 @@ function buildAuditChildReportStatusSection(
         row.taskId,
       )}\` | ${row.status} | ${formatMarkdownTableCell(row.notes)} |`;
     }),
+    "",
+  ];
+}
+
+function weakAuditArtifactVerificationStrength(
+  artifact: WeakAuditArtifactSummary,
+): AuditCardVerificationStrength {
+  return artifact.state === "external_blocked" || artifact.state === "manual_exception"
+    ? "inaccessible"
+    : "missing";
+}
+
+function weakAuditArtifactAcceptanceSatisfied(artifact: WeakAuditArtifactSummary): boolean {
+  return artifact.state === "external_blocked" || artifact.state === "manual_exception";
+}
+
+function formatAuditCardList(values: string[]): string {
+  return values.length > 0 ? values.join("<br>") : "none";
+}
+
+function formatAuditCardDecisionRow(input: {
+  sourceReport: string;
+  taskId: string;
+  decision: AuditCardDecision;
+}): string {
+  return [
+    `\`${formatMarkdownTableCell(input.sourceReport)}\``,
+    `\`${formatMarkdownTableCell(input.taskId)}\``,
+    formatMarkdownTableCell(input.decision.otzRequirement),
+    formatMarkdownTableCell(formatAuditCardList(input.decision.acceptanceCriteria)),
+    formatMarkdownTableCell(formatAuditCardList(input.decision.implementationEvidence)),
+    formatMarkdownTableCell(formatAuditCardList(input.decision.verificationEvidence)),
+    String(input.decision.auditFindingValidity.validFindings),
+    String(
+      input.decision.auditFindingValidity.weakFindings +
+        input.decision.auditFindingValidity.discardedFindings,
+    ),
+    formatMarkdownTableCell(formatAuditCardList(input.decision.residualRisks)),
+    `\`${input.decision.finalStatus}\``,
+  ].join(" | ");
+}
+
+function buildAuditCardDecisionSection(
+  sourceSummaries: AuditSourceReportSummary[],
+  weakArtifacts: WeakAuditArtifactSummary[],
+): string[] {
+  const rows = [
+    ...sourceSummaries.map((summary) =>
+      formatAuditCardDecisionRow({
+        sourceReport: summary.artifact.artifactPath,
+        taskId: summary.artifact.taskId,
+        decision: classifyAuditCardDecision({
+          otzRequirement: "Produce a terminal audit source report for the scoped OTZ card.",
+          acceptanceCriteria: [
+            "Report artifact exists and is trusted valid.",
+            "Accepted findings meet the evidence contract or no-findings evidence is substantive.",
+          ],
+          otzAcceptanceSatisfied: true,
+          implementationEvidence: [summary.artifact.artifactPath],
+          verificationEvidence: ["validator accepted source report evidence"],
+          verificationStrength: "verified",
+          validFindingCount: summary.includedFindings.length,
+          weakFindingCount: summary.omittedFindingCount,
+          discardedFindingCount: 0,
+          residualRisks:
+            summary.omittedFindingCount > 0
+              ? [`${summary.omittedFindingCount} weak finding(s) were discarded, not promoted.`]
+              : [],
+        }),
+      }),
+    ),
+    ...weakArtifacts.map((artifact) => {
+      const verificationStrength = weakAuditArtifactVerificationStrength(artifact);
+      return formatAuditCardDecisionRow({
+        sourceReport: artifact.artifactPath,
+        taskId: artifact.taskId,
+        decision: classifyAuditCardDecision({
+          otzRequirement: "Produce a terminal audit source report for the scoped OTZ card.",
+          acceptanceCriteria: [
+            "Report artifact exists and is trusted valid.",
+            "Accepted findings meet the evidence contract or no-findings evidence is substantive.",
+          ],
+          otzAcceptanceSatisfied: weakAuditArtifactAcceptanceSatisfied(artifact),
+          implementationEvidence: [artifact.artifactPath],
+          verificationEvidence: [
+            `artifact state: ${artifact.state}`,
+            `failure family: ${artifact.failureFamily ?? "none"}`,
+          ],
+          verificationStrength,
+          validFindingCount: 0,
+          weakFindingCount: 0,
+          discardedFindingCount: 0,
+          residualRisks:
+            verificationStrength === "inaccessible"
+              ? ["auditor could not verify because access, environment, or context is missing"]
+              : ["OTZ acceptance criteria were not satisfied by trusted evidence"],
+        }),
+      });
+    }),
+  ];
+
+  if (rows.length === 0) {
+    return ["## Card Decision Matrix", "", "- No OTZ cards were available for classification.", ""];
+  }
+
+  return [
+    "## Card Decision Matrix",
+    "",
+    "| Source report | Task | OTZ requirement | Acceptance criteria | Implementation evidence | Verification evidence | Valid findings | Weak/discarded findings | Residual risks | Final decision |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ...rows.map((row) => `| ${row} |`),
     "",
   ];
 }
@@ -1995,6 +2109,7 @@ function buildDeterministicAuditSynthesisContent(
     sourceSummaries,
     weakArtifacts,
   );
+  const cardDecisionSection = buildAuditCardDecisionSection(sourceSummaries, weakArtifacts);
 
   if (
     sourceOutcome.kind === "source_inconclusive" ||
@@ -2011,6 +2126,7 @@ function buildDeterministicAuditSynthesisContent(
       "No findings from the source reports survived the strict synthesis evidence filter, but the batch evidence does not support a product-quality no-findings conclusion.",
       "",
       ...childReportStatusSection,
+      ...cardDecisionSection,
       "## Source Reports Checked",
       "",
       sourceSummaries.length > 0
@@ -2112,6 +2228,7 @@ function buildDeterministicAuditSynthesisContent(
       "Generated from terminal audit batch report artifacts. Source report findings were included only when they carried concrete path:line Evidence, Risk, Proposed fix, and Verification sections.",
       "",
       ...childReportStatusSection,
+      ...cardDecisionSection,
       "## Source Reports Checked",
       "",
       sourceSummaries.length > 0
@@ -2205,6 +2322,7 @@ function buildDeterministicAuditSynthesisContent(
     "Weak or invalid source reports are listed as coverage gaps only.",
     "",
     ...childReportStatusSection,
+    ...cardDecisionSection,
     "## Source Reports",
     "",
     sourceSummaries.length > 0

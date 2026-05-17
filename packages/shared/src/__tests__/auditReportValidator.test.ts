@@ -214,6 +214,43 @@ describe("auditReportValidator", () => {
     expect(result.existingReferencedPaths).toContain("src/config.ts");
   });
 
+  it("keeps weak or discarded findings out of the final source classification", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "## Weak/discarded findings",
+      "",
+      "- discarded: `src/missing.ts:99` may contain ownership drift, but this note has weak evidence.",
+      "- weak_finding: Command output would show the issue if access were available.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(result.missingReferencedPaths).not.toContain("src/missing.ts");
+    expect(issueCodes(result)).not.toContain("missing_report_file_references");
+    expect(issueCodes(result)).not.toContain("speculative_audit_claim");
+    expect(issueCodes(result)).not.toContain("unverified_inspection_claim");
+    expect(issueCodes(result)).not.toContain("contradictory_findings_and_no_findings");
+  });
+
   it("rejects escaped-newline serialized markdown report blobs", () => {
     const root = initRepo();
     const text = [

@@ -2968,6 +2968,67 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("insufficient_report_evidence");
   });
 
+  it("does not turn weak or discarded findings into final completion blockers", () => {
+    const root = initRepo();
+    writeFileSync(join(root, "README.md"), "# test\nruntime evidence marker\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add runtime evidence", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-weak-discarded-finding"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime.md"),
+      [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-readme-1 for `README.md:2` audit evidence integrity was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `README.md:2`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "runtime evidence" README.md` output: `README.md:2:runtime evidence marker`',
+        "",
+        "## Weak/discarded findings",
+        "",
+        "- discarded: `src/missing.ts:99` may contain a runtime issue, but the evidence is weak.",
+        "- weak_finding: expected command output would show the issue if environment access existed.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-weak-discarded-finding",
+        title: "Audit runtime",
+        description: "Report artifact: audit/runtime.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.auditReportValidation.sourceClassification).toBe(
+      "validated_no_findings",
+    );
+    expect(codes(result)).not.toContain("invalid_or_missing_file_references");
+    expect(codes(result)).not.toContain("insufficient_report_evidence");
+    expect(codes(result)).not.toContain("low_quality_report_evidence");
+  });
+
   it("allows audit synthesis that explicitly closes as audit inconclusive", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/audit-explicit-inconclusive"], {

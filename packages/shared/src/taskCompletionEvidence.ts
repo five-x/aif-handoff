@@ -13,6 +13,7 @@ import {
 } from "./auditSynthesisClassifier.js";
 import { countValidatedAuditFindings } from "./auditSourceEvidence.js";
 import {
+  stripNonBlockingWeakFindingSections,
   validateAuditReportArtifact,
   type AuditReportValidationIssueCode,
   type AuditReportValidationResult,
@@ -1286,6 +1287,7 @@ export function evaluateTaskCompletionEvidence(
       )
     : gitEvidence.files.filter((file) => isReportArtifactPath(file, task));
   const reportText = collectReportText(projectRoot, reportArtifactFiles);
+  const reportClassificationText = stripNonBlockingWeakFindingSections(reportText);
   const committedReportRequired = riskyTask || requiresCommittedReport(task);
   const committedFileSet = new Set(gitEvidence.committedFiles.map(normalizePathForComparison));
   const dirtyFileSet = new Set(gitEvidence.dirtyFiles.map(normalizePathForComparison));
@@ -1317,10 +1319,10 @@ export function evaluateTaskCompletionEvidence(
   const taskReferencedPaths = extractReferencedPaths(combinedTaskText(task), projectRoot);
   const reportReferencedPaths = [
     ...new Set([
-      ...extractReferencedPaths(reportText, projectRoot, {
+      ...extractReferencedPaths(reportClassificationText, projectRoot, {
         includeUndelimitedMissingRootFiles: true,
       }),
-      ...extractDirectoryLineReferences(reportText, projectRoot),
+      ...extractDirectoryLineReferences(reportClassificationText, projectRoot),
     ]),
   ].sort();
   const referencedPaths = [...new Set([...taskReferencedPaths, ...reportReferencedPaths])].sort();
@@ -1371,7 +1373,7 @@ export function evaluateTaskCompletionEvidence(
       ledgerOrManifestBlockingIssues.some((issue) => issue.code === entry.code),
   );
   const legacySubstantiveReportEvidence = hasSubstantiveReportEvidence({
-    text: reportText,
+    text: reportClassificationText,
     projectRoot,
     existingReferencedPaths: reportExisting,
     excludedReferencedPaths: reportArtifactFiles,
@@ -1383,7 +1385,7 @@ export function evaluateTaskCompletionEvidence(
     (auditReportValidation.substantiveEvidence || legacySubstantiveReportEvidence);
   const reportQualityIssues = [
     ...new Set([
-      ...collectLowQualityReportEvidenceIssues(reportText, projectRoot),
+      ...collectLowQualityReportEvidenceIssues(reportClassificationText, projectRoot),
       ...auditReportValidation.reportQualityIssues,
     ]),
   ].sort();

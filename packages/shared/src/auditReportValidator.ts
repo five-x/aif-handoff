@@ -244,6 +244,40 @@ export function stripAuditReportManifestBlocks(text: string): string {
   return text.replace(MANIFEST_BLOCK_PATTERN, "\n").trim();
 }
 
+function isWeakOrDiscardedFindingsHeading(title: string): boolean {
+  const normalized = title.replace(/[`*_]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+  return (
+    /\bfinding/.test(normalized) &&
+    /\b(?:weak|discarded|rejected|omitted|unsupported|non-blocking)\b/.test(normalized)
+  );
+}
+
+export function stripNonBlockingWeakFindingSections(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const kept: string[] = [];
+  let skipUntilHeadingLevel: number | null = null;
+
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (heading) {
+      const level = heading[1].length;
+      const title = heading[2] ?? "";
+      if (skipUntilHeadingLevel !== null && level <= skipUntilHeadingLevel) {
+        skipUntilHeadingLevel = null;
+      }
+      if (skipUntilHeadingLevel === null && isWeakOrDiscardedFindingsHeading(title)) {
+        skipUntilHeadingLevel = level;
+        continue;
+      }
+    }
+
+    if (skipUntilHeadingLevel !== null) continue;
+    kept.push(line);
+  }
+
+  return kept.join("\n");
+}
+
 export function computeAuditReportArtifactSha256(text: string): string {
   return sha256(text);
 }
@@ -1434,6 +1468,7 @@ export function validateAuditReportArtifact(
   input: AuditReportValidationInput,
 ): AuditReportValidationResult {
   const text = input.text;
+  const classificationText = stripNonBlockingWeakFindingSections(text);
   const artifactSha256 = computeAuditReportArtifactSha256(text);
   const contentSha256 = computeAuditReportContentSha256(text);
   const parsedManifest = parseAuditReportManifestBlock(text);
@@ -1457,7 +1492,11 @@ export function validateAuditReportArtifact(
   const allowedPathSet = new Set(
     [...allowedEvidenceArtifactPaths, ...reportArtifactPaths].map(normalizePathForComparison),
   );
-  const referencedPaths = extractReferencedPaths(text, input.projectRoot, sourceReader);
+  const referencedPaths = extractReferencedPaths(
+    classificationText,
+    input.projectRoot,
+    sourceReader,
+  );
   const excludedEvidencePaths = collectDefaultExcludedEvidencePaths({
     referencedPaths,
     reportArtifactPaths,
@@ -1470,14 +1509,14 @@ export function validateAuditReportArtifact(
     sourceReader,
   );
   const scopeCoverage = collectScopeCoverage({
-    text,
+    text: classificationText,
     projectRoot: input.projectRoot,
     scopeRoots,
     excludedPaths,
     sourceReader,
   });
   const sourceEvidenceClassification = classifyAuditSourceEvidence({
-    text,
+    text: classificationText,
     projectRoot: input.projectRoot,
     excludedReferencedPaths: excludedEvidencePaths,
     requireProposedFix: input.requireProposedFix,
@@ -1680,7 +1719,7 @@ export function validateAuditReportArtifact(
         ),
       );
     }
-    if (hasInvalidCatLineReferenceCommand(text)) {
+    if (hasInvalidCatLineReferenceCommand(classificationText)) {
       issues.push(
         issue(
           "invalid_line_reference",
@@ -1689,11 +1728,11 @@ export function validateAuditReportArtifact(
       );
     }
     for (const { code, pattern, message } of LOW_QUALITY_REPORT_PATTERNS) {
-      if (pattern.test(text)) issues.push(issue(code, message));
+      if (pattern.test(classificationText)) issues.push(issue(code, message));
     }
   }
 
-  const falseMissingPaths = collectFalseMissingPathClaims(text, sourceReader);
+  const falseMissingPaths = collectFalseMissingPathClaims(classificationText, sourceReader);
   if (falseMissingPaths.length > 0) {
     issues.push(
       issue(
@@ -1704,7 +1743,7 @@ export function validateAuditReportArtifact(
     );
   }
 
-  if (hasContradictoryFindings(text)) {
+  if (hasContradictoryFindings(classificationText)) {
     issues.push(
       issue(
         "contradictory_findings_and_no_findings",
@@ -1713,7 +1752,14 @@ export function validateAuditReportArtifact(
     );
   }
 
-  if (hasInvalidExistingLineReference(text, input.projectRoot, excludedPaths, sourceReader)) {
+  if (
+    hasInvalidExistingLineReference(
+      classificationText,
+      input.projectRoot,
+      excludedPaths,
+      sourceReader,
+    )
+  ) {
     issues.push(
       issue(
         "invalid_line_reference",
@@ -1722,7 +1768,7 @@ export function validateAuditReportArtifact(
     );
   }
 
-  if (text.trim() && referencedPaths.length === 0) {
+  if (classificationText.trim() && referencedPaths.length === 0) {
     issues.push(
       issue(
         "missing_report_file_references",
@@ -1812,7 +1858,7 @@ export function validateAuditReportArtifact(
     missing.length === 0 &&
     sourceClassification !== "inventory_only_invalid" &&
     hasSubstantiveReportEvidenceInternal({
-      text,
+      text: classificationText,
       projectRoot: input.projectRoot,
       excludedReferencedPaths: excludedEvidencePaths,
       allowedEvidenceArtifactPaths,
@@ -1820,7 +1866,12 @@ export function validateAuditReportArtifact(
       sourceReader,
     });
 
-  if (text.trim() && missing.length === 0 && referencedPaths.length > 0 && !substantiveEvidence) {
+  if (
+    classificationText.trim() &&
+    missing.length === 0 &&
+    referencedPaths.length > 0 &&
+    !substantiveEvidence
+  ) {
     issues.push(
       issue(
         "missing_substantive_evidence",

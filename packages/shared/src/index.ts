@@ -406,6 +406,7 @@ export {
   extractAuditReportManifestEvidenceRefs,
   formatAuditReportValidationIssues,
   stripAuditReportManifestBlocks,
+  stripNonBlockingWeakFindingSections,
   validateAuditReportArtifact,
   type AuditReportManifest,
   type AuditReportManifestStatus,
@@ -429,6 +430,15 @@ export {
   type AuditSynthesisOutcomeKind,
   type AuditSynthesisSourceReport,
 } from "./auditSynthesisClassifier.js";
+export {
+  AUDIT_CARD_FINAL_STATUSES,
+  AUDIT_CARD_VERIFICATION_STRENGTHS,
+  classifyAuditCardDecision,
+  type AuditCardDecision,
+  type AuditCardDecisionInput,
+  type AuditCardFinalStatus,
+  type AuditCardVerificationStrength,
+} from "./auditCardDecision.js";
 export {
   AUDIT_PUBLIC_REPORT_OUTCOMES,
   AUDIT_SOURCE_CLASSIFICATIONS,
