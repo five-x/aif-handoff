@@ -1502,6 +1502,16 @@ describe("runImplementer rework behavior", () => {
         },
       ],
     });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-audit-deterministic-repair",
+      state: "invalid",
+      failureFamily: "invalid_artifact_contract",
+      reworkStatus: "rework_requested",
+      createAttemptBoundary: true,
+      validationDetails: {
+        auditReportValidation: { sourceClassification: "inventory_only_invalid" },
+      },
+    });
 
     await runImplementer("task-audit-deterministic-repair", projectRoot);
 
@@ -1523,9 +1533,10 @@ describe("runImplementer rework behavior", () => {
     expect(artifact.state).toBe("source_inconclusive");
     expect(artifact.failureFamily).toBe("source_inconclusive");
     const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
-    expect(attempts).toHaveLength(1);
-    expect(attempts[0]?.state).toBe("source_inconclusive");
-    expect(attempts[0]?.classification).toBe("source_inconclusive");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.state).toBe("invalid");
+    expect(attempts[1]?.state).toBe("source_inconclusive");
+    expect(attempts[1]?.classification).toBe("source_inconclusive");
     expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()

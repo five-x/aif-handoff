@@ -2270,12 +2270,14 @@ function runDeterministicAuditReportRepair(input: {
   let status: DeterministicAuditReportRepairResult["status"];
   let blockedReason: string | null = null;
   if (isTrustedValidAuditReportValidation(validation)) {
+    const roadmapArtifact = findRoadmapBatchArtifactByTaskId(input.task.id);
     updateRoadmapBatchArtifactState({
       taskId: input.task.id,
       state: "valid",
       failureFamily: null,
       classification: validation.sourceClassification,
       reworkStatus: "accepted",
+      attemptBoundaryId: roadmapArtifact?.attemptBoundaryId ?? undefined,
       sourceSnapshotId: validation.sourceSnapshot?.id ?? repair.sourceSnapshot.id,
       projectRoot: input.projectRoot,
       contentSha: validation.artifactSha256,
@@ -2469,12 +2471,14 @@ function terminalizeSourceInconclusiveAuditReport(input: {
       },
     };
   }
+  const roadmapArtifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   updateRoadmapBatchArtifactState({
     taskId: input.task.id,
     state: "source_inconclusive",
     failureFamily: "source_inconclusive",
     classification: "source_inconclusive",
     reworkStatus: "terminal_inconclusive",
+    attemptBoundaryId: roadmapArtifact?.attemptBoundaryId ?? undefined,
     sourceSnapshotId: input.sourceSnapshotId ?? input.validation?.sourceSnapshot?.id ?? null,
     projectRoot: input.projectRoot,
     contentSha: input.validation?.artifactSha256,
