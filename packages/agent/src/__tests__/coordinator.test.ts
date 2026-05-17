@@ -330,7 +330,7 @@ describe("coordinator", () => {
           taskIntent: "audit",
           description: "Report artifact: audit/final-synthesis.md.",
           status: "plan_ready",
-          retryCount: 2,
+          retryCount: 100,
           plan: "Short task\n/aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
         },
       ])
@@ -2754,7 +2754,7 @@ describe("coordinator", () => {
     expect(task!.blockedFromStatus).toBe("plan_ready");
     expect(task!.retryAfter).toBeNull();
     expect(task!.retryCount).toBe(1);
-    expect(task!.blockedReason).toContain("Plan quality guard replan 1/2");
+    expect(task!.blockedReason).toContain("Plan quality guard replan 1/100");
     expect(task!.blockedReason).toContain("slash_fallback_echo");
     expect(task!.agentActivityLog).toContain("Plan quality structured feedback");
     expect(task!.agentActivityLog).toContain('"kind":"plan_quality_feedback"');
@@ -2774,7 +2774,7 @@ describe("coordinator", () => {
         autoMode: true,
         retryCount: 1,
         blockedFromStatus: "plan_ready",
-        blockedReason: "Plan quality guard replan 1/2: previous feedback",
+        blockedReason: "Plan quality guard replan 1/100: previous feedback",
         plan: "## Plan\n- [ ] Try again",
       })
       .run();
@@ -2782,7 +2782,7 @@ describe("coordinator", () => {
     vi.mocked(runPlanChecker).mockImplementationOnce(async (taskId) => {
       const taskAtPlanCheck = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
       expect(taskAtPlanCheck!.blockedFromStatus).toBe("plan_ready");
-      expect(taskAtPlanCheck!.blockedReason).toContain("Plan quality guard replan 1/2");
+      expect(taskAtPlanCheck!.blockedReason).toContain("Plan quality guard replan 1/100");
       throw createPlanQualityError();
     });
 
@@ -2793,7 +2793,7 @@ describe("coordinator", () => {
     expect(runPlanChecker).toHaveBeenCalledWith("task-plan-quality-preserve", "/tmp/test");
     expect(task!.status).toBe("planning");
     expect(task!.retryCount).toBe(2);
-    expect(task!.blockedReason).toContain("Plan quality guard replan 2/2");
+    expect(task!.blockedReason).toContain("Plan quality guard replan 2/100");
   });
 
   it("should block non-roadmap invalid plan quality after retry limit", async () => {
@@ -2805,7 +2805,7 @@ describe("coordinator", () => {
         title: "Weak plan limit",
         status: "plan_ready",
         autoMode: true,
-        retryCount: 2,
+        retryCount: 100,
         plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
       })
       .run();
@@ -2818,7 +2818,7 @@ describe("coordinator", () => {
     expect(task!.status).toBe("blocked_external");
     expect(task!.blockedFromStatus).toBe("plan_ready");
     expect(task!.retryAfter).toBeNull();
-    expect(task!.retryCount).toBe(3);
+    expect(task!.retryCount).toBe(101);
     expect(task!.manualReviewRequired).toBe(true);
     expect(task!.blockedReason).toContain("Retry limit reached");
     expect(task!.blockedReason).toContain("Operator next step");
@@ -2838,7 +2838,7 @@ describe("coordinator", () => {
         taskIntent: "audit",
         status: "plan_ready",
         autoMode: true,
-        retryCount: 2,
+        retryCount: 100,
         plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
       })
       .run();
@@ -2891,7 +2891,7 @@ describe("coordinator", () => {
     expect(task!.blockedFromStatus).toBe("plan_ready");
     expect(task!.manualReviewRequired).toBe(true);
     expect(task!.reworkRequested).toBe(false);
-    expect(task!.retryCount).toBe(2);
+    expect(task!.retryCount).toBe(100);
     expect(runImplementer).not.toHaveBeenCalled();
 
     const reportArtifact = listRoadmapBatchArtifacts(batch.batchId).find(

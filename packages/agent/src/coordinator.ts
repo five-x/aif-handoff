@@ -94,7 +94,7 @@ const log = logger("coordinator");
 const env = getEnv();
 const STAGE_RUN_TIMEOUT_MS = Math.max(env.AGENT_STAGE_RUN_TIMEOUT_MS, 60_000);
 const CLAIM_LOCK_DURATION_MS = STAGE_RUN_TIMEOUT_MS + 5 * 60 * 1000; // stage timeout + 5 min buffer
-const PLAN_QUALITY_MAX_RETRIES = 2;
+const PLAN_QUALITY_MAX_RETRIES = 100;
 export const COORDINATOR_ID = crypto.randomUUID();
 
 type TaskWithHydratedFields = TaskRow & Pick<HydratedTaskRow, "autoReviewState">;
@@ -1515,7 +1515,7 @@ function handlePlanQualityFailure(input: {
     const strictness =
       nextRetryCount === 1
         ? "Replan with concrete task-specific steps, required artifact paths, and diagnostic-only constraints where applicable."
-        : "Second plan-quality failure: produce a stricter plan with a valid manifest when required, explicit scope boundaries, testable acceptance criteria, concrete verification commands, and no intent drift.";
+        : "Repeated plan-quality failure: produce a stricter plan with a valid manifest when required, explicit scope boundaries, testable acceptance criteria, concrete verification commands, and no intent drift.";
     const feedback = `${input.error.message} ${strictness}`;
     const structuredFeedback = formatPlanQualityStructuredFeedback({
       attempt: nextRetryCount,
