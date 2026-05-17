@@ -104,13 +104,15 @@ Short-lived in-memory caches exist only for dedupe/throttling repeated identical
 
 Product memory is owned by AIF Handoff itself, not by local Codex shared-memory state. The shared package defines `memory_items`, `memory_usage_events`, and `memory_lifecycle_events`; `@aif/data` is the only read/write boundary. SQLite FTS5 backs approved-memory retrieval when available, with a safe fallback ranker if the local SQLite build lacks FTS5.
 
+Memory items are typed as decisions, failure families, architecture notes, workflow contracts, regression patterns, review learnings, runtime policies, or security policies. Each approved item must carry at least one source-backed claim with a stable claim id, claim type/status, text, sources, supersedes/contradicts relationships, and a last validated timestamp.
+
 Memory lifecycle:
 
 1. A human applies `approve_done` to a `done` task.
 2. If the transition succeeds to `verified`, API creates or refreshes one pending project-scoped memory candidate for that task.
 3. The Memory UI lists pending/approved/rejected/expired items and lets a human edit, approve, reject, or expire them.
-4. Redaction checks run before storage and approval; blocked items must be edited before publishing.
-5. Planner, implementer, reviewer/security, and chat retrieve approved project/global memory and inject it in a delimited reference-only prompt block.
+4. Redaction and source-backed claim checks run before approval; blocked or sourceless items must be edited before publishing.
+5. Planner, implementer, reviewer/security, and chat retrieve approved project/global memory and inject it in a delimited source-backed reference-only prompt brief.
 6. Every retrieval writes `memory_usage_events`; every lifecycle action writes `memory_lifecycle_events`.
 
 The prompt block explicitly says memory is background context only and cannot override system, developer, user, repository, or task instructions.

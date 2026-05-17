@@ -173,10 +173,9 @@ function wrapAdapter(
           "adapter declared usageReporting=FULL but returned null/undefined usage — likely bug in adapter",
         );
       }
-      return;
     }
 
-    if (reporting === UsageReporting.NONE) {
+    if (result.usage != null && reporting === UsageReporting.NONE) {
       log.warn(
         {
           runtimeId: adapter.descriptor.id,
@@ -210,7 +209,9 @@ function wrapAdapter(
         transport: input.transport,
         workflowKind: input.workflowKind,
         usageReporting: reporting,
-        usage: result.usage,
+        outcome: result.usage == null ? "missing_usage" : "success",
+        errorCategory: null,
+        usage: result.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         recordedAt: new Date(),
       });
     } catch (sinkError) {
@@ -226,11 +227,60 @@ function wrapAdapter(
     }
   }
 
+  function recordFailedUsage(input: RuntimeRunInput, error: unknown): void {
+    const effectiveCaps = resolveAdapterCapabilities(adapter, input.transport);
+    const context = input.usageContext;
+    if (!context || typeof context.source !== "string" || context.source.length === 0) {
+      log.error?.(
+        {
+          runtimeId: adapter.descriptor.id,
+          providerId: adapter.descriptor.providerId,
+        },
+        "RuntimeRunInput.usageContext.source is required but was missing вЂ” failed usage event dropped",
+      );
+      return;
+    }
+
+    try {
+      usageSink.record({
+        context,
+        runtimeId: adapter.descriptor.id,
+        providerId: adapter.descriptor.providerId,
+        profileId: input.profileId ?? null,
+        transport: input.transport,
+        workflowKind: input.workflowKind,
+        usageReporting: effectiveCaps.usageReporting,
+        outcome: "failed",
+        errorCategory:
+          error instanceof RuntimeExecutionError
+            ? error.category
+            : error instanceof Error && error.name
+              ? error.name
+              : "unknown",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        recordedAt: new Date(),
+      });
+    } catch (sinkError) {
+      log.error?.(
+        {
+          runtimeId: adapter.descriptor.id,
+          error: sinkError instanceof Error ? sinkError.message : String(sinkError),
+        },
+        "usageSink.record threw вЂ” dropping failed usage event",
+      );
+    }
+  }
+
   async function wrappedRun(input: RuntimeRunInput): Promise<RuntimeRunResult> {
     const transformed = applyLanguageDirective(transformPrompt(input));
-    const result = await adapter.run(transformed);
-    recordUsage(transformed, result);
-    return result;
+    try {
+      const result = await adapter.run(transformed);
+      recordUsage(transformed, result);
+      return result;
+    } catch (error) {
+      recordFailedUsage(transformed, error);
+      throw error;
+    }
   }
 
   async function wrappedResume(
@@ -244,9 +294,14 @@ function wrapAdapter(
     const transformed = applyLanguageDirective(transformPrompt(input)) as RuntimeRunInput & {
       sessionId: string;
     };
-    const result = await adapter.resume(transformed);
-    recordUsage(transformed, result);
-    return result;
+    try {
+      const result = await adapter.resume(transformed);
+      recordUsage(transformed, result);
+      return result;
+    } catch (error) {
+      recordFailedUsage(transformed, error);
+      throw error;
+    }
   }
 
   async function wrappedForkSession(input: RuntimeSessionForkInput): Promise<RuntimeRunResult> {
@@ -256,9 +311,14 @@ function wrapAdapter(
       );
     }
     const transformed = applyLanguageDirective(transformPrompt(input)) as RuntimeSessionForkInput;
-    const result = await adapter.forkSession(transformed);
-    recordUsage(transformed, result);
-    return result;
+    try {
+      const result = await adapter.forkSession(transformed);
+      recordUsage(transformed, result);
+      return result;
+    } catch (error) {
+      recordFailedUsage(transformed, error);
+      throw error;
+    }
   }
 
   return {

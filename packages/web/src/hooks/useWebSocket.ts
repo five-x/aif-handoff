@@ -37,6 +37,10 @@ function hasProjectIdPayload(value: unknown): value is { projectId: string } {
   return isRecord(value) && typeof value.projectId === "string";
 }
 
+function hasTaskIdPayload(value: unknown): value is { taskId: string; projectId?: string | null } {
+  return isRecord(value) && typeof value.taskId === "string";
+}
+
 function hasProjectScopedIdPayload(
   value: unknown,
 ): value is { id: string; projectId?: string | null } {
@@ -110,6 +114,21 @@ function patchTaskInCache(queryClient: QueryClient, patch: TaskCachePatch): void
 function invalidateTaskCaches(queryClient: QueryClient, taskId: string): void {
   queryClient.invalidateQueries({ queryKey: ["tasks"] });
   queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+}
+
+function invalidateTaskOperatorQueries(queryClient: QueryClient, taskId: string): void {
+  invalidateTaskCaches(queryClient, taskId);
+  queryClient.invalidateQueries({ queryKey: ["task-timeline", taskId] });
+  queryClient.invalidateQueries({ queryKey: ["task-evidence", taskId] });
+  queryClient.invalidateQueries({ queryKey: ["task-memory", taskId] });
+  queryClient.invalidateQueries({ queryKey: ["task-runtime-usage", taskId] });
+  queryClient.invalidateQueries({ queryKey: ["task-worktree", taskId] });
+}
+
+function invalidateProjectOperatorQueries(queryClient: QueryClient, projectId: string): void {
+  queryClient.invalidateQueries({ queryKey: ["project-knowledge", projectId] });
+  queryClient.invalidateQueries({ queryKey: ["project-runtime-usage", projectId] });
+  queryClient.invalidateQueries({ queryKey: ["project-queue", projectId] });
 }
 
 function resolveWsUrl(): string {
@@ -299,12 +318,36 @@ export function useWebSocket() {
         return;
       }
 
+      if (
+        data.type === "task:timeline_updated" ||
+        data.type === "task:evidence_recorded" ||
+        data.type === "task:trust_updated" ||
+        data.type === "task:manual_handoff_required"
+      ) {
+        if (hasProjectScopedIdPayload(data.payload)) {
+          invalidateTaskOperatorQueries(queryClient, data.payload.id);
+          if (data.payload.projectId) {
+            invalidateProjectOperatorQueries(queryClient, data.payload.projectId);
+          }
+        }
+        return;
+      }
+
       // Project auto-queue toggle changed somewhere — refresh the projects
       // list so the Switch in the project settings dialog stays in sync.
       if (data.type === "project:auto_queue_mode_changed") {
         queryClient.invalidateQueries({ queryKey: ["projects"] });
         if (hasIdPayload(data.payload)) {
           queryClient.invalidateQueries({ queryKey: ["autoQueueMode", data.payload.id] });
+        }
+        return;
+      }
+
+      if (data.type === "project:auto_queue_advanced") {
+        queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        queryClient.invalidateQueries({ queryKey: ["project-queue"] });
+        if (hasIdPayload(data.payload)) {
+          queryClient.invalidateQueries({ queryKey: ["task", data.payload.id] });
         }
         return;
       }
@@ -361,6 +404,49 @@ export function useWebSocket() {
       if (data.type === "project:warmup_updated" && hasWarmupPayload(data.payload)) {
         queryClient.invalidateQueries({ queryKey: ["projectWarmup", data.payload.projectId] });
         queryClient.invalidateQueries({ queryKey: ["projects"] });
+        return;
+      }
+
+      if (
+        data.type === "project:memory_candidate_created" &&
+        hasProjectScopedIdPayload(data.payload)
+      ) {
+        queryClient.invalidateQueries({ queryKey: ["memory"] });
+        if (data.payload.projectId) {
+          queryClient.invalidateQueries({ queryKey: ["memory", data.payload.projectId] });
+          queryClient.invalidateQueries({
+            queryKey: ["project-knowledge", data.payload.projectId],
+          });
+        }
+        if (hasTaskIdPayload(data.payload)) {
+          queryClient.invalidateQueries({ queryKey: ["task-memory", data.payload.taskId] });
+          queryClient.invalidateQueries({ queryKey: ["task", data.payload.taskId] });
+          queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        }
+        return;
+      }
+
+      if (data.type === "project:usage_updated" && hasProjectIdPayload(data.payload)) {
+        queryClient.invalidateQueries({
+          queryKey: ["project-runtime-usage", data.payload.projectId],
+        });
+        if (hasTaskIdPayload(data.payload)) {
+          queryClient.invalidateQueries({ queryKey: ["task-runtime-usage", data.payload.taskId] });
+          queryClient.invalidateQueries({ queryKey: ["task", data.payload.taskId] });
+          queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        }
+        return;
+      }
+
+      if (data.type === "project:queue_updated" && hasProjectIdPayload(data.payload)) {
+        queryClient.invalidateQueries({ queryKey: ["project-queue", data.payload.projectId] });
+        queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        return;
+      }
+
+      if (data.type === "project:worktree_warning" && hasTaskIdPayload(data.payload)) {
+        queryClient.invalidateQueries({ queryKey: ["task-worktree", data.payload.taskId] });
+        queryClient.invalidateQueries({ queryKey: ["task", data.payload.taskId] });
         return;
       }
 

@@ -426,6 +426,7 @@ describe("registry usage pipeline", () => {
     providerId?: string;
     usageReporting: (typeof UsageReporting)[keyof typeof UsageReporting];
     returnedUsage: RuntimeUsageEvent["usage"] | null;
+    throwOnRun?: boolean;
   }): RuntimeAdapter {
     return {
       descriptor: {
@@ -438,6 +439,9 @@ describe("registry usage pipeline", () => {
         },
       },
       async run() {
+        if (options.throwOnRun) {
+          throw new Error("boom");
+        }
         return { outputText: "ok", usage: options.returnedUsage };
       },
     };
@@ -526,10 +530,38 @@ describe("registry usage pipeline", () => {
     expect(event.context.taskId).toBe("t-1");
     expect(event.runtimeId).toBe("fake");
     expect(event.usageReporting).toBe(UsageReporting.FULL);
+    expect(event.outcome).toBe("success");
     expect(event.recordedAt).toBeInstanceOf(Date);
   });
 
-  it("does not call sink when adapter returns null usage", async () => {
+  it("records failed usage when adapter throws", async () => {
+    const sink = createCapturingSink();
+    const registry = createRuntimeRegistry({
+      usageSink: sink,
+      builtInAdapters: [
+        createFakeAdapter({
+          usageReporting: UsageReporting.PARTIAL,
+          returnedUsage: null,
+          throwOnRun: true,
+        }),
+      ],
+    });
+    const adapter = registry.resolveRuntime("fake");
+
+    await expect(
+      adapter.run({
+        runtimeId: "fake",
+        prompt: "hello",
+        usageContext: { source: UsageSource.TEST },
+      }),
+    ).rejects.toThrow();
+
+    expect(sink.events).toHaveLength(1);
+    expect(sink.events[0].outcome).toBe("failed");
+    expect(sink.events[0].usage).toEqual({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+  });
+
+  it("records missing_usage when adapter returns null usage", async () => {
     const sink = createCapturingSink();
     const registry = createRuntimeRegistry({
       usageSink: sink,
@@ -545,7 +577,9 @@ describe("registry usage pipeline", () => {
       usageContext: { source: UsageSource.TEST },
     });
 
-    expect(sink.events).toHaveLength(0);
+    expect(sink.events).toHaveLength(1);
+    expect(sink.events[0].outcome).toBe("missing_usage");
+    expect(sink.events[0].usage).toEqual({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
   });
 
   it("logs error when adapter declared FULL but returns null usage", async () => {
@@ -566,7 +600,8 @@ describe("registry usage pipeline", () => {
       usageContext: { source: UsageSource.TEST },
     });
 
-    expect(sink.events).toHaveLength(0);
+    expect(sink.events).toHaveLength(1);
+    expect(sink.events[0].outcome).toBe("missing_usage");
     expect(error).toHaveBeenCalledWith(
       expect.objectContaining({ usageReporting: UsageReporting.FULL }),
       expect.stringContaining("FULL"),

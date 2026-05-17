@@ -15,6 +15,7 @@ import { api } from "@/lib/api";
 import {
   TASK_INTENT_CONTRACTS,
   TASK_INTENTS,
+  formatTaskIntentPrimaryConstraints,
   type Project,
   type TaskIntent,
 } from "@aif/shared/browser";
@@ -41,6 +42,8 @@ export function RoadmapDialog({
   const [result, setResult] = useState<RoadmapImportResult | null>(null);
   const [exists, setExists] = useState<boolean | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+  const selectedIntentContract = TASK_INTENT_CONTRACTS[taskIntent];
+  const selectedIntentConstraints = formatTaskIntentPrimaryConstraints(taskIntent);
 
   const prevOpenRef = useRef(false);
 
@@ -190,6 +193,12 @@ export function RoadmapDialog({
                   label: TASK_INTENT_CONTRACTS[intent].label,
                 }))}
               />
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                {selectedIntentContract.decomposition}
+              </p>
+              <p className="mt-0.5 text-[10px] text-muted-foreground">
+                Primary constraints: {selectedIntentConstraints}
+              </p>
             </div>
             <div>
               <label htmlFor="roadmap-vision" className="block text-xs font-medium mb-1">

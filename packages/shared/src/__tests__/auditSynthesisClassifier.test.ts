@@ -126,7 +126,7 @@ describe("auditSynthesisClassifier", () => {
       })),
     });
 
-    expect(outcome.kind).toBe("inconclusive_batch_evidence");
+    expect(outcome.kind).toBe("source_inconclusive");
     expect(outcome.inventoryOnlyNoFindingsReportCount).toBe(6);
     expect(outcome.reason).toContain("did not include enough substantive inspection evidence");
   });
@@ -138,7 +138,45 @@ describe("auditSynthesisClassifier", () => {
       reports: [],
     });
 
-    expect(outcome.kind).toBe("inconclusive_batch_evidence");
+    expect(outcome.kind).toBe("source_inconclusive");
+  });
+
+  it("does not trust terminal source_inconclusive reports as synthesis input", () => {
+    const root = initRepo();
+    const terminalReport = [
+      substantiveNoFindingsReport("src/config.ts"),
+      "```audit-report-manifest",
+      JSON.stringify({
+        version: 2,
+        auditPlanId: "task:task-source",
+        taskId: "task-source",
+        artifactPath: "audit/source.md",
+        contentSha256: "0".repeat(64),
+        sourceSnapshot: { id: "snapshot:source", dirty: false },
+        outcome: "source_inconclusive",
+        scopeCoverage: [],
+        riskHypotheses: [],
+        findings: [],
+        noFindingsClaims: [],
+        evidenceRefs: [],
+      }),
+      "```",
+    ].join("\n");
+
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      reports: [
+        {
+          artifactPath: "audit/source.md",
+          taskId: "task-source",
+          content: terminalReport,
+        },
+      ],
+    });
+
+    expect(outcome.kind).toBe("source_inconclusive");
+    expect(outcome.substantiveNoFindingsReportCount).toBe(0);
+    expect(outcome.weakReportCount).toBe(1);
   });
 
   it("preserves source outcome precedence over stronger final text claims", () => {
@@ -169,8 +207,8 @@ describe("auditSynthesisClassifier", () => {
 
     const output = classifyAuditSynthesisOutput({ text, projectRoot: root });
 
-    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("inconclusive_batch_evidence");
-    expect(output.kind).toBe("inconclusive_batch_evidence");
+    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("source_inconclusive");
+    expect(output.kind).toBe("source_inconclusive");
   });
 
   it("treats forged no-findings metadata with zero source reports as inconclusive", () => {
@@ -200,8 +238,8 @@ describe("auditSynthesisClassifier", () => {
 
     const output = classifyAuditSynthesisOutput({ text, projectRoot: root });
 
-    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("inconclusive_batch_evidence");
-    expect(output.kind).toBe("inconclusive_batch_evidence");
+    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("source_inconclusive");
+    expect(output.kind).toBe("source_inconclusive");
     expect(output.reason).toContain("does not prove substantive no-findings");
   });
 
@@ -232,8 +270,8 @@ describe("auditSynthesisClassifier", () => {
 
     const output = classifyAuditSynthesisOutput({ text, projectRoot: root });
 
-    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("inconclusive_batch_evidence");
-    expect(output.kind).toBe("inconclusive_batch_evidence");
+    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("source_inconclusive");
+    expect(output.kind).toBe("source_inconclusive");
     expect(output.inventoryOnlyNoFindingsReportCount).toBe(6);
   });
 
@@ -258,8 +296,8 @@ describe("auditSynthesisClassifier", () => {
 
     const output = classifyAuditSynthesisOutput({ text, projectRoot: root });
 
-    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("inconclusive_batch_evidence");
-    expect(output.kind).toBe("inconclusive_batch_evidence");
+    expect(parseAuditSynthesisOutcomeFromText(text)?.kind).toBe("source_inconclusive");
+    expect(output.kind).toBe("source_inconclusive");
     expect(output.reason).toContain("missing or invalid counts");
   });
 });

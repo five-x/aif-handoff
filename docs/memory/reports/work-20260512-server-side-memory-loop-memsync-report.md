@@ -1,4 +1,4 @@
-﻿<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
+<!-- Managed by codex-platform; edit source GPTI/templates and re-run the compiler. -->
 
 # Memory Sync Report
 

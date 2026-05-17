@@ -1,10 +1,59 @@
 import { describe, expect, it } from "vitest";
 import {
+  PLAN_MANIFEST_REQUIRED_CREATED_AT,
   TaskPlanQualityError,
   buildDeterministicDiagnosticPlan,
   evaluateTaskPlanQuality,
   formatTaskPlanQualityBlockedReason,
 } from "../planQuality.js";
+
+function planManifest(overrides: Record<string, unknown> = {}): string {
+  return [
+    "```aif-plan-manifest",
+    JSON.stringify(
+      {
+        version: 1,
+        taskId: "task-full",
+        intent: "feature",
+        scope: ["packages/shared/src/planQuality.ts"],
+        allowedChanges: ["source", "tests"],
+        forbiddenChanges: ["report", "unrelated modules", "secrets"],
+        expectedArtifacts: [
+          {
+            kind: "source_diff",
+            paths: ["packages/shared/src/planQuality.ts"],
+          },
+        ],
+        acceptanceCriteria: [
+          {
+            id: "ac-1",
+            description: "Plan manifest validation rejects weak full-mode plans.",
+            verification:
+              "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts",
+          },
+        ],
+        verificationCommands: [
+          "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts",
+        ],
+        ...overrides,
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
+
+function fullPlanWithManifest(manifest = planManifest()): string {
+  return [
+    "## Manifest plan",
+    "",
+    manifest,
+    "",
+    "- [ ] Update packages/shared/src/planQuality.ts with manifest validation.",
+    "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+  ].join("\n");
+}
 
 describe("evaluateTaskPlanQuality", () => {
   it("accepts a focused checklist plan for a simple task", () => {
@@ -15,6 +64,526 @@ describe("evaluateTaskPlanQuality", () => {
 
     expect(result.ok).toBe(true);
     expect(result.categories).toEqual([]);
+  });
+
+  it("requires a plan manifest for new full-mode tasks", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add plan manifest gate",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: [
+        "## Plan",
+        "- [ ] Update packages/shared/src/planQuality.ts with manifest validation.",
+        "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("missing_plan_manifest");
+    expect(result.planManifest).toMatchObject({
+      required: true,
+      present: false,
+      status: "missing",
+    });
+  });
+
+  it("does not require a missing manifest for pre-rollout full-mode plans", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-old-full",
+        title: "Old full-mode task",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: "2026-05-15T23:59:59.000Z",
+      },
+      plan: [
+        "## Plan",
+        "- [ ] Update packages/shared/src/planQuality.ts with a focused guard.",
+        "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.planManifest).toMatchObject({
+      required: false,
+      present: false,
+      status: "not_required",
+    });
+  });
+
+  it("requires a manifest for pre-rollout full-mode tasks intentionally replanned after plan-quality feedback", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-old-replanned",
+        title: "Old full-mode replan",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: "2026-05-15T23:59:59.000Z",
+        blockedFromStatus: "plan_ready",
+        blockedReason: "Plan quality guard replan 1/2: previous feedback",
+      },
+      plan: [
+        "## Plan",
+        "- [ ] Update packages/shared/src/planQuality.ts with a focused guard.",
+        "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("missing_plan_manifest");
+    expect(result.planManifest?.required).toBe(true);
+  });
+
+  it("accepts a valid manifest for new full-mode tasks", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add plan manifest gate",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.planManifest).toMatchObject({
+      required: true,
+      present: true,
+      status: "valid",
+      taskId: "task-full",
+      intent: "feature",
+    });
+  });
+
+  it("rejects malformed present manifests even when manifest is optional", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-fast",
+        title: "Fast plan with bad manifest",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "fast",
+      },
+      plan: fullPlanWithManifest("```aif-plan-manifest\nnot-json\n```"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("invalid_plan_manifest");
+    expect(result.planManifest).toMatchObject({
+      required: false,
+      present: true,
+      status: "invalid",
+    });
+  });
+
+  it("rejects multiple plan manifest blocks", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add plan manifest gate",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest([planManifest(), planManifest()].join("\n\n")),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("invalid_plan_manifest");
+    expect(result.planManifest).toMatchObject({
+      required: true,
+      present: true,
+      status: "invalid",
+    });
+  });
+
+  it("rejects manifest task and intent mismatches", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add plan manifest gate",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(planManifest({ taskId: "other-task", intent: "docs" })),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toEqual(
+      expect.arrayContaining(["plan_manifest_task_mismatch", "plan_manifest_intent_mismatch"]),
+    );
+  });
+
+  it("rejects untestable manifest acceptance criteria and missing verification commands", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add plan manifest gate",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          acceptanceCriteria: [{ id: "ac-1", description: "Do the thing", verification: "TBD" }],
+          verificationCommands: [],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toEqual(
+      expect.arrayContaining([
+        "plan_manifest_untestable_acceptance_criteria",
+        "plan_manifest_missing_verification_commands",
+      ]),
+    );
+  });
+
+  it("rejects prose-only verification commands and acceptance verification", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add plan manifest gate",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          acceptanceCriteria: [
+            {
+              id: "ac-1",
+              description: "Manual check is not enough",
+              verification: "check manually",
+            },
+          ],
+          verificationCommands: ["verify manually"],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toEqual(
+      expect.arrayContaining([
+        "plan_manifest_untestable_acceptance_criteria",
+        "plan_manifest_missing_verification_commands",
+      ]),
+    );
+  });
+
+  it("rejects allowed changes that contradict task intent policy", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Audit should remain report only",
+        description:
+          "Scope: packages/shared/src/planQuality.ts. Report artifact: audit/plan-quality.md.",
+        taskIntent: "audit",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: [
+        "## Audit manifest plan",
+        "",
+        planManifest({
+          intent: "audit",
+          allowedChanges: ["source", "report"],
+          forbiddenChanges: ["source", "tests", "docs", "config"],
+          scope: ["packages/shared/src/planQuality.ts"],
+          expectedArtifacts: [{ kind: "audit_report", paths: ["audit/plan-quality.md"] }],
+        }),
+        "",
+        "Report artifact: `audit/plan-quality.md`",
+        "Scope: `packages/shared/src/planQuality.ts`.",
+        "Scoped evidence targets: `packages/shared/src/planQuality.ts`.",
+        "Excluded areas: generated files and unrelated source.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect packages/shared/src/planQuality.ts and update audit/plan-quality.md.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_allowed_change_violation");
+  });
+
+  it("rejects audit manifests with source expected artifacts", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Audit should not expect source diffs",
+        description:
+          "Scope: packages/shared/src/planQuality.ts. Report artifact: audit/plan-quality.md.",
+        taskIntent: "audit",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: [
+        "## Audit manifest plan",
+        "",
+        planManifest({
+          intent: "audit",
+          allowedChanges: ["report"],
+          forbiddenChanges: ["source", "tests", "docs", "config"],
+          scope: ["packages/shared/src/planQuality.ts"],
+          expectedArtifacts: [
+            { kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] },
+          ],
+        }),
+        "",
+        "Report artifact: `audit/plan-quality.md`",
+        "Scope: `packages/shared/src/planQuality.ts`.",
+        "Scoped evidence targets: `packages/shared/src/planQuality.ts`.",
+        "Excluded areas: generated files and unrelated source.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect packages/shared/src/planQuality.ts and update audit/plan-quality.md.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_expected_artifact_violation");
+  });
+
+  it("rejects expected artifact categories omitted from manifest allowedChanges", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Feature manifest must allow expected source artifacts",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          allowedChanges: ["tests"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [
+            { kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] },
+          ],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_expected_artifact_violation");
+  });
+
+  it("rejects expected artifact categories listed in manifest forbiddenChanges", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Feature manifest must not forbid expected source artifacts",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          allowedChanges: ["tests"],
+          forbiddenChanges: ["report", "source"],
+          expectedArtifacts: [
+            { kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] },
+          ],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_expected_artifact_violation");
+  });
+
+  it("rejects manifest categories listed in both allowedChanges and forbiddenChanges", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Feature manifest must not both allow and forbid source",
+        description: "Scope: packages/shared/src/__tests__/planQuality.test.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          scope: ["packages/shared/src/__tests__/planQuality.test.ts"],
+          allowedChanges: ["source", "tests"],
+          forbiddenChanges: ["report", "source"],
+          expectedArtifacts: [
+            {
+              kind: "test_delta",
+              paths: ["packages/shared/src/__tests__/planQuality.test.ts"],
+            },
+          ],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_allowed_change_violation");
+  });
+
+  it("rejects manifests that omit required forbidden change policy categories", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Audit should declare source changes forbidden",
+        description:
+          "Scope: packages/shared/src/planQuality.ts. Report artifact: audit/plan-quality.md.",
+        taskIntent: "audit",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: [
+        "## Audit manifest plan",
+        "",
+        planManifest({
+          intent: "audit",
+          allowedChanges: ["report"],
+          forbiddenChanges: [],
+          scope: ["packages/shared/src/planQuality.ts"],
+          expectedArtifacts: [{ kind: "audit_report", paths: ["audit/plan-quality.md"] }],
+        }),
+        "",
+        "Report artifact: `audit/plan-quality.md`",
+        "Scope: `packages/shared/src/planQuality.ts`.",
+        "Scoped evidence targets: `packages/shared/src/planQuality.ts`.",
+        "Excluded areas: generated files and unrelated source.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect packages/shared/src/planQuality.ts and update audit/plan-quality.md.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toEqual(
+      expect.arrayContaining([
+        "missing_plan_manifest_fields",
+        "plan_manifest_forbidden_change_violation",
+      ]),
+    );
+  });
+
+  it("rejects docs manifests that omit policy-forbidden source, tests, config, and report categories", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Document plan quality",
+        description: "Scope: docs/ops/runbook.md.",
+        taskIntent: "docs",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: [
+        "## Docs manifest plan",
+        "",
+        planManifest({
+          intent: "docs",
+          allowedChanges: ["docs"],
+          forbiddenChanges: ["source"],
+          scope: ["docs/ops/runbook.md"],
+          expectedArtifacts: [{ kind: "docs_diff", paths: ["docs/ops/runbook.md"] }],
+        }),
+        "",
+        "- [ ] Update docs/ops/runbook.md with plan quality behavior.",
+        "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_forbidden_change_violation");
+  });
+
+  it("rejects docs manifests with source expected artifacts", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Document plan quality",
+        description:
+          "Scope: docs/ops/runbook.md and packages/shared/src/planQuality.ts for source facts.",
+        taskIntent: "docs",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: [
+        "## Docs manifest plan",
+        "",
+        planManifest({
+          intent: "docs",
+          allowedChanges: ["docs"],
+          forbiddenChanges: ["source", "tests", "config", "report"],
+          scope: ["docs/ops/runbook.md", "packages/shared/src/planQuality.ts"],
+          expectedArtifacts: [
+            { kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] },
+          ],
+        }),
+        "",
+        "- [ ] Verify packages/shared/src/planQuality.ts as the source fact input.",
+        "- [ ] Update docs/ops/runbook.md with plan quality behavior.",
+        "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_expected_artifact_violation");
+  });
+
+  it("rejects tests manifests with source and docs expected artifacts", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add plan quality regression tests",
+        description:
+          "Scope: packages/shared/src/__tests__/planQuality.test.ts, packages/shared/src/planQuality.ts, and docs/ops/runbook.md.",
+        taskIntent: "tests",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: [
+        "## Tests manifest plan",
+        "",
+        planManifest({
+          intent: "tests",
+          allowedChanges: ["tests"],
+          forbiddenChanges: ["source", "docs", "config", "report"],
+          scope: [
+            "packages/shared/src/__tests__/planQuality.test.ts",
+            "packages/shared/src/planQuality.ts",
+            "docs/ops/runbook.md",
+          ],
+          expectedArtifacts: [
+            { kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] },
+            { kind: "docs_diff", paths: ["docs/ops/runbook.md"] },
+          ],
+        }),
+        "",
+        "- [ ] Add regression coverage in packages/shared/src/__tests__/planQuality.test.ts.",
+        "- [ ] Do not change packages/shared/src/planQuality.ts or docs/ops/runbook.md.",
+        "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_expected_artifact_violation");
   });
 
   it("rejects slash fallback echo and thinking artifacts", () => {

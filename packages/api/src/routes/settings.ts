@@ -5,8 +5,10 @@ import { join } from "node:path";
 import YAML from "yaml";
 import {
   findProjectById,
+  appendConfigAuditEvent,
   getAppDefaultRuntimeProfileId,
   getAppSettings,
+  listProjects,
   listRuntimeProfiles,
   updateAppSettings,
 } from "@aif/data";
@@ -16,6 +18,7 @@ import {
   getEnv,
   clearProjectConfigCache,
   parseMcpPortSetting,
+  validateProjectConfigObject,
 } from "@aif/shared";
 import type { RuntimeMcpInstallInput } from "@aif/runtime";
 import { updateAppRuntimeDefaultsSchema } from "../schemas.js";
@@ -146,8 +149,19 @@ settingsRoutes.put("/runtime-defaults", jsonValidator(updateAppRuntimeDefaultsSc
     return c.json(validation, 400);
   }
 
+  const before = buildAppRuntimeDefaultsResponse();
   updateAppSettings(body);
   const response = buildAppRuntimeDefaultsResponse();
+  for (const project of listProjects()) {
+    appendConfigAuditEvent({
+      projectId: project.id,
+      action: "app_runtime_defaults_updated",
+      sourceKind: "app_settings",
+      actor: "api",
+      before,
+      after: response,
+    });
+  }
   log.info({ runtimeDefaults: response }, "Updated app runtime defaults");
   broadcast({ type: "settings:runtime_defaults_updated", payload: getAppSettings() });
   return c.json(response);
@@ -276,6 +290,29 @@ settingsRoutes.put("/config", async (c) => {
     if (!config || typeof config !== "object") {
       return c.json({ error: "config must be an object" }, 400);
     }
+    const issues = validateProjectConfigObject(config);
+    const blockingIssues = issues.filter((issue) => issue.severity === "error");
+    if (blockingIssues.length > 0) {
+      return c.json(
+        {
+          error: "Invalid project config",
+          reasonCodes: [...new Set(blockingIssues.map((issue) => issue.reasonCode))],
+          issues: blockingIssues,
+        },
+        400,
+      );
+    }
+    const beforeExisted = existsSync(configPath);
+    let beforeIssueCount = 0;
+    if (beforeExisted) {
+      try {
+        beforeIssueCount = validateProjectConfigObject(
+          YAML.parse(await readFile(configPath, "utf-8")),
+        ).length;
+      } catch {
+        beforeIssueCount = 1;
+      }
+    }
     const yaml = YAML.stringify(config, {
       lineWidth: 0,
       defaultKeyType: "PLAIN",
@@ -284,6 +321,15 @@ settingsRoutes.put("/config", async (c) => {
     await writeFile(configPath, yaml, "utf-8");
     const project = findProjectById(projectId!);
     if (project) clearProjectConfigCache(project.rootPath);
+    appendConfigAuditEvent({
+      projectId: projectId!,
+      action: "project_config_written",
+      sourceKind: "project_config",
+      actor: "api",
+      reasonCodes: issues.map((issue) => issue.reasonCode),
+      before: { existed: beforeExisted, issueCount: beforeIssueCount },
+      after: { issueCount: issues.length, fingerprint: "redacted_config_payload" },
+    });
     log.info({ projectId }, "config.yaml updated");
     broadcast({ type: "settings:config_updated", payload: { projectId: projectId! } });
     return c.json({ success: true });

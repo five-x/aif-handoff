@@ -20,6 +20,10 @@ import {
 import {
   logger,
   getEnv,
+  decidePolicyBypass,
+  formatTaskIntentOptionsForPrompt,
+  getPermissionExecutionPolicy,
+  isPermissionPolicyIntent,
   redactProviderText,
   redactProviderTextForLogs,
   sanitizeRuntimeLimitSnapshotForExposure,
@@ -30,6 +34,7 @@ import {
   type WsEvent,
 } from "@aif/shared";
 import {
+  appendTaskActivityLog,
   createChatMessage,
   createChatSession,
   deleteChatSession,
@@ -52,7 +57,10 @@ import {
   updateChatSessionTimestamp,
 } from "@aif/data";
 import { chatRequestSchema, createChatSessionSchema, updateChatSessionSchema } from "../schemas.js";
-import { persistAttachments } from "../services/attachmentPersistence.js";
+import {
+  AttachmentValidationError,
+  persistAttachments,
+} from "../services/attachmentPersistence.js";
 import { readAttachment } from "../services/attachmentStorage.js";
 import { broadcast, sendToClient } from "../ws.js";
 import {
@@ -158,17 +166,40 @@ function formatToolQuestion(payload: RuntimeToolQuestionPayload): string | null 
 const CHAT_ACTIONS_PROMPT = `
 Identity: You are AIFer.
 
-You have special capabilities in this chat:
+You have special capabilities in this chat. Structured actions are proposals or UI hints only.
+Never output an action that directly changes task status, approves done, verifies memory,
+updates review/completion fields, bypasses security policy, or mutates a plan.
 
 1. CREATE TASK: ONLY when the user explicitly asks to create a task (e.g. "создай задачу", "create a task", "добавь таск"), output a structured block. Do NOT create tasks unprompted or for casual messages:
 <!--ACTION:CREATE_TASK-->
-{"title": "Short task title", "description": "Detailed task description with context from the conversation", "taskIntent": "feature", "isFix": false}
+{"title": "Short task title", "description": "Detailed task description with context from the conversation", "taskIntent": "feature", "isFix": false, "sourceRef": "chat:conversation"}
 <!--/ACTION-->
 Include this block in your response along with a brief explanation of the task you're creating. The user will see a confirmation card and can approve it.
 
+2. CREATE FOLLOW-UP: when the user asks to create follow-up work from the current task/chat context. The UI shows a confirmation card before any task is created.
+<!--ACTION:CREATE_FOLLOW_UP-->
+{"title": "Follow-up title", "description": "Follow-up scope and why it follows from the current task", "taskIntent": "feature", "isFix": false, "sourceRef": "chat:current-task"}
+<!--/ACTION-->
+
+3. START EXPLORE: when the user asks to explore, research, or brainstorm before creating work. This only opens explore-mode affordances and must not mutate task state.
+<!--ACTION:START_EXPLORE-->
+{"prompt": "Focused exploration prompt", "sourceRef": "chat:conversation"}
+<!--/ACTION-->
+
+4. EXPLAIN BLOCKER: when the user asks why work is blocked. This is a structured explanation only; do not set blocked status or blockedReason.
+<!--ACTION:EXPLAIN_BLOCKER-->
+{"title": "Blocker summary", "summary": "What is blocked, known evidence, and next operator decision", "sourceRef": "chat:current-task"}
+<!--/ACTION-->
+
+5. PREPARE REPLAN: when the user asks for a replan proposal. This is a draft only; do not request replanning, write plan fields, or change status.
+<!--ACTION:PREPARE_REPLAN-->
+{"title": "Replan proposal", "proposal": "Suggested replacement plan or deltas", "rationale": "Why this replan is needed", "sourceRef": "chat:current-task"}
+<!--/ACTION-->
+
 Set "isFix" to true when the user describes a bug, defect, or asks to fix/repair/debug something (e.g. "исправь", "fix", "починить", "баг", "не работает", "сломалось"). When isFix is true, the agent pipeline will use the bug-fix workflow instead of the feature workflow. Default is false for new features, improvements, and refactoring.
 
-Set "taskIntent" to one of "audit", "feature", "fix", "spike", "docs", "tests", or "general". Use "audit" only for diagnostic-only audit/review/discovery cards, "feature" for new product behavior, "fix" for bugs/defects, "spike" for research/design only, "docs" for documentation work, and "tests" for focused test work.
+Set "taskIntent" using this shared task intent policy:
+${formatTaskIntentOptionsForPrompt()}
 
 2. TASK SUMMARY: When the user asks to summarize what was done on the current task (or any task you have context for), generate a concise summary covering: what was planned, what was implemented, review results, and current status.
 `.trim();
@@ -1480,7 +1511,11 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
       dbSession?.runtimeSessionId ?? dbSession?.agentSessionId ?? undefined;
 
     if (chatSessionId && !attachments?.length) {
-      createChatMessage({ sessionId: chatSessionId, role: "user", content: message });
+      createChatMessage({
+        sessionId: chatSessionId,
+        role: "user",
+        content: redactProviderText(message),
+      });
       broadcastChatSessionMessagesUpdated(chatSessionId, projectId);
     }
     if (chatSessionId) {
@@ -1490,13 +1525,32 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
     // Persist file attachments to disk and build prompt with paths
     let prompt = explore ? `/aif-explore ${message}` : message;
     if (attachments?.length && chatSessionId) {
-      const persisted = await persistAttachments(attachments, {
-        projectRoot: project.rootPath,
-        chatSessionId,
-      });
+      let persisted;
+      try {
+        persisted = await persistAttachments(attachments, {
+          projectRoot: project.rootPath,
+          chatSessionId,
+        });
+      } catch (error) {
+        if (error instanceof AttachmentValidationError) {
+          return c.json({ error: error.message }, 400);
+        }
+        throw error;
+      }
       savedAttachments = persisted
         .filter((a) => a.path)
-        .map((a) => ({ name: a.name, mimeType: a.mimeType, size: a.size, path: a.path }));
+        .map((a) => {
+          const attachment: ChatMessageAttachment = {
+            name: a.name,
+            mimeType: a.mimeType,
+            size: a.size,
+            path: a.path,
+          };
+          if (a.sourceKind) attachment.sourceKind = a.sourceKind;
+          if (a.sourceRef) attachment.sourceRef = a.sourceRef;
+          if (a.redactionStatus) attachment.redactionStatus = a.redactionStatus;
+          return attachment;
+        });
       const fileContext = persisted
         .map((f, i) => {
           const location = f.path ? `Path: ${f.path}` : "[metadata only]";
@@ -1510,13 +1564,48 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
       createChatMessage({
         sessionId: chatSessionId,
         role: "user",
-        content: message,
+        content: redactProviderText(message),
         attachments: savedAttachments,
       });
       broadcastChatSessionMessagesUpdated(chatSessionId, projectId);
     }
 
-    const bypassPermissions = env.AGENT_BYPASS_PERMISSIONS;
+    const bypassRequested = env.AGENT_BYPASS_PERMISSIONS;
+    const permissionIntent = isPermissionPolicyIntent(currentTask?.taskIntent)
+      ? currentTask.taskIntent
+      : "general";
+    const permissionPolicy = getPermissionExecutionPolicy(permissionIntent);
+    const bypassDecision = bypassRequested
+      ? decidePolicyBypass({
+          intent: permissionIntent,
+          requestedMode: "danger_full_access",
+          humanApprovalBridgeAvailable: true,
+          humanApproved: true,
+          reason: `AGENT_BYPASS_PERMISSIONS for ${permissionIntent}`,
+        })
+      : null;
+    const bypassPermissions = bypassRequested && bypassDecision?.allowed === true;
+    if (
+      bypassPermissions &&
+      taskId &&
+      !currentTask?.agentActivityLog?.includes("[permission-policy:bypass]")
+    ) {
+      appendTaskActivityLog(
+        taskId,
+        `[${new Date().toISOString()}] Agent: [permission-policy:bypass] intent=${permissionIntent} defaultMode=${permissionPolicy.defaultMode}`,
+      );
+    }
+    if (
+      bypassRequested &&
+      !bypassPermissions &&
+      taskId &&
+      !currentTask?.agentActivityLog?.includes("[permission-policy:bypass")
+    ) {
+      appendTaskActivityLog(
+        taskId,
+        `[${new Date().toISOString()}] Agent: [permission-policy:bypass-blocked] intent=${permissionIntent} defaultMode=${permissionPolicy.defaultMode} reason=${bypassDecision?.reasons.join(" ") ?? "not allowed"}`,
+      );
+    }
     // Preserve assistant-turn event order as text/question segments:
     //   * question blocks are buffered and flushed before the next text delta
     //     (or at turn end), so a stream like text→question→text stays ordered.
@@ -1533,9 +1622,10 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
 
     const sendToken = (text: string) => {
       if (!clientId) return;
+      const token = redactProviderText(text);
       const tokenEvent: WsEvent = {
         type: "chat:token",
-        payload: { conversationId: chatConversationId, token: text },
+        payload: { conversationId: chatConversationId, token },
       };
       sendToClient(clientId, tokenEvent);
     };
@@ -1677,6 +1767,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
         onEvent: onRuntimeEvent,
         systemPromptAppend: systemAppend,
         bypassPermissions,
+        permissionPolicy,
         abortController,
         environment: {
           HANDOFF_MODE: "1",
@@ -1790,7 +1881,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
         createChatMessage({
           sessionId: chatSessionId,
           role: "assistant",
-          content: trimmed,
+          content: redactProviderText(trimmed),
         });
         createdAssistantMessage = true;
       }
@@ -1826,7 +1917,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
     return c.json({
       conversationId: chatConversationId,
       sessionId: chatSessionId,
-      assistantMessage: fullAssistantResponse || null,
+      assistantMessage: fullAssistantResponse ? redactProviderText(fullAssistantResponse) : null,
       usage: result.usage ?? null,
       runtime: {
         runtimeId,
@@ -1846,7 +1937,11 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
       // would lose visible output.
       const partial = fullAssistantResponse.trim();
       if (chatSessionId && partial) {
-        createChatMessage({ sessionId: chatSessionId, role: "assistant", content: partial });
+        createChatMessage({
+          sessionId: chatSessionId,
+          role: "assistant",
+          content: redactProviderText(partial),
+        });
         updateChatSessionTimestamp(chatSessionId);
         broadcastChatSessionMessagesUpdated(chatSessionId, projectId);
       }
@@ -1921,7 +2016,7 @@ chatRouter.post("/", jsonValidator(chatRequestSchema), async (c) => {
           // Expose the partial assistant reply so clients without an active
           // WebSocket can render what was saved server-side. Mirrors the
           // success path's `assistantMessage`.
-          assistantMessage: partial.length > 0 ? partial : null,
+          assistantMessage: partial.length > 0 ? redactProviderText(partial) : null,
           // Echo server-resolved attachments so the optimistic user bubble
           // can upgrade its chips with download paths even on abort.
           ...(savedAttachments?.length ? { attachments: savedAttachments } : {}),

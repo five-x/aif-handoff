@@ -36,6 +36,8 @@ function makeTask(status: Task["status"]): Task {
     autoReviewState: null,
     paused: false,
     lastHeartbeatAt: null,
+    lockStage: null,
+    coordinatorId: null,
     lastSyncedAt: null,
     runtimeProfileId: null,
     modelOverride: null,

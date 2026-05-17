@@ -18,7 +18,19 @@ import {
   type AuditReportValidationResult,
 } from "./auditReportValidator.js";
 import type { AuditEvidenceUnit } from "./auditEvidenceLedger.js";
-import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
+import {
+  isDevelopmentImplementationIntent,
+  validateImplementationManifest,
+  type ImplementationManifestIssueCode,
+  type ImplementationManifestValidationResult,
+} from "./implementationManifest.js";
+import {
+  inferTaskIntent,
+  isTaskIntent,
+  validateTaskIntentChangedFiles,
+  type TaskIntent,
+  type TaskIntentChangedFilesIssue,
+} from "./taskIntent.js";
 
 export type TaskCompletionIssueCode =
   | "zero_delta"
@@ -35,6 +47,8 @@ export type TaskCompletionIssueCode =
   | "audit_inconclusive"
   | "branch_isolation"
   | "manual_review_required"
+  | "intent_changed_files_contradiction"
+  | ImplementationManifestIssueCode
   | AuditReportValidationIssueCode;
 
 export interface TaskCompletionEvidenceTask {
@@ -47,9 +61,12 @@ export interface TaskCompletionEvidenceTask {
   plan?: string | null;
   planPath?: string | null;
   implementationLog?: string | null;
+  implementationManifestJson?: string | null;
   reviewComments?: string | null;
   agentActivityLog?: string | null;
   manualReviewRequired?: boolean | null;
+  skipReview?: boolean | null;
+  isFix?: boolean | null;
   expectedReportArtifactPath?: string | null;
   allowedEvidenceArtifactPaths?: string[] | null;
   auditArtifactRole?: "report" | "synthesis" | null;
@@ -91,10 +108,12 @@ export interface TaskCompletionEvidenceResult {
     auditReportValidation: AuditReportValidationResult;
     auditSynthesisOutcome: AuditSynthesisOutcome | null;
     expectedReportArtifactPath: string | null;
+    intentPolicyIssues: TaskIntentChangedFilesIssue[];
+    implementationManifestValidation: ImplementationManifestValidationResult | null;
   };
 }
 
-export type TaskCompletionEvidencePhase = "pre_implementation" | "completion";
+export type TaskCompletionEvidencePhase = "pre_implementation" | "review_handoff" | "completion";
 
 export interface TaskCompletionEvidenceInput {
   task: TaskCompletionEvidenceTask;
@@ -369,8 +388,12 @@ function isPlanArtifact(path: string, task: TaskCompletionEvidenceTask): boolean
   const taskPlanPath = normalizeRelativePath(task.planPath || ".ai-factory/PLAN.md");
   const name = basename(normalized).toLowerCase();
   if (normalized === taskPlanPath) return true;
-  if (name === "plan.md" || name === "fix_plan.md") return true;
-  if (normalized.includes("/plans/")) return true;
+  if (
+    normalized.startsWith(".ai-factory/") &&
+    (name === "plan.md" || name === "fix_plan.md" || normalized.includes("/plans/"))
+  ) {
+    return true;
+  }
   if (/^docs\/rdpi\/.+\/(?:research|design|plan|result)\.md$/i.test(normalized)) return true;
   if (normalized.startsWith("docs/intake/")) return true;
   if (normalized === "docs/work_status.json" || normalized === "docs/work_index.md") return true;
@@ -1211,6 +1234,11 @@ function formatPathExamples(paths: string[], limit = 8): string {
   return remaining > 0 ? `${shown.join(", ")} and ${remaining} more` : shown.join(", ");
 }
 
+function taskExplicitlyRequiresImplementationManifest(task: TaskCompletionEvidenceTask): boolean {
+  if (task.isFix === true) return true;
+  return isTaskIntent(task.taskIntent) && isDevelopmentImplementationIntent(task.taskIntent);
+}
+
 export function evaluateTaskCompletionEvidence(
   input: TaskCompletionEvidenceInput,
 ): TaskCompletionEvidenceResult {
@@ -1222,6 +1250,28 @@ export function evaluateTaskCompletionEvidence(
   const meaningfulChangedFiles = gitEvidence.files.filter(
     (file) => !isPlanArtifact(file, task) && !isMetadataOnlyPath(file),
   );
+  const meaningfulDirtyChangedFiles = gitEvidence.dirtyFiles.filter(
+    (file) => !isPlanArtifact(file, task) && !isMetadataOnlyPath(file),
+  );
+  const intentPolicyResult =
+    phase !== "pre_implementation"
+      ? validateTaskIntentChangedFiles({
+          task,
+          changedFiles: gitEvidence.files,
+          meaningfulChangedFiles,
+        })
+      : null;
+  const implementationManifestValidation =
+    phase !== "pre_implementation" && taskExplicitlyRequiresImplementationManifest(task)
+      ? validateImplementationManifest({
+          task,
+          manifestJson: task.implementationManifestJson,
+          changedFiles: gitEvidence.files,
+          meaningfulChangedFiles,
+          dirtyChangedFiles: meaningfulDirtyChangedFiles,
+          phase,
+        })
+      : null;
   const expectedReportArtifactPath =
     task.expectedReportArtifactPath ??
     (task.description ? parseExpectedAuditReportArtifactPath(task.description) : null);
@@ -1386,7 +1436,8 @@ export function evaluateTaskCompletionEvidence(
       );
     }
     if (
-      auditSynthesisOutcome?.kind === "inconclusive_batch_evidence" &&
+      (auditSynthesisOutcome?.kind === "source_inconclusive" ||
+        auditSynthesisOutcome?.kind === "inconclusive_batch_evidence") &&
       !hasExplicitAuditInconclusiveSynthesisConclusion({
         text: reportText,
         projectRoot,
@@ -1492,6 +1543,12 @@ export function evaluateTaskCompletionEvidence(
       );
     }
   }
+  for (const policyIssue of intentPolicyResult?.issues ?? []) {
+    issues.push(issue(policyIssue.code, policyIssue.message));
+  }
+  for (const manifestIssue of implementationManifestValidation?.issues ?? []) {
+    issues.push(issue(manifestIssue.code, manifestIssue.message));
+  }
   if (
     input.requireManualReview ||
     Boolean(task.manualReviewRequired && (issues.length > 0 || meaningfulChangedFiles.length === 0))
@@ -1534,6 +1591,8 @@ export function evaluateTaskCompletionEvidence(
       auditReportValidation,
       auditSynthesisOutcome,
       expectedReportArtifactPath,
+      intentPolicyIssues: intentPolicyResult?.issues ?? [],
+      implementationManifestValidation,
     },
   };
 }

@@ -170,6 +170,15 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
     "The plan must make completion verifiable: require report findings or verification items to include exact `path:line` evidence, `Risk:`, and `Verification: Command ... output ...` details.",
     "The plan must require the report artifact to be committed on the task branch, including `git status --short`, `git add <report path>`, `git commit -m ...`, and `git log -1 --name-only --oneline` verification steps.",
   ].join(" ");
+  const planManifestPlanningConstraint =
+    plannerMode === "full"
+      ? [
+          "Full-mode planning requirement: include exactly one fenced `aif-plan-manifest` JSON block in the final plan.",
+          "The manifest must include version 1, taskId, intent, scope, allowedChanges, forbiddenChanges, expectedArtifacts, acceptanceCriteria, and verificationCommands.",
+          "Acceptance criteria must be testable and verificationCommands must be concrete local commands.",
+          "The manifest intent, allowedChanges, and forbiddenChanges must respect the task intent contract and must not convert audit, spike, docs, or tests tasks into feature/fix implementation work.",
+        ].join(" ")
+      : "Fast-mode planning compatibility: do not require an aif-plan-manifest block unless one already exists; preserve and repair any existing manifest instead of deleting it.";
 
   // Deterministic branch handling. Two contracts, applied in order:
   //
@@ -275,7 +284,10 @@ Planning feedback:
 ${planningFeedback}
 
 Diagnostic task constraint:
-${diagnosticPlanningConstraint}`;
+${diagnosticPlanningConstraint}
+
+Plan manifest constraint:
+${planManifestPlanningConstraint}`;
   let prompt: string;
   let workflowSpec: ReturnType<typeof createRuntimeWorkflowSpec>;
   // HANDOFF_BRANCH_PREPARED=1 tells the aif-plan / plan-polisher skill that
@@ -360,7 +372,7 @@ ${taskContext}`;
     projectRoot: executionRoot,
     agentName: executionName,
     prompt,
-    profileMode: "plan",
+    profileMode: "planner",
     maxBudgetUsd: plannerBudget,
     agent: task.isFix || !useSubagents ? undefined : AGENT_NAME,
     workflowSpec,

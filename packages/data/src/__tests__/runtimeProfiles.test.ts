@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   appSettings,
   projects,
@@ -49,6 +52,9 @@ const {
   upsertCodexLimitHeads,
   listCodexLimitHeadsForOverlay,
   findPreferredCodexLimitHeadForOverlay,
+  appendConfigAuditEvent,
+  listConfigAuditEvents,
+  buildProjectConfigGovernance,
 } = dataModule;
 
 const dataModuleWithAppSettings = dataModule as unknown as {
@@ -152,6 +158,80 @@ describe("runtime profiles data layer", () => {
     expect(mapped.options).toEqual({ timeoutMs: 1000 });
   });
 
+  it("persists redacted config audit events", () => {
+    const event = appendConfigAuditEvent({
+      projectId: "proj-1",
+      action: "task_runtime_override_updated",
+      sourceKind: "task_override",
+      actor: "test",
+      reasonCodes: ["TASK_RUNTIME_SECRET_LIKE_OPTION_KEY"],
+      before: { runtimeOptionKeys: ["temperature"] },
+      after: { runtimeOptionKeys: ["temperature", "apiKey"] },
+    });
+
+    const events = listConfigAuditEvents({ projectId: "proj-1" });
+    expect(events).toHaveLength(1);
+    expect(events?.[0]).toMatchObject({
+      id: event.id,
+      projectId: "proj-1",
+      action: "task_runtime_override_updated",
+      sourceKind: "task_override",
+      reasonCodes: ["TASK_RUNTIME_SECRET_LIKE_OPTION_KEY"],
+    });
+  });
+
+  it("builds a redacted governance projection with runtime profile key metadata", () => {
+    const profile = createRuntimeProfile({
+      projectId: "proj-1",
+      name: "Profile",
+      runtimeId: "codex",
+      providerId: "openai",
+      headers: { "x-request-id": "value" },
+      options: { temperature: 0 },
+    });
+
+    const view = buildProjectConfigGovernance("proj-1");
+    expect(view?.projectId).toBe("proj-1");
+    expect(view?.runtimeProfiles).toContainEqual(
+      expect.objectContaining({
+        id: profile!.id,
+        headerKeys: ["x-request-id"],
+        optionKeys: ["temperature"],
+      }),
+    );
+    expect(view?.fingerprint).toMatch(/^fnv1a32:/);
+  });
+
+  it("does not project raw values from secret-like project config keys", () => {
+    const rootPath = mkdtempSync(join(tmpdir(), "aif-config-governance-data-"));
+    mkdirSync(join(rootPath, ".ai-factory"), { recursive: true });
+    writeFileSync(
+      join(rootPath, ".ai-factory", "config.yaml"),
+      [
+        "paths:",
+        "  plan: .ai-factory/PLAN.md",
+        "  credentials: raw-secret-value",
+        "git:",
+        "  enabled: true",
+        "  base_branch: main",
+        "  token: raw-secret-value",
+        "",
+      ].join("\n"),
+    );
+    testDb.current
+      .insert(projects)
+      .values({ id: "secret-config-project", name: "Secret Config", rootPath })
+      .run();
+
+    const view = buildProjectConfigGovernance("secret-config-project");
+    expect(JSON.stringify(view)).not.toContain("raw-secret-value");
+    expect(view?.projectConfig.paths).not.toHaveProperty("credentials");
+    expect(view?.projectConfig.git).not.toHaveProperty("token");
+    expect(view?.issues.map((issue) => issue.reasonCode)).toContain(
+      "PROJECT_CONFIG_SECRET_LIKE_KEY",
+    );
+  });
+
   it("updates runtime profiles", () => {
     const profile = createRuntimeProfile({
       name: "Codex",
@@ -214,6 +294,23 @@ describe("runtime profiles data layer", () => {
           totalTokens: 52,
           costUsd: 0.03,
           createdAt: "2026-04-18T10:00:00.000Z",
+        },
+        {
+          id: "usage-failed",
+          source: "chat",
+          projectId: "proj-1",
+          profileId: profile!.id,
+          runtimeId: "codex",
+          providerId: "openai",
+          transport: "sdk",
+          usageReporting: "full",
+          outcome: "failed",
+          errorCategory: "rate_limit",
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          costUsd: null,
+          createdAt: "2026-04-18T11:00:00.000Z",
         },
       ])
       .run();

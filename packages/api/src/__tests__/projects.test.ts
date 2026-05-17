@@ -1,11 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { projects, runtimeProfiles, runtimeWarmupSessions, tasks } from "@aif/shared";
+import {
+  configAuditEvents,
+  memoryItems,
+  projects,
+  runtimeProfiles,
+  runtimeWarmupSessions,
+  tasks,
+  usageEvents,
+} from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -97,6 +106,14 @@ function createRoadmapProject(id: string, roadmapContent?: string) {
   return rootPath;
 }
 
+function writeBlockingProjectConfig(rootPath: string) {
+  mkdirSync(join(rootPath, ".ai-factory"), { recursive: true });
+  writeFileSync(
+    join(rootPath, ".ai-factory", "config.yaml"),
+    "workflow:\n  auto_create_dirs: yes\n",
+  );
+}
+
 describe("projects API", () => {
   let app: ReturnType<typeof createApp>;
 
@@ -112,6 +129,7 @@ describe("projects API", () => {
     const unsupportedWarmup = {
       supported: false,
       skipReason: "unsupported_capability",
+      stage: "planner",
       workflowKind: "planner",
       profileMode: "plan",
       runtimeId: "openrouter",
@@ -141,6 +159,84 @@ describe("projects API", () => {
     const res = await app.request("/projects");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
+  });
+
+  it("returns redacted project config governance and audit events", async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), "aif-config-governance-route-"));
+    mkdirSync(join(rootPath, ".ai-factory"), { recursive: true });
+    writeFileSync(
+      join(rootPath, ".ai-factory", "config.yaml"),
+      YAML.stringify({
+        paths: { plan: ".ai-factory/PLAN.md", credentials: "raw-secret-value" },
+        workflow: { verify_mode: "strict" },
+        git: { enabled: true, base_branch: "main", token: "raw-secret-value" },
+      }),
+    );
+    testDb.current
+      .insert(projects)
+      .values({
+        id: "cfg-proj",
+        name: "Config Project",
+        rootPath,
+        defaultTaskRuntimeProfileId: "profile-1",
+      })
+      .run();
+    testDb.current
+      .insert(runtimeProfiles)
+      .values({
+        id: "profile-1",
+        projectId: "cfg-proj",
+        name: "Project Profile",
+        runtimeId: "claude",
+        providerId: "anthropic",
+        apiKeyEnvVar: "ANTHROPIC_API_KEY",
+        optionsJson: JSON.stringify({ timeoutMs: 1000 }),
+      })
+      .run();
+    testDb.current
+      .insert(configAuditEvents)
+      .values({
+        id: "audit-1",
+        projectId: "cfg-proj",
+        runtimeProfileId: "profile-1",
+        action: "runtime_profile_updated",
+        sourceKind: "runtime_profile",
+        reasonCodesJson: JSON.stringify(["RUNTIME_PROFILE_SECRET_LIKE_OPTION_KEY"]),
+        afterJson: JSON.stringify({ optionKeys: ["timeoutMs"] }),
+        createdAt: "2026-05-17T00:00:00.000Z",
+      })
+      .run();
+
+    const governanceRes = await app.request("/projects/cfg-proj/config-governance");
+    expect(governanceRes.status).toBe(200);
+    const governanceBody = await governanceRes.json();
+    expect(governanceBody.projectId).toBe("cfg-proj");
+    expect(governanceBody.projectConfig.workflow.verify_mode).toBe("strict");
+    expect(governanceBody.projectConfig.paths).not.toHaveProperty("credentials");
+    expect(governanceBody.projectConfig.git).not.toHaveProperty("token");
+    expect(
+      governanceBody.issues.map((issue: { reasonCode: string }) => issue.reasonCode),
+    ).toContain("PROJECT_CONFIG_SECRET_LIKE_KEY");
+    expect(governanceBody.runtimeProfiles[0]).toMatchObject({
+      id: "profile-1",
+      apiKeyEnvVar: "ANTHROPIC_API_KEY",
+      optionKeys: ["timeoutMs"],
+    });
+    expect(JSON.stringify(governanceBody)).not.toContain("raw-secret-value");
+
+    const auditRes = await app.request("/projects/cfg-proj/config-audit");
+    expect(auditRes.status).toBe(200);
+    const auditBody = await auditRes.json();
+    expect(auditBody).toMatchObject({
+      projectId: "cfg-proj",
+      events: [
+        {
+          id: "audit-1",
+          action: "runtime_profile_updated",
+          reasonCodes: ["RUNTIME_PROFILE_SECRET_LIKE_OPTION_KEY"],
+        },
+      ],
+    });
   });
 
   it("rejects invalid root path for create", async () => {
@@ -518,6 +614,23 @@ describe("projects API", () => {
         projectId: "roadmap-audit-logging",
         roadmapAlias: "audit-logging",
       });
+    });
+
+    it("blocks roadmap generation when config governance has blockers", async () => {
+      const rootPath = createRoadmapProject("roadmap-config-blocked");
+      writeBlockingProjectConfig(rootPath);
+
+      const res = await app.request("/projects/roadmap-config-blocked/roadmap/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "feature-plan", vision: "Ship feature" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("config_governance_blocked");
+      expect(body.reasonCodes).toContain("PROJECT_CONFIG_INVALID_BOOLEAN");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
     });
   });
 
@@ -997,6 +1110,139 @@ describe("projects API", () => {
     });
   });
 
+  describe("operator project surfaces", () => {
+    it("returns knowledge, runtime usage, and queue projections", async () => {
+      const db = testDb.current;
+      db.insert(projects)
+        .values({
+          id: "operator-project",
+          name: "Operator Project",
+          rootPath: "/tmp/operator-project",
+          tokenInput: 5,
+          tokenOutput: 8,
+          tokenTotal: 13,
+          costUsd: 0.02,
+        })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "operator-queued-task",
+          projectId: "operator-project",
+          title: "Queued task",
+          status: "backlog",
+          priority: 2,
+          position: 1,
+        })
+        .run();
+      db.insert(memoryItems)
+        .values({
+          id: "operator-knowledge",
+          projectId: "operator-project",
+          scope: "project",
+          sourceKind: "manual",
+          itemType: "decision",
+          status: "approved",
+          title: "Operator knowledge",
+          summary: "Knowledge summary",
+          content: "Knowledge content",
+          claimsJson: "[]",
+          tagsJson: "[]",
+        })
+        .run();
+      db.insert(memoryItems)
+        .values([
+          {
+            id: "operator-global-approved",
+            projectId: null,
+            scope: "global",
+            sourceKind: "manual",
+            itemType: "decision",
+            status: "approved",
+            title: "Approved global knowledge",
+            summary: "Approved global summary",
+            content: "Approved global content",
+            claimsJson: "[]",
+            tagsJson: "[]",
+          },
+          {
+            id: "operator-global-pending",
+            projectId: null,
+            scope: "global",
+            sourceKind: "manual",
+            itemType: "decision",
+            status: "pending",
+            title: "Pending global knowledge",
+            summary: "Pending global summary",
+            content: "Pending global content",
+            claimsJson: "[]",
+            tagsJson: "[]",
+          },
+        ])
+        .run();
+      db.insert(usageEvents)
+        .values({
+          id: "operator-project-usage",
+          source: "agent",
+          projectId: "operator-project",
+          runtimeId: "codex",
+          providerId: "openai",
+          profileId: "profile-1",
+          usageReporting: "reported",
+          inputTokens: 5,
+          outputTokens: 8,
+          totalTokens: 13,
+          costUsd: 0.02,
+        })
+        .run();
+
+      const knowledgeRes = await app.request("/projects/operator-project/knowledge");
+      expect(knowledgeRes.status).toBe(200);
+      expect(await knowledgeRes.json()).toEqual(
+        expect.objectContaining({
+          projectId: "operator-project",
+          counts: expect.objectContaining({
+            byStatus: expect.objectContaining({ approved: 1 }),
+            byType: expect.objectContaining({ decision: 1 }),
+          }),
+          items: [expect.objectContaining({ id: "operator-knowledge" })],
+        }),
+      );
+
+      const knowledgeWithGlobalRes = await app.request(
+        "/projects/operator-project/knowledge?includeGlobal=true",
+      );
+      expect(knowledgeWithGlobalRes.status).toBe(200);
+      const knowledgeWithGlobal = await knowledgeWithGlobalRes.json();
+      expect(knowledgeWithGlobal.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "operator-knowledge" }),
+          expect.objectContaining({ id: "operator-global-approved" }),
+        ]),
+      );
+      expect(knowledgeWithGlobal.items).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: "operator-global-pending" })]),
+      );
+
+      const usageRes = await app.request("/projects/operator-project/runtime-usage");
+      expect(usageRes.status).toBe(200);
+      expect(await usageRes.json()).toEqual(
+        expect.objectContaining({
+          totals: expect.objectContaining({ totalTokens: 13, costUsd: 0.02 }),
+          events: [expect.objectContaining({ id: "operator-project-usage" })],
+        }),
+      );
+
+      const queueRes = await app.request("/projects/operator-project/queue");
+      expect(queueRes.status).toBe(200);
+      expect(await queueRes.json()).toEqual(
+        expect.objectContaining({
+          countsByStatus: expect.objectContaining({ backlog: 1 }),
+          backlog: [expect.objectContaining({ id: "operator-queued-task" })],
+        }),
+      );
+    });
+  });
+
   describe("warmup routes", () => {
     beforeEach(() => {
       testDb.current
@@ -1008,6 +1254,7 @@ describe("projects API", () => {
     function mockSupportedWarmup() {
       const supportedWarmup = {
         supported: true,
+        stage: "planner",
         workflowKind: "planner",
         profileMode: "plan",
         runtimeId: "claude",
@@ -1070,11 +1317,36 @@ describe("projects API", () => {
       expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
     });
 
+    it("POST blocks warmup when config governance has blockers", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-warmup-config-block-"));
+      writeBlockingProjectConfig(rootPath);
+      testDb.current
+        .update(projects)
+        .set({ rootPath })
+        .where(eq(projects.id, "warm-project"))
+        .run();
+      mockWarmupEnabled.value = true;
+      mockSupportedWarmup();
+
+      const res = await app.request("/projects/warm-project/warmup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ttlSeconds: 600 }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("config_governance_blocked");
+      expect(body.reasonCodes).toContain("PROJECT_CONFIG_INVALID_BOOLEAN");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
     it("POST rejects unsupported warmup runtimes", async () => {
       mockWarmupEnabled.value = true;
       mockResolveApiWarmupSupport.mockResolvedValue({
         supported: false,
         skipReason: "unsupported_capability",
+        stage: "planner",
         workflowKind: "planner",
         profileMode: "plan",
         runtimeId: "openrouter",
@@ -1088,6 +1360,7 @@ describe("projects API", () => {
         {
           supported: false,
           skipReason: "unsupported_capability",
+          stage: "planner",
           workflowKind: "planner",
           profileMode: "plan",
           runtimeId: "openrouter",
@@ -1185,6 +1458,7 @@ describe("projects API", () => {
           providerId: "anthropic",
           transport: "sdk",
           model: "claude-sonnet-4",
+          stage: "planner",
           sourceSessionId: "seed-old",
           status: "ready",
           ttlSeconds: 600,
@@ -1227,6 +1501,7 @@ describe("projects API", () => {
       mockResolveApiWarmupSupports.mockResolvedValue([
         {
           supported: true,
+          stage: "planner",
           workflowKind: "planner",
           profileMode: "plan",
           runtimeId: "claude",
@@ -1238,6 +1513,7 @@ describe("projects API", () => {
         },
         {
           supported: true,
+          stage: "implementer",
           workflowKind: "implementer",
           profileMode: "task",
           runtimeId: "codex",
@@ -1249,6 +1525,7 @@ describe("projects API", () => {
         },
         {
           supported: true,
+          stage: "reviewer",
           workflowKind: "reviewer",
           profileMode: "review",
           runtimeId: "claude",
@@ -1281,13 +1558,13 @@ describe("projects API", () => {
       expect(body.warmups).toHaveLength(3);
       expect(mockRunApiRuntimeOneShot).toHaveBeenCalledTimes(3);
       expect(mockRunApiRuntimeOneShot).toHaveBeenCalledWith(
-        expect.objectContaining({ workflowKind: "planner", profileMode: "plan" }),
+        expect.objectContaining({ workflowKind: "planner", profileMode: "planner" }),
       );
       expect(mockRunApiRuntimeOneShot).toHaveBeenCalledWith(
-        expect.objectContaining({ workflowKind: "implementer", profileMode: "task" }),
+        expect.objectContaining({ workflowKind: "implementer", profileMode: "implementer" }),
       );
       expect(mockRunApiRuntimeOneShot).toHaveBeenCalledWith(
-        expect.objectContaining({ workflowKind: "reviewer", profileMode: "review" }),
+        expect.objectContaining({ workflowKind: "reviewer", profileMode: "reviewer" }),
       );
       const rows = testDb.current.select().from(runtimeWarmupSessions).all();
       expect(rows).toEqual(
@@ -1313,6 +1590,7 @@ describe("projects API", () => {
       mockResolveApiWarmupSupports.mockResolvedValue([
         {
           supported: true,
+          stage: "planner",
           workflowKind: "planner",
           profileMode: "plan",
           runtimeId: "claude",
@@ -1324,6 +1602,7 @@ describe("projects API", () => {
         },
         {
           supported: true,
+          stage: "implementer",
           workflowKind: "implementer",
           profileMode: "task",
           runtimeId: "codex",
@@ -1665,5 +1944,39 @@ describe("projects API", () => {
       error: "taskId does not belong to the target project",
     });
     expect(mockBroadcast).not.toHaveBeenCalled();
+  });
+
+  it("fans out auto-queue advancement broadcasts to queue updates", async () => {
+    const db = testDb.current;
+    db.insert(projects)
+      .values({ id: "proj-queue-fanout", name: "Project Fanout", rootPath: "/tmp/fanout" })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-queue-fanout",
+        projectId: "proj-queue-fanout",
+        title: "Queue fanout task",
+        status: "planning",
+      })
+      .run();
+
+    const res = await app.request("/projects/proj-queue-fanout/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "project:auto_queue_advanced",
+        taskId: "task-queue-fanout",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "project:auto_queue_advanced",
+      payload: { id: "task-queue-fanout" },
+    });
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "project:queue_updated",
+      payload: { projectId: "proj-queue-fanout", taskId: "task-queue-fanout" },
+    });
   });
 });

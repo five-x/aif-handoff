@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { TaskPlanQualityError, evaluateTaskPlanQuality, projects, tasks } from "@aif/shared";
+import {
+  PLAN_MANIFEST_REQUIRED_CREATED_AT,
+  TaskPlanQualityError,
+  evaluateTaskPlanQuality,
+  projects,
+  tasks,
+} from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -45,9 +51,47 @@ function streamSuccess(result: string): AsyncIterable<{
   };
 }
 
+function validPlanManifest(taskId: string): string {
+  return [
+    "```aif-plan-manifest",
+    JSON.stringify(
+      {
+        version: 1,
+        taskId,
+        intent: "feature",
+        scope: ["packages/shared/src/planQuality.ts"],
+        allowedChanges: ["source", "tests"],
+        forbiddenChanges: ["report", "unrelated modules", "secrets"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-1",
+            description: "Plan checker accepts manifest-backed full-mode plans.",
+            verification:
+              "npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planChecker.test.ts",
+          },
+        ],
+        verificationCommands: [
+          "npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planChecker.test.ts",
+        ],
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
+
 describe("normalizeMarkdownFence", () => {
   it("extracts content from markdown fenced block", () => {
     expect(normalizeMarkdownFence("```markdown\n## Plan\n- [ ] A\n```")).toBe("## Plan\n- [ ] A");
+  });
+
+  it("preserves internal plan manifest fences", () => {
+    const plan = ["## Plan", "", validPlanManifest("task-full-valid-manifest"), "", "- [ ] A"].join(
+      "\n",
+    );
+    expect(normalizeMarkdownFence(plan)).toBe(plan);
   });
 
   it("returns trimmed text when no fence present", () => {
@@ -144,6 +188,151 @@ describe("runPlanChecker", () => {
     await runPlanChecker("task-skip", "/tmp/plan-checker-test");
 
     expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects new full-mode checklist plans that omit a plan manifest", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-full-missing-manifest",
+        projectId: "project-1",
+        title: "Full mode manifest",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "- [ ] Update packages/shared/src/planQuality.ts with the manifest guard.",
+          "- [ ] Run npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planChecker.test.ts.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-full-missing-manifest", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps pre-rollout full-mode checklist plans compatible when no manifest is present", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-old-full-compatible",
+        projectId: "project-1",
+        title: "Old full mode task",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: "2026-05-15T23:59:59.000Z",
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "- [ ] Update packages/shared/src/planQuality.ts with a focused guard.",
+          "- [ ] Run npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planChecker.test.ts.",
+        ].join("\n"),
+      })
+      .run();
+
+    await runPlanChecker("task-old-full-compatible", "/tmp/plan-checker-test");
+
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("requires manifests for pre-rollout full-mode tasks after plan-quality replanning feedback", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-old-full-replanned",
+        projectId: "project-1",
+        title: "Old full mode replan",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: "2026-05-15T23:59:59.000Z",
+        blockedFromStatus: "plan_ready",
+        blockedReason: "Plan quality guard replan 1/2: previous feedback",
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "- [ ] Update packages/shared/src/planQuality.ts with a focused guard.",
+          "- [ ] Run npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planChecker.test.ts.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-old-full-replanned", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts new full-mode checklist plans with a valid plan manifest", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-full-valid-manifest",
+        projectId: "project-1",
+        title: "Full mode manifest",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "",
+          validPlanManifest("task-full-valid-manifest"),
+          "",
+          "- [ ] Update packages/shared/src/planQuality.ts with the manifest guard.",
+          "- [ ] Run npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planChecker.test.ts.",
+        ].join("\n"),
+      })
+      .run();
+
+    await runPlanChecker("task-full-valid-manifest", "/tmp/plan-checker-test");
+
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("persists LLM plans with internal plan manifest fences", async () => {
+    const returnedPlan = [
+      "## Plan",
+      "",
+      validPlanManifest("task-full-returned-manifest"),
+      "",
+      "- [ ] Update packages/shared/src/planQuality.ts with the manifest guard.",
+      "- [ ] Run npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planChecker.test.ts.",
+    ].join("\n");
+    queryMock.mockReturnValue(streamSuccess(returnedPlan));
+
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-full-returned-manifest",
+        projectId: "project-1",
+        title: "Full mode manifest from checker",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        status: "plan_ready",
+        plan: "## Plan\nConvert the prose plan for packages/shared/src/planQuality.ts into checklist steps.",
+      })
+      .run();
+
+    await runPlanChecker("task-full-returned-manifest", "/tmp/plan-checker-test");
+
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-full-returned-manifest"))
+      .get();
+    expect(row?.plan).toBe(returnedPlan);
+    expect(row?.plan).toContain("```aif-plan-manifest");
+    expect(queryMock).toHaveBeenCalled();
   });
 
   it("converts plain bullets locally and skips LLM when mixed plan", async () => {

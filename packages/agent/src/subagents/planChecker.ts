@@ -46,9 +46,9 @@ function buildPlanQualityTaskContext(task: PlanCheckerTask): PlanCheckerTask & T
 }
 
 export function normalizeMarkdownFence(text: string): string {
-  const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
+  const fenced = text.match(/^\s*(`{3,})(?:markdown|md)[^\S\r\n]*\r?\n([\s\S]*?)\r?\n\1\s*$/i);
   if (!fenced) return text.trim();
-  return fenced[1].trim();
+  return fenced[2].trim();
 }
 
 export function hasChecklistItems(text: string): boolean {
@@ -181,6 +181,10 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
 
   const project = findProjectById(task.projectId);
   const planCheckerBudget = project?.planCheckerMaxBudgetUsd ?? null;
+  const manifestRequirement =
+    task.plannerMode === "full"
+      ? "8) Full-mode plans must include exactly one fenced `aif-plan-manifest` JSON block with version, taskId, intent, scope, allowedChanges, forbiddenChanges, expectedArtifacts, acceptanceCriteria, and verificationCommands. Preserve a valid existing manifest or add/repair it when absent or malformed.\n9) Manifest acceptance criteria must be testable and verificationCommands must be concrete local commands.\n10) Manifest intent, allowedChanges, and forbiddenChanges must respect the task intent contract; do not convert audit, spike, docs, or tests work into feature/fix implementation."
+      : "8) If an `aif-plan-manifest` block is already present, preserve and repair it. Do not add a manifest solely because the plan is fast-mode.";
 
   log.info({ taskId, title: task.title }, "Starting plan-checker agent");
 
@@ -197,14 +201,16 @@ Requirements:
 4) Preserve completed items "- [x]" as completed.
 5) Return the FULL updated plan markdown, not a partial snippet.
 6) Return only the corrected plan markdown, no explanations.
-7) Do not use tools or subagents.`;
+7) Do not use tools or subagents.
+${manifestRequirement}`;
 
   const { resultText } = await executeSubagentQuery({
     taskId,
     projectRoot,
     agentName: AGENT_NAME,
     prompt,
-    profileMode: "plan",
+    profileMode: "plan_checker",
+    workflowKind: "plan-checker",
     maxBudgetUsd: planCheckerBudget,
   });
 

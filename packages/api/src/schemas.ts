@@ -1,11 +1,22 @@
 import { z } from "zod";
 import {
   MEMORY_ITEM_STATUSES,
+  MEMORY_CLAIM_SOURCE_KINDS,
+  MEMORY_CLAIM_STATUSES,
+  MEMORY_FAILURE_FAMILIES,
+  MEMORY_ITEM_TYPES,
   MEMORY_SCOPES,
   TASK_EVENTS,
   TASK_INTENTS,
   TASK_STATUSES,
+  ATTACHMENT_CONTENT_MAX_CHARS,
+  ATTACHMENT_MAX_BYTES,
   getEnv,
+  isAllowedAttachmentMimeType,
+  isBinaryAttachmentMimeType,
+  isSafeAttachmentFilename,
+  isSafeAttachmentStoragePath,
+  isValidBase64AttachmentContent,
 } from "@aif/shared";
 
 /**
@@ -29,14 +40,64 @@ export const scheduledAtSchema = z
   .nullable()
   .optional();
 
-const taskAttachmentSchema = z.object({
+const attachmentBaseObjectSchema = z.object({
   name: z.string().min(1).max(500),
-  mimeType: z.string().max(200),
-  size: z.number().int().min(0).max(100_000_000),
-  content: z.string().max(2_000_000).nullable(),
+  mimeType: z.string().min(1).max(200),
+  size: z.number().int().min(0).max(ATTACHMENT_MAX_BYTES),
+  content: z.string().max(ATTACHMENT_CONTENT_MAX_CHARS).nullable(),
+  sourceKind: z.enum(["task", "comment", "chat"]).optional(),
+  sourceRef: z.string().max(500).optional(),
+  redactionStatus: z.enum(["none", "redacted", "not_scanned"]).optional(),
   /** Relative path in storage/ — present for file-backed attachments */
-  path: z.string().max(1000).optional(),
 });
+
+function validateAttachmentBase(
+  attachment: z.infer<typeof attachmentBaseObjectSchema>,
+  ctx: z.RefinementCtx,
+): void {
+  if (!isSafeAttachmentFilename(attachment.name)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["name"],
+      message: "Unsafe attachment filename",
+    });
+  }
+  if (!isAllowedAttachmentMimeType(attachment.mimeType)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["mimeType"],
+      message: "Unsupported attachment MIME type",
+    });
+  }
+  if (
+    attachment.content &&
+    isBinaryAttachmentMimeType(attachment.mimeType) &&
+    !isValidBase64AttachmentContent(attachment.content)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["content"],
+      message: "Binary attachment content must be valid base64",
+    });
+  }
+}
+
+const attachmentBaseSchema = attachmentBaseObjectSchema.superRefine(validateAttachmentBase);
+
+const taskAttachmentSchema = attachmentBaseObjectSchema
+  .extend({
+    path: z.string().max(1000).optional(),
+  })
+  .superRefine((attachment, ctx) => {
+    validateAttachmentBase(attachment, ctx);
+    if (attachment.path && !isSafeAttachmentStoragePath(attachment.path)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["path"],
+        message: "Unsafe attachment storage path",
+      });
+    }
+  });
 
 export const createProjectSchema = z.object({
   name: z.string().min(1, "Name is required").max(200),
@@ -56,6 +117,7 @@ export const createTaskSchema = z.object({
   projectId: z.string().min(1, "Project ID is required"),
   title: z.string().min(1, "Title is required").max(500),
   description: z.string().default(""),
+  sourceRef: z.string().max(500).nullable().optional(),
   attachments: z.array(taskAttachmentSchema).max(100).default([]),
   priority: z.number().int().min(0).max(5).default(0),
   autoMode: z.boolean().default(true),
@@ -85,6 +147,7 @@ export const createTaskSchema = z.object({
 export const updateTaskSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   description: z.string().optional(),
+  sourceRef: z.string().max(500).nullable().optional(),
   attachments: z.array(taskAttachmentSchema).max(100).optional(),
   priority: z.number().int().min(0).max(5).optional(),
   autoMode: z.boolean().optional(),
@@ -99,6 +162,7 @@ export const updateTaskSchema = z.object({
   maxReviewIterations: z.number().int().min(1).max(100).optional(),
   plan: z.string().nullable().optional(),
   implementationLog: z.string().nullable().optional(),
+  implementationManifest: z.record(z.string(), z.unknown()).nullable().optional(),
   reviewComments: z.string().nullable().optional(),
   agentActivityLog: z.string().nullable().optional(),
   blockedReason: z.string().nullable().optional(),
@@ -123,6 +187,22 @@ export const taskEventSchema = z.object({
   manualExceptionJustification: z.string().min(1).max(20_000).optional(),
 });
 
+export const manualExceptionSchema = z.object({
+  justification: z.string().min(1).max(20_000),
+});
+
+export const worktreeCleanupSchema = z.object({
+  action: z.enum(["archive", "delete"]).default("archive"),
+});
+
+export const operatorLimitQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  includeGlobal: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === "true")),
+});
+
 export const createTaskCommentSchema = z.object({
   message: z.string().min(1, "Comment message is required").max(20_000),
   attachments: z.array(taskAttachmentSchema).max(100).default([]),
@@ -134,7 +214,17 @@ export const reorderTaskSchema = z.object({
 
 export const broadcastTaskSchema = z.object({
   type: z
-    .enum(["task:updated", "task:moved", "task:activity", "task:scheduled_fired"])
+    .enum([
+      "task:created",
+      "task:updated",
+      "task:moved",
+      "task:activity",
+      "task:scheduled_fired",
+      "task:timeline_updated",
+      "task:evidence_recorded",
+      "task:trust_updated",
+      "task:manual_handoff_required",
+    ])
     .default("task:updated"),
 });
 
@@ -147,6 +237,10 @@ export const broadcastProjectSchema = z.object({
     "project:auto_queue_mode_changed",
     "project:auto_queue_advanced",
     "project:runtime_limit_updated",
+    "project:memory_candidate_created",
+    "project:usage_updated",
+    "project:queue_updated",
+    "project:worktree_warning",
   ]),
   taskId: z.string().min(1).optional(),
   runtimeProfileId: z.string().min(1).nullable().optional(),
@@ -191,12 +285,7 @@ export const updateAppRuntimeDefaultsSchema = z
     message: "At least one field is required",
   });
 
-export const chatAttachmentSchema = z.object({
-  name: z.string().min(1).max(500),
-  mimeType: z.string().max(200),
-  size: z.number().int().min(0).max(100_000_000),
-  content: z.string().max(2_000_000).nullable(),
-});
+export const chatAttachmentSchema = attachmentBaseSchema;
 
 export const chatRequestSchema = z.object({
   projectId: z.string().min(1, "Project ID is required"),
@@ -283,16 +372,43 @@ export const memoryListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
+const memoryClaimSourceSchema = z.object({
+  kind: z.enum(MEMORY_CLAIM_SOURCE_KINDS),
+  ref: z.string().min(1).max(500).nullable().optional(),
+  taskId: z.string().max(200).nullable().optional(),
+  artifactId: z.string().max(200).nullable().optional(),
+  evidenceId: z.string().max(200).nullable().optional(),
+  memoryId: z.string().max(200).nullable().optional(),
+  path: z.string().max(500).nullable().optional(),
+  label: z.string().max(200).nullable().optional(),
+  excerpt: z.string().max(1_000).nullable().optional(),
+  observedAt: z.string().max(100).nullable().optional(),
+});
+
+const memoryClaimSchema = z.object({
+  claimId: z.string().min(1).max(120),
+  type: z.enum(MEMORY_ITEM_TYPES),
+  status: z.enum(MEMORY_CLAIM_STATUSES).default("pending"),
+  text: z.string().min(1).max(1_000),
+  sources: z.array(memoryClaimSourceSchema).min(1).max(10),
+  supersedes: z.array(z.string().max(120)).max(20).default([]),
+  contradicts: z.array(z.string().max(120)).max(20).default([]),
+  lastValidatedAt: z.string().max(100).nullable().optional().default(null),
+});
+
 export const createMemoryItemSchema = z
   .object({
     projectId: z.string().min(1).nullable().optional(),
     scope: z.enum(MEMORY_SCOPES),
-    sourceTaskId: z.string().min(1).nullable().optional(),
+    sourceTaskId: z.string().min(1).max(200).nullable().optional(),
     sourceKind: z.enum(["task", "manual"]).optional(),
     sourceRef: z.string().max(500).nullable().optional(),
+    itemType: z.enum(MEMORY_ITEM_TYPES).optional(),
+    failureFamily: z.enum(MEMORY_FAILURE_FAMILIES).nullable().optional(),
     title: z.string().min(1).max(500),
     summary: z.string().min(1).max(5_000),
     content: z.string().min(1).max(50_000),
+    claims: z.array(memoryClaimSchema).max(20).optional(),
     tags: z.array(z.string().max(100)).max(50).optional(),
     expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   })
@@ -304,9 +420,12 @@ export const createMemoryItemSchema = z
 export const updateMemoryItemSchema = z
   .object({
     scope: z.enum(MEMORY_SCOPES).optional(),
+    itemType: z.enum(MEMORY_ITEM_TYPES).optional(),
+    failureFamily: z.enum(MEMORY_FAILURE_FAMILIES).nullable().optional(),
     title: z.string().min(1).max(500).optional(),
     summary: z.string().min(1).max(5_000).optional(),
     content: z.string().min(1).max(50_000).optional(),
+    claims: z.array(memoryClaimSchema).max(20).optional(),
     tags: z.array(z.string().max(100)).max(50).optional(),
     reviewNote: z.string().max(5_000).nullable().optional(),
     expiresAt: z.string().datetime({ offset: true }).nullable().optional(),

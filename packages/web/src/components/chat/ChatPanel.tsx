@@ -110,6 +110,13 @@ export function ChatPanel({
     // Task created via action card — react-query invalidation happens in useCreateTask
   }, []);
   const panelRef = useRef<HTMLDivElement>(null);
+  const handleStartExplore = useCallback(
+    (prompt?: string) => {
+      setExplore(true);
+      if (prompt) setInput(prompt);
+    },
+    [setExplore],
+  );
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -482,8 +489,10 @@ export function ChatPanel({
                 message={msg}
                 projectId={projectId ?? ""}
                 sessionId={activeSessionId}
+                taskId={taskId}
                 onTaskCreated={handleTaskCreated}
                 onOpenTask={onOpenTask}
+                onStartExplore={handleStartExplore}
               />
             ))}
           {isStreaming && (

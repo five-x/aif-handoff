@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeAdapter, RuntimeCapabilities, RuntimeRunInput } from "@aif/runtime";
-import type { AuditEvidenceUnit } from "@aif/shared";
+import type { AuditEvidenceUnit, RuntimeStage, RuntimeStageOrProfileMode } from "@aif/shared";
 
 const queryMock = vi.fn();
 const logActivityMock = vi.fn();
@@ -29,6 +29,7 @@ const findActiveReadyRuntimeWarmupSessionMock = vi.fn<
         providerId: string;
         transport: string;
         model: string | null;
+        stage: RuntimeStage;
         sourceSessionId: string;
         status: string;
         ttlSeconds: number;
@@ -40,9 +41,20 @@ const findActiveReadyRuntimeWarmupSessionMock = vi.fn<
       }
     | undefined
 >(() => undefined);
-const getAppDefaultRuntimeProfileIdMock = vi.fn<
-  (mode: "task" | "plan" | "review" | "chat") => string | null
->(() => null);
+const getAppDefaultRuntimeProfileIdMock = vi.fn<(mode: RuntimeStageOrProfileMode) => string | null>(
+  () => null,
+);
+const getRuntimeProfileResponseByIdMock = vi.fn<
+  (id: string) =>
+    | {
+        id: string;
+        runtimeId: string;
+        providerId: string;
+        defaultModel?: string | null;
+        enabled: boolean;
+      }
+    | undefined
+>(() => undefined);
 const runtimeAdapterOverride = vi.hoisted(() => ({
   current: null as null | { runtimeId: string; adapter: RuntimeAdapter },
 }));
@@ -53,6 +65,8 @@ interface MockTaskRow {
   runtimeOptionsJson: string | null;
   modelOverride: string | null;
   branchName?: string | null;
+  taskIntent?: string | null;
+  agentActivityLog?: string | null;
 }
 
 interface MockEffectiveRuntimeProfile {
@@ -132,6 +146,7 @@ vi.mock("@aif/data", async (importOriginal) => {
     expireStaleRuntimeWarmupSessions: expireStaleRuntimeWarmupSessionsMock,
     findActiveReadyRuntimeWarmupSession: findActiveReadyRuntimeWarmupSessionMock,
     getAppDefaultRuntimeProfileId: getAppDefaultRuntimeProfileIdMock,
+    getRuntimeProfileResponseById: getRuntimeProfileResponseByIdMock,
     findTaskById: findTaskByIdMock,
     resolveEffectiveRuntimeProfile: resolveEffectiveRuntimeProfileMock,
   };
@@ -223,7 +238,8 @@ const {
   readAuditEvidenceRuntimePayload,
   validateAuditReportArtifact,
 } = await import("@aif/shared");
-const { executeSubagentQuery, resolveAdapterForTask } = await import("../subagentQuery.js");
+const { executeSubagentQuery, resolveAdapterForTask, setRuntimeStageFallbackProfile } =
+  await import("../subagentQuery.js");
 
 function initAuditGitFixture(): string {
   const root = mkdtempSync(join(tmpdir(), "aif-subagent-audit-ledger-"));
@@ -309,6 +325,8 @@ beforeEach(() => {
   expireStaleRuntimeWarmupSessionsMock.mockReturnValue(0);
   findActiveReadyRuntimeWarmupSessionMock.mockReset();
   findActiveReadyRuntimeWarmupSessionMock.mockReturnValue(undefined);
+  getRuntimeProfileResponseByIdMock.mockReset();
+  getRuntimeProfileResponseByIdMock.mockReturnValue(undefined);
 });
 
 function makeDelayedSuccess(delayMs: number, result: string) {
@@ -443,6 +461,187 @@ describe("executeSubagentQuery attribution", () => {
         HANDOFF_BRANCH_NAME: "feature/task-branch",
       }),
     );
+  });
+
+  it("passes task-intent permission policy to runtime adapters", async () => {
+    mockEnvOverrides.AGENT_BYPASS_PERMISSIONS = false;
+    const capabilities = {
+      supportsResume: false,
+      supportsSessionFork: false,
+      supportsSessionList: false,
+      supportsAgentDefinitions: true,
+      supportsAifSkillCommands: false,
+      supportsRepositoryTools: true,
+      supportsStreaming: true,
+      supportsModelDiscovery: false,
+      supportsApprovals: false,
+      supportsCustomEndpoint: false,
+      usageReporting: UsageReporting.NONE,
+    };
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-runtime",
+        providerId: "test",
+        displayName: "Test Runtime",
+        defaultTransport: RuntimeTransport.SDK,
+        supportedTransports: [RuntimeTransport.SDK],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      run: vi.fn(async () => ({ outputText: "done", usage: null })),
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-runtime", adapter };
+    findTaskByIdMock.mockReturnValue({
+      id: "task-audit",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+      taskIntent: "audit",
+      agentActivityLog: null,
+    });
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test-runtime",
+        runtimeId: "test-runtime",
+        providerId: "test",
+        transport: RuntimeTransport.SDK,
+        defaultModel: null,
+      } as never,
+      taskRuntimeProfileId: "profile-test-runtime",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-audit",
+      projectRoot: "/tmp/project",
+      agentName: "audit-coordinator",
+      prompt: "run",
+      workflowKind: "implementer",
+    });
+
+    expect(adapter.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          permissionPolicy: expect.objectContaining({
+            intent: "audit",
+            defaultMode: "audit_diagnostic_only",
+          }),
+        }),
+      }),
+    );
+    delete mockEnvOverrides.AGENT_BYPASS_PERMISSIONS;
+  });
+
+  it("records task activity when subagent runs use bypass mode", async () => {
+    mockEnvOverrides.AGENT_BYPASS_PERMISSIONS = true;
+    findTaskByIdMock.mockReturnValue({
+      id: "task-docs",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+      taskIntent: "docs",
+      agentActivityLog: null,
+    });
+    queryMock.mockImplementation(async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        result: "done",
+        usage: {},
+        total_cost_usd: 0,
+      };
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-docs",
+      projectRoot: "/tmp/project",
+      agentName: "plan-coordinator",
+      prompt: "run",
+      workflowKind: "planner",
+    });
+
+    expect(logActivityMock).toHaveBeenCalledWith(
+      "task-docs",
+      "Agent",
+      expect.stringContaining("[permission-policy:bypass] intent=docs defaultMode=workspace_write"),
+    );
+    delete mockEnvOverrides.AGENT_BYPASS_PERMISSIONS;
+  });
+
+  it("clears native bypass and records blocked activity when audit subagent intent disallows bypass", async () => {
+    mockEnvOverrides.AGENT_BYPASS_PERMISSIONS = true;
+    const capabilities = {
+      supportsResume: false,
+      supportsSessionFork: false,
+      supportsSessionList: false,
+      supportsAgentDefinitions: true,
+      supportsAifSkillCommands: false,
+      supportsRepositoryTools: true,
+      supportsStreaming: true,
+      supportsModelDiscovery: false,
+      supportsApprovals: false,
+      supportsCustomEndpoint: false,
+      usageReporting: UsageReporting.NONE,
+    };
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-runtime",
+        providerId: "test",
+        displayName: "Test Runtime",
+        defaultTransport: RuntimeTransport.SDK,
+        supportedTransports: [RuntimeTransport.SDK],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      run: vi.fn(async () => ({ outputText: "done", usage: null })),
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-runtime", adapter };
+    findTaskByIdMock.mockReturnValue({
+      id: "task-audit",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+      taskIntent: "audit",
+      agentActivityLog: null,
+    });
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test-runtime",
+        runtimeId: "test-runtime",
+        providerId: "test",
+        transport: RuntimeTransport.SDK,
+        defaultModel: null,
+      } as never,
+      taskRuntimeProfileId: "profile-test-runtime",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-audit",
+      projectRoot: "/tmp/project",
+      agentName: "audit-coordinator",
+      prompt: "run",
+      workflowKind: "implementer",
+    });
+
+    expect(adapter.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          bypassPermissions: false,
+          permissionPolicy: expect.objectContaining({ intent: "audit" }),
+        }),
+      }),
+    );
+    expect(logActivityMock).toHaveBeenCalledWith(
+      "task-audit",
+      "Agent",
+      expect.stringContaining("[permission-policy:bypass-blocked] intent=audit"),
+    );
+    delete mockEnvOverrides.AGENT_BYPASS_PERMISSIONS;
   });
 
   it("persists runtime audit evidence events with IDs report manifests can cite", async () => {
@@ -693,12 +892,12 @@ describe("subagent app-default runtime resolution", () => {
       workflowKind: "planner",
     });
 
-    expect(getAppDefaultRuntimeProfileIdMock).toHaveBeenCalledWith("plan");
+    expect(getAppDefaultRuntimeProfileIdMock).toHaveBeenCalledWith("planner");
     expect(resolveEffectiveRuntimeProfileMock).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: "task-1",
         projectId: "project-1",
-        mode: "plan",
+        mode: "planner",
         systemDefaultRuntimeProfileId: "app-plan-default",
       }),
     );
@@ -906,6 +1105,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
       providerId: "anthropic",
       transport: "sdk",
       model: null,
+      stage: "planner",
       sourceSessionId: "warm-source-session",
       status: "ready",
       ttlSeconds: 600,
@@ -959,6 +1159,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
       providerId: "anthropic",
       transport: "sdk",
       model: null,
+      stage: "implementer",
       sourceSessionId: "warm-impl-source",
       status: "ready",
       ttlSeconds: 600,
@@ -985,6 +1186,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
       providerId: "anthropic",
       transport: "sdk",
       model: null,
+      stage: "implementer",
     });
     const callOptions = queryMock.mock.calls[0][0].options;
     expect(callOptions.resume).toBe("warm-impl-source");
@@ -1019,6 +1221,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
       providerId: "anthropic",
       transport: "sdk",
       model: null,
+      stage: "reviewer",
       sourceSessionId: "warm-review-source",
       status: "ready",
       ttlSeconds: 600,
@@ -1045,7 +1248,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
     expect(saveTaskSessionIdMock).toHaveBeenCalledWith("task-review", "review-child-session");
   });
 
-  it("forks the reviewer warmup for security review workflows", async () => {
+  it("forks the security-stage warmup for security review workflows", async () => {
     findActiveReadyRuntimeWarmupSessionMock.mockReturnValue({
       id: "warmup-review-security",
       projectId: "project-1",
@@ -1054,6 +1257,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
       providerId: "anthropic",
       transport: "sdk",
       model: null,
+      stage: "security",
       sourceSessionId: "warm-review-source",
       status: "ready",
       ttlSeconds: 600,
@@ -1117,6 +1321,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
       providerId: "anthropic",
       transport: "sdk",
       model: null,
+      stage: "planner",
     });
     const callOptions = queryMock.mock.calls[0][0].options;
     expect(callOptions.resume).toBeUndefined();
@@ -1725,6 +1930,63 @@ describe("executeSubagentQuery model fallback policy", () => {
 
     const callOptions = queryMock.mock.calls[0][0].options as Record<string, unknown>;
     expect(callOptions.model).toBe("profile-model");
+  });
+
+  it("uses coordinator-selected runtime fallback profiles for the matching stage", async () => {
+    findTaskByIdMock.mockReturnValue({
+      id: "task-fallback",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+    });
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "project_default",
+      profile: {
+        id: "primary-profile",
+        runtimeId: "claude",
+        providerId: "anthropic",
+        defaultModel: "primary-model",
+      },
+      taskRuntimeProfileId: null,
+      projectRuntimeProfileId: "primary-profile",
+      systemRuntimeProfileId: null,
+    });
+    getRuntimeProfileResponseByIdMock.mockReturnValue({
+      id: "fallback-profile",
+      runtimeId: "claude",
+      providerId: "anthropic",
+      defaultModel: "fallback-model",
+      enabled: true,
+    });
+    queryMock.mockImplementation(makeDelayedSuccess(0, "ok"));
+
+    try {
+      setRuntimeStageFallbackProfile({
+        taskId: "task-fallback",
+        stage: "planner",
+        profileId: "fallback-profile",
+        source: "system_default",
+      });
+
+      await executeSubagentQuery({
+        taskId: "task-fallback",
+        projectRoot: "/tmp/project",
+        agentName: "plan-coordinator",
+        prompt: "plan",
+        profileMode: "planner",
+        workflowKind: "planner",
+      });
+    } finally {
+      setRuntimeStageFallbackProfile({
+        taskId: "task-fallback",
+        stage: "planner",
+        profileId: null,
+      });
+    }
+
+    expect(getRuntimeProfileResponseByIdMock).toHaveBeenCalledWith("fallback-profile");
+    const callOptions = queryMock.mock.calls[0][0].options as Record<string, unknown>;
+    expect(callOptions.model).toBe("fallback-model");
   });
 
   it("does not inject lightModel when no task override and no profile model", async () => {

@@ -47,6 +47,8 @@ const mockTask: Task = {
   autoReviewState: null,
   paused: false,
   lastHeartbeatAt: null,
+  lockStage: null,
+  coordinatorId: null,
   lastSyncedAt: null,
   sessionId: null,
   scheduledAt: null,

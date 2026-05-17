@@ -27,9 +27,18 @@ import {
   type RuntimeWorkflowSpec,
   type RuntimeSessionForkSkipReason,
 } from "@aif/runtime";
-import { DEFAULT_WARMUP_TARGET, WARMUP_TARGETS, getEnv, logger } from "@aif/shared";
-import type { WarmupTarget } from "@aif/shared";
 import {
+  DEFAULT_WARMUP_TARGET,
+  WARMUP_TARGETS,
+  decidePolicyBypass,
+  getEnv,
+  getPermissionExecutionPolicy,
+  isPermissionPolicyIntent,
+  logger,
+} from "@aif/shared";
+import type { RuntimeStageOrProfileMode, WarmupTarget } from "@aif/shared";
+import {
+  appendTaskActivityLog,
   clearRuntimeProfileLimitSnapshot,
   createDbUsageSink,
   type DbUsageEvent,
@@ -98,7 +107,10 @@ export async function getApiRuntimeRegistry(): Promise<RuntimeRegistry> {
       // wrapper. Structurally matches @aif/runtime's RuntimeUsageSink —
       // no cross-package type import needed.
       usageSink: createDbUsageSink({
-        onRecorded: broadcastRuntimeUsageRefresh,
+        onRecorded: (event) => {
+          if (event.outcome && event.outcome !== "success") return;
+          broadcastRuntimeUsageRefresh(event);
+        },
       }),
     }).catch((error) => {
       runtimeRegistryPromise = null;
@@ -212,6 +224,14 @@ function broadcastRuntimeUsageRefresh(event: DbUsageEvent): void {
     taskId: event.context.taskId ?? null,
     runtimeProfileId,
     signature: `usage:${event.recordedAt.toISOString()}:${event.context.source}:${event.usage.totalTokens}:${event.usage.inputTokens}:${event.usage.outputTokens}:${event.usage.costUsd ?? ""}`,
+  });
+  broadcast({
+    type: "project:usage_updated",
+    payload: {
+      projectId,
+      taskId: event.context.taskId ?? null,
+      runtimeProfileId,
+    },
   });
 }
 
@@ -359,6 +379,7 @@ export interface RuntimeExecutionContext {
 export interface ApiWarmupSupport {
   supported: boolean;
   skipReason?: RuntimeSessionForkSkipReason | "resolution_failed";
+  stage: WarmupTarget["stage"];
   workflowKind: string;
   profileMode: WarmupTarget["profileMode"];
   runtimeId: string | null;
@@ -372,7 +393,7 @@ export interface ApiWarmupSupport {
 export async function resolveApiRuntimeContext(input: {
   projectId?: string | null;
   taskId?: string | null;
-  mode: "task" | "plan" | "review" | "chat";
+  mode: RuntimeStageOrProfileMode;
   workflow: RuntimeWorkflowSpec;
   modelOverride?: string | null;
   runtimeOptionsOverride?: Record<string, unknown> | null;
@@ -512,7 +533,7 @@ async function resolveApiWarmupSupportForTarget(
   try {
     const context = await resolveApiRuntimeContext({
       projectId,
-      mode: target.profileMode,
+      mode: target.stage,
       workflow,
     });
     const capabilities = resolveAdapterCapabilities(
@@ -538,6 +559,7 @@ async function resolveApiWarmupSupportForTarget(
     return {
       supported: forkSupport.ok,
       ...(forkSupport.skipReason ? { skipReason: forkSupport.skipReason } : {}),
+      stage: target.stage,
       workflowKind: target.workflowKind,
       profileMode: target.profileMode,
       runtimeId: context.resolvedProfile.runtimeId,
@@ -552,6 +574,7 @@ async function resolveApiWarmupSupportForTarget(
     return {
       supported: false,
       skipReason: "resolution_failed",
+      stage: target.stage,
       workflowKind: target.workflowKind,
       profileMode: target.profileMode,
       runtimeId: null,
@@ -609,7 +632,7 @@ export async function runApiRuntimeOneShot(input: {
   projectId: string;
   projectRoot: string;
   taskId?: string | null;
-  profileMode?: "task" | "plan" | "review" | "chat";
+  profileMode?: RuntimeStageOrProfileMode;
   prompt: string;
   workflowKind?: string;
   requiredCapabilities?: RuntimeCapabilityName[];
@@ -659,8 +682,41 @@ export async function runApiRuntimeOneShot(input: {
     workflow,
   });
 
-  const bypassPermissions = env.AGENT_BYPASS_PERMISSIONS;
+  const bypassRequested = env.AGENT_BYPASS_PERMISSIONS;
   const task = input.taskId ? findTaskById(input.taskId) : null;
+  const permissionIntent = isPermissionPolicyIntent(task?.taskIntent) ? task.taskIntent : "general";
+  const permissionPolicy = getPermissionExecutionPolicy(permissionIntent);
+  const bypassDecision = bypassRequested
+    ? decidePolicyBypass({
+        intent: permissionIntent,
+        requestedMode: "danger_full_access",
+        humanApprovalBridgeAvailable: true,
+        humanApproved: true,
+        reason: `AGENT_BYPASS_PERMISSIONS for ${permissionIntent}`,
+      })
+    : null;
+  const bypassPermissions = bypassRequested && bypassDecision?.allowed === true;
+  if (
+    bypassPermissions &&
+    input.taskId &&
+    !task?.agentActivityLog?.includes("[permission-policy:bypass]")
+  ) {
+    appendTaskActivityLog(
+      input.taskId,
+      `[${new Date().toISOString()}] Agent: [permission-policy:bypass] intent=${permissionIntent} defaultMode=${permissionPolicy.defaultMode}`,
+    );
+  }
+  if (
+    bypassRequested &&
+    !bypassPermissions &&
+    input.taskId &&
+    !task?.agentActivityLog?.includes("[permission-policy:bypass")
+  ) {
+    appendTaskActivityLog(
+      input.taskId,
+      `[${new Date().toISOString()}] Agent: [permission-policy:bypass-blocked] intent=${permissionIntent} defaultMode=${permissionPolicy.defaultMode} reason=${bypassDecision?.reasons.join(" ") ?? "not allowed"}`,
+    );
+  }
   const branchEnvironment: Record<string, string> = task?.branchName
     ? {
         HANDOFF_BRANCH_PREPARED: "1",
@@ -724,6 +780,7 @@ export async function runApiRuntimeOneShot(input: {
         onEvent: onRuntimeEvent,
         systemPromptAppend: input.systemPromptAppend,
         bypassPermissions,
+        permissionPolicy,
         environment: input.taskId
           ? { HANDOFF_MODE: "1", HANDOFF_TASK_ID: input.taskId, ...branchEnvironment }
           : { HANDOFF_MODE: "1" },

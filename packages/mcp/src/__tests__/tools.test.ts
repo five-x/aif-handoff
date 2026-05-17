@@ -281,28 +281,26 @@ describe("MCP tools", () => {
       expect(result.winner).toBe("target");
     });
 
-    it("invalid NaN source timestamp gets server-time fallback and wins", () => {
+    it("invalid NaN source timestamp loses to target", () => {
       const result = resolveConflict({
         sourceTimestamp: "not-a-date",
         targetTimestamp: "2026-01-02T00:00:00.000Z",
         field: "status",
       });
-      // NaN fallback: replaced with Date.now(), which is newer
-      expect(result.applied).toBe(true);
-      expect(result.conflict).toBe(false);
-      expect(result.winner).toBe("source");
+      expect(result.applied).toBe(false);
+      expect(result.conflict).toBe(true);
+      expect(result.winner).toBe("target");
     });
 
-    it("epoch-zero source timestamp gets server-time fallback and wins", () => {
+    it("epoch-zero source timestamp loses to target", () => {
       const result = resolveConflict({
         sourceTimestamp: "1970-01-01T00:00:00.000Z",
         targetTimestamp: "2026-01-02T00:00:00.000Z",
         field: "status",
       });
-      // Epoch-zero fallback: replaced with Date.now(), which is newer
-      expect(result.applied).toBe(true);
-      expect(result.conflict).toBe(false);
-      expect(result.winner).toBe("source");
+      expect(result.applied).toBe(false);
+      expect(result.conflict).toBe(true);
+      expect(result.winner).toBe("target");
     });
 
     it("source wins on equal timestamps", () => {

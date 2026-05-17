@@ -1,8 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 
 const mockReleaseTaskClaim = vi.fn();
+const mockReleaseTaskClaimsForCoordinator = vi.fn();
 vi.mock("@aif/data", () => ({
   releaseTaskClaim: (...args: unknown[]) => mockReleaseTaskClaim(...args),
+  releaseTaskClaimsForCoordinator: (...args: unknown[]) =>
+    mockReleaseTaskClaimsForCoordinator(...args),
 }));
 
 import {
@@ -63,22 +66,36 @@ describe("stageAbort", () => {
     setActiveStageAbortController("task-1", null);
   });
 
-  it("abortAllActiveStages aborts all controllers and releases locks", () => {
+  it("abortAllActiveStages aborts all controllers and releases owner-scoped locks", () => {
     mockReleaseTaskClaim.mockClear();
+    mockReleaseTaskClaimsForCoordinator.mockClear();
     const abort1 = new AbortController();
     const abort2 = new AbortController();
     setActiveStageAbortController("task-1", abort1);
     setActiveStageAbortController("task-2", abort2);
 
-    abortAllActiveStages();
+    abortAllActiveStages("coord-1");
 
     expect(abort1.signal.aborted).toBe(true);
     expect(abort2.signal.aborted).toBe(true);
     expect(getActiveStageAbortController("task-1")).toBeNull();
     expect(getActiveStageAbortController("task-2")).toBeNull();
-    // Locks released for each active task
-    expect(mockReleaseTaskClaim).toHaveBeenCalledWith("task-1");
-    expect(mockReleaseTaskClaim).toHaveBeenCalledWith("task-2");
+    expect(mockReleaseTaskClaim).toHaveBeenCalledWith("task-1", "coord-1");
+    expect(mockReleaseTaskClaim).toHaveBeenCalledWith("task-2", "coord-1");
     expect(mockReleaseTaskClaim).toHaveBeenCalledTimes(2);
+    expect(mockReleaseTaskClaimsForCoordinator).toHaveBeenCalledWith("coord-1");
+  });
+
+  it("abortAllActiveStages releases task and coordinator claims for the owner", () => {
+    mockReleaseTaskClaim.mockClear();
+    mockReleaseTaskClaimsForCoordinator.mockClear();
+    const abort = new AbortController();
+    setActiveStageAbortController("task-owned", abort);
+
+    abortAllActiveStages("coord-1");
+
+    expect(abort.signal.aborted).toBe(true);
+    expect(mockReleaseTaskClaim).toHaveBeenCalledWith("task-owned", "coord-1");
+    expect(mockReleaseTaskClaimsForCoordinator).toHaveBeenCalledWith("coord-1");
   });
 });

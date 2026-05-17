@@ -3,7 +3,7 @@
  * Supports parallel task execution — each task gets its own controller.
  */
 
-import { releaseTaskClaim } from "@aif/data";
+import { releaseTaskClaim, releaseTaskClaimsForCoordinator } from "@aif/data";
 
 const _activeAborts = new Map<string, AbortController>();
 
@@ -24,15 +24,20 @@ export function getActiveStageAbortController(taskId?: string): AbortController 
   return null;
 }
 
-/** Abort all active stages and release their locks (used during shutdown). */
-export function abortAllActiveStages(): void {
+/** Abort all active stages and release locks owned by this coordinator. */
+export function abortAllActiveStages(coordinatorId: string): void {
   for (const [taskId, abort] of _activeAborts) {
     if (!abort.signal.aborted) abort.abort();
     try {
-      releaseTaskClaim(taskId);
+      releaseTaskClaim(taskId, coordinatorId);
     } catch {
       /* best-effort during shutdown */
     }
     _activeAborts.delete(taskId);
+  }
+  try {
+    releaseTaskClaimsForCoordinator(coordinatorId);
+  } catch {
+    /* best-effort during shutdown */
   }
 }

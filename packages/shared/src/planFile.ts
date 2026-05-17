@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { getProjectConfig } from "./projectConfig.js";
 
 // Re-export browser-safe functions for backward compatibility
@@ -20,10 +20,14 @@ interface SyncCanonicalPlanInput extends CanonicalPlanInput {
 
 export function getCanonicalPlanPath(input: CanonicalPlanInput): string {
   const cfg = getProjectConfig(input.projectRoot);
-  if (input.isFix) {
-    return resolve(input.projectRoot, cfg.paths.fix_plan);
+  const canonicalPath = input.isFix
+    ? resolve(input.projectRoot, cfg.paths.fix_plan)
+    : resolve(input.projectRoot, input.planPath || cfg.paths.plan);
+  const relativePath = relative(input.projectRoot, canonicalPath);
+  if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+    throw new Error("Plan path must resolve within the project root");
   }
-  return resolve(input.projectRoot, input.planPath || cfg.paths.plan);
+  return canonicalPath;
 }
 
 export function syncPlanTextToCanonicalFile(input: SyncCanonicalPlanInput): string {

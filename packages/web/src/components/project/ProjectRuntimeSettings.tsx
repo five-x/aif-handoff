@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { Project, RuntimeProfile } from "@aif/shared/browser";
+import { ShieldCheck, ShieldAlert, ShieldX } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -9,6 +10,8 @@ import {
   useAppRuntimeDefaults,
   useCreateRuntimeProfile,
   useDeleteRuntimeProfile,
+  useProjectConfigAudit,
+  useProjectConfigGovernance,
   useProjectRuntimeProfiles,
   useRuntimes,
   useRuntimeProfiles,
@@ -69,6 +72,8 @@ export function ProjectRuntimeSettings({
   const { data: profiles = [], isLoading } = useRuntimeProfiles(project.id, true, isOpen);
   const { data: projectProfiles = [], isLoading: projectProfilesLoading } =
     useProjectRuntimeProfiles(project.id, isOpen);
+  const { data: configGovernance } = useProjectConfigGovernance(project.id, isOpen);
+  const { data: configAudit = [] } = useProjectConfigAudit(project.id, isOpen);
   const globalProfiles = useMemo(
     () => profiles.filter((profile) => profile.projectId == null),
     [profiles],
@@ -116,6 +121,16 @@ export function ProjectRuntimeSettings({
     ? "(app default)"
     : "(env fallback)";
   const deletingProfileIsGlobal = deletingProfile?.projectId == null;
+  const blockingIssues = configGovernance?.issues.filter((issue) => issue.blocksWork) ?? [];
+  const warningIssues =
+    configGovernance?.issues.filter((issue) => issue.severity !== "error" && !issue.blocksWork) ??
+    [];
+  const recentConfigEvents = configGovernance?.recentAuditEvents?.length
+    ? configGovernance.recentAuditEvents
+    : configAudit;
+  const governanceTone = blockingIssues.length > 0 ? "blocked" : (configGovernance?.status ?? "ok");
+  const defaultPermissionMode =
+    configGovernance?.permissionPolicy.defaultByIntent?.general ?? "workspace_write";
 
   const handleSaveDefaults = async () => {
     setStatusMessage(null);
@@ -325,6 +340,151 @@ export function ProjectRuntimeSettings({
           {updateProject.isPending ? "Saving..." : "Save Project Defaults"}
         </Button>
       </div>
+
+      {configGovernance && (
+        <div className="space-y-3 border-t border-border pt-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              {governanceTone === "blocked" ? (
+                <ShieldX className="h-4 w-4 text-destructive" />
+              ) : governanceTone === "warning" ? (
+                <ShieldAlert className="h-4 w-4 text-amber-500" />
+              ) : (
+                <ShieldCheck className="h-4 w-4 text-green-500" />
+              )}
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Config Governance
+              </p>
+            </div>
+            <Badge
+              size="sm"
+              variant={governanceTone === "blocked" ? "error" : "secondary"}
+              className={
+                governanceTone === "warning"
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-500"
+                  : undefined
+              }
+            >
+              {governanceTone.toUpperCase()}
+            </Badge>
+          </div>
+
+          <div className="grid gap-2 md:grid-cols-4">
+            <GovernanceMetric
+              label="Runtime defaults"
+              value={[
+                configGovernance.projectRuntimeDefaults.defaultTaskRuntimeProfileId
+                  ? "project"
+                  : configGovernance.appRuntimeDefaults.resolvedDefaultTaskRuntimeProfileId
+                    ? "app"
+                    : "env",
+                configGovernance.projectRuntimeDefaults.defaultChatRuntimeProfileId
+                  ? "chat project"
+                  : configGovernance.appRuntimeDefaults.resolvedDefaultChatRuntimeProfileId
+                    ? "chat app"
+                    : "chat env",
+              ].join(" / ")}
+            />
+            <GovernanceMetric
+              label="Policy"
+              value={[
+                defaultPermissionMode,
+                configGovernance.env.features.bypassPermissions ? "bypass on" : "bypass off",
+                configGovernance.env.features.taskWorktreesEnabled ? "worktrees on" : "shared tree",
+              ].join(" / ")}
+            />
+            <GovernanceMetric
+              label="Memory / Usage"
+              value={[
+                configGovernance.env.features.memoryEnabled ? "memory on" : "memory off",
+                configGovernance.env.features.usageLimitsEnabled ? "limits on" : "limits off",
+              ].join(" / ")}
+            />
+            <GovernanceMetric
+              label="MCP"
+              value={`${configGovernance.mcp.serverCount} server${
+                configGovernance.mcp.serverCount === 1 ? "" : "s"
+              }`}
+            />
+          </div>
+
+          <div className="grid gap-2 md:grid-cols-2">
+            <div className="space-y-1 border border-border bg-background/40 p-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Project Config
+              </p>
+              <p className="text-xs">
+                git={String(configGovernance.projectConfig.git?.enabled ?? true)} branch=
+                {String(configGovernance.projectConfig.git?.base_branch ?? "main")}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                verify={String(configGovernance.projectConfig.workflow?.verify_mode ?? "normal")}{" "}
+                plan={String(configGovernance.projectConfig.paths?.plan ?? ".ai-factory/PLAN.md")}
+              </p>
+            </div>
+            <div className="space-y-1 border border-border bg-background/40 p-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Runtime Secrets
+              </p>
+              <p className="text-xs">
+                {configGovernance.runtimeProfiles.length} profile
+                {configGovernance.runtimeProfiles.length === 1 ? "" : "s"}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                {configGovernance.runtimeProfiles
+                  .slice(0, 3)
+                  .map(
+                    (profile) =>
+                      `${profile.name}:${profile.apiKeyEnvVar ?? "env default"}=${
+                        profile.apiKeyConfigured ? "set" : "unset"
+                      }`,
+                  )
+                  .join(" / ") || "no runtime profiles"}
+              </p>
+            </div>
+          </div>
+
+          {(blockingIssues.length > 0 || warningIssues.length > 0) && (
+            <div className="space-y-1">
+              {[...blockingIssues, ...warningIssues].slice(0, 4).map((issue) => (
+                <div
+                  key={`${issue.source}-${issue.code}-${issue.path ?? ""}`}
+                  className="flex items-start gap-2 border border-border bg-background/40 px-2 py-1.5"
+                >
+                  <Badge size="xs" variant={issue.severity === "error" ? "error" : "outline"}>
+                    {issue.code}
+                  </Badge>
+                  <p className="min-w-0 text-[11px] text-muted-foreground">{issue.message}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {recentConfigEvents.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Recent Config Events
+              </p>
+              {recentConfigEvents.slice(0, 3).map((event) => (
+                <div
+                  key={event.id}
+                  className="flex items-center justify-between gap-2 border border-border bg-background/40 px-2 py-1.5"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-xs">{event.action}</p>
+                    <p className="truncate text-[11px] text-muted-foreground">
+                      {event.reasonCodes.join(", ") || event.sourceKind}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    {formatConfigEventTime(event.createdAt)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {usageLimitsEnabled && (
         <div className="space-y-2 border-t border-border pt-3">
@@ -577,4 +737,21 @@ export function ProjectRuntimeSettings({
       />
     </div>
   );
+}
+
+function GovernanceMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-border bg-background/40 p-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {label}
+      </p>
+      <p className="truncate text-xs">{value}</p>
+    </div>
+  );
+}
+
+function formatConfigEventTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }

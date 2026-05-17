@@ -1,16 +1,14 @@
 import {
+  AUDIT_PUBLIC_REPORT_OUTCOMES,
   classifyAuditSourceEvidence,
   countValidatedAuditFindings,
   extractSubstantiveAuditCommandEvidence,
+  type AuditPublicReportOutcome,
 } from "./auditSourceEvidence.js";
 
-export const AUDIT_SYNTHESIS_OUTCOME_KINDS = [
-  "validated_findings_present",
-  "validated_no_findings",
-  "inconclusive_batch_evidence",
-] as const;
+export const AUDIT_SYNTHESIS_OUTCOME_KINDS = AUDIT_PUBLIC_REPORT_OUTCOMES;
 
-export type AuditSynthesisOutcomeKind = (typeof AUDIT_SYNTHESIS_OUTCOME_KINDS)[number];
+export type AuditSynthesisOutcomeKind = AuditPublicReportOutcome | "inconclusive_batch_evidence";
 
 export interface AuditSynthesisSourceReport {
   artifactPath: string;
@@ -45,6 +43,23 @@ export function extractAuditSynthesisCommandEvidence(text: string): string[] {
   return extractSubstantiveAuditCommandEvidence(text).map((entry) => entry.evidence);
 }
 
+function hasTerminalSourceInconclusiveManifest(text: string): boolean {
+  const manifestPattern = /(?:^|\n)```audit-report-manifest\s*\r?\n([\s\S]*?)\r?\n```/gi;
+  for (const match of text.matchAll(manifestPattern)) {
+    try {
+      const parsed = JSON.parse(match[1] ?? "{}") as { outcome?: unknown };
+      if (parsed.outcome === "source_inconclusive") return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+function isTerminalSourceInconclusiveReport(text: string): boolean {
+  return hasTerminalSourceInconclusiveManifest(text) || /\bAudit inconclusive\b/i.test(text);
+}
+
 function hasSubstantiveNoFindingsEvidence(text: string, projectRoot: string): boolean {
   return (
     classifyAuditSourceEvidence({ text, projectRoot, requireProposedFix: true }).classification ===
@@ -68,7 +83,7 @@ function inconclusive(
   input: Partial<AuditSynthesisOutcome>,
 ): AuditSynthesisOutcome {
   return {
-    kind: "inconclusive_batch_evidence",
+    kind: "source_inconclusive",
     reason,
     sourceReportCount: input.sourceReportCount ?? 0,
     validatedFindingCount: input.validatedFindingCount ?? 0,
@@ -88,14 +103,19 @@ export function classifyAuditSynthesisSourceReports(
     });
   }
 
-  const validatedFindingCount = input.reports.reduce(
+  const trustedReports = input.reports.filter(
+    (report) => !isTerminalSourceInconclusiveReport(report.content),
+  );
+  const terminalInconclusiveReportCount = input.reports.length - trustedReports.length;
+  const totalWeakReportCount = weakReportCount + terminalInconclusiveReportCount;
+  const validatedFindingCount = trustedReports.reduce(
     (sum, report) => sum + countValidatedFindings(report.content, input.projectRoot),
     0,
   );
-  const substantiveNoFindingsReportCount = input.reports.filter((report) =>
+  const substantiveNoFindingsReportCount = trustedReports.filter((report) =>
     hasSubstantiveNoFindingsEvidence(report.content, input.projectRoot),
   ).length;
-  const inventoryOnlyNoFindingsReportCount = input.reports.filter((report) =>
+  const inventoryOnlyNoFindingsReportCount = trustedReports.filter((report) =>
     hasInventoryOnlyNoFindingsEvidence(report.content, input.projectRoot),
   ).length;
   const base = {
@@ -103,7 +123,7 @@ export function classifyAuditSynthesisSourceReports(
     validatedFindingCount,
     substantiveNoFindingsReportCount,
     inventoryOnlyNoFindingsReportCount,
-    weakReportCount,
+    weakReportCount: totalWeakReportCount,
   };
 
   if (validatedFindingCount > 0) {
@@ -114,7 +134,7 @@ export function classifyAuditSynthesisSourceReports(
     };
   }
 
-  if (weakReportCount > 0) {
+  if (totalWeakReportCount > 0) {
     return inconclusive(
       "Audit inconclusive: terminal weak or invalid source reports were present and no validated findings survived.",
       base,
@@ -242,7 +262,13 @@ export function parseAuditSynthesisOutcomeFromText(text: string): AuditSynthesis
   if (!match) return null;
   try {
     const parsed = JSON.parse(match[1]?.trim() ?? "{}") as Partial<AuditSynthesisOutcome>;
-    if (!AUDIT_SYNTHESIS_OUTCOME_KINDS.includes(parsed.kind as AuditSynthesisOutcomeKind)) {
+    if (parsed.kind === "inconclusive_batch_evidence") {
+      return inconclusiveFromParsedMetadata(
+        "Audit inconclusive: source-report outcome metadata uses a legacy inconclusive diagnostic kind.",
+        parsed,
+      );
+    }
+    if (!AUDIT_SYNTHESIS_OUTCOME_KINDS.includes(parsed.kind as AuditPublicReportOutcome)) {
       return inconclusiveFromParsedMetadata(
         "Audit inconclusive: source-report outcome metadata has an invalid outcome kind.",
         parsed,
@@ -324,8 +350,8 @@ export function combineAuditSynthesisOutcomes(input: {
     );
   }
 
-  if (input.sourceOutcome.kind === "inconclusive_batch_evidence") {
-    if (input.visibleOutcome.kind !== "inconclusive_batch_evidence") {
+  if (input.sourceOutcome.kind === "source_inconclusive") {
+    if (input.visibleOutcome.kind !== "source_inconclusive") {
       return inconclusive(
         "Audit inconclusive: synthesis artifact visible conclusion disagrees with source-report outcome.",
         {
@@ -340,7 +366,7 @@ export function combineAuditSynthesisOutcomes(input: {
     }
     return input.sourceOutcome;
   }
-  if (input.visibleOutcome.kind === "inconclusive_batch_evidence") return input.visibleOutcome;
+  if (input.visibleOutcome.kind === "source_inconclusive") return input.visibleOutcome;
   if (input.sourceOutcome.kind !== input.visibleOutcome.kind) {
     return inconclusive(
       "Audit inconclusive: synthesis artifact conclusion disagrees with source-report outcome.",

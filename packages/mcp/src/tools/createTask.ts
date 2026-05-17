@@ -1,6 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { logger, TASK_INTENTS, type TaskIntent } from "@aif/shared";
+import {
+  formatTaskIntentOptionsForPrompt,
+  isTaskIntent,
+  logger,
+  normalizeTaskIntent,
+  TASK_INTENTS,
+  type TaskIntent,
+} from "@aif/shared";
 import { createTask, findProjectById, toTaskResponse } from "@aif/data";
 import { registerMcpTool, type ToolContext } from "./index.js";
 import { rateLimitError, validationError } from "../middleware/errorHandler.js";
@@ -11,6 +18,7 @@ import {
   assertRuntimeProfileSelection,
   buildEffectiveTaskRuntimeMetadata,
 } from "./runtimeTaskMetadata.js";
+import { validateSafeRelativeArtifactPath } from "./workflowGuards.js";
 
 const log = logger("mcp:tool:create-task");
 const createTaskInputSchema: Record<string, z.ZodTypeAny> = {
@@ -25,7 +33,10 @@ const createTaskInputSchema: Record<string, z.ZodTypeAny> = {
     .optional()
     .describe("Priority level (0=none, 1=low, 2=medium, 3=high)"),
   tags: z.array(z.string()).optional().describe("Tags for the task"),
-  taskIntent: z.enum(TASK_INTENTS).optional().describe("Typed task intent"),
+  taskIntent: z
+    .enum(TASK_INTENTS)
+    .optional()
+    .describe(`Typed task intent. Shared policy options:\n${formatTaskIntentOptionsForPrompt()}`),
   plannerMode: z.enum(["fast", "full"]).optional().describe("Planner mode"),
   autoMode: z.boolean().optional().describe("Enable auto mode for agent processing"),
   isFix: z.boolean().optional().describe("Mark task as a fix"),
@@ -36,6 +47,11 @@ const createTaskInputSchema: Record<string, z.ZodTypeAny> = {
     .string()
     .optional()
     .describe("Plan file path (auto-generated for full mode if omitted)"),
+  sourceRef: z
+    .string()
+    .max(500)
+    .optional()
+    .describe("Optional source reference for the originating artifact or request"),
   useSubagents: z.boolean().optional().describe("Use subagents for implementation"),
   maxReviewIterations: z.number().int().min(1).optional().describe("Maximum review iterations"),
   paused: z.boolean().optional().describe("Create task in paused state"),
@@ -74,6 +90,7 @@ type CreateTaskArgs = {
   projectId: string;
   runtimeOptions?: Record<string, unknown> | null;
   runtimeProfileId?: string | null;
+  sourceRef?: string;
   skipReview?: boolean;
   tags?: string[];
   title: string;
@@ -118,17 +135,31 @@ export function register(server: McpServer, context: ToolContext): void {
         log,
       });
 
+      validateSafeRelativeArtifactPath(args.planPath);
+      if (args.taskIntent !== undefined && !isTaskIntent(args.taskIntent)) {
+        throw validationError("Invalid taskIntent", {
+          taskIntent: [`Expected one of: ${TASK_INTENTS.join(", ")}`],
+        });
+      }
+      const taskIntent =
+        args.taskIntent !== undefined
+          ? normalizeTaskIntent(args.taskIntent)
+          : args.isFix === true
+            ? "fix"
+            : undefined;
+
       const row = createTask({
         projectId: args.projectId,
         title: args.title,
         description: args.description ?? "",
         priority: args.priority,
         tags: args.tags,
-        taskIntent: args.taskIntent,
+        taskIntent,
         plannerMode: args.plannerMode,
         autoMode: args.autoMode,
         isFix: args.isFix,
         planPath: args.planPath,
+        sourceRef: args.sourceRef,
         planDocs: args.planDocs,
         planTests: args.planTests,
         skipReview: args.skipReview,
@@ -172,7 +203,7 @@ export function register(server: McpServer, context: ToolContext): void {
         "handoff_create_task completed",
       );
 
-      void broadcastTaskChange(full.id, "task:moved", {
+      void broadcastTaskChange(full.id, "task:created", {
         title: full.title,
         toStatus: "backlog",
       });

@@ -81,6 +81,7 @@ function ensureTables(sqlite: Database.Database): void {
       is_fix INTEGER NOT NULL DEFAULT 0,
       planner_mode TEXT NOT NULL DEFAULT 'fast',
       plan_path TEXT NOT NULL DEFAULT '.ai-factory/PLAN.md',
+      source_ref TEXT,
       plan_docs INTEGER NOT NULL DEFAULT 0,
       plan_tests INTEGER NOT NULL DEFAULT 0,
       skip_review INTEGER NOT NULL DEFAULT 0,
@@ -90,6 +91,7 @@ function ensureTables(sqlite: Database.Database): void {
       position REAL NOT NULL DEFAULT 1000.0,
       plan TEXT,
       implementation_log TEXT,
+      implementation_manifest_json TEXT,
       review_comments TEXT,
       agent_activity_log TEXT,
       blocked_reason TEXT,
@@ -118,6 +120,8 @@ function ensureTables(sqlite: Database.Database): void {
       runtime_limit_updated_at TEXT,
       locked_by TEXT,
       locked_until TEXT,
+      lock_stage TEXT,
+      coordinator_id TEXT,
       scheduled_at TEXT,
       branch_name TEXT,
       worktree_path TEXT,
@@ -228,6 +232,21 @@ function ensureTables(sqlite: Database.Database): void {
     )
   `);
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS config_audit_events (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      task_id TEXT,
+      runtime_profile_id TEXT,
+      action TEXT NOT NULL,
+      source_kind TEXT NOT NULL,
+      actor TEXT,
+      reason_codes_json TEXT NOT NULL DEFAULT '[]',
+      before_json TEXT,
+      after_json TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runtime_profiles (
       id TEXT PRIMARY KEY,
       project_id TEXT,
@@ -282,6 +301,8 @@ function ensureTables(sqlite: Database.Database): void {
       transport TEXT,
       workflow_kind TEXT,
       usage_reporting TEXT NOT NULL,
+      outcome TEXT NOT NULL DEFAULT 'success',
+      error_category TEXT,
       input_tokens INTEGER NOT NULL DEFAULT 0,
       output_tokens INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -297,6 +318,9 @@ function ensureTables(sqlite: Database.Database): void {
       source_task_id TEXT,
       source_kind TEXT NOT NULL DEFAULT 'task',
       source_ref TEXT,
+      item_type TEXT NOT NULL DEFAULT 'architecture_note',
+      failure_family TEXT,
+      claims_json TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'pending',
       redaction_status TEXT NOT NULL DEFAULT 'clean',
       publish_block_reason TEXT,
@@ -344,6 +368,7 @@ function ensureTables(sqlite: Database.Database): void {
       provider_id TEXT NOT NULL,
       transport TEXT,
       model TEXT,
+      stage TEXT,
       source_session_id TEXT,
       status TEXT NOT NULL DEFAULT 'creating',
       ttl_seconds INTEGER NOT NULL,
@@ -572,9 +597,11 @@ const MIGRATIONS: Migration[] = [
         provider_id TEXT NOT NULL,
         profile_id TEXT,
         transport TEXT,
-        workflow_kind TEXT,
-        usage_reporting TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL DEFAULT 0,
+      workflow_kind TEXT,
+      usage_reporting TEXT NOT NULL,
+      outcome TEXT NOT NULL DEFAULT 'success',
+      error_category TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
         output_tokens INTEGER NOT NULL DEFAULT 0,
         total_tokens INTEGER NOT NULL DEFAULT 0,
         cost_usd REAL,
@@ -614,6 +641,8 @@ const MIGRATIONS: Migration[] = [
         transport TEXT,
         workflow_kind TEXT,
         usage_reporting TEXT NOT NULL,
+        outcome TEXT NOT NULL DEFAULT 'success',
+        error_category TEXT,
         input_tokens INTEGER NOT NULL DEFAULT 0,
         output_tokens INTEGER NOT NULL DEFAULT 0,
         total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -830,6 +859,7 @@ const MIGRATIONS: Migration[] = [
         provider_id TEXT NOT NULL,
         transport TEXT,
         model TEXT,
+        stage TEXT,
         source_session_id TEXT,
         status TEXT NOT NULL DEFAULT 'creating',
         ttl_seconds INTEGER NOT NULL,
@@ -908,6 +938,9 @@ const MIGRATIONS: Migration[] = [
         source_task_id TEXT,
         source_kind TEXT NOT NULL DEFAULT 'task',
         source_ref TEXT,
+        item_type TEXT NOT NULL DEFAULT 'architecture_note',
+        failure_family TEXT,
+        claims_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL DEFAULT 'pending',
         redaction_status TEXT NOT NULL DEFAULT 'clean',
         publish_block_reason TEXT,
@@ -996,6 +1029,84 @@ const MIGRATIONS: Migration[] = [
         rework_status TEXT NOT NULL DEFAULT 'not_applicable',
         validation_details_json TEXT,
         source_snapshot_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
+  {
+    version: 27,
+    description: "Persist structured implementation manifests on tasks",
+    sql: `
+      ALTER TABLE tasks ADD COLUMN implementation_manifest_json TEXT;
+    `,
+  },
+  {
+    version: 28,
+    description: "Add source-backed memory claim metadata",
+    sql: `
+      ALTER TABLE memory_items ADD COLUMN item_type TEXT NOT NULL DEFAULT 'architecture_note';
+      ALTER TABLE memory_items ADD COLUMN failure_family TEXT;
+      ALTER TABLE memory_items ADD COLUMN claims_json TEXT NOT NULL DEFAULT '[]';
+    `,
+    skipIfMissingColumns: [
+      {
+        statementContains: "memory_items ADD COLUMN item_type",
+        tableName: "memory_items",
+        columnName: "id",
+      },
+      {
+        statementContains: "memory_items ADD COLUMN failure_family",
+        tableName: "memory_items",
+        columnName: "id",
+      },
+      {
+        statementContains: "memory_items ADD COLUMN claims_json",
+        tableName: "memory_items",
+        columnName: "id",
+      },
+    ],
+  },
+  {
+    version: 29,
+    description: "Add runtime usage event outcomes",
+    sql: `
+      ALTER TABLE usage_events ADD COLUMN outcome TEXT NOT NULL DEFAULT 'success';
+      ALTER TABLE usage_events ADD COLUMN error_category TEXT;
+    `,
+  },
+  {
+    version: 30,
+    description: "Scope runtime warmup sessions by canonical runtime stage",
+    sql: "ALTER TABLE runtime_warmup_sessions ADD COLUMN stage TEXT",
+  },
+  {
+    version: 31,
+    description: "Add durable task lock provenance",
+    sql: `
+      ALTER TABLE tasks ADD COLUMN lock_stage TEXT;
+      ALTER TABLE tasks ADD COLUMN coordinator_id TEXT;
+    `,
+  },
+  {
+    version: 32,
+    description: "Persist task source references",
+    sql: "ALTER TABLE tasks ADD COLUMN source_ref TEXT",
+  },
+  {
+    version: 33,
+    description: "Add config audit events",
+    sql: `
+      CREATE TABLE IF NOT EXISTS config_audit_events (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        task_id TEXT,
+        runtime_profile_id TEXT,
+        action TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        actor TEXT,
+        reason_codes_json TEXT NOT NULL DEFAULT '[]',
+        before_json TEXT,
+        after_json TEXT,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
     `,
@@ -1335,6 +1446,9 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_audit_evidence_task ON audit_evidence_events(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_evidence_plan_snapshot ON audit_evidence_events(audit_plan_id, source_snapshot_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_evidence_kind_grade ON audit_evidence_events(evidence_kind, evidence_grade, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_config_audit_project_created ON config_audit_events(project_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_config_audit_task_created ON config_audit_events(task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_config_audit_profile_created ON config_audit_events(runtime_profile_id, created_at)",
     // Usage event scope lookups for per-entity aggregation queries and dashboards
     "CREATE INDEX IF NOT EXISTS idx_usage_events_project ON usage_events(project_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_task ON usage_events(task_id, created_at)",
@@ -1353,6 +1467,7 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_memory_lifecycle_events_item ON memory_lifecycle_events(memory_item_id, created_at)",
     // Runtime warmup lookup and lifecycle scans.
     "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_active_lookup ON runtime_warmup_sessions(project_id, runtime_profile_id, runtime_id, provider_id, transport, model, status, expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_stage_lookup ON runtime_warmup_sessions(project_id, stage, runtime_profile_id, runtime_id, provider_id, transport, model, status, expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_expires ON runtime_warmup_sessions(status, expires_at)",
     // Codex index: project session listing and session detail lookup.
     "CREATE INDEX IF NOT EXISTS idx_codex_sessions_project_root_updated ON codex_sessions(project_root, source_updated_at DESC)",

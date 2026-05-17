@@ -117,7 +117,7 @@ Rules:
 
 ## Memory
 
-Server-side memory is stored in SQLite and is independent of local Codex shared-memory files or MCP configuration. Approved memory is retrieved as reference-only context for planner, implementer, reviewer/security, and chat runs. Candidate extraction runs after `approve_done` moves a task to `verified`.
+Server-side memory is stored in SQLite and is independent of local Codex shared-memory files or MCP configuration. Approved memory is retrieved as a bounded, source-backed, reference-only brief for planner, implementer, reviewer/security, and chat runs. Candidate extraction runs after `approve_done` moves a task to `verified`.
 
 ### List Memory Items
 
@@ -141,9 +141,15 @@ POST /memory
 PUT /memory/:id
 ```
 
-Create body fields: `scope`, `projectId` for project scope, `title`, `summary`, `content`, optional `tags`, `sourceTaskId`, `sourceRef`, and `expiresAt`.
+Create body fields: `scope`, `projectId` for project scope, `title`, `summary`, `content`, optional `itemType`, `failureFamily`, `claims`, `tags`, `sourceTaskId`, `sourceRef`, and `expiresAt`.
 
-Update body fields: `scope`, `title`, `summary`, `content`, `tags`, `reviewNote`, and `expiresAt`.
+Update body fields: `scope`, `itemType`, `failureFamily`, `title`, `summary`, `content`, `claims`, `tags`, `reviewNote`, and `expiresAt`.
+
+`itemType` values are `decision`, `failure_family`, `architecture_note`, `workflow_contract`, `regression_pattern`, `review_learning`, `runtime_policy`, and `security_policy`.
+
+Each claim has `claimId`, `type`, `status`, `text`, `sources`, `supersedes`, `contradicts`, and `lastValidatedAt`. Claim sources can reference tasks, artifacts, evidence, code paths, memory items, documents, commits, or URLs.
+
+Known memory failure families include `inventory_only_no_findings`, `stale_rework_evidence`, `branch_drift`, `plan_quality_generic`, `runtime_limit_blocked`, `review_loop_stalled`, and `no_substantive_rework_delta`.
 
 Secret-like text is redacted before storage and blocks approval until edited.
 
@@ -161,7 +167,7 @@ Body:
 { "note": "review note" }
 ```
 
-Approval fails with `400` while `redactionStatus` is `blocked`.
+Approval fails with `400` while `redactionStatus` is `blocked` or while the memory item lacks a valid source-backed claim.
 
 ### Audit Trails
 
@@ -170,7 +176,7 @@ GET /memory/:id/usage
 GET /memory/:id/lifecycle
 ```
 
-Usage rows record the memory item, project/task/chat scope, workflow kind, source, and timestamp. Lifecycle rows record create/edit/approve/reject/expire actions.
+Usage rows record the memory item, project/task/chat scope, workflow kind, source, and timestamp. Lifecycle rows record create/edit/approve/reject/expire actions. The prompt brief cites memory and claim ids but remains reference-only and cannot override local repo facts or higher-priority instructions.
 
 **WebSocket events:** `memory:item_created`, `memory:item_updated`, `memory:item_deleted`, `memory:usage_recorded`.
 
@@ -556,11 +562,13 @@ Used by API/agent services to trigger project-scoped WebSocket broadcasts withou
   - `project:auto_queue_advanced` returns `400` when `taskId` does not belong to the target project.
   - `project:runtime_limit_updated` returns `400` when `runtimeProfileId` is omitted.
   - `project:runtime_limit_updated` returns `400` when `runtimeProfileId` does not belong to the target project and is not global.
+  - `project:usage_updated`, `project:queue_updated`, `project:worktree_warning`, and `project:memory_candidate_created` validate task ownership when `taskId` is supplied.
+  - `project:usage_updated` validates runtime profile ownership/global scope when `runtimeProfileId` is supplied.
 
 **Body:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | yes | One of `project:auto_queue_mode_changed`, `project:auto_queue_advanced`, `project:runtime_limit_updated` |
+| `type` | string | yes | One of `project:auto_queue_mode_changed`, `project:auto_queue_advanced`, `project:runtime_limit_updated`, `project:usage_updated`, `project:queue_updated`, `project:worktree_warning`, `project:memory_candidate_created` |
 | `taskId` | string | no | Optional related task id for runtime-limit updates |
 | `runtimeProfileId` | string\|null | conditional | Required for `project:runtime_limit_updated`; runtime profile whose persisted limit snapshot changed |
 
@@ -571,6 +579,20 @@ Used by API/agent services to trigger project-scoped WebSocket broadcasts withou
 ```
 
 ---
+
+## Operator Project Projections
+
+These endpoints expose bounded server-built read models for operator trust surfaces. They use existing memory, usage, and task state as their source of truth and do not include raw provider diagnostics, secrets, artifact bodies, or command output.
+
+```
+GET /projects/:id/knowledge?includeGlobal=true&limit=100
+GET /projects/:id/runtime-usage?limit=50
+GET /projects/:id/queue
+```
+
+- `knowledge` returns project memory items, optional approved global memory, and counts by status/type/failure family.
+- `runtime-usage` returns aggregate project token/cost totals plus recent `usage_events` rows.
+- `queue` returns auto-queue mode, counts by task status, and a bounded backlog/planning list.
 
 ## Runtime Profiles
 
@@ -810,6 +832,28 @@ Additional constraints:
 
 **WebSocket event:** `task:moved`
 
+### Operator Task Projections
+
+These endpoints expose bounded task read models built from existing timeline, trust, evidence, memory, usage, and worktree state.
+
+```
+GET /tasks/:id/timeline
+GET /tasks/:id/artifact-trust
+GET /tasks/:id/evidence
+GET /tasks/:id/memory
+GET /tasks/:id/runtime-usage?limit=50
+GET /tasks/:id/worktree
+POST /tasks/:id/manual-exception
+POST /tasks/:id/worktree/cleanup
+```
+
+- `artifact-trust` returns the task artifact trust rollup or `null` when no trust artifact exists.
+- `evidence` returns timeline evidence, evidence links, and evidence-recorded events.
+- `memory` returns memory candidates whose source task is the requested task.
+- `runtime-usage` returns aggregate task token/cost totals plus recent `usage_events` rows.
+- `manual-exception` is an alias for the `manual_exception` task event with `{ "justification": string }`.
+- `worktree/cleanup` accepts `{ "action": "archive" | "delete" }` and delegates to the existing fail-closed worktree service. Omitted action defaults to `archive`.
+
 ### Reorder Task
 
 ```
@@ -842,7 +886,7 @@ Used by the agent process to trigger WebSocket broadcasts after updating a task.
 **Body:**
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `task:updated` | Event type: `task:updated`, `task:moved`, `task:activity`, or `task:scheduled_fired` |
+| `type` | string | `task:updated` | Event type: `task:updated`, `task:moved`, `task:activity`, `task:scheduled_fired`, `task:timeline_updated`, `task:evidence_recorded`, `task:trust_updated`, or `task:manual_handoff_required` |
 
 **Response:** `200 OK`
 
@@ -1221,6 +1265,14 @@ All events are JSON with this structure:
 | `task:scheduled_fired`              | Full task object                                                                                   | Coordinator fires a backlog task whose `scheduledAt` is due                          |
 | `project:auto_queue_mode_changed`   | Full project object                                                                                | `PATCH /projects/:id/auto-queue-mode`                                                |
 | `project:auto_queue_advanced`       | `{ id: string }` (task id)                                                                         | Coordinator auto-advances the next backlog task in an auto-queue project             |
+| `task:timeline_updated`             | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built task timeline invalidation                                              |
+| `task:evidence_recorded`            | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built task evidence invalidation                                              |
+| `task:trust_updated`                | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built artifact-trust invalidation                                             |
+| `task:manual_handoff_required`      | `{ id, projectId, blockedReason?, reasonCodes?, generatedAt? }`                                    | Manual-review or blocked-external handoff                                            |
+| `project:memory_candidate_created`  | `{ id, projectId, taskId, status }`                                                                | Verified task memory candidate creation                                              |
+| `project:usage_updated`             | `{ projectId, taskId?, runtimeProfileId? }`                                                        | Runtime usage event persisted                                                        |
+| `project:queue_updated`             | `{ projectId, taskId? }`                                                                           | Task create/delete/reorder or queue state change                                     |
+| `project:worktree_warning`          | `{ projectId, taskId, warnings }`                                                                  | Worktree inspect/cleanup surfaced warning codes                                      |
 | `project:runtime_limit_updated`     | `{ projectId, runtimeProfileId, taskId? }`                                                         | Persisted runtime-profile limit state or last usage changed                          |
 | `project:warmup_updated`            | `{ projectId, status }`                                                                            | Warmup create/delete/failure changed project warmup state                            |
 

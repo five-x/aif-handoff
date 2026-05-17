@@ -49,6 +49,19 @@ describe("memory API", () => {
         title: "Close-out convention",
         summary: "Verified tasks create pending memory.",
         content: "Approved memory is injected as reference-only context.",
+        itemType: "decision",
+        claims: [
+          {
+            claimId: "close-out-convention",
+            type: "decision",
+            status: "pending",
+            text: "Verified tasks create pending memory.",
+            sources: [{ kind: "document", ref: "docs/kb/memory.md" }],
+            supersedes: [],
+            contradicts: [],
+            lastValidatedAt: null,
+          },
+        ],
         tags: ["memory"],
       }),
     });
@@ -91,10 +104,45 @@ describe("memory API", () => {
         title: "Secret note",
         summary: "Contains a secret.",
         content: "token=super-secret-token",
+        claims: [
+          {
+            claimId: "secret-note",
+            type: "security_policy",
+            status: "pending",
+            text: "Secret-like memory content is blocked.",
+            sources: [{ kind: "document", ref: "docs/kb/memory.md" }],
+            supersedes: [],
+            contradicts: [],
+            lastValidatedAt: null,
+          },
+        ],
       }),
     });
     const created = (await createRes.json()) as { id: string; redactionStatus: string };
     expect(created.redactionStatus).toBe("blocked");
+
+    const approveRes = await app.request(`/memory/${created.id}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "publish" }),
+    });
+    expect(approveRes.status).toBe(400);
+  });
+
+  it("rejects approval without a valid source-backed claim", async () => {
+    const createRes = await app.request("/memory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "project-1",
+        scope: "project",
+        title: "Unsupported note",
+        summary: "Missing claims.",
+        content: "This memory has no source-backed claim.",
+      }),
+    });
+    const created = (await createRes.json()) as { id: string; failureFamily: string };
+    expect(created.failureFamily).toBe("missing_source_backed_claim");
 
     const approveRes = await app.request(`/memory/${created.id}/approve`, {
       method: "POST",

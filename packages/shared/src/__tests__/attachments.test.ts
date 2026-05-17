@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   parseAttachments,
   formatAttachmentsForPrompt,
+  isSafeAttachmentFilename,
+  isSafeAttachmentStoragePath,
   extractHeadings,
   looksLikeFullPlanUpdate,
 } from "../attachments.js";
@@ -100,6 +102,48 @@ describe("formatAttachmentsForPrompt", () => {
     const result = formatAttachmentsForPrompt(input);
     expect(result).not.toContain("x".repeat(5000));
     expect(result.length).toBeLessThan(5000 + 200);
+  });
+
+  it("does not inline binary content", () => {
+    const input = JSON.stringify([
+      { name: "img.png", mimeType: "image/png", size: 1024, content: "aGVsbG8=" },
+    ]);
+    const result = formatAttachmentsForPrompt(input);
+    expect(result).toContain("[binary content omitted]");
+    expect(result).not.toContain("aGVsbG8=");
+  });
+
+  it("includes attachment provenance when present", () => {
+    const input = JSON.stringify([
+      {
+        name: "notes.txt",
+        mimeType: "text/plain",
+        size: 12,
+        content: "hello",
+        sourceRef: "task:t1",
+        redactionStatus: "none",
+      },
+    ]);
+    const result = formatAttachmentsForPrompt(input);
+    expect(result).toContain("source: task:t1");
+  });
+});
+
+describe("attachment safety helpers", () => {
+  it("rejects unsafe attachment filenames", () => {
+    expect(isSafeAttachmentFilename("notes.txt")).toBe(true);
+    expect(isSafeAttachmentFilename("../notes.txt")).toBe(false);
+    expect(isSafeAttachmentFilename("bad:name.txt")).toBe(false);
+  });
+
+  it("validates context-bound storage paths", () => {
+    expect(
+      isSafeAttachmentStoragePath(".ai-factory/files/tasks/t1/notes.txt", { taskId: "t1" }),
+    ).toBe(true);
+    expect(
+      isSafeAttachmentStoragePath(".ai-factory/files/tasks/t2/notes.txt", { taskId: "t1" }),
+    ).toBe(false);
+    expect(isSafeAttachmentStoragePath(".ai-factory/files/tasks/t1/../x.txt")).toBe(false);
   });
 });
 

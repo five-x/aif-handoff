@@ -7,16 +7,26 @@ import {
   logger,
   getEnv,
   getProjectConfig,
+  normalizeRuntimeStage,
   projectUsesSharedBranchIsolation,
+  type RuntimeStage,
+  type RuntimeStageOrProfileMode,
   type TaskIntent,
 } from "@aif/shared";
 import {
   clearActiveRuntimeWarmupSessions,
   createRuntimeWarmupSession,
+  appendConfigAuditEvent,
+  buildProjectConfigGovernance,
   expireStaleRuntimeWarmupSessions,
   findActiveReadyRuntimeWarmupSession,
   findRuntimeProfileById,
   findTaskById,
+  buildProjectKnowledge,
+  buildProjectQueueState,
+  listProjectRuntimeUsageEvents,
+  listConfigAuditEvents,
+  listProjectConfigWorkBlockers,
   markRuntimeWarmupSessionFailed,
   markRuntimeWarmupSessionReady,
   type RuntimeWarmupSessionRow,
@@ -28,6 +38,7 @@ import {
   broadcastProjectSchema,
   autoQueueModeSchema,
   warmupCreateSchema,
+  operatorLimitQuerySchema,
 } from "../schemas.js";
 import { getAutoQueueMode, setAutoQueueMode } from "@aif/data";
 import { broadcast } from "../ws.js";
@@ -80,19 +91,40 @@ function rejectsParallelAutoQueueWithBranches(input: {
   return "Parallel auto-queue with git.create_branches=true requires AIF_TASK_WORKTREES_ENABLED=true";
 }
 
-function warmupScopeFromSupport(
-  support: {
-    runtimeId: string | null;
-    providerId: string | null;
-    runtimeProfileId: string | null;
-    transport: string | null;
-    model: string | null;
-  },
-  projectId: string,
-) {
+type WarmupScopeSupport = {
+  stage?: RuntimeStage | null;
+  workflowKind?: string | null;
+  profileMode?: RuntimeStageOrProfileMode | string | null;
+  runtimeId: string | null;
+  providerId: string | null;
+  runtimeProfileId: string | null;
+  transport: string | null;
+  model: string | null;
+};
+
+function warmupStageFromSupport(support: WarmupScopeSupport): RuntimeStage {
+  if (support.stage) return support.stage;
+  if (support.workflowKind === "planner") return "planner";
+  if (support.workflowKind === "plan-checker") return "plan_checker";
+  if (support.workflowKind === "implementer") return "implementer";
+  if (support.workflowKind === "reviewer") return "reviewer";
+  if (support.workflowKind === "review-security" || support.workflowKind === "security_review") {
+    return "security";
+  }
+  if (support.workflowKind === "audit") return "audit";
+  if (support.workflowKind === "synthesis") return "synthesis";
+  if (support.workflowKind === "chat") return "chat";
+  if (support.profileMode === "plan") return "planner";
+  if (support.profileMode === "review") return "reviewer";
+  if (support.profileMode === "chat") return "chat";
+  return normalizeRuntimeStage("task");
+}
+
+function warmupScopeFromSupport(support: WarmupScopeSupport, projectId: string) {
   if (!support.runtimeId || !support.providerId) return null;
   return {
     projectId,
+    stage: warmupStageFromSupport(support),
     runtimeProfileId: support.runtimeProfileId,
     runtimeId: support.runtimeId,
     providerId: support.providerId,
@@ -104,6 +136,7 @@ function warmupScopeFromSupport(
 function warmupScopeKey(scope: NonNullable<ReturnType<typeof warmupScopeFromSupport>>): string {
   return JSON.stringify([
     scope.projectId,
+    scope.stage,
     scope.runtimeProfileId ?? null,
     scope.runtimeId,
     scope.providerId,
@@ -146,6 +179,7 @@ function toWarmupPayload(row: RuntimeWarmupSessionRow | undefined | null, now = 
     providerId: row.providerId,
     transport: row.transport,
     model: row.model,
+    stage: row.stage,
     status: row.status,
     ttlSeconds: row.ttlSeconds,
     expiresAt: row.expiresAt,
@@ -154,6 +188,16 @@ function toWarmupPayload(row: RuntimeWarmupSessionRow | undefined | null, now = 
     errorMessage: row.errorMessage,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+function projectConfigGovernanceBlocker(projectId: string) {
+  const blockers = listProjectConfigWorkBlockers(projectId);
+  if (!blockers || blockers.length === 0) return null;
+  const reasonCodes = [...new Set(blockers.map((issue) => issue.reasonCode))].sort();
+  return {
+    error: `config_governance_blocked:${reasonCodes.join(",")}`,
+    reasonCodes,
   };
 }
 
@@ -268,6 +312,34 @@ projectsRouter.put("/:id", jsonValidator(createProjectSchema), async (c) => {
   const { project: updated, pathError } = updateProject(id, body);
   if (pathError) return c.json({ error: pathError }, 400);
   if (!updated) return c.json({ error: "Project not found after update" }, 500);
+  appendConfigAuditEvent({
+    projectId: id,
+    action: "project_updated",
+    sourceKind: "project",
+    actor: "api",
+    before: {
+      name: existing.name,
+      rootPath: existing.rootPath,
+      parallelEnabled: existing.parallelEnabled,
+      defaultRuntimeProfileIds: {
+        task: existing.defaultTaskRuntimeProfileId,
+        plan: existing.defaultPlanRuntimeProfileId,
+        review: existing.defaultReviewRuntimeProfileId,
+        chat: existing.defaultChatRuntimeProfileId,
+      },
+    },
+    after: {
+      name: updated.name,
+      rootPath: updated.rootPath,
+      parallelEnabled: updated.parallelEnabled,
+      defaultRuntimeProfileIds: {
+        task: updated.defaultTaskRuntimeProfileId,
+        plan: updated.defaultPlanRuntimeProfileId,
+        review: updated.defaultReviewRuntimeProfileId,
+        chat: updated.defaultChatRuntimeProfileId,
+      },
+    },
+  });
 
   log.debug({ projectId: id }, "Project updated");
   broadcast({ type: "project:updated", payload: updated });
@@ -285,6 +357,24 @@ projectsRouter.get("/:id/mcp", (c) => {
   return c.json({ mcpServers: getProjectMcpServers(id) });
 });
 
+// GET /projects/:id/config-governance - redacted resolved project config view
+projectsRouter.get("/:id/config-governance", (c) => {
+  const { id } = c.req.param();
+  const response = buildProjectConfigGovernance(id);
+  if (!response) return c.json({ error: "Project not found" }, 404);
+  return c.json(response);
+});
+
+// GET /projects/:id/config-audit - append-only redacted config audit trail
+projectsRouter.get("/:id/config-audit", (c) => {
+  const { id } = c.req.param();
+  const parsed = operatorLimitQuerySchema.safeParse({ limit: c.req.query("limit") });
+  if (!parsed.success) return c.json({ error: "Invalid query" }, 400);
+  const response = listConfigAuditEvents({ projectId: id, limit: parsed.data.limit });
+  if (!response) return c.json({ error: "Project not found" }, 404);
+  return c.json({ projectId: id, events: response });
+});
+
 // GET /projects/:id/defaults — return resolved config defaults for a project
 projectsRouter.get("/:id/defaults", (c) => {
   const { id } = c.req.param();
@@ -295,6 +385,40 @@ projectsRouter.get("/:id/defaults", (c) => {
 
   const cfg = getProjectConfig(project.rootPath);
   return c.json({ paths: cfg.paths, workflow: cfg.workflow });
+});
+
+// GET /projects/:id/knowledge - source-backed memory knowledge projection.
+projectsRouter.get("/:id/knowledge", (c) => {
+  const { id } = c.req.param();
+  const parsed = operatorLimitQuerySchema.safeParse({
+    limit: c.req.query("limit"),
+    includeGlobal: c.req.query("includeGlobal"),
+  });
+  if (!parsed.success) return c.json({ error: "Invalid query" }, 400);
+  const response = buildProjectKnowledge(id, {
+    includeGlobal: parsed.data.includeGlobal,
+    limit: parsed.data.limit,
+  });
+  if (!response) return c.json({ error: "Project not found" }, 404);
+  return c.json(response);
+});
+
+// GET /projects/:id/runtime-usage - bounded project runtime usage events.
+projectsRouter.get("/:id/runtime-usage", (c) => {
+  const { id } = c.req.param();
+  const parsed = operatorLimitQuerySchema.safeParse({ limit: c.req.query("limit") });
+  if (!parsed.success) return c.json({ error: "Invalid query" }, 400);
+  const response = listProjectRuntimeUsageEvents(id, parsed.data.limit);
+  if (!response) return c.json({ error: "Project not found" }, 404);
+  return c.json(response);
+});
+
+// GET /projects/:id/queue - bounded queue state projection.
+projectsRouter.get("/:id/queue", (c) => {
+  const { id } = c.req.param();
+  const response = buildProjectQueueState(id);
+  if (!response) return c.json({ error: "Project not found" }, 404);
+  return c.json(response);
 });
 
 // GET /projects/:id/roadmap/status — check if ROADMAP.md exists for the project
@@ -337,6 +461,8 @@ projectsRouter.post("/:id/roadmap/generate", jsonValidator(roadmapGenerateSchema
   if (aliasError) {
     return c.json({ error: aliasError, code: "ROADMAP_ALIAS_EXISTS" }, 409);
   }
+  const configBlocker = projectConfigGovernanceBlocker(id);
+  if (configBlocker) return c.json(configBlocker, 409);
 
   log.info(
     { projectId: id, roadmapAlias, taskIntent: taskIntent ?? "general", hasVision: !!vision },
@@ -495,6 +621,8 @@ projectsRouter.post("/:id/warmup", jsonValidator(warmupCreateSchema), async (c) 
     log.warn({ projectId: id }, "Rejected warmup create because feature flag is disabled");
     return c.json({ error: "Warmup is disabled", code: "feature_disabled" }, 403);
   }
+  const configBlocker = projectConfigGovernanceBlocker(id);
+  if (configBlocker) return c.json(configBlocker, 409);
 
   const targetSupports = await resolveApiWarmupSupports(id);
   const supportedScopes = supportedWarmupScopes(id, targetSupports);
@@ -508,6 +636,7 @@ projectsRouter.post("/:id/warmup", jsonValidator(warmupCreateSchema), async (c) 
       runtimeProfileId: support.runtimeProfileId,
       transport: support.transport,
       model: support.model,
+      stage: warmupStageFromSupport(support),
       supported: support.supported,
       skipReason: support.skipReason ?? null,
       supportedTargetCount: supportedScopes.length,
@@ -554,7 +683,7 @@ projectsRouter.post("/:id/warmup", jsonValidator(warmupCreateSchema), async (c) 
     });
     if (!pending) {
       log.error(
-        { projectId: id, workflowKind: targetSupport.workflowKind },
+        { projectId: id, stage: scope.stage, workflowKind: targetSupport.workflowKind },
         "Failed to create warmup persistence row",
       );
       return c.json({ error: "Failed to create warmup" }, 500);
@@ -566,7 +695,7 @@ projectsRouter.post("/:id/warmup", jsonValidator(warmupCreateSchema), async (c) 
         projectRoot: project.rootPath,
         prompt: WARMUP_PROMPT,
         workflowKind: targetSupport.workflowKind,
-        profileMode: targetSupport.profileMode,
+        profileMode: scope.stage,
         usageContext: { source: "warmup" as const },
         includePartialMessages: false,
         maxTurns: 1,
@@ -583,6 +712,7 @@ projectsRouter.post("/:id/warmup", jsonValidator(warmupCreateSchema), async (c) 
             projectId: id,
             warmupId: pending.id,
             runtimeId: scope.runtimeId,
+            stage: scope.stage,
             workflowKind: targetSupport.workflowKind,
           },
           "Warmup create failed because runtime did not return a seed session id",
@@ -617,6 +747,7 @@ projectsRouter.post("/:id/warmup", jsonValidator(warmupCreateSchema), async (c) 
           warmupId: pending.id,
           runtimeId: scope.runtimeId,
           runtimeProfileId: scope.runtimeProfileId,
+          stage: scope.stage,
           workflowKind: targetSupport.workflowKind,
           profileMode: targetSupport.profileMode,
           ttlSeconds,
@@ -632,6 +763,7 @@ projectsRouter.post("/:id/warmup", jsonValidator(warmupCreateSchema), async (c) 
           projectId: id,
           warmupId: pending.id,
           runtimeId: scope.runtimeId,
+          stage: scope.stage,
           workflowKind: targetSupport.workflowKind,
           err: error,
         },
@@ -684,6 +816,7 @@ projectsRouter.delete("/:id/warmup", async (c) => {
       projectId: id,
       runtimeId: support.runtimeId,
       runtimeProfileId: support.runtimeProfileId,
+      stage: warmupStageFromSupport(support),
       supportedTargetCount: supportedScopes.length,
       cleared,
     },
@@ -706,7 +839,16 @@ projectsRouter.post(
     const project = findProjectById(id);
     if (!project) return c.json({ error: "Project not found" }, 404);
 
-    if (type === "project:auto_queue_advanced" && taskId) {
+    if (
+      [
+        "project:auto_queue_advanced",
+        "project:memory_candidate_created",
+        "project:usage_updated",
+        "project:queue_updated",
+        "project:worktree_warning",
+      ].includes(type) &&
+      taskId
+    ) {
       const task = findTaskById(taskId);
       if (!task || task.projectId !== id) {
         return c.json({ error: "taskId does not belong to the target project" }, 400);
@@ -720,7 +862,10 @@ projectsRouter.post(
       );
     }
 
-    if (type === "project:runtime_limit_updated" && runtimeProfileId) {
+    if (
+      (type === "project:runtime_limit_updated" || type === "project:usage_updated") &&
+      runtimeProfileId
+    ) {
       const runtimeProfile = findRuntimeProfileById(runtimeProfileId);
       const belongsToProject =
         runtimeProfile?.projectId === id || runtimeProfile?.projectId == null;
@@ -734,6 +879,31 @@ projectsRouter.post(
 
     if (type === "project:auto_queue_advanced" && taskId) {
       broadcast({ type, payload: { id: taskId } });
+      broadcast({ type: "project:queue_updated", payload: { projectId: id, taskId } });
+    } else if (type === "project:usage_updated") {
+      broadcast({
+        type,
+        payload: {
+          projectId: id,
+          taskId: taskId ?? null,
+          runtimeProfileId: runtimeProfileId ?? null,
+        },
+      });
+    } else if (type === "project:queue_updated") {
+      broadcast({ type, payload: { projectId: id, taskId: taskId ?? null } });
+    } else if (type === "project:memory_candidate_created") {
+      broadcast({
+        type,
+        payload: {
+          id: taskId ?? id,
+          projectId: id,
+          taskId: taskId ?? null,
+          status: "pending",
+        },
+      });
+    } else if (type === "project:worktree_warning") {
+      if (!taskId) return c.json({ error: "taskId is required for project:worktree_warning" }, 400);
+      broadcast({ type, payload: { projectId: id, taskId, warnings: ["manual_broadcast"] } });
     } else if (type === "project:runtime_limit_updated") {
       broadcast({
         type,

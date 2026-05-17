@@ -150,4 +150,53 @@ describe("runtime profile resolution", () => {
     const developerMarkerPattern = new RegExp(String.raw`\[${"FIX"}:|^DEBUG `, "m");
     expect(debugMessages.join("\n")).not.toMatch(developerMarkerPattern);
   });
+
+  it("accepts canonical runtime stages and returns compatibility metadata", () => {
+    testDb.current
+      .insert(projects)
+      .values({
+        id: "proj-1",
+        name: "Project 1",
+        rootPath: "/tmp/proj-1",
+        defaultTaskRuntimeProfileId: "profile-task",
+        defaultPlanRuntimeProfileId: "profile-plan",
+        defaultReviewRuntimeProfileId: "profile-review",
+        defaultChatRuntimeProfileId: "profile-chat",
+      })
+      .run();
+    testDb.current
+      .insert(runtimeProfiles)
+      .values([
+        { id: "profile-task", projectId: "proj-1", name: "Task", runtimeId: "codex", providerId: "openai", enabled: true },
+        { id: "profile-plan", projectId: "proj-1", name: "Plan", runtimeId: "codex", providerId: "openai", enabled: true },
+        { id: "profile-review", projectId: "proj-1", name: "Review", runtimeId: "codex", providerId: "openai", enabled: true },
+        { id: "profile-chat", projectId: "proj-1", name: "Chat", runtimeId: "codex", providerId: "openai", enabled: true },
+      ])
+      .run();
+    testDb.current
+      .insert(tasks)
+      .values({ id: "task-1", projectId: "proj-1", title: "Task 1" })
+      .run();
+
+    expect(resolveEffectiveRuntimeProfile({ taskId: "task-1", mode: "planner" })).toMatchObject({
+      stage: "planner",
+      profileMode: "plan",
+      profile: expect.objectContaining({ id: "profile-plan" }),
+    });
+    expect(resolveEffectiveRuntimeProfile({ taskId: "task-1", mode: "plan_checker" })).toMatchObject({
+      stage: "plan_checker",
+      profileMode: "plan",
+      profile: expect.objectContaining({ id: "profile-plan" }),
+    });
+    expect(resolveEffectiveRuntimeProfile({ taskId: "task-1", mode: "security" })).toMatchObject({
+      stage: "security",
+      profileMode: "review",
+      profile: expect.objectContaining({ id: "profile-review" }),
+    });
+    expect(resolveEffectiveRuntimeProfile({ taskId: "task-1", mode: "synthesis" })).toMatchObject({
+      stage: "synthesis",
+      profileMode: "task",
+      profile: expect.objectContaining({ id: "profile-task" }),
+    });
+  });
 });

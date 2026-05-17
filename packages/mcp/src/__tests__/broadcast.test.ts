@@ -207,4 +207,37 @@ describe("broadcastTaskChange with Telegram", () => {
     // Only broadcast, no Telegram
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
+
+  it("sends internal broadcast token when configured", async () => {
+    vi.doMock("@aif/shared", async () => {
+      const actual = await vi.importActual<typeof import("@aif/shared")>("@aif/shared");
+      return {
+        ...actual,
+        getEnv: () => ({
+          API_BASE_URL: "http://localhost:3009",
+          INTERNAL_BROADCAST_TOKEN: "test-internal-token",
+          TELEGRAM_BOT_TOKEN: undefined,
+          TELEGRAM_USER_ID: undefined,
+        }),
+        sendTelegramNotification: async () => {},
+      };
+    });
+
+    const { broadcastTaskChange: broadcast } = await import("../utils/broadcast.js");
+
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", mockFetch);
+
+    await broadcast("task-abc");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:3009/tasks/task-abc/broadcast",
+      expect.objectContaining({
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer test-internal-token",
+        },
+      }),
+    );
+  });
 });

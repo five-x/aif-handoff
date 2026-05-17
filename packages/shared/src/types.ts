@@ -1,3 +1,4 @@
+import type { ImplementationManifest } from "./implementationManifest.js";
 import type { TaskIntent } from "./taskIntent.js";
 
 export const TASK_STATUSES = [
@@ -15,6 +16,10 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export type { TaskIntent };
 
+export const COORDINATOR_STAGES = ["planner", "plan-checker", "implementer", "reviewer"] as const;
+
+export type CoordinatorStage = (typeof COORDINATOR_STAGES)[number];
+
 export const AUTO_REVIEW_STRATEGIES = ["full_re_review", "closure_first"] as const;
 
 export type AutoReviewStrategy = (typeof AUTO_REVIEW_STRATEGIES)[number];
@@ -27,10 +32,62 @@ export const AUTO_REVIEW_FINDING_SOURCES = [
 
 export type AutoReviewFindingSource = (typeof AUTO_REVIEW_FINDING_SOURCES)[number];
 
+export const AUTO_REVIEW_PREVIOUS_FINDING_STATUSES = [
+  "resolved",
+  "still_blocking",
+  "new_blocker",
+  "not_reproducible",
+  "manual_review_required",
+] as const;
+
+export type AutoReviewPreviousFindingStatus =
+  (typeof AUTO_REVIEW_PREVIOUS_FINDING_STATUSES)[number];
+
+export type AutoReviewFindingSeverity = "low" | "medium" | "high" | "critical";
+
+export const AUTO_REVIEW_SECURITY_COVERAGE_AREAS = [
+  "secret_leaks",
+  "permissions_sandbox",
+  "unsafe_shell_network_file",
+  "dependency_config",
+] as const;
+
+export type AutoReviewSecurityCoverageArea = (typeof AUTO_REVIEW_SECURITY_COVERAGE_AREAS)[number];
+
+export type AutoReviewSecurityCoverageStatus =
+  | "covered"
+  | "issue_found"
+  | "not_applicable"
+  | "not_checked";
+
+export interface AutoReviewSecurityCoverage {
+  area: AutoReviewSecurityCoverageArea;
+  status: AutoReviewSecurityCoverageStatus;
+  note: string;
+}
+
+export interface AutoReviewBlockerHistoryEntry {
+  id: string;
+  source: AutoReviewFindingSource;
+  status: AutoReviewPreviousFindingStatus;
+  note: string;
+  text?: string | null;
+  iteration?: number;
+  closureEvidence?: string;
+  requiredEvidence?: string | null;
+}
+
 export interface AutoReviewFinding {
   id: string;
   text: string;
   source: AutoReviewFindingSource;
+  status?: AutoReviewPreviousFindingStatus;
+  severity?: AutoReviewFindingSeverity;
+  location?: string;
+  claim?: string;
+  requiredFix?: string;
+  verification?: string;
+  closureEvidence?: string;
   firstSeenIteration?: number;
   lastSeenIteration?: number;
   streak?: number;
@@ -41,12 +98,19 @@ export interface AutoReviewReworkSnapshot {
   artifactPath: string;
   artifactContentSha: string | null;
   findingIds: string[];
+  baselineHeadSha?: string | null;
+  changedFilesDigest?: string | null;
+  changedFilesSummary?: string[];
+  requiredEvidenceByFindingId?: Record<string, string>;
+  forbiddenChanges?: string[];
 }
 
 export interface AutoReviewState {
   strategy: AutoReviewStrategy;
   iteration: number;
   findings: AutoReviewFinding[];
+  securityCoverage?: AutoReviewSecurityCoverage[];
+  blockerHistory?: AutoReviewBlockerHistoryEntry[];
   reworkSnapshot?: AutoReviewReworkSnapshot;
 }
 
@@ -113,6 +177,9 @@ export interface TaskCommentAttachment {
   content: string | null;
   /** Relative path in storage/ directory. Present for file-backed attachments. */
   path?: string;
+  sourceKind?: "task" | "comment" | "chat";
+  sourceRef?: string;
+  redactionStatus?: "none" | "redacted" | "not_scanned";
 }
 
 export interface Task {
@@ -126,6 +193,7 @@ export interface Task {
   isFix: boolean;
   plannerMode: string;
   planPath: string;
+  sourceRef?: string | null;
   planDocs: boolean;
   planTests: boolean;
   skipReview: boolean;
@@ -135,6 +203,7 @@ export interface Task {
   position: number;
   plan: string | null;
   implementationLog: string | null;
+  implementationManifest?: ImplementationManifest | null;
   reviewComments: string | null;
   agentActivityLog: string | null;
   blockedReason: string | null;
@@ -154,6 +223,8 @@ export interface Task {
   autoReviewState: AutoReviewState | null;
   paused: boolean;
   lastHeartbeatAt: string | null;
+  lockStage: CoordinatorStage | null;
+  coordinatorId: string | null;
   lastSyncedAt: string | null;
   runtimeProfileId?: string | null;
   modelOverride?: string | null;
@@ -162,11 +233,21 @@ export interface Task {
   runtimeLimitSnapshot?: RuntimeLimitSnapshot | null;
   runtimeLimitUpdatedAt?: string | null;
   artifactTrust?: TaskArtifactTrustRollup | null;
+  effectiveRuntime?: TaskEffectiveRuntime | null;
+  memoryCandidateCount?: number;
   scheduledAt: string | null;
   branchName: string | null;
   worktreePath: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TaskEffectiveRuntime {
+  source: EffectiveRuntimeProfileSource;
+  profileId: string | null;
+  runtimeId: string | null;
+  providerId: string | null;
+  profileName: string | null;
 }
 
 export interface TaskComment {
@@ -178,7 +259,24 @@ export interface TaskComment {
   createdAt: string;
 }
 
-export type WorkflowTimelineSourceKind = "none" | "roadmap_batch";
+export const WORKFLOW_TIMELINE_GENERIC_ARTIFACT_KINDS = [
+  "plan",
+  "plan_manifest",
+  "implementation_manifest",
+  "source_diff",
+  "test_result",
+  "review_report",
+  "security_report",
+  "audit_report",
+  "audit_synthesis",
+  "memory_candidate",
+  "commit_evidence",
+] as const;
+
+export type WorkflowTimelineGenericArtifactKind =
+  (typeof WORKFLOW_TIMELINE_GENERIC_ARTIFACT_KINDS)[number];
+
+export type WorkflowTimelineSourceKind = "none" | "roadmap_batch" | "task_record";
 
 export type WorkflowTimelineArtifactState =
   | "expected"
@@ -205,6 +303,8 @@ export type TaskArtifactTrustClaimOutcome = WorkflowTimelineClaimOutcome;
 
 export type TaskArtifactTrustNextAction =
   | "none"
+  | "continue_task"
+  | "review_task"
   | "retry_source_rework"
   | "retry_synthesis"
   | "provide_operator_input"
@@ -346,6 +446,15 @@ export interface WorkflowTimeline {
   events: WorkflowTimelineEvent[];
 }
 
+export interface TaskOperatorEvidenceResponse {
+  taskId: string;
+  projectId: string;
+  generatedAt: string;
+  evidence: WorkflowTimelineEvidence[];
+  evidenceLinks: WorkflowTimelineEvidenceLink[];
+  events: WorkflowTimelineEvent[];
+}
+
 /** POST /tasks/:id/comments body */
 export interface CreateTaskCommentInput {
   message: string;
@@ -363,6 +472,7 @@ export interface CreateTaskInput {
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
+  sourceRef?: string | null;
   planDocs?: boolean;
   planTests?: boolean;
   skipReview?: boolean;
@@ -388,12 +498,14 @@ export interface UpdateTaskInput {
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
+  sourceRef?: string | null;
   planDocs?: boolean;
   planTests?: boolean;
   skipReview?: boolean;
   useSubagents?: boolean;
   plan?: string | null;
   implementationLog?: string | null;
+  implementationManifest?: ImplementationManifest | null;
   reviewComments?: string | null;
   agentActivityLog?: string | null;
   blockedReason?: string | null;
@@ -462,6 +574,75 @@ export const MEMORY_SOURCE_KINDS = ["task", "manual"] as const;
 
 export type MemorySourceKind = (typeof MEMORY_SOURCE_KINDS)[number];
 
+export const MEMORY_ITEM_TYPES = [
+  "decision",
+  "failure_family",
+  "architecture_note",
+  "workflow_contract",
+  "regression_pattern",
+  "review_learning",
+  "runtime_policy",
+  "security_policy",
+] as const;
+
+export type MemoryItemType = (typeof MEMORY_ITEM_TYPES)[number];
+
+export const MEMORY_FAILURE_FAMILIES = [
+  "inventory_only_no_findings",
+  "stale_rework_evidence",
+  "branch_drift",
+  "plan_quality_generic",
+  "runtime_limit_blocked",
+  "review_loop_stalled",
+  "no_substantive_rework_delta",
+  "missing_source_backed_claim",
+  "invalid_source_claim",
+  "redaction_blocked",
+] as const;
+
+export type MemoryFailureFamily = (typeof MEMORY_FAILURE_FAMILIES)[number];
+
+export const MEMORY_CLAIM_SOURCE_KINDS = [
+  "task",
+  "artifact",
+  "evidence",
+  "code",
+  "memory",
+  "document",
+  "commit",
+  "url",
+] as const;
+
+export type MemoryClaimSourceKind = (typeof MEMORY_CLAIM_SOURCE_KINDS)[number];
+
+export const MEMORY_CLAIM_STATUSES = ["pending", "approved", "rejected", "expired"] as const;
+
+export type MemoryClaimStatus = (typeof MEMORY_CLAIM_STATUSES)[number];
+
+export interface MemoryClaimSource {
+  kind: MemoryClaimSourceKind;
+  ref?: string | null;
+  taskId?: string | null;
+  artifactId?: string | null;
+  evidenceId?: string | null;
+  memoryId?: string | null;
+  path?: string | null;
+  label?: string | null;
+  excerpt?: string | null;
+  observedAt?: string | null;
+}
+
+export interface MemoryClaim {
+  claimId: string;
+  type: MemoryItemType;
+  status: MemoryClaimStatus;
+  text: string;
+  sources: MemoryClaimSource[];
+  supersedes: string[];
+  contradicts: string[];
+  lastValidatedAt: string | null;
+}
+
 export const MEMORY_WORKFLOW_KINDS = [
   "planner",
   "implementer",
@@ -489,6 +670,9 @@ export interface MemoryItem {
   sourceTaskId: string | null;
   sourceKind: MemorySourceKind;
   sourceRef: string | null;
+  itemType: MemoryItemType;
+  failureFamily: MemoryFailureFamily | null;
+  claims: MemoryClaim[];
   status: MemoryItemStatus;
   redactionStatus: MemoryRedactionStatus;
   publishBlockReason: string | null;
@@ -511,18 +695,24 @@ export interface CreateMemoryItemInput {
   sourceTaskId?: string | null;
   sourceKind?: MemorySourceKind;
   sourceRef?: string | null;
+  itemType?: MemoryItemType;
+  failureFamily?: MemoryFailureFamily | null;
   title: string;
   summary: string;
   content: string;
+  claims?: MemoryClaim[];
   tags?: string[];
   expiresAt?: string | null;
 }
 
 export interface UpdateMemoryItemInput {
   scope?: MemoryScope;
+  itemType?: MemoryItemType;
+  failureFamily?: MemoryFailureFamily | null;
   title?: string;
   summary?: string;
   content?: string;
+  claims?: MemoryClaim[];
   tags?: string[];
   reviewNote?: string | null;
   expiresAt?: string | null;
@@ -548,10 +738,106 @@ export interface MemoryLifecycleEvent {
   createdAt: string;
 }
 
+export interface TaskMemoryCandidatesResponse {
+  taskId: string;
+  projectId: string;
+  candidates: MemoryItem[];
+}
+
+export interface ProjectKnowledgeCounts {
+  byStatus: Partial<Record<MemoryItemStatus, number>>;
+  byType: Partial<Record<MemoryItemType, number>>;
+  byFailureFamily: Partial<Record<MemoryFailureFamily | "none", number>>;
+}
+
+export interface ProjectKnowledgeResponse {
+  projectId: string;
+  includeGlobal: boolean;
+  counts: ProjectKnowledgeCounts;
+  items: MemoryItem[];
+}
+
 export interface MemoryItemBroadcastPayload {
   id: string;
   projectId: string | null;
   status: MemoryItemStatus;
+}
+
+export interface TaskRuntimeUsageEvent {
+  id: string;
+  source: string;
+  projectId: string | null;
+  taskId: string | null;
+  chatSessionId: string | null;
+  runtimeId: string;
+  providerId: string;
+  profileId: string | null;
+  transport: string | null;
+  workflowKind: string | null;
+  usageReporting: string;
+  outcome: UsageEventOutcome;
+  errorCategory: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+  createdAt: string;
+}
+
+export interface RuntimeUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+export interface TaskRuntimeUsageResponse {
+  taskId: string;
+  projectId: string;
+  totals: RuntimeUsageTotals;
+  events: TaskRuntimeUsageEvent[];
+}
+
+export interface ProjectRuntimeUsageResponse {
+  projectId: string;
+  totals: RuntimeUsageTotals;
+  events: TaskRuntimeUsageEvent[];
+}
+
+export interface ProjectQueueBacklogItem {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  priority: number;
+  position: number;
+  autoMode: boolean;
+  scheduledAt: string | null;
+  blockedReason: string | null;
+  runtimeProfileId: string | null;
+  updatedAt: string;
+}
+
+export interface ProjectQueueStateResponse {
+  projectId: string;
+  autoQueueMode: boolean;
+  countsByStatus: Partial<Record<TaskStatus, number>>;
+  backlog: ProjectQueueBacklogItem[];
+}
+
+export interface TaskWorktreeInspection {
+  taskId: string;
+  path: string | null;
+  branchName: string | null;
+  exists: boolean;
+  sizeBytes: number | null;
+  eligible: boolean;
+  warnings: string[];
+}
+
+export interface TaskWorktreeCleanupResult extends TaskWorktreeInspection {
+  action: "archive" | "delete";
+  archivedPath?: string;
+  deletedPath?: string;
 }
 
 /** WebSocket event types */
@@ -584,9 +870,17 @@ export type WsEventType =
   | "sync:status_changed"
   | "sync:plan_pushed"
   | "task:activity"
+  | "task:timeline_updated"
+  | "task:evidence_recorded"
+  | "task:trust_updated"
+  | "task:manual_handoff_required"
   | "task:scheduled_fired"
   | "project:auto_queue_mode_changed"
   | "project:auto_queue_advanced"
+  | "project:memory_candidate_created"
+  | "project:usage_updated"
+  | "project:queue_updated"
+  | "project:worktree_warning"
   | "project:runtime_limit_updated"
   | "project:warmup_updated"
   | "task:commit_started"
@@ -654,6 +948,41 @@ export interface RuntimeLimitBroadcastPayload {
   taskId?: string | null;
 }
 
+export interface TaskOperatorWsPayload {
+  id: string;
+  projectId: string;
+  reasonCodes?: string[];
+  generatedAt?: string;
+}
+
+export interface TaskManualHandoffWsPayload extends TaskOperatorWsPayload {
+  blockedReason?: string | null;
+}
+
+export interface ProjectMemoryCandidateWsPayload {
+  id: string;
+  projectId: string | null;
+  taskId: string | null;
+  status: MemoryItemStatus;
+}
+
+export interface ProjectUsageWsPayload {
+  projectId: string;
+  taskId?: string | null;
+  runtimeProfileId?: string | null;
+}
+
+export interface ProjectQueueWsPayload {
+  projectId: string;
+  taskId?: string | null;
+}
+
+export interface ProjectWorktreeWarningWsPayload {
+  projectId: string;
+  taskId: string;
+  warnings: string[];
+}
+
 export interface WarmupBroadcastPayload {
   projectId: string;
   status: "ready" | "failed" | "partial" | "cleared" | "expired";
@@ -697,6 +1026,12 @@ export interface WsEvent {
     | ChatSession
     | TaskCommitPayload
     | RuntimeLimitBroadcastPayload
+    | TaskOperatorWsPayload
+    | TaskManualHandoffWsPayload
+    | ProjectMemoryCandidateWsPayload
+    | ProjectUsageWsPayload
+    | ProjectQueueWsPayload
+    | ProjectWorktreeWarningWsPayload
     | WarmupBroadcastPayload
     | MemoryItemBroadcastPayload;
 }
@@ -804,7 +1139,12 @@ export interface EffectiveRuntimeProfileSelection {
   taskRuntimeProfileId: string | null;
   projectRuntimeProfileId: string | null;
   systemRuntimeProfileId: string | null;
+  stage?: import("./constants.js").RuntimeStage;
+  profileMode?: import("./constants.js").RuntimeProfileMode;
 }
+
+export const USAGE_EVENT_OUTCOMES = ["success", "missing_usage", "failed"] as const;
+export type UsageEventOutcome = (typeof USAGE_EVENT_OUTCOMES)[number];
 
 export const RuntimeLimitSource = {
   PROVIDER_API: "provider_api",
@@ -915,6 +1255,9 @@ export interface ChatMessageAttachment {
   mimeType: string;
   size: number;
   path?: string;
+  sourceKind?: "task" | "comment" | "chat";
+  sourceRef?: string;
+  redactionStatus?: "none" | "redacted" | "not_scanned";
 }
 
 export interface ChatSessionMessage {
@@ -939,6 +1282,9 @@ export interface ChatAttachment {
   mimeType: string;
   size: number;
   content: string | null;
+  sourceKind?: "task" | "comment" | "chat";
+  sourceRef?: string;
+  redactionStatus?: "none" | "redacted" | "not_scanned";
 }
 
 export interface ChatRequest {
@@ -961,9 +1307,45 @@ export interface ChatActionCreateTask {
   description: string;
   taskIntent?: TaskIntent;
   isFix?: boolean;
+  sourceRef?: string;
 }
 
-export type ChatAction = ChatActionCreateTask;
+export interface ChatActionCreateFollowUp {
+  type: "create_follow_up";
+  title: string;
+  description: string;
+  taskIntent?: TaskIntent;
+  isFix?: boolean;
+  sourceRef?: string;
+}
+
+export interface ChatActionStartExplore {
+  type: "start_explore";
+  prompt?: string;
+  sourceRef?: string;
+}
+
+export interface ChatActionExplainBlocker {
+  type: "explain_blocker";
+  title?: string;
+  summary: string;
+  sourceRef?: string;
+}
+
+export interface ChatActionPrepareReplan {
+  type: "prepare_replan";
+  title?: string;
+  proposal: string;
+  rationale?: string;
+  sourceRef?: string;
+}
+
+export type ChatAction =
+  | ChatActionCreateTask
+  | ChatActionCreateFollowUp
+  | ChatActionStartExplore
+  | ChatActionExplainBlocker
+  | ChatActionPrepareReplan;
 
 export interface ChatStreamTokenPayload {
   conversationId: string;

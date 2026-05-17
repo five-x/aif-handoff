@@ -28,6 +28,25 @@ import type {
   MemoryScope,
   MemoryUsageEvent,
   MemoryLifecycleEvent,
+  TaskOperatorEvidenceResponse,
+  TaskRuntimeUsageResponse,
+  ProjectRuntimeUsageResponse,
+  TaskMemoryCandidatesResponse,
+  ProjectKnowledgeResponse,
+  ProjectQueueStateResponse,
+  TaskWorktreeInspection,
+  TaskWorktreeCleanupResult,
+} from "@aif/shared/browser";
+
+export type {
+  TaskOperatorEvidenceResponse,
+  TaskRuntimeUsageResponse,
+  ProjectRuntimeUsageResponse,
+  TaskMemoryCandidatesResponse,
+  ProjectKnowledgeResponse,
+  ProjectQueueStateResponse,
+  TaskWorktreeInspection,
+  TaskWorktreeCleanupResult,
 } from "@aif/shared/browser";
 
 export class ApiError extends Error {
@@ -124,6 +143,7 @@ export interface SettingsResponse {
 export interface ProjectWarmupSupport {
   supported: boolean;
   skipReason: string | null;
+  stage?: string;
   workflowKind?: string;
   profileMode?: string;
   runtimeId: string | null;
@@ -142,6 +162,7 @@ export interface ProjectWarmupSession {
   providerId: string;
   transport: string | null;
   model: string | null;
+  stage: string | null;
   status: "creating" | "ready" | "failed" | "cleared" | "expired";
   ttlSeconds: number;
   expiresAt: string;
@@ -159,6 +180,172 @@ export interface ProjectWarmupResponse {
   warmup: ProjectWarmupSession | null;
   warmups?: ProjectWarmupSession[];
 }
+
+export interface ResolvedConfigIssue {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  source: string;
+  blocksWork: boolean;
+  path?: string | null;
+}
+
+export interface ConfigAuditEvent {
+  id: string;
+  projectId: string | null;
+  taskId: string | null;
+  runtimeProfileId: string | null;
+  action: string;
+  sourceKind: string;
+  actor: string | null;
+  reasonCodes: string[];
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface ResolvedRuntimeProfileConfigSummary {
+  id: string;
+  projectId: string | null;
+  name: string;
+  runtimeId: string;
+  providerId: string;
+  transport: string | null;
+  defaultModel: string | null;
+  apiKeyEnvVar: string | null;
+  apiKeyConfigured?: boolean;
+  enabled: boolean;
+  headerKeys: string[];
+  optionKeys: string[];
+}
+
+export interface ResolvedProjectConfigGovernance {
+  projectId: string;
+  generatedAt: string;
+  fingerprint: string;
+  status: "ok" | "warning" | "blocked";
+  issues: ResolvedConfigIssue[];
+  env: {
+    files: { env: boolean; envLocal: boolean };
+    runtime: {
+      defaultRuntimeId: string;
+      defaultProviderId: string;
+      modules: string[];
+      anthropicBaseUrlConfigured?: boolean;
+      openAiBaseUrlConfigured: boolean;
+      codexCliPathConfigured: boolean;
+    };
+    features: {
+      useSubagents: boolean;
+      memoryEnabled: boolean;
+      usageLimitsEnabled: boolean;
+      warmupEnabled: boolean;
+      taskWorktreesEnabled: boolean;
+      bypassPermissions: boolean;
+    };
+  };
+  appRuntimeDefaults: AppRuntimeDefaultsResponse;
+  projectRuntimeDefaults: {
+    defaultTaskRuntimeProfileId: string | null;
+    defaultPlanRuntimeProfileId: string | null;
+    defaultReviewRuntimeProfileId: string | null;
+    defaultChatRuntimeProfileId: string | null;
+  };
+  runtimeProfiles: ResolvedRuntimeProfileConfigSummary[];
+  projectConfig: {
+    exists: boolean;
+    path: string;
+    paths?: Record<string, string>;
+    workflow?: Record<string, unknown>;
+    git?: Record<string, unknown>;
+    language?: Record<string, unknown>;
+  };
+  mcp: {
+    exists: boolean;
+    serverCount: number;
+    servers: Array<{
+      name: string;
+      transport: string | null;
+      commandConfigured: boolean;
+      urlConfigured: boolean;
+      envKeys: string[];
+    }>;
+  };
+  permissionPolicy: {
+    modes: string[];
+    intents: string[];
+    defaultByIntent?: Record<string, string>;
+  };
+  recentAuditEvents: ConfigAuditEvent[];
+}
+
+interface BackendResolvedConfigIssue {
+  code?: string;
+  reasonCode?: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  source?: string;
+  sourceKind?: string;
+  blocksWork: boolean;
+  path?: string | null;
+}
+
+interface BackendProjectConfigGovernance {
+  projectId: string;
+  generatedAt: string;
+  fingerprint: string;
+  status?: "ok" | "warning" | "blocked";
+  project?: {
+    defaultRuntimeProfileIds?: Partial<Record<"task" | "plan" | "review" | "chat", string | null>>;
+  };
+  env?: {
+    files?: { env?: boolean; envLocal?: boolean };
+    runtime?: {
+      defaultRuntimeId?: string;
+      defaultProviderId?: string;
+      modules?: string[];
+      openAiBaseUrlConfigured?: boolean;
+      codexCliPathConfigured?: boolean;
+    };
+    runtimeModules?: string[];
+    defaultRuntimeId?: string;
+    defaultProviderId?: string;
+    configuredKeys?: string[];
+    flags?: Partial<Record<string, boolean>>;
+    features?: Partial<Record<string, boolean>>;
+  };
+  appRuntimeDefaults?: Partial<Record<"task" | "plan" | "review" | "chat", string | null>> &
+    Partial<AppRuntimeDefaultsResponse>;
+  projectRuntimeDefaults?: Partial<ResolvedProjectConfigGovernance["projectRuntimeDefaults"]>;
+  runtimeProfiles?: ResolvedRuntimeProfileConfigSummary[];
+  projectConfig?: ResolvedProjectConfigGovernance["projectConfig"] & { parseOk?: boolean };
+  mcp?: {
+    exists?: boolean;
+    serverCount?: number;
+    servers?: Array<{
+      name: string;
+      transport: string | null;
+      hasCommand?: boolean;
+      hasUrl?: boolean;
+      commandConfigured?: boolean;
+      urlConfigured?: boolean;
+      envKeys: string[];
+    }>;
+  };
+  permissionPolicy?: {
+    bypassEnabled?: boolean;
+    modes?: string[];
+    intents?: string[];
+    defaultByIntent?: Record<string, string>;
+  };
+  usageLimits?: { enabled?: boolean };
+  memory?: { enabled?: boolean };
+  issues?: BackendResolvedConfigIssue[];
+  recentAuditEvents?: ConfigAuditEvent[];
+}
+
+type BackendRuntimeDefaults = Partial<ResolvedProjectConfigGovernance["projectRuntimeDefaults"]> &
+  Partial<Record<"task" | "plan" | "review" | "chat", string | null>>;
 
 export interface PartialProjectWarmupResponse {
   enabled?: boolean;
@@ -257,6 +444,154 @@ async function request<T>(
   }
 
   return res.json();
+}
+
+function firstString(...values: Array<string | null | undefined>): string | null {
+  return (
+    values.find((value): value is string => typeof value === "string" && value.length > 0) ?? null
+  );
+}
+
+function normalizeAppRuntimeDefaults(
+  raw: BackendProjectConfigGovernance["appRuntimeDefaults"] | undefined,
+): AppRuntimeDefaultsResponse {
+  const defaultTaskRuntimeProfileId = firstString(raw?.defaultTaskRuntimeProfileId, raw?.task);
+  const defaultPlanRuntimeProfileId = firstString(raw?.defaultPlanRuntimeProfileId, raw?.plan);
+  const defaultReviewRuntimeProfileId = firstString(
+    raw?.defaultReviewRuntimeProfileId,
+    raw?.review,
+  );
+  const defaultChatRuntimeProfileId = firstString(raw?.defaultChatRuntimeProfileId, raw?.chat);
+  return {
+    defaultTaskRuntimeProfileId,
+    defaultPlanRuntimeProfileId,
+    defaultReviewRuntimeProfileId,
+    defaultChatRuntimeProfileId,
+    resolvedDefaultTaskRuntimeProfileId: firstString(
+      raw?.resolvedDefaultTaskRuntimeProfileId,
+      defaultTaskRuntimeProfileId,
+    ),
+    resolvedDefaultPlanRuntimeProfileId: firstString(
+      raw?.resolvedDefaultPlanRuntimeProfileId,
+      defaultPlanRuntimeProfileId,
+      defaultTaskRuntimeProfileId,
+    ),
+    resolvedDefaultReviewRuntimeProfileId: firstString(
+      raw?.resolvedDefaultReviewRuntimeProfileId,
+      defaultReviewRuntimeProfileId,
+      defaultTaskRuntimeProfileId,
+    ),
+    resolvedDefaultChatRuntimeProfileId: firstString(
+      raw?.resolvedDefaultChatRuntimeProfileId,
+      defaultChatRuntimeProfileId,
+    ),
+  };
+}
+
+function normalizeProjectRuntimeDefaults(
+  raw: BackendProjectConfigGovernance,
+): ResolvedProjectConfigGovernance["projectRuntimeDefaults"] {
+  const defaults = (raw.projectRuntimeDefaults ??
+    raw.project?.defaultRuntimeProfileIds ??
+    {}) as BackendRuntimeDefaults;
+  return {
+    defaultTaskRuntimeProfileId: firstString(defaults.defaultTaskRuntimeProfileId, defaults.task),
+    defaultPlanRuntimeProfileId: firstString(defaults.defaultPlanRuntimeProfileId, defaults.plan),
+    defaultReviewRuntimeProfileId: firstString(
+      defaults.defaultReviewRuntimeProfileId,
+      defaults.review,
+    ),
+    defaultChatRuntimeProfileId: firstString(defaults.defaultChatRuntimeProfileId, defaults.chat),
+  };
+}
+
+function normalizeConfigGovernance(
+  raw: BackendProjectConfigGovernance,
+): ResolvedProjectConfigGovernance {
+  const issues = (raw.issues ?? []).map((issue) => ({
+    code: issue.code ?? issue.reasonCode ?? "UNKNOWN_CONFIG_ISSUE",
+    severity: issue.severity,
+    message: issue.message,
+    source: issue.source ?? issue.sourceKind ?? "unknown",
+    blocksWork: issue.blocksWork,
+    path: issue.path ?? null,
+  }));
+  const flags = { ...(raw.env?.features ?? {}), ...(raw.env?.flags ?? {}) };
+  const status =
+    raw.status ??
+    (issues.some((issue) => issue.blocksWork)
+      ? "blocked"
+      : issues.some((issue) => issue.severity === "warning" || issue.severity === "error")
+        ? "warning"
+        : "ok");
+  const mcpServers = raw.mcp?.servers ?? [];
+
+  return {
+    projectId: raw.projectId,
+    generatedAt: raw.generatedAt,
+    fingerprint: raw.fingerprint,
+    status,
+    issues,
+    env: {
+      files: {
+        env: Boolean(raw.env?.files?.env),
+        envLocal: Boolean(raw.env?.files?.envLocal),
+      },
+      runtime: {
+        defaultRuntimeId: raw.env?.runtime?.defaultRuntimeId ?? raw.env?.defaultRuntimeId ?? "",
+        defaultProviderId: raw.env?.runtime?.defaultProviderId ?? raw.env?.defaultProviderId ?? "",
+        modules: raw.env?.runtime?.modules ?? raw.env?.runtimeModules ?? [],
+        openAiBaseUrlConfigured: Boolean(raw.env?.runtime?.openAiBaseUrlConfigured),
+        codexCliPathConfigured: Boolean(raw.env?.runtime?.codexCliPathConfigured),
+      },
+      features: {
+        useSubagents: Boolean(flags.useSubagents ?? flags.agentUseSubagents),
+        memoryEnabled: Boolean(flags.memoryEnabled ?? raw.memory?.enabled),
+        usageLimitsEnabled: Boolean(flags.usageLimitsEnabled ?? raw.usageLimits?.enabled),
+        warmupEnabled: Boolean(flags.warmupEnabled),
+        taskWorktreesEnabled: Boolean(flags.taskWorktreesEnabled),
+        bypassPermissions: Boolean(
+          flags.bypassPermissions ??
+          flags.agentBypassPermissions ??
+          raw.permissionPolicy?.bypassEnabled,
+        ),
+      },
+    },
+    appRuntimeDefaults: normalizeAppRuntimeDefaults(raw.appRuntimeDefaults),
+    projectRuntimeDefaults: normalizeProjectRuntimeDefaults(raw),
+    runtimeProfiles: raw.runtimeProfiles ?? [],
+    projectConfig: {
+      exists: Boolean(raw.projectConfig?.exists),
+      path: raw.projectConfig?.path ?? ".ai-factory/config.yaml",
+      paths: raw.projectConfig?.paths,
+      workflow: raw.projectConfig?.workflow,
+      git: raw.projectConfig?.git,
+      language: raw.projectConfig?.language,
+    },
+    mcp: {
+      exists: Boolean(raw.mcp?.exists),
+      serverCount: raw.mcp?.serverCount ?? mcpServers.length,
+      servers: mcpServers.map((server) => ({
+        name: server.name,
+        transport: server.transport,
+        commandConfigured: Boolean(server.commandConfigured ?? server.hasCommand),
+        urlConfigured: Boolean(server.urlConfigured ?? server.hasUrl),
+        envKeys: server.envKeys,
+      })),
+    },
+    permissionPolicy: {
+      modes: raw.permissionPolicy?.modes ?? [],
+      intents: raw.permissionPolicy?.intents ?? [],
+      defaultByIntent: raw.permissionPolicy?.defaultByIntent,
+    },
+    recentAuditEvents: raw.recentAuditEvents ?? [],
+  };
+}
+
+function extractConfigAuditEvents(
+  response: ConfigAuditEvent[] | { events?: ConfigAuditEvent[] },
+): ConfigAuditEvent[] {
+  return Array.isArray(response) ? response : (response.events ?? []);
 }
 
 export const api = {
@@ -374,6 +709,42 @@ export const api = {
     return request<WorkflowTimeline>(`${API_BASE}/${id}/timeline`);
   },
 
+  getTaskArtifactTrust(id: string): Promise<Task["artifactTrust"]> {
+    console.debug("[api] GET /tasks/%s/artifact-trust", id);
+    return request<Task["artifactTrust"]>(`${API_BASE}/${id}/artifact-trust`);
+  },
+
+  getTaskEvidence(id: string): Promise<TaskOperatorEvidenceResponse> {
+    console.debug("[api] GET /tasks/%s/evidence", id);
+    return request<TaskOperatorEvidenceResponse>(`${API_BASE}/${id}/evidence`);
+  },
+
+  getTaskMemoryCandidates(id: string): Promise<TaskMemoryCandidatesResponse> {
+    console.debug("[api] GET /tasks/%s/memory", id);
+    return request<TaskMemoryCandidatesResponse>(`${API_BASE}/${id}/memory`);
+  },
+
+  getTaskRuntimeUsage(id: string): Promise<TaskRuntimeUsageResponse> {
+    console.debug("[api] GET /tasks/%s/runtime-usage", id);
+    return request<TaskRuntimeUsageResponse>(`${API_BASE}/${id}/runtime-usage`);
+  },
+
+  getTaskWorktree(id: string): Promise<TaskWorktreeInspection> {
+    console.debug("[api] GET /tasks/%s/worktree", id);
+    return request<TaskWorktreeInspection>(`${API_BASE}/${id}/worktree`);
+  },
+
+  cleanupTaskWorktree(
+    id: string,
+    action: "archive" | "delete" = "archive",
+  ): Promise<TaskWorktreeCleanupResult> {
+    console.debug("[api] POST /tasks/%s/worktree/cleanup", id, action);
+    return request<TaskWorktreeCleanupResult>(`${API_BASE}/${id}/worktree/cleanup`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+  },
+
   createTask(input: CreateTaskInput): Promise<Task> {
     console.debug("[api] POST /tasks", input);
     return request<Task>(API_BASE, {
@@ -447,6 +818,35 @@ export const api = {
   getTaskPlanFileStatus(id: string): Promise<{ exists: boolean; path: string }> {
     console.debug("[api] GET /tasks/%s/plan-file-status", id);
     return request<{ exists: boolean; path: string }>(`${API_BASE}/${id}/plan-file-status`);
+  },
+
+  getProjectKnowledge(id: string): Promise<ProjectKnowledgeResponse> {
+    console.debug("[api] GET /projects/%s/knowledge", id);
+    return request<ProjectKnowledgeResponse>(`/projects/${id}/knowledge`);
+  },
+
+  getProjectRuntimeUsage(id: string): Promise<ProjectRuntimeUsageResponse> {
+    console.debug("[api] GET /projects/%s/runtime-usage", id);
+    return request<ProjectRuntimeUsageResponse>(`/projects/${id}/runtime-usage`);
+  },
+
+  getProjectQueue(id: string): Promise<ProjectQueueStateResponse> {
+    console.debug("[api] GET /projects/%s/queue", id);
+    return request<ProjectQueueStateResponse>(`/projects/${id}/queue`);
+  },
+
+  getProjectConfigGovernance(id: string): Promise<ResolvedProjectConfigGovernance> {
+    console.debug("[api] GET /projects/%s/config-governance", id);
+    return request<BackendProjectConfigGovernance>(`/projects/${id}/config-governance`).then(
+      normalizeConfigGovernance,
+    );
+  },
+
+  listProjectConfigAudit(id: string): Promise<ConfigAuditEvent[]> {
+    console.debug("[api] GET /projects/%s/config-audit", id);
+    return request<ConfigAuditEvent[] | { events?: ConfigAuditEvent[] }>(
+      `/projects/${id}/config-audit`,
+    ).then(extractConfigAuditEvents);
   },
 
   checkRoadmapStatus(projectId: string): Promise<{ exists: boolean }> {

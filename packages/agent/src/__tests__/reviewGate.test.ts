@@ -52,6 +52,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       "",
       "## Advisories",
       "- code_review | Looks good",
+      "",
+      "## Security Coverage",
+      "- secret_leaks | covered | Checked secret handling",
+      "- permissions_sandbox | covered | Checked sandbox boundaries",
+      "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+      "- dependency_config | covered | Checked dependency configuration",
     ].join("\n"),
   };
 
@@ -128,6 +134,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       "",
       "## Advisories",
       "- code_review | The audit report was committed and reviewed.",
+      "",
+      "## Security Coverage",
+      "- secret_leaks | covered | Checked secret handling",
+      "- permissions_sandbox | covered | Checked sandbox boundaries",
+      "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+      "- dependency_config | covered | Checked dependency configuration",
     ].join("\n");
   }
 
@@ -164,6 +176,63 @@ describe("evaluateReviewCommentsForAutoMode", () => {
   }
 
   it.each([
+    {
+      name: "malformed audit report manifest JSON",
+      issueCode: "invalid_report_manifest",
+      description: "Report artifact: reports/audit.md",
+      reportText: () =>
+        [
+          "No validated findings.",
+          "",
+          "Checked files:",
+          "- `README.md:1`",
+          "",
+          "```audit-report-manifest",
+          '{"version":1,"contentSha256":',
+          "```",
+          "",
+        ].join("\n"),
+    },
+    {
+      name: "placeholder manifest hash and snapshot",
+      issueCode: "missing_report_manifest_fields",
+      description: "Report artifact: reports/audit.md",
+      reportText: () =>
+        [
+          "No validated findings.",
+          "",
+          "Checked files:",
+          "- `README.md:1`",
+          "",
+          "```audit-report-manifest",
+          JSON.stringify(
+            {
+              version: 1,
+              auditPlanId: "audit-task",
+              taskId: "audit-task",
+              artifactPath: "reports/audit.md",
+              contentSha256: "<computed_sha256>",
+              sourceSnapshot: {
+                id: "<snapshot>",
+                commit: "<commit>",
+                tree: "<tree>",
+                branch: "feature/audit-report",
+                dirty: false,
+              },
+              outcome: "validated_no_findings",
+              scopeCoverage: [],
+              riskHypotheses: [],
+              findings: [],
+              noFindingsClaims: [],
+              evidenceRefs: [],
+            },
+            null,
+            2,
+          ),
+          "```",
+          "",
+        ].join("\n"),
+    },
     {
       name: "synthetic git output",
       issueCode: "synthetic_git_output",
@@ -276,6 +345,109 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(executeSubagentQueryMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: "missing Security Coverage",
+      securityCoverage: [] as string[],
+    },
+    {
+      name: "partial Security Coverage",
+      securityCoverage: [
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+      ],
+    },
+    {
+      name: "duplicate Security Coverage",
+      securityCoverage: [
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- secret_leaks | covered | Checked secret handling again",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ],
+    },
+  ])("fails closed for structured review comments with $name", async ({ securityCoverage }) => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Looks good",
+        ...(securityCoverage.length > 0 ? ["", ...securityCoverage] : []),
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.handoffReason).toBe("malformed_structured_review_contract");
+    expect(result.metrics.parserMode).toBe("structured");
+    expect(result.blockingFindings).toEqual([
+      expect.objectContaining({
+        source: "review_gate",
+        text: expect.stringContaining("complete unique Security Coverage rows"),
+      }),
+    ]);
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("manual-handoffs reviewer-generated sidecar contract failure comments", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "- Contract Failure: structured_review_sidecar",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [structured-review-contract] review_gate | Structured review contract not satisfied: review output must include complete unique Security Coverage rows for secret_leaks, permissions_sandbox, unsafe_shell_network_file, and dependency_config. Failed sidecar(s): security_audit.",
+        "",
+        "## Advisories",
+        "- review_gate | Raw sidecar output is retained below with provider-text redaction applied.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | not_checked | Structured review contract failed before secret-leak coverage could be trusted.",
+        "- permissions_sandbox | not_checked | Structured review contract failed before permission and sandbox coverage could be trusted.",
+        "- unsafe_shell_network_file | not_checked | Structured review contract failed before shell, network, and file-operation coverage could be trusted.",
+        "- dependency_config | not_checked | Structured review contract failed before dependency and configuration coverage could be trusted.",
+        "",
+        "## Raw Code Review",
+        "## Blocking Findings",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.handoffReason).toBe("malformed_structured_review_contract");
+    expect(result.metrics.parserMode).toBe("structured");
+    expect(result.blockingFindings).toEqual([
+      expect.objectContaining({
+        source: "review_gate",
+        text: expect.stringContaining("complete unique Security Coverage rows"),
+      }),
+    ]);
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
   it("ignores raw embedded sidecar headings when parsing the canonical summary", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
@@ -292,6 +464,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- code_review | README.md:1 was inspected.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
         "",
         "## Raw Code Review",
         "## Blocking Findings",
@@ -331,6 +509,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -389,6 +573,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -434,6 +624,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -478,6 +674,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- code_review | Reviewed the changed guard path.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -490,6 +692,276 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         totalBlockingCount: 0,
         parserMode: "structured",
       }),
+    );
+  });
+
+  it("accepts not_reproducible previous-finding closure only with concrete evidence", async () => {
+    const blockerId = createAutoReviewFindingId("security_audit", "Remove token echo from logs");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "security_audit",
+          text: "Remove token echo from logs",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] security_audit | not_reproducible | Inspected \`packages/agent/src/reviewContract.ts\`; command output showed no token echo path remains`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.metrics.stillBlockingCount).toBe(0);
+  });
+
+  it("requires manual review for not_reproducible without concrete evidence", async () => {
+    const blockerId = createAutoReviewFindingId("security_audit", "Remove token echo from logs");
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "security_audit",
+          text: "Remove token echo from logs",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] security_audit | not_reproducible | Could not reproduce`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.autoReviewState.findings).toEqual([
+      expect.objectContaining({
+        id: blockerId,
+        text: "Remove token echo from logs",
+      }),
+    ]);
+  });
+
+  it.each(["new_blocker", "manual_review_required"] as const)(
+    "keeps previous finding status %s as an unresolved blocker",
+    async (status) => {
+      const blockerId = createAutoReviewFindingId("code_review", "Keep exact blocker IDs");
+      const result = await evaluateReviewCommentsForAutoMode({
+        ...baseInput,
+        iteration: 2,
+        previousFindings: [
+          {
+            id: blockerId,
+            source: "code_review",
+            text: "Keep exact blocker IDs",
+          },
+        ],
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          "- Review Iteration: 2",
+          "",
+          "## Previous Findings",
+          `- [${blockerId}] code_review | ${status} | Reviewer requires operator-visible closure in \`packages/agent/src/reviewGate.ts\``,
+          "",
+          "## Blocking Findings",
+          "- none",
+          "",
+          "## Advisories",
+          "- none",
+          "",
+          "## Security Coverage",
+          "- secret_leaks | covered | Checked secret handling",
+          "- permissions_sandbox | covered | Checked sandbox boundaries",
+          "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+          "- dependency_config | covered | Checked dependency configuration",
+        ].join("\n"),
+      });
+
+      expect(result.status).toBe("request_changes");
+      if (result.status !== "request_changes") {
+        throw new Error("expected request_changes");
+      }
+      expect(result.metrics.stillBlockingCount).toBe(1);
+      expect(result.autoReviewState.findings).toEqual([
+        expect.objectContaining({
+          id: blockerId,
+          status,
+          text: "Reviewer requires operator-visible closure in `packages/agent/src/reviewGate.ts`",
+        }),
+      ]);
+      expect(result.autoReviewState.blockerHistory).toEqual([
+        expect.objectContaining({
+          id: blockerId,
+          status,
+        }),
+      ]);
+    },
+  );
+
+  it.each(["still_blocking", "new_blocker", "manual_review_required"] as const)(
+    "preserves previous finding status %s when canonical blocking rows repeat the same id",
+    async (status) => {
+      const blockerId = createAutoReviewFindingId("code_review", "Keep exact blocker IDs");
+      const result = await evaluateReviewCommentsForAutoMode({
+        ...baseInput,
+        iteration: 2,
+        previousFindings: [
+          {
+            id: blockerId,
+            source: "code_review",
+            text: "Keep exact blocker IDs",
+          },
+        ],
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          "- Review Iteration: 2",
+          "",
+          "## Previous Findings",
+          `- [${blockerId}] code_review | ${status} | Reviewer requires operator-visible closure in \`packages/agent/src/reviewGate.ts\``,
+          "",
+          "## Blocking Findings",
+          `- [${blockerId}] code_review | Reviewer requires operator-visible closure in \`packages/agent/src/reviewGate.ts\``,
+          "",
+          "## Advisories",
+          "- none",
+          "",
+          "## Security Coverage",
+          "- secret_leaks | covered | Checked secret handling",
+          "- permissions_sandbox | covered | Checked sandbox boundaries",
+          "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+          "- dependency_config | covered | Checked dependency configuration",
+        ].join("\n"),
+      });
+
+      expect(result.status).toBe("request_changes");
+      if (result.status !== "request_changes") {
+        throw new Error("expected request_changes");
+      }
+      expect(result.autoReviewState.findings).toEqual([
+        expect.objectContaining({
+          id: blockerId,
+          status,
+          text: "Reviewer requires operator-visible closure in `packages/agent/src/reviewGate.ts`",
+        }),
+      ]);
+    },
+  );
+
+  it("does not close strict audit validator blockers from resolved prose while validation still fails", async () => {
+    const root = initReportRepoWithReport(
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `README.md:1`",
+        "",
+        "Checked commands:",
+        "- Command `rg reviewed README.md` output: `1:# reviewed`",
+        "",
+      ].join("\n"),
+    );
+    const blockerId = "deterministic_repair_missing_scope_coverage";
+    const previousText =
+      "Audit report validator blocked completion (missing_scope_coverage): Report artifact does not cover declared audit scope roots.";
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: blockerId,
+          source: "review_gate",
+          text: previousText,
+          firstSeenIteration: 1,
+          lastSeenIteration: 1,
+          streak: 1,
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        `- [${blockerId}] review_gate | resolved | Manifest, evidenceRefs, and scope coverage are present in \`reports/audit.md\` after the deterministic rewrite`,
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Reviewer claimed the audit report was resolved.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+      task: {
+        id: "audit-task",
+        title: "Full repository audit",
+        description: [
+          "Scope: src",
+          "Report artifact: reports/audit.md",
+          "Evidence requirements: include Evidence:, Risk:, Proposed fix:, and Verification:.",
+        ].join("\n"),
+        agentActivityLog: agentActivityLog(),
+      },
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.metrics.stillBlockingCount).toBe(1);
+    expect(result.blockingFindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: blockerId,
+          text: previousText,
+          streak: 2,
+        }),
+      ]),
+    );
+    expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
+      "(missing_scope_coverage)",
     );
   });
 
@@ -521,6 +993,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -564,6 +1042,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -607,6 +1091,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -642,6 +1132,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- code_review | Looks good.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -691,6 +1187,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -729,6 +1231,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -773,6 +1281,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -817,6 +1331,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
     });
 
@@ -1002,6 +1522,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
       task: {
         id: "audit-task",
@@ -1119,6 +1645,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- code_review | Evidence reviewed",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
         "",
         "## Evidence",
         "Evidence: `README.md:1` was inspected for the audit report.",
@@ -1280,6 +1812,12 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "",
         "## Advisories",
         "- code_review | The audit report was committed and reviewed.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
       task: {
         id: "audit-task",

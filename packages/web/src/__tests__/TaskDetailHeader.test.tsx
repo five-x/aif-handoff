@@ -24,6 +24,8 @@ const baseTask: Task = {
   autoReviewState: null,
   paused: false,
   lastHeartbeatAt: null,
+  lockStage: null,
+  coordinatorId: null,
   lastSyncedAt: null,
   sessionId: null,
   scheduledAt: null,
@@ -414,6 +416,32 @@ describe("TaskDetailHeader", () => {
     expect(
       screen.getByText(/Reasons: plan_quality, synthesis_not_ready, untrusted_artifact/),
     ).toBeDefined();
+  });
+
+  it("renders plan quality replan feedback outside blocked status", () => {
+    render(
+      <TaskDetailHeader
+        task={{
+          ...baseTask,
+          status: "planning",
+          blockedFromStatus: "plan_ready",
+          blockedReason:
+            "Plan quality guard replan 1/2: Plan quality guard (missing_plan_manifest): Full-mode task plan must include an aif-plan-manifest block.",
+        }}
+        activeTab="activity"
+        onTabChange={vi.fn()}
+        onActionClick={vi.fn()}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("PLAN QUALITY")).toBeDefined();
+    expect(screen.getByText("Plan quality replan")).toBeDefined();
+    expect(screen.getByText(/missing_plan_manifest/)).toBeDefined();
   });
 
   it("renders synthesis not ready batch counts and identifiers", () => {

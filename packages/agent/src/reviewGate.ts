@@ -31,6 +31,7 @@ export type ReviewGateParserMode = "structured" | "fallback";
 export type ReviewGateManualHandoffReason =
   | "new_blockers_after_rework"
   | "malformed_review_output_fallback"
+  | "malformed_structured_review_contract"
   | "risky_review_without_substantive_evidence";
 
 export interface ReviewGateMetrics {
@@ -90,7 +91,17 @@ function mergeFindings(...groups: AutoReviewFinding[][]): AutoReviewFinding[] {
   const map = new Map<string, AutoReviewFinding>();
   for (const group of groups) {
     for (const finding of group) {
-      map.set(finding.id, finding);
+      const existing = map.get(finding.id);
+      if (!existing) {
+        map.set(finding.id, finding);
+        continue;
+      }
+      map.set(finding.id, {
+        ...existing,
+        ...finding,
+        status: finding.status ?? existing.status,
+        closureEvidence: finding.closureEvidence ?? existing.closureEvidence,
+      });
     }
   }
   return [...map.values()];
@@ -440,8 +451,79 @@ function resolvedPreviousFindingsHaveClosureEvidence(
   return parsed.previousFindings.every(
     (finding) =>
       finding.status === "still_blocking" ||
+      finding.status === "new_blocker" ||
+      finding.status === "manual_review_required" ||
       resolvedPreviousFindingHasClosureEvidence(finding.note),
   );
+}
+
+const STRICT_AUDIT_VALIDATOR_BLOCKER_CODES = new Set([
+  "invalid_report_manifest",
+  "missing_scope_coverage",
+  "missing_substantive_evidence",
+  "fake_or_placeholder_command_output",
+  "false_missing_path_claim",
+  "future_tense_git_verification",
+  "governance_observation_as_finding",
+  "irrelevant_audit_evidence",
+  "malformed_report_artifact",
+  "missing_risk_hypotheses",
+  "non_actionable_audit_observation",
+  "placeholder_author_metadata",
+  "speculative_audit_claim",
+  "synthetic_git_output",
+  "audit_evidence_discovery_only",
+  "audit_evidence_identity_mismatch",
+  "audit_evidence_risk_mismatch",
+  "audit_evidence_scope_mismatch",
+  "audit_evidence_source_snapshot_mismatch",
+  "contradictory_findings_and_no_findings",
+  "invalid_line_reference",
+  "manifest_content_hash_mismatch",
+  "manifest_identity_mismatch",
+  "manifest_outcome_mismatch",
+  "manifest_source_snapshot_mismatch",
+  "missing_audit_evidence_ref",
+  "missing_declared_scope_root",
+  "missing_report_file_references",
+  "missing_report_manifest",
+  "missing_report_manifest_fields",
+  "unsupported_report_manifest_version",
+  "unverified_inspection_claim",
+]);
+
+function extractStrictAuditValidatorBlockerCode(text: string): string | null {
+  const validatorMatch = text.match(/\(([^)]+)\)/);
+  const deterministicRepairMatch = text.match(/\bdeterministic_repair_([a-z0-9_]+)/i);
+  const candidates = [validatorMatch?.[1]?.trim(), deterministicRepairMatch?.[1]?.trim()].filter(
+    (entry): entry is string => Boolean(entry),
+  );
+  return candidates.find((entry) => STRICT_AUDIT_VALIDATOR_BLOCKER_CODES.has(entry)) ?? null;
+}
+
+function preserveResolvedStrictAuditValidatorBlockers(input: {
+  previousFindings: AutoReviewFinding[];
+  parsed: ParsedStructuredReviewComments;
+  deterministicFindings: AutoReviewFinding[];
+}): AutoReviewFinding[] {
+  const currentStrictCodes = new Set(
+    input.deterministicFindings
+      .map((finding) => extractStrictAuditValidatorBlockerCode(finding.text))
+      .filter((entry): entry is string => Boolean(entry)),
+  );
+  if (currentStrictCodes.size === 0) return [];
+
+  const previousById = new Map(input.previousFindings.map((finding) => [finding.id, finding]));
+  return input.parsed.previousFindings
+    .filter((finding) => finding.status === "resolved" || finding.status === "not_reproducible")
+    .map((finding) => previousById.get(finding.id))
+    .filter((finding): finding is AutoReviewFinding => Boolean(finding))
+    .filter((finding) => {
+      const code =
+        extractStrictAuditValidatorBlockerCode(finding.text) ??
+        extractStrictAuditValidatorBlockerCode(finding.id);
+      return code != null && currentStrictCodes.has(code);
+    });
 }
 
 function buildStructuredDecision(
@@ -450,21 +532,44 @@ function buildStructuredDecision(
   deterministicFindings: AutoReviewFinding[],
 ): ReviewGateResult {
   const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const preservedStrictAuditValidatorBlockers = preserveResolvedStrictAuditValidatorBlockers({
+    previousFindings: input.previousFindings,
+    parsed,
+    deterministicFindings,
+  });
   const stillBlockingPreviousFindings = parsed.previousFindings
-    .filter((finding) => finding.status === "still_blocking")
-    .map((finding) => ({
-      id: finding.id,
-      source: finding.source,
-      text: finding.note,
-    }));
+    .filter(
+      (finding) =>
+        finding.status === "still_blocking" ||
+        finding.status === "new_blocker" ||
+        finding.status === "manual_review_required",
+    )
+    .map((finding) => {
+      const blockingFinding: AutoReviewFinding = {
+        id: finding.id,
+        source: finding.source,
+        status: finding.status,
+        text: finding.note,
+      };
+      if (finding.closureEvidence) {
+        blockingFinding.closureEvidence = finding.closureEvidence;
+      }
+      return blockingFinding;
+    });
   const blockingFindings = mergeFindings(
     stillBlockingPreviousFindings,
+    preservedStrictAuditValidatorBlockers,
     parsed.blockingFindings,
     deterministicFindings,
   );
   const stillBlockingIds = new Set(
     parsed.previousFindings
-      .filter((finding) => finding.status === "still_blocking")
+      .filter(
+        (finding) =>
+          finding.status === "still_blocking" ||
+          finding.status === "new_blocker" ||
+          finding.status === "manual_review_required",
+      )
       .map((finding) => finding.id),
   );
   for (const finding of blockingFindings) {
@@ -511,6 +616,8 @@ function buildStructuredDecision(
     strategy: input.strategy,
     iteration: input.iteration,
     findings: enrichedBlockingFindings,
+    securityCoverage: parsed.securityCoverage,
+    blockerHistory: parsed.previousFindings,
   });
 
   if (
@@ -774,13 +881,84 @@ function buildSubstantiveEvidenceHandoff(
   };
 }
 
+const STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT =
+  "Structured review contract not satisfied: review output must include complete unique Security Coverage rows for secret_leaks, permissions_sandbox, unsafe_shell_network_file, and dependency_config.";
+
+function isStructuredReviewContractAttempt(reviewComments: string | null): boolean {
+  if (!reviewComments) return false;
+  return /^## Auto Review Metadata\b/m.test(reviewComments);
+}
+
+function isStructuredReviewContractFailure(reviewComments: string | null): boolean {
+  if (!reviewComments) return false;
+  const canonicalSummary = reviewComments.split(/\n## Raw Code Review\b/)[0] ?? reviewComments;
+  if (!/^## Auto Review Metadata\b/m.test(canonicalSummary)) return false;
+  return (
+    /^- Contract Failure:\s+structured_review_sidecar\s*$/m.test(canonicalSummary) ||
+    /^- \[structured-review-contract\]\s+review_gate\s+\|/m.test(canonicalSummary) ||
+    canonicalSummary.includes(STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT)
+  );
+}
+
+function buildMalformedStructuredReviewContractHandoff(
+  input: ReviewGateInput,
+  deterministicFindings: AutoReviewFinding[],
+): ReviewGateResult {
+  const contractFinding: AutoReviewFinding = {
+    id: createAutoReviewFindingId("review_gate", STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT),
+    source: "review_gate",
+    text: STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT,
+  };
+  const mergedFindings =
+    input.previousFindings.length > 0
+      ? mergeFindings(input.previousFindings, [contractFinding], deterministicFindings)
+      : mergeFindings([contractFinding], deterministicFindings);
+  const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const enrichedFindings = enrichBlockingFindings({
+    findings: mergedFindings,
+    previousFindings: input.previousFindings,
+    iteration: input.iteration,
+  });
+  const newBlockingCount = enrichedFindings.filter(
+    (finding) => !previousIds.has(finding.id),
+  ).length;
+  const metrics = buildMetrics({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    previousBlockingCount: input.previousFindings.length,
+    stillBlockingCount: input.previousFindings.length,
+    newBlockingCount,
+    totalBlockingCount: enrichedFindings.length,
+    parserMode: "structured",
+  });
+
+  return {
+    status: "manual_review_required",
+    handoffReason: "malformed_structured_review_contract",
+    metrics,
+    blockingFindings: enrichedFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedFindings),
+    autoReviewState: toAutoReviewState({
+      strategy: input.strategy,
+      iteration: input.iteration,
+      findings: enrichedFindings,
+    }),
+  };
+}
+
 export async function evaluateReviewCommentsForAutoMode(
   input: ReviewGateInput,
 ): Promise<ReviewGateResult> {
   const deterministicFindings = collectDeterministicReviewGateFindings(input);
+  if (isStructuredReviewContractFailure(input.reviewComments)) {
+    return buildMalformedStructuredReviewContractHandoff(input, deterministicFindings);
+  }
   const parsedStructuredComments = parseStructuredReviewComments(input.reviewComments);
   if (parsedStructuredComments) {
     return buildStructuredDecision(input, parsedStructuredComments, deterministicFindings);
+  }
+  if (isStructuredReviewContractAttempt(input.reviewComments)) {
+    return buildMalformedStructuredReviewContractHandoff(input, deterministicFindings);
   }
 
   const legacyBlockingFindings = parseLegacyBlockingFindings(input);

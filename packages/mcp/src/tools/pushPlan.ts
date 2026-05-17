@@ -6,6 +6,7 @@ import { registerMcpTool, type ToolContext } from "./index.js";
 import { rateLimitError, toMcpError, validationError } from "../middleware/errorHandler.js";
 import { compactTaskResponse } from "../utils/compactResponse.js";
 import { broadcastTaskChange } from "../utils/broadcast.js";
+import { assertPlanningCompatiblePlanMutation } from "./workflowGuards.js";
 
 const log = logger("mcp:tool:push-plan");
 const pushPlanInputSchema: Record<string, z.ZodTypeAny> = {
@@ -42,6 +43,8 @@ export function register(server: McpServer, context: ToolContext): void {
             taskId: ["Task does not exist"],
           });
         }
+
+        assertPlanningCompatiblePlanMutation(row.status);
 
         // Parse annotations from the incoming plan
         const annotations = parsePlanAnnotations(args.planContent);

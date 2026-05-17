@@ -4,6 +4,7 @@ import type {
   RuntimeUsageContext,
   UsageReporting,
 } from "./types.js";
+import type { UsageEventOutcome } from "@aif/shared";
 
 /**
  * Event recorded by the registry wrapper after every successful adapter run
@@ -22,6 +23,10 @@ export interface RuntimeUsageEvent {
   workflowKind?: string;
   /** Adapter's declared usage-reporting contract at the time of recording. */
   usageReporting: UsageReporting;
+  /** Whether usage was concrete, absent from a completed run, or failed before completion. */
+  outcome: UsageEventOutcome;
+  /** Optional normalized failure category for failed events. */
+  errorCategory?: string | null;
   /** Concrete token counts and cost from the run. */
   usage: RuntimeUsage;
   /** When the wrapper observed the event. */

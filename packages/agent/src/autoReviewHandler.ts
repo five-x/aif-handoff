@@ -20,6 +20,7 @@ import {
   type ReviewGateManualHandoffReason,
   type ReviewGateMetrics,
 } from "./reviewGate.js";
+import { readGitWorktreeReworkSnapshot } from "./reworkSnapshot.js";
 
 const log = logger("auto-review-handler");
 
@@ -198,7 +199,28 @@ function withReworkSnapshot(input: {
 }): AutoReviewState {
   const artifact = findRoadmapBatchArtifactByTaskId(input.taskId);
   if (!artifact || (artifact.role !== "report" && artifact.role !== "synthesis")) {
-    return input.autoReviewState;
+    const gitSnapshot = readGitWorktreeReworkSnapshot(input.projectRoot);
+    if (!gitSnapshot) return input.autoReviewState;
+    const findingIds = input.autoReviewState.findings.map((finding) => finding.id);
+    return {
+      ...input.autoReviewState,
+      reworkSnapshot: {
+        iteration: input.iteration,
+        artifactPath: ".",
+        artifactContentSha: null,
+        findingIds,
+        baselineHeadSha: gitSnapshot.baselineHeadSha,
+        changedFilesDigest: gitSnapshot.changedFilesDigest,
+        changedFilesSummary: gitSnapshot.changedFilesSummary,
+        requiredEvidenceByFindingId: Object.fromEntries(
+          input.autoReviewState.findings.map((finding) => [
+            finding.id,
+            `Current-attempt evidence required for ${finding.source}: ${finding.text}`,
+          ]),
+        ),
+        forbiddenChanges: ["unrelated source, test, config, dependency, or documentation changes"],
+      } as AutoReviewState["reworkSnapshot"],
+    };
   }
   const artifactSha = readArtifactSha({
     projectRoot: input.projectRoot,

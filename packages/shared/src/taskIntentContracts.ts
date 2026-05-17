@@ -20,11 +20,58 @@ export interface TaskIntentDefaults extends PlannerFlagDefaults {
   isFix: boolean;
 }
 
+export type TaskIntentChangeCategory =
+  | "source"
+  | "tests"
+  | "docs"
+  | "config"
+  | "report"
+  | "research"
+  | "fixtures"
+  | "metadata";
+
+export interface TaskIntentChangePolicy {
+  categories: TaskIntentChangeCategory[];
+  summary: string;
+}
+
+export interface TaskIntentArtifactPolicy {
+  primary: string[];
+  optional: string[];
+}
+
+export interface TaskIntentMemoryPolicy {
+  mode: "allowed" | "required" | "forbidden";
+  summary: string;
+}
+
+export interface TaskIntentReviewPolicy {
+  summary: string;
+  skipReviewDefault: boolean;
+  manualReviewTriggers: string[];
+}
+
+export interface TaskIntentCompletionPolicy {
+  changedFileRule: "none" | "audit_report_only" | "docs_only" | "tests_only" | "research_only";
+  summary: string;
+}
+
+export interface TaskIntentPolicy {
+  allowedChanges: TaskIntentChangePolicy;
+  forbiddenChanges: TaskIntentChangePolicy;
+  expectedArtifacts: TaskIntentArtifactPolicy;
+  verificationRequirements: string[];
+  memoryRules: TaskIntentMemoryPolicy;
+  reviewRules: TaskIntentReviewPolicy;
+  completion: TaskIntentCompletionPolicy;
+}
+
 export interface TaskIntentContract {
   intent: TaskIntent;
   label: string;
   decomposition: string;
   defaults: TaskIntentDefaults;
+  policy: TaskIntentPolicy;
   executableBacklogPolicy: string;
   allowedFileChanges: string;
   evidenceRequirements: string;
@@ -71,6 +118,36 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
       planTests: false,
       isFix: false,
     },
+    policy: {
+      allowedChanges: {
+        categories: ["source", "tests", "docs", "config", "metadata"],
+        summary: "Task-specific source, tests, docs, config, and metadata changes are allowed.",
+      },
+      forbiddenChanges: {
+        categories: [],
+        summary: "No intent-wide forbidden file categories; the task text defines the boundary.",
+      },
+      expectedArtifacts: {
+        primary: ["Implemented task delta when requested"],
+        optional: ["Focused tests", "Documentation updates", "Verification notes"],
+      },
+      verificationRequirements: ["Run verification relevant to the touched files."],
+      memoryRules: {
+        mode: "allowed",
+        summary:
+          "Use approved memory only as context; do not publish memory unless the workflow asks for it.",
+      },
+      reviewRules: {
+        summary:
+          "Review is optional by default for fast general work unless task settings require it.",
+        skipReviewDefault: true,
+        manualReviewTriggers: ["Ambiguous scope", "unsafe file operations", "failed verification"],
+      },
+      completion: {
+        changedFileRule: "none",
+        summary: "Completion is governed by task acceptance criteria and existing evidence checks.",
+      },
+    },
     executableBacklogPolicy: "Executable immediately when the task shape is valid.",
     allowedFileChanges: "Normal implementation scope from the task text.",
     evidenceRequirements: "Task-specific acceptance criteria and verification when generated.",
@@ -92,6 +169,45 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
       planDocs: true,
       planTests: true,
       isFix: false,
+    },
+    policy: {
+      allowedChanges: {
+        categories: ["report"],
+        summary: "Only the named diagnostic report or synthesis artifact may change.",
+      },
+      forbiddenChanges: {
+        categories: ["source", "tests", "docs", "config"],
+        summary:
+          "Source, config, test, docs implementation, and child implementation work are forbidden.",
+      },
+      expectedArtifacts: {
+        primary: ["Concrete report artifact", "Structured evidence", "Commit verification"],
+        optional: ["Synthesis report over existing source reports"],
+      },
+      verificationRequirements: [
+        "Every finding must include exact path:line or symbol evidence.",
+        "Reports must include Risk and Verification command output.",
+        "Report artifact commit must be verified with git status/add/commit/log output.",
+      ],
+      memoryRules: {
+        mode: "allowed",
+        summary:
+          "Use approved source-backed memory only as context; do not publish raw audit notes.",
+      },
+      reviewRules: {
+        summary:
+          "Audit requires review, security review, and completion evidence before terminal status.",
+        skipReviewDefault: false,
+        manualReviewTriggers: [
+          "Missing report artifact",
+          "Weak or placeholder evidence",
+          "Unexpected non-report changes",
+        ],
+      },
+      completion: {
+        changedFileRule: "audit_report_only",
+        summary: "Completion must be report-only and satisfy strict audit validators.",
+      },
     },
     executableBacklogPolicy:
       "Executable only when diagnostic-only validation passes; invalid audit cards fail closed.",
@@ -126,6 +242,39 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
       planTests: true,
       isFix: false,
     },
+    policy: {
+      allowedChanges: {
+        categories: ["source", "tests", "docs", "config"],
+        summary:
+          "Source, tests, docs, and config changes are allowed when required by the feature slice.",
+      },
+      forbiddenChanges: {
+        categories: ["report"],
+        summary: "Diagnostic-only report work belongs to audit tasks, not feature tasks.",
+      },
+      expectedArtifacts: {
+        primary: ["Implemented feature delta", "Acceptance criteria evidence"],
+        optional: ["Focused tests", "Docs updates", "Config changes"],
+      },
+      verificationRequirements: [
+        "Describe expected user-visible behavior.",
+        "Run commands that cover the feature acceptance criteria.",
+      ],
+      memoryRules: {
+        mode: "allowed",
+        summary:
+          "Use approved memory as implementation context when it is relevant and source-backed.",
+      },
+      reviewRules: {
+        summary: "Feature work should receive code review unless explicitly configured otherwise.",
+        skipReviewDefault: false,
+        manualReviewTriggers: ["Acceptance criteria not verified", "Broad cross-module risk"],
+      },
+      completion: {
+        changedFileRule: "none",
+        summary: "Completion must satisfy acceptance criteria and verification evidence.",
+      },
+    },
     executableBacklogPolicy: "Executable immediately when acceptance and verification are present.",
     allowedFileChanges: "Source, tests, docs, and config only as needed for the feature.",
     evidenceRequirements:
@@ -150,6 +299,37 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
       planTests: true,
       isFix: true,
     },
+    policy: {
+      allowedChanges: {
+        categories: ["source", "tests", "docs", "config"],
+        summary: "Use the smallest source, test, docs, or config changes needed for the defect.",
+      },
+      forbiddenChanges: {
+        categories: ["report", "research"],
+        summary: "Broad research, diagnostic-only reports, and unrelated refactors are forbidden.",
+      },
+      expectedArtifacts: {
+        primary: ["Narrow defect patch", "Regression verification"],
+        optional: ["Focused regression test", "Brief docs note when behavior changed"],
+      },
+      verificationRequirements: [
+        "Capture reproduction or observed failure.",
+        "Run the regression command that proves the fix.",
+      ],
+      memoryRules: {
+        mode: "allowed",
+        summary: "Use approved prior-fix memory only when it directly matches the failure.",
+      },
+      reviewRules: {
+        summary: "Fix work should receive review focused on regression risk and scope creep.",
+        skipReviewDefault: false,
+        manualReviewTriggers: ["No reproduction evidence", "Regression command missing"],
+      },
+      completion: {
+        changedFileRule: "none",
+        summary: "Completion must prove the defect was addressed with regression evidence.",
+      },
+    },
     executableBacklogPolicy: "Executable immediately when defect evidence is present.",
     allowedFileChanges: "Smallest source/test/docs changes needed for the defect.",
     evidenceRequirements:
@@ -173,6 +353,41 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
       planDocs: true,
       planTests: false,
       isFix: false,
+    },
+    policy: {
+      allowedChanges: {
+        categories: ["research", "docs", "metadata"],
+        summary:
+          "Research/design notes and explicitly named proof-of-concept artifacts are allowed.",
+      },
+      forbiddenChanges: {
+        categories: ["source", "tests", "config"],
+        summary:
+          "Production source, config, and test changes are forbidden unless a proof of concept is explicitly named.",
+      },
+      expectedArtifacts: {
+        primary: ["Research or design artifact", "Recommendation"],
+        optional: ["Explicitly named proof-of-concept artifact"],
+      },
+      verificationRequirements: [
+        "Answer the stated research questions.",
+        "Record options, tradeoffs, recommendation, and next-step boundaries.",
+      ],
+      memoryRules: {
+        mode: "allowed",
+        summary:
+          "Use memory to compare prior decisions, but publish only curated conclusions after review.",
+      },
+      reviewRules: {
+        summary: "Spike output requires review for recommendation quality and boundary discipline.",
+        skipReviewDefault: false,
+        manualReviewTriggers: ["Production implementation drift", "Missing recommendation"],
+      },
+      completion: {
+        changedFileRule: "research_only",
+        summary:
+          "Completion must stay research/design-only unless a proof of concept is explicitly named.",
+      },
     },
     executableBacklogPolicy:
       "Executable only when a research artifact and exit criteria are named.",
@@ -200,6 +415,39 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
       planTests: false,
       isFix: false,
     },
+    policy: {
+      allowedChanges: {
+        categories: ["docs"],
+        summary: "Documentation, examples, and docs-adjacent text artifacts are allowed.",
+      },
+      forbiddenChanges: {
+        categories: ["source", "tests", "config", "report"],
+        summary:
+          "Source, test, and config changes are forbidden unless explicitly required for docs correctness.",
+      },
+      expectedArtifacts: {
+        primary: ["Documentation update"],
+        optional: ["Example update", "Link/render/lint verification"],
+      },
+      verificationRequirements: [
+        "Verify referenced source facts.",
+        "Run link, render, lint, or command checks when available.",
+      ],
+      memoryRules: {
+        mode: "allowed",
+        summary: "Use reviewed memory only to locate source-backed project facts.",
+      },
+      reviewRules: {
+        summary: "Docs changes should be reviewed for source accuracy and broken references.",
+        skipReviewDefault: false,
+        manualReviewTriggers: ["Unverified source claim", "Broken render or link check"],
+      },
+      completion: {
+        changedFileRule: "docs_only",
+        summary:
+          "Completion must be documentation-only unless task context explicitly allows support edits.",
+      },
+    },
     executableBacklogPolicy:
       "Executable immediately when docs target and verification are present.",
     allowedFileChanges:
@@ -224,6 +472,40 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
       planDocs: false,
       planTests: true,
       isFix: false,
+    },
+    policy: {
+      allowedChanges: {
+        categories: ["tests", "fixtures"],
+        summary:
+          "Tests and test fixtures are allowed; minimal testability hooks require explicit justification.",
+      },
+      forbiddenChanges: {
+        categories: ["source", "docs", "config", "report"],
+        summary:
+          "Source, docs, and config changes are forbidden unless explicitly justified for testing.",
+      },
+      expectedArtifacts: {
+        primary: ["Focused test or fixture delta"],
+        optional: ["Minimal testability hook with justification"],
+      },
+      verificationRequirements: [
+        "Name the target behavior or regression.",
+        "Run the relevant test command and record the expected pass/fail outcome.",
+      ],
+      memoryRules: {
+        mode: "allowed",
+        summary: "Use memory only to identify prior regressions or known flaky-test context.",
+      },
+      reviewRules: {
+        summary: "Test work should be reviewed for meaningful assertions and fixture scope.",
+        skipReviewDefault: false,
+        manualReviewTriggers: ["No target behavior", "No test command", "Broad source refactor"],
+      },
+      completion: {
+        changedFileRule: "tests_only",
+        summary:
+          "Completion must stay test/fixture-focused unless task context explicitly allows support edits.",
+      },
     },
     executableBacklogPolicy:
       "Executable immediately when target behavior and test command are present.",

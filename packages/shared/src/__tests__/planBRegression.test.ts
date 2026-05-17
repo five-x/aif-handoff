@@ -147,7 +147,7 @@ describe("Plan B shared regression contract", () => {
 
     for (const item of cases) {
       const outcome = classifyAuditSynthesisOutput({ text: item.text, projectRoot });
-      expect(outcome.kind, item.name).toBe("inconclusive_batch_evidence");
+      expect(outcome.kind, item.name).toBe("source_inconclusive");
       expect(formatAuditSynthesisOutcomeForArtifact(outcome), item.name).toContain(
         "audit-synthesis-outcome",
       );

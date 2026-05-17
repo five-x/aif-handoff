@@ -1,11 +1,18 @@
 import type { CSSProperties, MouseEvent } from "react";
 import { ChevronUp, ChevronDown, Clock, Pause, Play } from "lucide-react";
-import { STATUS_CONFIG, type Task } from "@aif/shared/browser";
+import {
+  STATUS_CONFIG,
+  TASK_INTENT_CONTRACTS,
+  type Task,
+  type TaskIntent,
+} from "@aif/shared/browser";
 import { Badge } from "@/components/ui/badge";
 import { TaskTagsList } from "@/components/ui/task-tags-list";
 import { timeAgo } from "@/lib/utils";
+import { formatUsd } from "@/lib/formatters";
 import { getRuntimeLimitDisplay } from "@/lib/runtimeLimits";
 import { getArtifactTrustPresentation } from "@/lib/artifactTrust";
+import { getPlanQualityPresentation } from "@/lib/planQuality";
 import { useUsageLimitsEnabled } from "@/hooks/useSettings";
 
 const PRIORITY_LABELS: Record<number, { label: string; className: string }> = {
@@ -33,6 +40,40 @@ function shortTaskId(id: string) {
   return id.slice(0, 8);
 }
 
+function resolveDisplayIntent(task: Task): TaskIntent {
+  return task.taskIntent ?? (task.isFix ? "fix" : "general");
+}
+
+function operatorTaskFields(task: Task) {
+  const candidate = task as Task & {
+    effectiveRuntime?: {
+      source?: string | null;
+      profileName?: string | null;
+      runtimeId?: string | null;
+      providerId?: string | null;
+    } | null;
+    memoryCandidateCount?: number;
+  };
+  return {
+    effectiveRuntime: candidate.effectiveRuntime ?? null,
+    memoryCandidateCount:
+      typeof candidate.memoryCandidateCount === "number" ? candidate.memoryCandidateCount : 0,
+  };
+}
+
+function blockedReasonFamily(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  const [family] = reason.split(":");
+  return family?.trim().replaceAll("_", " ") || "blocked";
+}
+
+function runtimeBadgeLabel(runtime: ReturnType<typeof operatorTaskFields>["effectiveRuntime"]) {
+  if (!runtime) return null;
+  if (runtime.profileName) return runtime.profileName;
+  if (runtime.runtimeId && runtime.providerId) return `${runtime.runtimeId}/${runtime.providerId}`;
+  return runtime.runtimeId ?? runtime.providerId ?? runtime.source ?? null;
+}
+
 export function TaskCard({
   task,
   onClick,
@@ -57,6 +98,14 @@ export function TaskCard({
       })
     : null;
   const artifactTrust = getArtifactTrustPresentation(task.artifactTrust);
+  const planQuality = getPlanQualityPresentation(task);
+  const taskIntentContract = TASK_INTENT_CONTRACTS[resolveDisplayIntent(task)];
+  const operatorFields = operatorTaskFields(task);
+  const runtimeLabel = runtimeBadgeLabel(operatorFields.effectiveRuntime);
+  const blockedFamily = blockedReasonFamily(task.blockedReason);
+  const hasWorktree = Boolean(
+    task.worktreePath || task.branchName || task.artifactTrust?.worktreePath,
+  );
 
   const stop = (e: MouseEvent) => {
     e.stopPropagation();
@@ -110,9 +159,61 @@ export function TaskCard({
               {artifactTrust.label}
             </Badge>
           )}
+          {planQuality && (
+            <Badge
+              size={isCompact ? "xs" : "sm"}
+              className={
+                planQuality.isTerminal
+                  ? "border-red-500/35 bg-red-500/15 text-red-700 dark:text-red-300"
+                  : "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-300"
+              }
+            >
+              Plan Quality
+            </Badge>
+          )}
           {priority.label !== "None" && (
             <Badge size={isCompact ? "xs" : "sm"} className={priority.className}>
               {priority.label}
+            </Badge>
+          )}
+          <Badge size={isCompact ? "xs" : "sm"} variant="outline">
+            {taskIntentContract.label}
+          </Badge>
+          {runtimeLabel && (
+            <Badge size={isCompact ? "xs" : "sm"} variant="outline">
+              {runtimeLabel}
+            </Badge>
+          )}
+          {(task.costUsd ?? 0) > 0 && (
+            <Badge size={isCompact ? "xs" : "sm"} variant="outline">
+              {formatUsd(task.costUsd)}
+            </Badge>
+          )}
+          <Badge size={isCompact ? "xs" : "sm"} variant="outline">
+            {task.autoMode ? "Auto" : "Manual"}
+          </Badge>
+          {blockedFamily && (
+            <Badge
+              size={isCompact ? "xs" : "sm"}
+              className="border-red-500/35 bg-red-500/10 text-red-700 dark:text-red-300"
+            >
+              {blockedFamily}
+            </Badge>
+          )}
+          {hasWorktree && (
+            <Badge
+              size={isCompact ? "xs" : "sm"}
+              className="border-cyan-500/35 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+            >
+              Worktree
+            </Badge>
+          )}
+          {operatorFields.memoryCandidateCount > 0 && (
+            <Badge
+              size={isCompact ? "xs" : "sm"}
+              className="border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+            >
+              Memory {operatorFields.memoryCandidateCount}
             </Badge>
           )}
         </div>
@@ -223,6 +324,12 @@ export function TaskCard({
       {task.status === "blocked_external" && !runtimeLimitDisplay && task.blockedReason && (
         <div className="mt-2 ml-2 border border-red-500/30 bg-red-500/10 px-2 py-1 text-3xs text-red-300 line-clamp-2">
           {task.blockedReason}
+        </div>
+      )}
+
+      {planQuality && task.status !== "blocked_external" && (
+        <div className="mt-2 ml-2 border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-3xs text-amber-700 dark:text-amber-300 line-clamp-2">
+          {planQuality.summary}
         </div>
       )}
 

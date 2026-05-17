@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { createNodeWebSocket } from "@hono/node-ws";
 import type { WsEvent } from "@aif/shared";
-import { logger } from "@aif/shared";
+import { logger, redactPermissionPolicyValue } from "@aif/shared";
 import type { WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 
@@ -60,19 +60,32 @@ export function getInjectWebSocket() {
   return injectWebSocketFn;
 }
 
+export function __setWebSocketClientsForTest(
+  entries: Array<{ clientId?: string; socket: WebSocket }>,
+): void {
+  clients = new Set(entries.map((entry) => entry.socket));
+  clientMap.clear();
+  socketToClientId.clear();
+  for (const entry of entries) {
+    if (!entry.clientId) continue;
+    clientMap.set(entry.clientId, entry.socket);
+    socketToClientId.set(entry.socket, entry.clientId);
+  }
+}
+
 export function sendToClient(clientId: string, event: WsEvent): boolean {
   const client = clientMap.get(clientId);
   if (!client || client.readyState !== client.OPEN) {
     log.debug({ clientId, event: event.type }, "sendToClient: client not found or not open");
     return false;
   }
-  client.send(JSON.stringify(event));
+  client.send(JSON.stringify(redactPermissionPolicyValue(event)));
   log.debug({ clientId, event: event.type }, "Sent WS event to client");
   return true;
 }
 
 export function broadcast(event: WsEvent): void {
-  const data = JSON.stringify(event);
+  const data = JSON.stringify(redactPermissionPolicyValue(event));
   let sent = 0;
   for (const client of clients) {
     if (client.readyState === client.OPEN) {

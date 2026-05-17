@@ -3,6 +3,27 @@
  * Used by API routes and agent subagents.
  */
 
+import { redactProviderText } from "./runtimeLimitUtils.js";
+
+export const ATTACHMENT_MAX_BYTES = 10_000_000;
+export const ATTACHMENT_CONTENT_MAX_CHARS = Math.ceil((ATTACHMENT_MAX_BYTES * 4) / 3) + 256;
+export const ATTACHMENT_PROMPT_CONTENT_LIMIT = 4000;
+
+export const ATTACHMENT_ALLOWED_MIME_TYPES = [
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/json",
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
+export type AttachmentSourceKind = "task" | "comment" | "chat";
+export type AttachmentRedactionStatus = "none" | "redacted" | "not_scanned";
+
 export interface ParsedAttachment {
   name: string;
   mimeType: string;
@@ -10,6 +31,106 @@ export interface ParsedAttachment {
   content: string | null;
   /** Relative path in storage/ directory. Present for file-backed attachments. */
   path?: string;
+  sourceKind?: AttachmentSourceKind;
+  sourceRef?: string;
+  redactionStatus?: AttachmentRedactionStatus;
+}
+
+export interface AttachmentStoragePathContext {
+  taskId?: string;
+  commentId?: string;
+  chatSessionId?: string;
+}
+
+export function normalizeAttachmentMimeType(mimeType: string): string {
+  return mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+export function isAllowedAttachmentMimeType(mimeType: string): boolean {
+  return (ATTACHMENT_ALLOWED_MIME_TYPES as readonly string[]).includes(
+    normalizeAttachmentMimeType(mimeType),
+  );
+}
+
+export function isTextAttachmentMimeType(mimeType: string): boolean {
+  const normalized = normalizeAttachmentMimeType(mimeType);
+  return (
+    normalized === "text/plain" ||
+    normalized === "text/markdown" ||
+    normalized === "text/csv" ||
+    normalized === "application/json" ||
+    normalized.startsWith("text/")
+  );
+}
+
+export function isBinaryAttachmentMimeType(mimeType: string): boolean {
+  return isAllowedAttachmentMimeType(mimeType) && !isTextAttachmentMimeType(mimeType);
+}
+
+export function isSafeAttachmentFilename(name: string): boolean {
+  if (typeof name !== "string") return false;
+  if (name.length === 0 || name.trim() !== name) return false;
+  if (name === "." || name === "..") return false;
+  if (/[\x00-\x1f/\\:*?"<>|]/.test(name)) return false;
+  return true;
+}
+
+function normalizeStoragePath(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+export function isSafeAttachmentStoragePath(
+  path: string,
+  context: AttachmentStoragePathContext = {},
+): boolean {
+  if (typeof path !== "string" || path.length === 0 || path.trim() !== path) return false;
+  if (path.includes("\0") || path.includes(":")) return false;
+  const normalized = normalizeStoragePath(path);
+  if (normalized !== path) return false;
+  if (normalized.startsWith("/") || normalized.startsWith("./")) return false;
+
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+    return false;
+  }
+  if (segments[0] !== ".ai-factory" || segments[1] !== "files" || segments.length < 4) {
+    return false;
+  }
+
+  let expectedPrefix = ".ai-factory/files/";
+  if (context.chatSessionId) {
+    expectedPrefix = `.ai-factory/files/chat/${context.chatSessionId}/`;
+  } else if (context.taskId && context.commentId) {
+    expectedPrefix = `.ai-factory/files/tasks/${context.taskId}/comments/${context.commentId}/`;
+  } else if (context.taskId) {
+    expectedPrefix = `.ai-factory/files/tasks/${context.taskId}/`;
+  }
+
+  return normalized.startsWith(expectedPrefix) && normalized.length > expectedPrefix.length;
+}
+
+export function isValidBase64AttachmentContent(content: string): boolean {
+  const data = content.match(/^data:[^;]+;base64,(.+)$/s)?.[1] ?? content;
+  const compact = data.replace(/\s/g, "");
+  if (compact.length === 0 || compact.length % 4 !== 0) return false;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(compact)) return false;
+  try {
+    const decoded = Buffer.from(compact, "base64");
+    return decoded.toString("base64") === compact;
+  } catch {
+    return false;
+  }
+}
+
+export function redactAttachmentTextContent(content: string): {
+  content: string;
+  redactionStatus: AttachmentRedactionStatus;
+} {
+  const redacted = redactProviderText(content);
+  return {
+    content: redacted,
+    redactionStatus: redacted === content ? "none" : "redacted",
+  };
 }
 
 /**
@@ -33,6 +154,23 @@ export function parseAttachments(raw: string | null): ParsedAttachment[] {
         if (typeof item.path === "string" && item.path.length > 0) {
           attachment.path = item.path;
         }
+        if (
+          item.sourceKind === "task" ||
+          item.sourceKind === "comment" ||
+          item.sourceKind === "chat"
+        ) {
+          attachment.sourceKind = item.sourceKind;
+        }
+        if (typeof item.sourceRef === "string" && item.sourceRef.length > 0) {
+          attachment.sourceRef = item.sourceRef;
+        }
+        if (
+          item.redactionStatus === "none" ||
+          item.redactionStatus === "redacted" ||
+          item.redactionStatus === "not_scanned"
+        ) {
+          attachment.redactionStatus = item.redactionStatus;
+        }
         return attachment;
       });
   } catch {
@@ -46,9 +184,6 @@ export function parseAttachments(raw: string | null): ParsedAttachment[] {
 export function isFileBackedAttachment(attachment: ParsedAttachment): boolean {
   return typeof attachment.path === "string" && attachment.path.length > 0;
 }
-
-/** Max characters of file content included in agent prompts. */
-const CONTENT_PREVIEW_LIMIT = 4000;
 
 /** Thresholds for looksLikeFullPlanUpdate heuristic. */
 const PLAN_SHORT_THRESHOLD = 120;
@@ -71,19 +206,35 @@ export function formatAttachmentsForPrompt(raw: string | null): string {
 
   return attachments
     .map((file, index) => {
-      let detail: string;
-      if (file.content) {
-        detail = `\n    content:\n${file.content
-          .slice(0, CONTENT_PREVIEW_LIMIT)
+      const metadata: string[] = [];
+      if (file.sourceRef) metadata.push(`source: ${file.sourceRef}`);
+      if (file.redactionStatus === "redacted") metadata.push("redaction: redacted");
+      if (file.redactionStatus === "not_scanned") metadata.push("redaction: not scanned");
+
+      let detail = "";
+      if (file.content && isTextAttachmentMimeType(file.mimeType)) {
+        const redacted = redactAttachmentTextContent(file.content);
+        const preview = redacted.content.slice(0, ATTACHMENT_PROMPT_CONTENT_LIMIT);
+        const truncated = redacted.content.length > ATTACHMENT_PROMPT_CONTENT_LIMIT;
+        const indentedPreview = preview
           .split("\n")
           .map((line) => `      ${line}`)
-          .join("\n")}`;
+          .join("\n");
+        detail = `\n    content:\n${indentedPreview}`;
+        if (truncated) detail += "\n      [truncated]";
+        if (redacted.redactionStatus === "redacted" && !metadata.includes("redaction: redacted")) {
+          metadata.push("redaction: redacted");
+        }
+      } else if (file.content && isBinaryAttachmentMimeType(file.mimeType)) {
+        detail = "\n    content: [binary content omitted]";
       } else if (file.path) {
         detail = `\n    file: ${file.path}`;
       } else {
         detail = "\n    content: [not provided]";
       }
-      return `${index + 1}. ${file.name} (${file.mimeType}, ${file.size} bytes)${detail}`;
+
+      const metadataDetail = metadata.length > 0 ? `\n    ${metadata.join("\n    ")}` : "";
+      return `${index + 1}. ${file.name} (${file.mimeType}, ${file.size} bytes)${metadataDetail}${detail}`;
     })
     .join("\n");
 }

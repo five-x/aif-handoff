@@ -1,6 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { logger, TASK_INTENTS, type TaskIntent } from "@aif/shared";
+import {
+  formatTaskIntentOptionsForPrompt,
+  isTaskIntent,
+  logger,
+  normalizeTaskIntent,
+  TASK_INTENTS,
+  type TaskIntent,
+} from "@aif/shared";
 import { findTaskById, updateTask, toTaskResponse } from "@aif/data";
 import { registerMcpTool, type ToolContext } from "./index.js";
 import { rateLimitError, toMcpError, validationError } from "../middleware/errorHandler.js";
@@ -10,6 +17,10 @@ import {
   assertRuntimeProfileSelection,
   buildEffectiveTaskRuntimeMetadata,
 } from "./runtimeTaskMetadata.js";
+import {
+  assertPlanningCompatiblePlanMutation,
+  validateSafeRelativeArtifactPath,
+} from "./workflowGuards.js";
 
 const log = logger("mcp:tool:update-task");
 const updateTaskInputSchema: Record<string, z.ZodTypeAny> = {
@@ -26,7 +37,20 @@ const updateTaskInputSchema: Record<string, z.ZodTypeAny> = {
   tags: z.array(z.string()).optional().describe("Updated tags"),
   plan: z.string().nullable().optional().describe("Plan content (null to clear)"),
   autoMode: z.boolean().optional().describe("Enable/disable auto mode"),
-  taskIntent: z.enum(TASK_INTENTS).optional().describe("Typed task intent"),
+  taskIntent: z
+    .enum(TASK_INTENTS)
+    .optional()
+    .describe(`Typed task intent. Shared policy options:\n${formatTaskIntentOptionsForPrompt()}`),
+  planPath: z
+    .string()
+    .optional()
+    .describe("Plan file path (must be a safe relative artifact path)"),
+  sourceRef: z
+    .string()
+    .max(500)
+    .nullable()
+    .optional()
+    .describe("Optional source reference for the originating artifact or request"),
   isFix: z.boolean().optional().describe("Mark/unmark as fix"),
   plannerMode: z.enum(["fast", "full"]).optional().describe("Planner mode"),
   planDocs: z.boolean().optional().describe("Include documentation in plan"),
@@ -71,18 +95,22 @@ type UpdateTaskArgs = {
   plan?: string | null;
   planDocs?: boolean;
   plannerMode?: "fast" | "full";
+  planPath?: string;
   planTests?: boolean;
   priority?: number;
   reviewComments?: string | null;
   roadmapAlias?: string | null;
   runtimeOptions?: Record<string, unknown> | null;
   runtimeProfileId?: string | null;
+  sourceRef?: string | null;
   skipReview?: boolean;
   tags?: string[];
   taskId: string;
   title?: string;
   useSubagents?: boolean;
 };
+
+const GUARDED_DIRECT_FIELDS = ["implementationLog", "reviewComments", "blockedReason"] as const;
 
 export function register(server: McpServer, context: ToolContext): void {
   registerMcpTool(
@@ -123,8 +151,30 @@ export function register(server: McpServer, context: ToolContext): void {
           log,
         });
 
+        const guardedFields = GUARDED_DIRECT_FIELDS.filter((field) => args[field] !== undefined);
+        if (guardedFields.length > 0) {
+          throw validationError("Direct writes to guarded workflow fields are not allowed", {
+            fields: guardedFields,
+          });
+        }
+
+        validateSafeRelativeArtifactPath(args.planPath);
+        if (args.plan !== undefined) {
+          assertPlanningCompatiblePlanMutation(existing.status);
+        }
+        if (args.taskIntent !== undefined && !isTaskIntent(args.taskIntent)) {
+          throw validationError("Invalid taskIntent", {
+            taskIntent: [`Expected one of: ${TASK_INTENTS.join(", ")}`],
+          });
+        }
+
         // Extract taskId, pass remaining fields to updateTask
         const { taskId, ...fields } = args;
+        if (fields.taskIntent !== undefined) {
+          fields.taskIntent = normalizeTaskIntent(fields.taskIntent);
+        } else if (fields.isFix === true) {
+          fields.taskIntent = "fix";
+        }
 
         // Build a summary of changed fields for logging
         const changedFields = Object.keys(fields).filter(

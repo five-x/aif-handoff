@@ -89,9 +89,11 @@ function createTask(overrides: Partial<Task> = {}): Task {
     scheduledAt: null,
     branchName: null,
     worktreePath: null,
-    createdAt: "2026-05-08T00:00:00.000Z",
-    updatedAt: "2026-05-08T00:00:00.000Z",
     ...overrides,
+    lockStage: overrides.lockStage ?? null,
+    coordinatorId: overrides.coordinatorId ?? null,
+    createdAt: overrides.createdAt ?? "2026-05-08T00:00:00.000Z",
+    updatedAt: overrides.updatedAt ?? "2026-05-08T00:00:00.000Z",
   };
 }
 
@@ -304,6 +306,68 @@ describe("useWebSocket", () => {
     expect(queryClient.getQueryData<Task>(["task", "task-1"])?.status).toBe("done");
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["tasks"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task", "task-1"] });
+
+    unmount();
+  });
+
+  it("invalidates operator projection queries for trust, memory, usage, queue, and worktree broadcasts", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { unmount } = renderHook(() => useWebSocket(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    act(() => {
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "task:trust_updated",
+          payload: { id: "task-1", projectId: "project-1", reasonCodes: ["trusted"] },
+        }),
+      });
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "project:memory_candidate_created",
+          payload: { id: "memory-1", projectId: "project-1", taskId: "task-1", status: "pending" },
+        }),
+      });
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "project:usage_updated",
+          payload: { projectId: "project-1", taskId: "task-1" },
+        }),
+      });
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "project:queue_updated",
+          payload: { projectId: "project-1", taskId: "task-1" },
+        }),
+      });
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "project:auto_queue_advanced",
+          payload: { id: "task-1" },
+        }),
+      });
+      MockWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({
+          type: "project:worktree_warning",
+          payload: { projectId: "project-1", taskId: "task-1", warnings: ["large_disk_usage"] },
+        }),
+      });
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task-timeline", "task-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task-evidence", "task-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task-memory", "task-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task-runtime-usage", "task-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["task-worktree", "task-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["project-knowledge", "project-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ["project-runtime-usage", "project-1"],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["project-queue", "project-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["project-queue"] });
 
     unmount();
   });

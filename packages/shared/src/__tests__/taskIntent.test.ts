@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   TASK_INTENT_CONTRACTS,
+  formatTaskIntentContractForPrompt,
+  formatTaskIntentOptionsForPrompt,
+  formatTaskIntentPrimaryConstraints,
   inferTaskIntent,
   resolveTaskIntentDefaults,
+  validateTaskIntentChangedFiles,
   validateGeneratedTaskIntent,
 } from "../taskIntent.js";
 import {
@@ -58,6 +62,15 @@ describe("taskIntent", () => {
       "spike",
       "tests",
     ]);
+    for (const contract of Object.values(TASK_INTENT_CONTRACTS)) {
+      expect(contract.policy.allowedChanges.summary).toBeTruthy();
+      expect(contract.policy.forbiddenChanges.summary).toBeTruthy();
+      expect(contract.policy.expectedArtifacts.primary.length).toBeGreaterThan(0);
+      expect(contract.policy.verificationRequirements.length).toBeGreaterThan(0);
+      expect(contract.policy.memoryRules.summary).toBeTruthy();
+      expect(contract.policy.reviewRules.summary).toBeTruthy();
+      expect(contract.policy.completion.summary).toBeTruthy();
+    }
 
     expect(resolveTaskIntentDefaults("audit", { envUseSubagents: false })).toMatchObject({
       plannerMode: "full",
@@ -80,6 +93,361 @@ describe("taskIntent", () => {
       planDocs: false,
       planTests: false,
     });
+  });
+
+  it("formats prompts and UI constraints from structured policy", () => {
+    expect(formatTaskIntentContractForPrompt("docs")).toContain("Forbidden changes:");
+    expect(formatTaskIntentContractForPrompt("docs")).toContain("Expected artifacts:");
+    expect(formatTaskIntentContractForPrompt("docs")).toContain("Memory rules:");
+    expect(formatTaskIntentPrimaryConstraints("tests")).toContain("Focused test or fixture delta");
+    expect(formatTaskIntentOptionsForPrompt()).toContain("- audit (Audit):");
+    expect(formatTaskIntentOptionsForPrompt()).toContain("Expected artifacts:");
+  });
+
+  it("validates deterministic changed-file contradictions for bounded intents", () => {
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "audit",
+          title: "Audit configuration",
+          description: "Report artifact: audit/config-audit.md",
+        },
+        changedFiles: ["audit/config-audit.md"],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "audit",
+          title: "Audit configuration",
+          description: "Report artifact: audit/config-audit.md",
+        },
+        changedFiles: ["audit/config-audit.md", "packages/api/src/index.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/api/src/index.ts"],
+      }),
+    ]);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "audit",
+          title: "Audit configuration",
+          description: "Report artifact: audit/config-audit.md",
+        },
+        changedFiles: ["audit/other.md"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["audit/other.md"],
+      }),
+    ]);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "audit",
+          title: "Audit docs",
+          description: "Report artifact: docs/security-audit.md",
+        },
+        changedFiles: ["docs/security-audit.md"],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: { taskIntent: "docs", title: "Update API docs" },
+        changedFiles: ["packages/api/src/index.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/api/src/index.ts"],
+      }),
+    ]);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "docs",
+          title: "Update API docs",
+          description: "Supporting source edits for docs correctness are required.",
+        },
+        changedFiles: ["packages/api/src/index.ts"],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "docs",
+          title: "Update API docs",
+          description: "Supporting source edits for docs correctness are required.",
+        },
+        changedFiles: [
+          "packages/api/src/index.ts",
+          "package.json",
+          "packages/api/src/__tests__/tasks.test.ts",
+        ],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["package.json", "packages/api/src/__tests__/tasks.test.ts"],
+      }),
+    ]);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "docs",
+          title: "Update API docs",
+          implementationLog: "Supporting source edits for docs correctness were made.",
+          reviewComments: "Docs correctness required source edits.",
+          agentActivityLog: "Edited packages/api/src/index.ts for documentation correctness.",
+        },
+        changedFiles: ["packages/api/src/index.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/api/src/index.ts"],
+      }),
+    ]);
+
+    for (const plan of [
+      "No source changes are needed for docs correctness.",
+      "Do not make source changes; update documentation only.",
+      "Source changes are forbidden for docs correctness.",
+      "Do not change source code for docs correctness.",
+      "Do not make changes to source code for docs correctness.",
+      "Without changing source code, update docs correctness notes.",
+      "Do not touch source code for docs correctness.",
+      "Changes to source code are forbidden for docs correctness.",
+      "Never change source code for docs correctness.",
+    ]) {
+      expect(
+        validateTaskIntentChangedFiles({
+          task: {
+            taskIntent: "docs",
+            title: "Update API docs",
+            plan,
+          },
+          changedFiles: ["packages/api/src/index.ts"],
+        }).issues,
+      ).toEqual([
+        expect.objectContaining({
+          code: "intent_changed_files_contradiction",
+          files: ["packages/api/src/index.ts"],
+        }),
+      ]);
+    }
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: { taskIntent: "tests", title: "Add API coverage" },
+        changedFiles: ["packages/api/src/__tests__/tasks.test.ts"],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: { taskIntent: "tests", title: "Add API fixture coverage" },
+        changedFiles: [
+          "packages/api/src/__tests__/fixtures/input.txt",
+          "packages/api/fixtures/golden.md",
+          "packages/api/testdata/sample.txt",
+        ],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "tests",
+          title: "Add API coverage",
+          plan: "Minimal source changes for testing are required before adding coverage.",
+        },
+        changedFiles: ["packages/api/src/index.ts"],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "tests",
+          title: "Add API coverage",
+          plan: "Minimal source changes for testing are required before adding coverage.",
+        },
+        changedFiles: ["packages/api/src/index.ts", "docs/api.md", "package.json"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["docs/api.md", "package.json"],
+      }),
+    ]);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "tests",
+          title: "Add API coverage",
+          implementationLog: "Minimal source changes for testing were made.",
+          reviewComments: "Source changes support regression coverage.",
+          agentActivityLog: "Edited packages/api/src/index.ts for testability.",
+        },
+        changedFiles: ["packages/api/src/index.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/api/src/index.ts"],
+      }),
+    ]);
+
+    for (const plan of [
+      "No source changes are needed for testing.",
+      "Do not make source changes; add tests only.",
+      "Source changes are forbidden for regression coverage.",
+      "Do not change source code for regression coverage.",
+      "Do not make changes to source code for testing.",
+      "Without changing source code, add regression coverage.",
+      "Do not touch source code for testing.",
+      "Changes to source code are forbidden for testing.",
+      "Never make source changes for testing.",
+    ]) {
+      expect(
+        validateTaskIntentChangedFiles({
+          task: {
+            taskIntent: "tests",
+            title: "Add API coverage",
+            plan,
+          },
+          changedFiles: ["packages/api/src/index.ts"],
+        }).issues,
+      ).toEqual([
+        expect.objectContaining({
+          code: "intent_changed_files_contradiction",
+          files: ["packages/api/src/index.ts"],
+        }),
+      ]);
+    }
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "spike",
+          title: "Spike storage adapter",
+          description: "Proof-of-concept artifact: packages/storage/src/poc.ts",
+        },
+        changedFiles: ["packages/storage/src/poc.ts"],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "spike",
+          title: "Spike storage adapter",
+          plan: "Approved plan\nProof-of-concept artifact path: packages/storage/src/plan-poc.ts",
+        },
+        changedFiles: ["packages/storage/src/plan-poc.ts"],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "spike",
+          title: "Spike storage adapter",
+          description: "Proof-of-concept artifact: packages/storage/src/poc.ts",
+        },
+        changedFiles: ["packages/storage/src/adapter.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/storage/src/adapter.ts"],
+      }),
+    ]);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "spike",
+          title: "Spike storage adapter",
+          description: "Create a proof-of-concept implementation for the storage adapter.",
+        },
+        changedFiles: ["packages/storage/src/poc.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/storage/src/poc.ts"],
+      }),
+    ]);
+
+    for (const plan of [
+      "Do not create proof-of-concept artifact path: packages/storage/src/poc.ts",
+      "No prototype file packages/storage/src/poc.ts",
+      "Prototype artifact packages/storage/src/poc.ts is forbidden",
+      "Never create proof-of-concept artifact path: packages/storage/src/poc.ts",
+    ]) {
+      expect(
+        validateTaskIntentChangedFiles({
+          task: {
+            taskIntent: "spike",
+            title: "Spike storage adapter",
+            plan,
+          },
+          changedFiles: ["packages/storage/src/poc.ts"],
+        }).issues,
+      ).toEqual([
+        expect.objectContaining({
+          code: "intent_changed_files_contradiction",
+          files: ["packages/storage/src/poc.ts"],
+        }),
+      ]);
+    }
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "spike",
+          title: "Spike storage adapter",
+          description: "Proof-of-concept artifact: packages/storage/src/POC.ts",
+        },
+        changedFiles: ["packages/storage/src/poc.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/storage/src/poc.ts"],
+      }),
+    ]);
+
+    expect(
+      validateTaskIntentChangedFiles({
+        task: {
+          taskIntent: "spike",
+          title: "Spike storage adapter",
+          implementationLog: "Implemented proof-of-concept artifact: packages/storage/src/poc.ts",
+          reviewComments: "Review checked POC file path: packages/storage/src/poc.ts",
+        },
+        changedFiles: ["packages/storage/src/poc.ts"],
+      }).issues,
+    ).toEqual([
+      expect.objectContaining({
+        code: "intent_changed_files_contradiction",
+        files: ["packages/storage/src/poc.ts"],
+      }),
+    ]);
   });
 
   it("infers explicit and legacy fix intents", () => {

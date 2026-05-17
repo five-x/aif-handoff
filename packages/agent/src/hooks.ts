@@ -367,6 +367,7 @@ export function persistAuditEvidencePayload(
       taskId,
       `[${new Date().toISOString()}] Agent: AuditEvidence ${unit.id} ${unit.evidenceKind}/${unit.evidenceGrade} tool=${sanitizeForActivityLog(unit.toolName, 80)} redaction=${unit.redactionStatus}`,
     );
+    void notifyTaskBroadcast(taskId, "task:evidence_recorded");
     return unit;
   } catch (err) {
     log.error({ err, taskId }, "Failed to persist audit evidence event");

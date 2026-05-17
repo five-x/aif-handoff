@@ -24,6 +24,8 @@ const mockTask: Task = {
   autoReviewState: null,
   paused: false,
   lastHeartbeatAt: null,
+  lockStage: null,
+  coordinatorId: null,
   lastSyncedAt: null,
   sessionId: null,
   scheduledAt: null,
@@ -60,10 +62,77 @@ const mockDoneFixTask: Task = {
   title: "Done Fix Task",
 };
 
+const mockManualReviewAutoReviewState = {
+  strategy: "closure_first",
+  iteration: 2,
+  findings: [
+    {
+      id: "sec-1",
+      source: "security_audit",
+      status: "still_blocking",
+      text: "client_secret=secret-value still appears in review evidence",
+      firstSeenIteration: 1,
+      lastSeenIteration: 2,
+      streak: 2,
+    },
+  ],
+  securityCoverage: [
+    {
+      area: "secret_leaks",
+      status: "covered",
+      note: "checked client_secret=secret-value in review comments",
+    },
+    {
+      area: "permissions_sandbox",
+      status: "covered",
+      note: "checked sandbox boundaries",
+    },
+    {
+      area: "unsafe_shell_network_file",
+      status: "covered",
+      note: "checked shell and file operations",
+    },
+    {
+      area: "dependency_config",
+      status: "covered",
+      note: "checked dependency configuration",
+    },
+  ],
+  blockerHistory: [
+    {
+      id: "sec-1",
+      source: "security_audit",
+      status: "still_blocking",
+      note: "access_token=oauth-token still needs proof",
+      iteration: 2,
+    },
+  ],
+  reworkSnapshot: {
+    iteration: 2,
+    artifactPath: ".",
+    artifactContentSha: null,
+    findingIds: ["sec-1"],
+    changedFilesDigest: "abcdef1234567890",
+    baselineHeadSha: "1234567890abcdef",
+  },
+} as Task["autoReviewState"];
+
 const mockManualReviewTask: Task = {
   ...mockDoneTask,
   id: "detail-manual-review",
   title: "Manual Review Task",
+  manualReviewRequired: true,
+  autoReviewState: mockManualReviewAutoReviewState,
+};
+
+const mockPlanQualityManualReviewTask: Task = {
+  ...mockDoneTask,
+  id: "detail-plan-quality-manual-review",
+  title: "Plan Quality Manual Review Task",
+  status: "blocked_external",
+  blockedFromStatus: "plan_ready",
+  blockedReason:
+    "Plan quality guard (missing_plan_manifest): Full-mode task plan must include an aif-plan-manifest block. Retry limit reached (2).",
   manualReviewRequired: true,
 };
 
@@ -137,6 +206,7 @@ const mutateCreateComment = vi.fn();
 const mutateTaskEventAsync = vi.fn();
 const mutateCreateCommentAsync = vi.fn();
 const mutateSyncTaskPlan = vi.fn();
+const mutateCleanupTaskWorktree = vi.fn();
 const mockGetTaskPlanFileStatus = vi.fn();
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -161,23 +231,48 @@ vi.mock("@/hooks/useTasks", () => ({
             ? mockDoneFixTask
             : id === "detail-manual-review"
               ? mockManualReviewTask
-              : id === "detail-backlog"
-                ? mockBacklogTask
-                : id === "detail-blocked"
-                  ? mockBlockedTask
-                  : id === "detail-plan-ready-manual"
-                    ? mockPlanReadyManualTask
-                    : id === "detail-review"
-                      ? mockReviewTask
-                      : id === "detail-with-attachment"
-                        ? mockTaskWithAttachment
-                        : id === "detail-no-plan-no-log"
-                          ? mockTaskNoPlanNoLog
-                          : id === "detail-planning-activity"
-                            ? mockPlanningTaskWithActivityOnly
-                            : null,
+              : id === "detail-plan-quality-manual-review"
+                ? mockPlanQualityManualReviewTask
+                : id === "detail-backlog"
+                  ? mockBacklogTask
+                  : id === "detail-blocked"
+                    ? mockBlockedTask
+                    : id === "detail-plan-ready-manual"
+                      ? mockPlanReadyManualTask
+                      : id === "detail-review"
+                        ? mockReviewTask
+                        : id === "detail-with-attachment"
+                          ? mockTaskWithAttachment
+                          : id === "detail-no-plan-no-log"
+                            ? mockTaskNoPlanNoLog
+                            : id === "detail-planning-activity"
+                              ? mockPlanningTaskWithActivityOnly
+                              : null,
   }),
   useTaskTimeline: () => ({ data: null, isLoading: false }),
+  useTaskEvidence: () => ({ data: null, isLoading: false }),
+  useTaskMemoryCandidates: () => ({ data: { candidates: [] }, isLoading: false }),
+  useTaskRuntimeUsage: () => ({ data: null, isLoading: false }),
+  useTaskWorktree: () => ({ data: null, isLoading: false }),
+  useProjectKnowledge: () => ({
+    data: {
+      projectId: "test-project",
+      includeGlobal: false,
+      counts: { byStatus: {}, byType: {}, byFailureFamily: {} },
+      items: [],
+    },
+    isLoading: false,
+  }),
+  useProjectRuntimeUsage: () => ({ data: null, isLoading: false }),
+  useProjectQueue: () => ({
+    data: {
+      projectId: "test-project",
+      autoQueueMode: true,
+      countsByStatus: {},
+      backlog: [],
+    },
+    isLoading: false,
+  }),
   useUpdateTask: () => ({ mutate: mutateUpdateTask }),
   useDeleteTask: () => ({ mutate: mutateDeleteTask }),
   useTaskEvent: () => ({
@@ -192,6 +287,7 @@ vi.mock("@/hooks/useTasks", () => ({
     isPending: false,
   }),
   useSyncTaskPlan: () => ({ mutate: mutateSyncTaskPlan, isPending: false }),
+  useCleanupTaskWorktree: () => ({ mutate: mutateCleanupTaskWorktree, isPending: false }),
 }));
 
 const { TaskDetail } = await import("@/components/task/TaskDetail");
@@ -212,6 +308,7 @@ describe("TaskDetail", () => {
     mutateTaskEventAsync.mockReset();
     mutateCreateCommentAsync.mockReset();
     mutateSyncTaskPlan.mockClear();
+    mutateCleanupTaskWorktree.mockClear();
     mockGetTaskPlanFileStatus.mockReset();
     mutateTaskEventAsync.mockResolvedValue(undefined);
     mutateCreateCommentAsync.mockResolvedValue(undefined);
@@ -281,6 +378,22 @@ describe("TaskDetail", () => {
     expect(screen.getByText("Timeline unavailable.")).toBeDefined();
   });
 
+  it("should render operator projection tabs", () => {
+    render(<TaskDetail taskId="detail-1" onClose={vi.fn()} />, { wrapper: Wrapper });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Evidence" }));
+    expect(screen.getByText("No evidence recorded for this task.")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Memory" }));
+    expect(screen.getByText("No task memory candidates.")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Runtime" }));
+    expect(screen.getByText("Task tokens")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Git" }));
+    expect(screen.getByText("Git & Worktree")).toBeDefined();
+  });
+
   it("defaults to activity tab when implementation log is empty but agent activity exists", () => {
     render(<TaskDetail taskId="detail-planning-activity" onClose={vi.fn()} />, {
       wrapper: Wrapper,
@@ -341,6 +454,30 @@ describe("TaskDetail", () => {
 
     expect(screen.getByText(/Auto-review stopped and human review is required/i)).toBeDefined();
     expect(screen.getByText("MANUAL REVIEW")).toBeDefined();
+  });
+
+  it("should show blocker history without raw secret-like values", () => {
+    render(<TaskDetail taskId="detail-manual-review" onClose={vi.fn()} />, {
+      wrapper: Wrapper,
+    });
+    const renderedText = document.body.textContent ?? "";
+
+    expect(screen.getByText("Blocker History")).toBeDefined();
+    expect(screen.getAllByText("sec-1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("still_blocking").length).toBeGreaterThan(0);
+    expect(renderedText).toContain("[REDACTED]");
+    expect(renderedText).not.toContain("secret-value");
+    expect(renderedText).not.toContain("oauth-token");
+  });
+
+  it("should show plan quality manual review guidance for exhausted plan blockers", () => {
+    render(<TaskDetail taskId="detail-plan-quality-manual-review" onClose={vi.fn()} />, {
+      wrapper: Wrapper,
+    });
+
+    expect(screen.getByText(/Plan quality retries are exhausted/i)).toBeDefined();
+    expect(screen.getByText("PLAN QUALITY")).toBeDefined();
+    expect(screen.getByText(/missing_plan_manifest/)).toBeDefined();
   });
 
   it("confirms approve_done without commit closes the modal immediately", () => {

@@ -14,16 +14,21 @@ export interface BroadcastOptions {
  */
 export async function broadcastTaskChange(
   taskId: string,
-  type: "task:moved" | "task:updated" = "task:updated",
+  type: "task:created" | "task:moved" | "task:updated" = "task:updated",
   options: BroadcastOptions = {},
 ): Promise<void> {
-  const baseUrl = getEnv().API_BASE_URL;
+  const env = getEnv() as ReturnType<typeof getEnv> & { INTERNAL_BROADCAST_TOKEN?: string };
+  const baseUrl = env.API_BASE_URL;
   const url = `${baseUrl}/tasks/${taskId}/broadcast`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (env.INTERNAL_BROADCAST_TOKEN) {
+    headers.Authorization = `Bearer ${env.INTERNAL_BROADCAST_TOKEN}`;
+  }
 
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ type }),
     });
 

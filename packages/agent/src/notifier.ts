@@ -2,7 +2,15 @@ import { logger, getEnv, sendTelegramNotification } from "@aif/shared";
 
 const log = logger("agent-notifier");
 
-type BroadcastType = "task:updated" | "task:moved" | "task:activity" | "task:scheduled_fired";
+type BroadcastType =
+  | "task:updated"
+  | "task:moved"
+  | "task:activity"
+  | "task:scheduled_fired"
+  | "task:timeline_updated"
+  | "task:evidence_recorded"
+  | "task:trust_updated"
+  | "task:manual_handoff_required";
 
 export interface TaskNotificationInfo {
   title?: string;
@@ -10,7 +18,10 @@ export interface TaskNotificationInfo {
   toStatus?: string;
 }
 
-type ProjectBroadcastType = "project:auto_queue_mode_changed" | "project:auto_queue_advanced";
+type ProjectBroadcastType =
+  | "project:auto_queue_mode_changed"
+  | "project:auto_queue_advanced"
+  | "project:queue_updated";
 type RuntimeLimitBroadcastType = "project:runtime_limit_updated";
 
 function internalBroadcastHeaders(): Record<string, string> {

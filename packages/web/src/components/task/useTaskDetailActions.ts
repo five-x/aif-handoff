@@ -17,14 +17,28 @@ import {
 
 export type PlanChangeMode = "replanning" | "fast_fix" | "request_changes";
 
-const TEXT_FILE_MAX_SIZE = 200_000;
-const IMAGE_FILE_MAX_SIZE = 1_000_000;
-const BASE64_CONTENT_MAX_SIZE = 2_000_000;
+const TEXT_FILE_MAX_SIZE = 10_000_000;
+const BINARY_FILE_MAX_SIZE = 10_000_000;
+const BASE64_CONTENT_MAX_SIZE = Math.ceil((10_000_000 * 4) / 3) + 256;
 export const MAX_TASK_ATTACHMENTS = 100;
 export const TASK_ATTACHMENT_WARN_AT = 50;
 // Mirrors taskAttachmentSchema.size.max() in packages/api/src/schemas.ts.
-export const ATTACHMENT_SIZE_HARD_LIMIT = 100_000_000;
+export const ATTACHMENT_SIZE_HARD_LIMIT = 10_000_000;
 const COMMENT_TIMEOUT_MS = 30_000;
+
+function inferAllowedMimeType(file: File, isTextLike: boolean): string {
+  const raw = file.type.toLowerCase();
+  if (raw === "application/json" || raw === "text/csv" || raw === "text/markdown") return raw;
+  if (raw === "application/pdf") return raw;
+  if (["image/png", "image/jpeg", "image/gif", "image/webp"].includes(raw)) return raw;
+  if (isTextLike) {
+    if (/\.(md|markdown)$/i.test(file.name)) return "text/markdown";
+    if (/\.csv$/i.test(file.name)) return "text/csv";
+    if (/\.json$/i.test(file.name)) return "application/json";
+    return "text/plain";
+  }
+  return raw || "application/octet-stream";
+}
 
 export function partitionBySize(files: File[]): { accepted: File[]; rejected: File[] } {
   const accepted: File[] = [];
@@ -42,22 +56,22 @@ export async function toAttachmentPayload(file: File): Promise<TaskCommentAttach
     /\.(md|markdown|txt|json|ya?ml|toml|ini|env|ts|tsx|js|jsx|mjs|cjs|py|go|java|kt|rb|php|css|scss|html|xml|csv|sql|sh)$/i.test(
       file.name,
     );
-  const isImage = file.type.startsWith("image/");
+  const mimeType = inferAllowedMimeType(file, isTextLike);
+  const isAllowedBinary =
+    mimeType === "application/pdf" ||
+    ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mimeType);
   const canReadContent = isTextLike && file.size <= TEXT_FILE_MAX_SIZE;
   const rawContent = canReadContent ? await file.text() : null;
-  let content: string | null = rawContent ? rawContent.slice(0, TEXT_FILE_MAX_SIZE) : null;
+  let content: string | null = rawContent;
 
-  if (!content && isImage && file.size <= IMAGE_FILE_MAX_SIZE) {
+  if (!content && isAllowedBinary && file.size <= BINARY_FILE_MAX_SIZE) {
     const base64 = encodeBase64(new Uint8Array(await file.arrayBuffer()));
-    content = `data:${file.type || "application/octet-stream"};base64,${base64}`.slice(
-      0,
-      BASE64_CONTENT_MAX_SIZE,
-    );
+    content = `data:${mimeType};base64,${base64}`.slice(0, BASE64_CONTENT_MAX_SIZE);
   }
 
   return {
     name: file.name,
-    mimeType: file.type || "application/octet-stream",
+    mimeType,
     size: file.size,
     content,
   };

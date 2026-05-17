@@ -3,6 +3,7 @@ import { getCanonicalPlanPath } from "@aif/shared";
 import {
   createTask,
   createTaskComment,
+  deleteTaskComment,
   updateTaskComment,
   deleteTask,
   findProjectByTaskId,
@@ -130,4 +131,8 @@ export function updateComment(
   patch: { attachments?: unknown[] },
 ): CommentRow | undefined {
   return updateTaskComment(commentId, patch);
+}
+
+export function deleteComment(commentId: string): void {
+  deleteTaskComment(commentId);
 }

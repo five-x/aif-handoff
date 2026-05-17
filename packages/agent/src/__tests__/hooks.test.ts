@@ -13,6 +13,7 @@ import {
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
+const originalFetch = global.fetch;
 
 vi.mock("@aif/shared/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@aif/shared/server")>();
@@ -186,10 +187,12 @@ describe("hooks - activity logging", () => {
     testDb.current = createTestDb();
     insertTestTask();
     vi.clearAllMocks();
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 }) as any;
   });
 
   afterEach(() => {
     disposeActivityQueue(TASK_ID);
+    global.fetch = originalFetch;
   });
 
   describe("sync mode", () => {
@@ -332,6 +335,7 @@ describe("hooks - activity logging", () => {
   describe("audit evidence logger", () => {
     beforeEach(() => {
       mockedGetEnv.mockReturnValue(makeEnv({ ACTIVITY_LOG_MODE: "sync" }));
+      global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 }) as any;
     });
 
     it("persists bounded redacted evidence for read tool responses", async () => {
@@ -365,6 +369,12 @@ describe("hooks - activity logging", () => {
       expect(JSON.stringify(events[0])).not.toContain("sk-SECRETSECRETSECRETSECRET");
       expect(getTaskLog()).toContain(`AuditEvidence ${events[0]?.id}`);
       expect(getTaskLog()).not.toContain("sk-SECRETSECRETSECRETSECRET");
+      expect(global.fetch).toHaveBeenCalledWith(
+        "http://localhost:3009/tasks/test-task-1/broadcast",
+        expect.objectContaining({
+          body: JSON.stringify({ type: "task:evidence_recorded" }),
+        }),
+      );
     });
 
     it("allows a report manifest to cite the actual persisted runtime evidence id", async () => {

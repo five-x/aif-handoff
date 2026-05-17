@@ -46,11 +46,31 @@ Task mode fallback order:
 
 Planning and review use the same chain, but `default_plan_runtime_profile_id` / `default_review_runtime_profile_id` fall back to the task default at the same scope when unset. Chat uses `default_chat_runtime_profile_id` for the project/app steps.
 
+Canonical runtime stages are accepted by the data layer and mapped onto compatibility slots:
+
+| Stage                               | Compatibility slot |
+| ----------------------------------- | ------------------ |
+| `planner`, `plan_checker`           | `plan`             |
+| `implementer`, `audit`, `synthesis` | `task`             |
+| `reviewer`, `security`              | `review`           |
+| `chat`                              | `chat`             |
+
+Warmup persistence uses the canonical runtime stage, not just the compatibility
+slot. `runtime_warmup_sessions.stage` keeps planner, implementer, reviewer,
+security, audit, and synthesis seeds separate even when several stages resolve
+to the same profile/runtime/model tuple.
+
 Scope rules:
 
 - app defaults may point only to enabled global profiles (`runtime_profiles.project_id = null`)
 - project defaults and task/chat overrides may point to either a same-project profile or a global profile
 - project-owned profiles from another project are rejected at the API layer
+
+Usage events are append-only. Successful provider usage records `outcome=success`. Completed calls with no provider usage record `outcome=missing_usage` with zero tokens/cost. Adapter failures record `outcome=failed` with zero tokens/cost and an optional `error_category`. Zero-usage outcome rows do not change aggregate token or cost math.
+
+Project stage budgets use the existing fields only: planner, plan checker, implementer, and review sidecar. Stages warn at 80% and block at 100%. Reviewer/security share review sidecar budget; audit/synthesis share implementer budget in this compatibility slice. A block can be manually overridden only with `task.runtimeOptions.runtimeBudgetOverride.justification` set to a non-empty string. Monthly, task-wide, and chat budget schemas/UI are not implemented here.
+
+Runtime-limit blocking remains explicit: `blocked_external` tasks with `retryAfter` are parked until the watchdog release cycle reaches that timestamp, then the original status is restored and the stored task limit snapshot is cleared before normal processing resumes.
 
 The API exposes effective selection endpoints:
 
@@ -346,6 +366,8 @@ and provision `OPENAI_API_KEY` via `.env` instead.
 
 When `AGENT_BYPASS_PERMISSIONS=1` is set in the environment, the runtime layer flips `execution.bypassPermissions=true`. This is intended for trusted, externally sandboxed environments (Docker containers) where the agent should run unattended.
 
+Runtime calls also carry `execution.permissionPolicy`, a provider-neutral policy derived from task intent. The policy names the default mode (`workspace_write`, `read_only`, `review_only`, `audit_diagnostic_only`, or `danger_full_access`), file boundary, shell/network rules, and bypass audit requirements. Adapters should treat dangerous shell commands as requiring human approval and must fail closed when no approval bridge exists.
+
 Each adapter translates this to its native "trust me, just run" mechanism:
 
 | Runtime / transport | Bypass translation                                                                                          |
@@ -374,6 +396,8 @@ The Codex CLI uses `--config` (`-c`) overrides instead of the single `--dangerou
 ```
 
 With the example above, even when `AGENT_BYPASS_PERMISSIONS=1` is set, the agent runs with `approval_policy=never` (from the explicit option, which happens to coincide with the bypass default) and `sandbox_mode=workspace-write` (overrides the `danger-full-access` bypass default). You can mix and match — only the axis you set gets overridden.
+
+When bypass is active for a task-scoped run, the coordinator records `[permission-policy:bypass]` in the task activity log with the selected intent and default mode. If the selected intent disallows bypass, such as `audit`, the runtime clears native provider bypass and records `[permission-policy:bypass-blocked]`.
 
 ### OpenRouter (API)
 

@@ -41,9 +41,11 @@ function makeTask(overrides: Partial<Task>): Task {
     scheduledAt: null,
     branchName: null,
     worktreePath: null,
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
+    lockStage: overrides.lockStage ?? null,
+    coordinatorId: overrides.coordinatorId ?? null,
+    createdAt: overrides.createdAt ?? "2026-01-01T00:00:00.000Z",
+    updatedAt: overrides.updatedAt ?? "2026-01-01T00:00:00.000Z",
   };
 }
 

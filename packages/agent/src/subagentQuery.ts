@@ -5,6 +5,7 @@ import {
   findActiveReadyRuntimeWarmupSession,
   findTaskById,
   getAppDefaultRuntimeProfileId,
+  getRuntimeProfileResponseById,
   getTaskSessionId,
   persistRuntimeProfileLimitSnapshot,
   renewTaskClaim,
@@ -47,10 +48,17 @@ import {
 } from "@aif/runtime";
 import {
   AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
+  decidePolicyBypass,
   getEnv,
+  getPermissionExecutionPolicy,
+  isPermissionPolicyIntent,
   isWarmupWorkflowKind,
   logger,
+  normalizeRuntimeStage,
   redactProviderTextForLogs,
+  type EffectiveRuntimeProfileSource,
+  type RuntimeStage,
+  type RuntimeStageOrProfileMode,
 } from "@aif/shared";
 import { createAuditEvidenceLogger, logActivity, persistAuditEvidencePayload } from "./hooks.js";
 import { PROJECT_SCOPE_SYSTEM_APPEND, REVIEW_DIFF_SCOPE_SYSTEM_APPEND } from "./constants.js";
@@ -348,6 +356,53 @@ function createFirstActivityWatchdog(
 
 let runtimeRegistryPromise: Promise<RuntimeRegistry> | null = null;
 
+const runtimeStageFallbackProfiles = new Map<
+  string,
+  {
+    profileId: string;
+    source: EffectiveRuntimeProfileSource;
+    createdAtMs: number;
+  }
+>();
+
+const RUNTIME_STAGE_FALLBACK_TTL_MS = 5 * 60 * 1000;
+
+function runtimeStageFallbackKey(taskId: string, stage: RuntimeStage): string {
+  return `${taskId}:${stage}`;
+}
+
+export function setRuntimeStageFallbackProfile(input: {
+  taskId: string;
+  stage: RuntimeStage;
+  profileId: string | null;
+  source?: EffectiveRuntimeProfileSource;
+}): void {
+  const key = runtimeStageFallbackKey(input.taskId, input.stage);
+  if (!input.profileId) {
+    runtimeStageFallbackProfiles.delete(key);
+    return;
+  }
+  runtimeStageFallbackProfiles.set(key, {
+    profileId: input.profileId,
+    source: input.source ?? "system_default",
+    createdAtMs: Date.now(),
+  });
+}
+
+function getRuntimeStageFallbackProfile(
+  taskId: string,
+  stage: RuntimeStage,
+): { profileId: string; source: EffectiveRuntimeProfileSource } | null {
+  const key = runtimeStageFallbackKey(taskId, stage);
+  const fallback = runtimeStageFallbackProfiles.get(key);
+  if (!fallback) return null;
+  if (Date.now() - fallback.createdAtMs > RUNTIME_STAGE_FALLBACK_TTL_MS) {
+    runtimeStageFallbackProfiles.delete(key);
+    return null;
+  }
+  return { profileId: fallback.profileId, source: fallback.source };
+}
+
 export interface SubagentQueryOptions {
   taskId: string;
   projectRoot: string;
@@ -359,7 +414,7 @@ export interface SubagentQueryOptions {
   /** Optional slash command fallback used when agent definitions are unavailable. */
   fallbackSlashCommand?: string;
   /** Runtime profile resolution mode — determines which project default is used. */
-  profileMode?: "task" | "plan" | "review";
+  profileMode?: RuntimeStageOrProfileMode;
   /** Whether to skip code review stage (implementing → done instead of implementing → review). */
   skipReview?: boolean;
   /** Optional override for tests/tuning: timeout waiting for first message from query stream. */
@@ -454,6 +509,7 @@ async function getRuntimeRegistry(): Promise<RuntimeRegistry> {
     runtimeModules: getEnv().AIF_RUNTIME_MODULES,
     usageSink: createDbUsageSink({
       onRecorded: (event) => {
+        if (event.outcome && event.outcome !== "success") return;
         notifyRuntimeUsageRefresh({
           projectId: event.context.projectId ?? null,
           runtimeProfileId: event.profileId ?? null,
@@ -477,7 +533,7 @@ async function getRuntimeRegistry(): Promise<RuntimeRegistry> {
  */
 export async function resolveAdapterForTask(
   taskId: string,
-  mode: "task" | "plan" | "review" = "task",
+  mode: RuntimeStageOrProfileMode = "task",
 ): Promise<RuntimeAdapter> {
   const task = findTaskById(taskId);
   const systemDefaultRuntimeProfileId = getAppDefaultRuntimeProfileId(mode);
@@ -497,6 +553,21 @@ export async function resolveAdapterForTask(
   return registry.resolveRuntime(resolved.runtimeId);
 }
 
+function runtimeStageForWorkflow(
+  workflowKind: string,
+  profileMode: RuntimeStageOrProfileMode,
+): RuntimeStage {
+  if (workflowKind === "planner") return "planner";
+  if (workflowKind === "plan-checker") return "plan_checker";
+  if (workflowKind === "implementer") return "implementer";
+  if (workflowKind === "reviewer") return "reviewer";
+  if (workflowKind === "review-security" || workflowKind === "security_review") return "security";
+  if (workflowKind === "audit") return "audit";
+  if (workflowKind === "synthesis") return "synthesis";
+  if (workflowKind === "chat") return "chat";
+  return normalizeRuntimeStage(profileMode);
+}
+
 function buildWorkflowSpec(options: SubagentQueryOptions): RuntimeWorkflowSpec {
   if (options.workflowSpec) return options.workflowSpec;
 
@@ -513,6 +584,7 @@ function buildWorkflowSpec(options: SubagentQueryOptions): RuntimeWorkflowSpec {
 
 async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
   workflow: RuntimeWorkflowSpec;
+  runtimeStage: RuntimeStage;
   runtimeId: string;
   providerId: string;
   profileId: string | null;
@@ -529,15 +601,42 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
 }> {
   const task = findTaskById(options.taskId);
   const profileMode = options.profileMode ?? "task";
-  const systemDefaultRuntimeProfileId = getAppDefaultRuntimeProfileId(profileMode);
-  const effective = resolveEffectiveRuntimeProfile({
+  const workflow = buildWorkflowSpec(options);
+  const runtimeStage = runtimeStageForWorkflow(workflow.workflowKind, profileMode);
+  const systemDefaultRuntimeProfileId = getAppDefaultRuntimeProfileId(runtimeStage);
+  let effective = resolveEffectiveRuntimeProfile({
     taskId: options.taskId,
     projectId: task?.projectId,
-    mode: profileMode,
+    mode: runtimeStage,
     systemDefaultRuntimeProfileId,
   });
-  const workflow = buildWorkflowSpec(options);
   const runtimeOptionsOverride = parseRuntimeOptions(task?.runtimeOptionsJson);
+  const fallbackProfile = getRuntimeStageFallbackProfile(options.taskId, runtimeStage);
+  if (fallbackProfile && fallbackProfile.profileId !== effective.profile?.id) {
+    const profile = getRuntimeProfileResponseById(fallbackProfile.profileId);
+    if (profile?.enabled) {
+      effective = {
+        ...effective,
+        source: fallbackProfile.source,
+        profile,
+      };
+      log.info(
+        {
+          taskId: options.taskId,
+          runtimeStage,
+          runtimeProfileId: fallbackProfile.profileId,
+          source: fallbackProfile.source,
+        },
+        "Applied coordinator-selected runtime gate fallback profile",
+      );
+    } else {
+      setRuntimeStageFallbackProfile({
+        taskId: options.taskId,
+        stage: runtimeStage,
+        profileId: null,
+      });
+    }
+  }
   const suppressModelFallback = options.suppressModelFallback === true;
   const modelOverride =
     options.modelOverride ?? (suppressModelFallback ? null : (task?.modelOverride ?? null));
@@ -615,7 +714,7 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
   // the current task's diff, not the full codebase. Inject the scope rule here
   // so every review-mode query gets it regardless of the agent definition file.
   const effectiveSystemPromptAppend =
-    (options.profileMode ?? "task") === "review"
+    effective.profileMode === "review"
       ? `${promptPolicy.systemPromptAppend}\n\n${REVIEW_DIFF_SCOPE_SYSTEM_APPEND}`.trim()
       : promptPolicy.systemPromptAppend;
 
@@ -648,6 +747,7 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
 
   return {
     workflow,
+    runtimeStage,
     runtimeId: resolved.runtimeId,
     providerId: resolved.providerId,
     profileId: resolved.profileId,
@@ -676,10 +776,40 @@ function buildExecutionIntent(
   stderr: (chunk: string) => void,
 ): import("@aif/runtime").RuntimeExecutionIntent {
   const env = getEnv();
-  const bypassPermissions = env.AGENT_BYPASS_PERMISSIONS;
+  const bypassRequested = env.AGENT_BYPASS_PERMISSIONS;
   const explicitAbort =
     options.abortController ?? getActiveStageAbortController(options.taskId) ?? undefined;
   const task = findTaskById(options.taskId);
+  const permissionIntent = isPermissionPolicyIntent(task?.taskIntent) ? task.taskIntent : "general";
+  const permissionPolicy = getPermissionExecutionPolicy(permissionIntent);
+  const bypassDecision = bypassRequested
+    ? decidePolicyBypass({
+        intent: permissionIntent,
+        requestedMode: "danger_full_access",
+        humanApprovalBridgeAvailable: true,
+        humanApproved: true,
+        reason: `AGENT_BYPASS_PERMISSIONS for ${permissionIntent}`,
+      })
+    : null;
+  const bypassPermissions = bypassRequested && bypassDecision?.allowed === true;
+  if (bypassPermissions && !task?.agentActivityLog?.includes("[permission-policy:bypass]")) {
+    logActivity(
+      options.taskId,
+      "Agent",
+      `[permission-policy:bypass] intent=${permissionIntent} defaultMode=${permissionPolicy.defaultMode}`,
+    );
+  }
+  if (
+    bypassRequested &&
+    !bypassPermissions &&
+    !task?.agentActivityLog?.includes("[permission-policy:bypass")
+  ) {
+    logActivity(
+      options.taskId,
+      "Agent",
+      `[permission-policy:bypass-blocked] intent=${permissionIntent} defaultMode=${permissionPolicy.defaultMode} reason=${bypassDecision?.reasons.join(" ") ?? "not allowed"}`,
+    );
+  }
   const branchEnvironment: Record<string, string> = task?.branchName
     ? {
         HANDOFF_BRANCH_PREPARED: "1",
@@ -697,6 +827,7 @@ function buildExecutionIntent(
     agentDefinitionName,
     systemPromptAppend,
     bypassPermissions,
+    permissionPolicy,
     environment: {
       HANDOFF_MODE: "1",
       HANDOFF_TASK_ID: options.taskId,
@@ -792,6 +923,7 @@ export async function executeSubagentQuery(
           workflowKind: context.workflow.workflowKind,
           runtimeId: context.runtimeId,
           runtimeProfileId: context.profileId,
+          runtimeStage: context.runtimeStage,
           transport: context.transport,
           model: context.model,
           skipReason,
@@ -841,6 +973,7 @@ export async function executeSubagentQuery(
                 providerId: context.providerId,
                 transport: context.transport,
                 model: context.model,
+                stage: context.runtimeStage,
               });
         if (!warmup?.sourceSessionId) {
           logWarmupSkip(expiredCount > 0 ? "expired" : "runtime_mismatch");
@@ -853,6 +986,7 @@ export async function executeSubagentQuery(
               warmupId,
               runtimeId: context.runtimeId,
               runtimeProfileId: context.profileId,
+              runtimeStage: context.runtimeStage,
               sourceSessionIdSuffix: sessionIdSuffix(warmupSourceSessionId),
             },
             "Warmup fork selected",

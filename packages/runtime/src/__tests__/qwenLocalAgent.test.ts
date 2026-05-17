@@ -821,6 +821,16 @@ describe("qwen-local-agent adapter", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("unsupported shell command");
   });
+  it("blocks dangerous shell commands through the shared permission policy", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-policy-deny-"));
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      { command: "curl", args: ["https://example.test"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("Network transfer shell commands require human approval");
+  });
   it("does not advertise or execute dir as a shell command", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-dir-deny-"));
     const result = await executeQwenLocalTool(

@@ -75,6 +75,7 @@ const mockBroadcast = vi.fn();
 const mockFindProjectById = vi.fn();
 const mockFindRuntimeProfileById = vi.fn();
 const mockFindTaskById = vi.fn();
+const mockAppendTaskActivityLog = vi.fn();
 const mockGetAppDefaultRuntimeProfileId = vi.fn();
 const mockResolveEffectiveRuntimeProfile = vi.fn();
 const mockToRuntimeProfileResponse = vi.fn((row: unknown) => row);
@@ -106,6 +107,7 @@ vi.mock("@aif/runtime", async (importOriginal) => {
 });
 
 vi.mock("@aif/data", () => ({
+  appendTaskActivityLog: (...args: unknown[]) => mockAppendTaskActivityLog(...args),
   clearRuntimeProfileLimitSnapshot: mockClearRuntimeProfileLimitSnapshot,
   findProjectById: mockFindProjectById,
   findRuntimeProfileById: mockFindRuntimeProfileById,
@@ -203,6 +205,7 @@ describe("runtime service", () => {
 
     mockFindProjectById.mockReturnValue({ id: "proj-1", rootPath: "/tmp/project" });
     mockFindTaskById.mockReturnValue(null);
+    mockAppendTaskActivityLog.mockReset();
     mockGetAppDefaultRuntimeProfileId.mockReturnValue(null);
     mockResolveEffectiveRuntimeProfile.mockReturnValue({
       source: "project_default",
@@ -380,11 +383,12 @@ describe("runtime service", () => {
     const support = await runtimeService.resolveApiWarmupSupport("proj-1");
 
     expect(support.supported).toBe(true);
-    expect(mockGetAppDefaultRuntimeProfileId).toHaveBeenCalledWith("plan");
+    expect(support.stage).toBe("planner");
+    expect(mockGetAppDefaultRuntimeProfileId).toHaveBeenCalledWith("planner");
     expect(mockResolveEffectiveRuntimeProfile).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "proj-1",
-        mode: "plan",
+        mode: "planner",
         systemDefaultRuntimeProfileId: "app-plan-default",
       }),
     );
@@ -574,6 +578,10 @@ describe("runtime service", () => {
           includePartialMessages: true,
           maxTurns: 4,
           bypassPermissions: false,
+          permissionPolicy: expect.objectContaining({
+            intent: "general",
+            defaultMode: "workspace_write",
+          }),
           environment: {
             HANDOFF_MODE: "1",
             HANDOFF_TASK_ID: "task-77",
@@ -646,6 +654,39 @@ describe("runtime service", () => {
             HANDOFF_BRANCH_PREPARED: "1",
             HANDOFF_BRANCH_NAME: "feature/task-branch",
           },
+        }),
+      }),
+    );
+  });
+
+  it("selects permission policy from task intent for one-shot runtime runs", async () => {
+    const runtimeService = await loadRuntimeService();
+    const adapter = createAdapter();
+    mockRegistryResolveRuntime.mockReturnValue(adapter);
+    mockFindTaskById.mockReturnValue({
+      id: "task-audit",
+      projectId: "proj-1",
+      taskIntent: "audit",
+      branchName: null,
+      agentActivityLog: null,
+    });
+
+    await runtimeService.runApiRuntimeOneShot({
+      projectId: "proj-1",
+      projectRoot: "/tmp/project",
+      taskId: "task-audit",
+      prompt: "audit",
+      workflowKind: "oneshot",
+      usageContext: { source: "test" },
+    });
+
+    expect(adapter.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          permissionPolicy: expect.objectContaining({
+            intent: "audit",
+            defaultMode: "audit_diagnostic_only",
+          }),
         }),
       }),
     );
@@ -758,6 +799,90 @@ describe("runtime service", () => {
           }),
         }),
       }),
+    );
+  });
+
+  it("records task activity when task-scoped one-shot runs use bypass mode", async () => {
+    const runtimeService = await loadRuntimeService();
+    const adapter = createAdapter();
+    mockRegistryResolveRuntime.mockReturnValue(adapter);
+    mockGetEnv.mockReturnValue({
+      AGENT_BYPASS_PERMISSIONS: true,
+      AIF_RUNTIME_MODULES: [],
+      AIF_DEFAULT_RUNTIME_ID: "claude",
+      AIF_DEFAULT_PROVIDER_ID: "anthropic",
+      AIF_USAGE_LIMITS_ENABLED: true,
+      API_RUNTIME_START_TIMEOUT_MS: 90_000,
+      API_RUNTIME_RUN_TIMEOUT_MS: 240_000,
+    });
+    mockFindTaskById.mockReturnValue({
+      id: "task-docs",
+      projectId: "proj-1",
+      taskIntent: "docs",
+      branchName: null,
+      agentActivityLog: null,
+    });
+
+    await runtimeService.runApiRuntimeOneShot({
+      projectId: "proj-1",
+      projectRoot: "/tmp/project",
+      taskId: "task-docs",
+      prompt: "do docs work",
+      workflowKind: "oneshot",
+      usageContext: { source: "test" },
+    });
+
+    expect(mockAppendTaskActivityLog).toHaveBeenCalledWith(
+      "task-docs",
+      expect.stringContaining("[permission-policy:bypass] intent=docs defaultMode=workspace_write"),
+    );
+  });
+
+  it("clears native bypass and records blocked activity when audit intent disallows bypass", async () => {
+    const runtimeService = await loadRuntimeService();
+    const adapter = createAdapter();
+    mockRegistryResolveRuntime.mockReturnValue(adapter);
+    mockGetEnv.mockReturnValue({
+      AGENT_BYPASS_PERMISSIONS: true,
+      AIF_RUNTIME_MODULES: [],
+      AIF_DEFAULT_RUNTIME_ID: "claude",
+      AIF_DEFAULT_PROVIDER_ID: "anthropic",
+      AIF_USAGE_LIMITS_ENABLED: true,
+      API_RUNTIME_START_TIMEOUT_MS: 90_000,
+      API_RUNTIME_RUN_TIMEOUT_MS: 240_000,
+    });
+    mockFindTaskById.mockReturnValue({
+      id: "task-audit",
+      projectId: "proj-1",
+      taskIntent: "audit",
+      branchName: null,
+      agentActivityLog: null,
+    });
+
+    await runtimeService.runApiRuntimeOneShot({
+      projectId: "proj-1",
+      projectRoot: "/tmp/project",
+      taskId: "task-audit",
+      prompt: "audit",
+      workflowKind: "oneshot",
+      usageContext: { source: "test" },
+    });
+
+    expect(adapter.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          bypassPermissions: false,
+          permissionPolicy: expect.objectContaining({ intent: "audit" }),
+          hooks: expect.objectContaining({
+            permissionMode: "acceptEdits",
+            allowDangerouslySkipPermissions: false,
+          }),
+        }),
+      }),
+    );
+    expect(mockAppendTaskActivityLog).toHaveBeenCalledWith(
+      "task-audit",
+      expect.stringContaining("[permission-policy:bypass-blocked] intent=audit"),
     );
   });
 

@@ -24,6 +24,8 @@ const mockTask: Task = {
   autoReviewState: null,
   paused: false,
   lastHeartbeatAt: null,
+  lockStage: null,
+  coordinatorId: null,
   lastSyncedAt: null,
   sessionId: null,
   scheduledAt: null,
@@ -212,6 +214,24 @@ describe("TaskCard", () => {
     ).toBeDefined();
     expect(screen.getByText(/Provider reset/)).toBeDefined();
     expect(screen.getByText(/Task retry .*scheduled/)).toBeDefined();
+  });
+
+  it("renders plan quality replan status and blocker reason for planning tasks", () => {
+    render(
+      <TaskCard
+        task={{
+          ...mockTask,
+          status: "planning",
+          blockedFromStatus: "plan_ready",
+          blockedReason:
+            "Plan quality guard replan 2/2: Plan quality guard (generic_plan): Plan is generic.",
+        }}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Plan Quality")).toBeDefined();
+    expect(screen.getByText(/generic_plan/)).toBeDefined();
   });
 
   describe("scheduled banner", () => {

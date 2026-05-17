@@ -56,6 +56,7 @@ function withManifest(input: {
   roadmapAlias?: string;
   artifactPath?: string;
   snapshot: Required<Pick<AuditReportSourceSnapshot, "id" | "commit" | "tree">>;
+  version?: number;
   outcome?: string;
   contentSha256?: string;
   omitTaskId?: boolean;
@@ -67,7 +68,7 @@ function withManifest(input: {
 }): string {
   const taskId = input.taskId ?? "task-audit";
   const manifest = {
-    version: 1,
+    version: input.version ?? 1,
     auditPlanId: input.batchId ? `batch:${input.batchId}:task:${taskId}` : `task:${taskId}`,
     ...(input.omitTaskId ? {} : { taskId }),
     ...(input.batchId && !input.omitBatchId ? { batchId: input.batchId } : {}),
@@ -1012,6 +1013,100 @@ describe("auditReportValidator", () => {
     expect(result.artifactSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(result.sourceSnapshot).toEqual(expect.objectContaining(snapshot));
     expect(result.sourceClassification).toBe("validated_no_findings");
+  });
+
+  it("accepts manifest v2 with the strict public outcome vocabulary", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({ body, taskId: "task-audit", snapshot, version: 2 }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot })],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.manifestStatus).toBe("valid");
+    expect(result.manifestVersion).toBe(2);
+    expect(result.manifest?.outcome).toBe("validated_no_findings");
+  });
+
+  it("rejects manifest v2 lower-level diagnostic outcomes", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      "- Command `git ls-files -- src/config.ts` output: `src/config.ts`",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        version: 2,
+        outcome: "inventory_only_invalid",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.manifest).toBeNull();
+    expect(result.manifestStatus).toBe("invalid");
+    expect(issueCodes(result)).toContain("invalid_report_manifest");
+  });
+
+  it("normalizes legacy manifest v1 lower-level diagnostic outcomes to source_inconclusive", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "No validated findings.",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "Checked commands:",
+      "- Command `git ls-files -- src/config.ts` output: `src/config.ts`",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "inventory_only_invalid",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.manifest?.outcome).toBe("source_inconclusive");
+    expect(issueCodes(result)).not.toContain("invalid_report_manifest");
+    expect(issueCodes(result)).not.toContain("manifest_outcome_mismatch");
+    expect(result.sourceClassification).toBe("inventory_only_invalid");
   });
 
   it("accepts manifest evidence refs backed by matching runtime ledger units", () => {

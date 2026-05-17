@@ -125,6 +125,11 @@ describe("tasks schema", () => {
         title: "Task with plan",
         plan: "## My Plan\n- Step 1",
         implementationLog: "Implemented X",
+        implementationManifestJson: JSON.stringify({
+          version: 1,
+          taskId: id,
+          intent: "feature",
+        }),
         reviewComments: "Looks good",
         agentActivityLog: "[2026-01-01] Tool: Read",
       })
@@ -133,6 +138,7 @@ describe("tasks schema", () => {
     const result = db.select().from(tasks).where(eq(tasks.id, id)).get();
     expect(result!.plan).toBe("## My Plan\n- Step 1");
     expect(result!.implementationLog).toBe("Implemented X");
+    expect(result!.implementationManifestJson).toContain('"intent":"feature"');
     expect(result!.reviewComments).toBe("Looks good");
     expect(result!.agentActivityLog).toBe("[2026-01-01] Tool: Read");
   });
@@ -150,6 +156,7 @@ describe("tasks schema", () => {
     expect(result!.taskIntent).toBe("general");
     expect(result!.plan).toBeNull();
     expect(result!.implementationLog).toBeNull();
+    expect(result!.implementationManifestJson).toBeNull();
     expect(result!.reviewComments).toBeNull();
     expect(result!.agentActivityLog).toBeNull();
     expect(result!.blockedReason).toBeNull();

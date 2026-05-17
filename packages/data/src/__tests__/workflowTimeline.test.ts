@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildEvidenceUnit,
   buildEvidenceUnitPayload,
+  hashAifPlanManifest,
   projects,
   tasks,
 } from "@aif/shared";
@@ -20,6 +21,7 @@ vi.mock("@aif/shared/server", async (importOriginal) => {
 const {
   appendEvidenceUnitEvent,
   buildTaskWorkflowTimeline,
+  createMemoryItem,
   createRoadmapBatchContract,
   updateRoadmapBatchArtifactState,
 } = await import("../index.js");
@@ -99,7 +101,7 @@ describe("workflow timeline read model", () => {
     );
     expect(timeline?.artifacts[0]).toEqual(
       expect.objectContaining({
-        kind: "audit.source_report",
+        kind: "audit_report",
         state: "accepted",
         path: "docs/audit/source.md",
       }),
@@ -137,7 +139,71 @@ describe("workflow timeline read model", () => {
     );
   });
 
-  it("returns an empty generic timeline for non-audit tasks", () => {
+  it("builds generic task-record timelines for non-audit tasks", () => {
+    const planManifest = {
+      version: 1,
+      taskId: "task-2",
+      intent: "feature",
+      scope: ["packages/data/src/index.ts"],
+      allowedChanges: ["source", "tests"],
+      forbiddenChanges: ["report"],
+      expectedArtifacts: [{ kind: "source_diff", paths: ["packages/data/src/index.ts"] }],
+      acceptanceCriteria: [
+        {
+          id: "AC1",
+          description: "Timeline surfaces generic artifacts.",
+          verification:
+            "npm.cmd test --workspace=@aif/data -- --run src/__tests__/workflowTimeline.test.ts",
+        },
+      ],
+      verificationCommands: [
+        "npm.cmd test --workspace=@aif/data -- --run src/__tests__/workflowTimeline.test.ts",
+      ],
+    };
+    const plan = [
+      "```aif-plan-manifest",
+      JSON.stringify(planManifest),
+      "```",
+      "",
+      "## Plan",
+      "- [x] Build generic timeline",
+    ].join("\n");
+    const implementationManifestJson = JSON.stringify({
+      version: 1,
+      taskId: "task-2",
+      intent: "feature",
+      planManifestHash: hashAifPlanManifest(plan),
+      changedFiles: [{ path: "packages/data/src/index.ts", status: "modified" }],
+      diffSummary: {
+        summary: "Changed packages/data/src/index.ts",
+        filesChanged: 1,
+      },
+      verificationEvidence: [
+        {
+          id: "verify-workflow-timeline",
+          command:
+            "npm.cmd test --workspace=@aif/data -- --run src/__tests__/workflowTimeline.test.ts",
+          status: "passed",
+          outputSha256: "a".repeat(64),
+          outputPreview: "tests passed",
+          outputPreviewTruncated: false,
+        },
+      ],
+      acceptanceCriteria: [
+        {
+          id: "AC1",
+          description: "Timeline surfaces generic artifacts.",
+          status: "satisfied",
+          evidenceRefs: ["verify-workflow-timeline"],
+        },
+      ],
+      evidenceRefs: ["verify-workflow-timeline"],
+      planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+      reviewClosure: { status: "passed", evidenceRefs: ["verify-workflow-timeline"] },
+      commitEvidence: { status: "not_committed", evidenceRefs: [] },
+      knownLimitations: [],
+    });
+
     testDb.current
       .insert(tasks)
       .values({
@@ -145,9 +211,26 @@ describe("workflow timeline read model", () => {
         projectId: "proj-1",
         title: "Feature task",
         taskIntent: "feature",
-        status: "backlog",
+        status: "verified",
+        branchName: "feature/task-2",
+        worktreePath: "/tmp/task-2",
+        plannerMode: "full",
+        plan,
+        implementationLog: "Changed packages/data/src/index.ts\nTests: npm test passed",
+        implementationManifestJson,
+        reviewComments: "Review passed. Security review found no additional issues.",
       })
       .run();
+    createMemoryItem({
+      projectId: "proj-1",
+      scope: "project",
+      sourceTaskId: "task-2",
+      sourceKind: "task",
+      sourceRef: "docs/memory/tasks/task-2.md",
+      title: "Timeline memory",
+      summary: "Generic timeline behavior was implemented.",
+      content: "Generic task timelines project deterministic task-record metadata.",
+    });
     appendEvidenceUnitEvent(
       buildEvidenceUnit(
         {
@@ -172,14 +255,107 @@ describe("workflow timeline read model", () => {
           taskId: "task-2",
           workflowPackId: "feature",
           workflowKind: "feature",
-          sourceKind: "none",
+          sourceKind: "task_record",
         }),
-        artifacts: [],
-        attempts: [],
-        claims: [],
-        evidence: [],
-        evidenceLinks: [],
-        events: [],
+      }),
+    );
+    expect(timeline?.artifacts.map((artifact) => artifact.kind)).toEqual(
+      expect.arrayContaining([
+        "plan",
+        "plan_manifest",
+        "implementation_manifest",
+        "source_diff",
+        "test_result",
+        "review_report",
+        "security_report",
+        "memory_candidate",
+        "commit_evidence",
+      ]),
+    );
+    const memoryArtifact = timeline?.artifacts.find((artifact) => artifact.kind === "memory_candidate");
+    expect(timeline?.claims.find((claim) => claim.artifactId === memoryArtifact?.id)).toEqual(
+      expect.objectContaining({ trustLevel: "weak", outcome: "not_evaluated" }),
+    );
+    const trustedArtifacts = timeline?.artifacts.filter((artifact) =>
+      timeline.claims.some(
+        (claim) => claim.artifactId === artifact.id && claim.trustLevel === "trusted",
+      ),
+    );
+    expect(trustedArtifacts?.length).toBeGreaterThan(0);
+    for (const artifact of trustedArtifacts ?? []) {
+      expect(timeline?.attempts.some((attempt) => attempt.artifactId === artifact.id)).toBe(true);
+    }
+    expect(timeline?.evidence.map((unit) => unit.id)).not.toContain("ev-feature");
+    expect(timeline?.events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining([
+        "artifact_created",
+        "attempt_recorded",
+        "claim_evaluated",
+        "evidence_recorded",
+      ]),
+    );
+  });
+
+  it("does not trust implementation logs as implementation manifests", () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-implementation-log-only",
+        projectId: "proj-1",
+        title: "Feature with legacy log only",
+        taskIntent: "feature",
+        status: "verified",
+        implementationLog: "Changed packages/data/src/index.ts\nTests: npm test passed",
+      })
+      .run();
+
+    const timeline = buildTaskWorkflowTimeline("task-implementation-log-only");
+    const manifestArtifact = timeline?.artifacts.find(
+      (artifact) => artifact.kind === "implementation_manifest",
+    );
+    const manifestClaim = timeline?.claims.find(
+      (claim) => claim.artifactId === manifestArtifact?.id,
+    );
+
+    expect(manifestArtifact).toEqual(
+      expect.objectContaining({
+        state: "missing",
+        metadata: expect.objectContaining({
+          reasonCodes: ["missing_implementation_manifest"],
+        }),
+      }),
+    );
+    expect(manifestClaim).toEqual(expect.objectContaining({ outcome: "refuted" }));
+    expect(timeline?.artifacts.map((artifact) => artifact.kind)).not.toContain("source_diff");
+    expect(timeline?.artifacts.map((artifact) => artifact.kind)).not.toContain("test_result");
+  });
+
+  it("links blocked generic task evidence to a blocker claim", () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-blocked",
+        projectId: "proj-1",
+        title: "Blocked task",
+        taskIntent: "feature",
+        status: "blocked_external",
+        blockedReason: "operator_input_required: provide API fixture",
+        manualReviewRequired: true,
+      })
+      .run();
+
+    const timeline = buildTaskWorkflowTimeline("task-blocked");
+    const blockerClaim = timeline?.claims.find((claim) => claim.outcome === "blocked");
+    const blockerEvidence = timeline?.evidence.find((unit) =>
+      unit.summary?.includes("operator_input_required"),
+    );
+
+    expect(blockerClaim).toBeDefined();
+    expect(blockerEvidence).toBeDefined();
+    expect(timeline?.evidenceLinks).toContainEqual(
+      expect.objectContaining({
+        evidenceId: blockerEvidence?.id,
+        claimId: blockerClaim?.id,
       }),
     );
   });
@@ -243,6 +419,9 @@ describe("workflow timeline read model", () => {
         claimId: timeline?.claims.find((claim) => claim.artifactId === timeline?.artifacts[0].id)
           ?.id,
       }),
+    );
+    expect(timeline?.artifacts.map((artifact) => artifact.kind)).toEqual(
+      expect.arrayContaining(["audit_report", "audit_synthesis"]),
     );
   });
 
@@ -363,6 +542,15 @@ describe("workflow timeline read model", () => {
           trustLevel: testCase.trustLevel,
         }),
       );
+      if (testCase.sourceState === "manual_exception") {
+        expect(timeline?.claims[0].metadata).toEqual(
+          expect.objectContaining({
+            validationDetails: expect.objectContaining({
+              justification: "Operator accepted the compatibility exception",
+            }),
+          }),
+        );
+      }
     }
   });
 

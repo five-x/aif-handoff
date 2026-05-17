@@ -1,4 +1,10 @@
-import { inferTaskIntent, isTaskIntent, type TaskIntent } from "./taskIntent.js";
+import {
+  getTaskIntentPolicy,
+  inferTaskIntent,
+  isTaskIntent,
+  type TaskIntent,
+} from "./taskIntent.js";
+import type { TaskIntentChangeCategory } from "./taskIntentContracts.js";
 import {
   classifyAuditDecompositionRequest,
   isAuditReportArtifactPath,
@@ -23,17 +29,36 @@ export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "missing_child_audit_report_decision",
   "missing_audit_decomposition",
   "audit_without_concrete_boundaries",
+  "missing_plan_manifest",
+  "invalid_plan_manifest",
+  "unsupported_plan_manifest_version",
+  "missing_plan_manifest_fields",
+  "plan_manifest_task_mismatch",
+  "plan_manifest_intent_mismatch",
+  "plan_manifest_missing_scope",
+  "plan_manifest_scope_mismatch",
+  "plan_manifest_missing_expected_artifacts",
+  "plan_manifest_expected_artifact_violation",
+  "plan_manifest_untestable_acceptance_criteria",
+  "plan_manifest_missing_verification_commands",
+  "plan_manifest_allowed_change_violation",
+  "plan_manifest_forbidden_change_violation",
 ] as const;
 
 export type TaskPlanQualityIssueCode = (typeof TASK_PLAN_QUALITY_ISSUE_CODES)[number];
 
 export interface TaskPlanQualityTask {
+  id?: string | null;
   title: string;
   description?: string | null;
   taskIntent?: TaskIntent | null;
   tags?: string[] | string | null;
   roadmapAlias?: string | null;
   planPath?: string | null;
+  plannerMode?: string | null;
+  createdAt?: string | null;
+  blockedFromStatus?: string | null;
+  blockedReason?: string | null;
   auditArtifactRole?: "report" | "synthesis" | null;
   roadmapBatchId?: string | null;
   sourceReportArtifacts?: TaskPlanQualitySourceReportArtifact[] | null;
@@ -56,11 +81,44 @@ export interface TaskPlanQualityResult {
   ok: boolean;
   issues: TaskPlanQualityIssue[];
   categories: TaskPlanQualityIssueCode[];
+  planManifest?: AifPlanManifestValidationSummary;
 }
 
 export interface TaskPlanQualityInput {
   task: TaskPlanQualityTask;
   plan: string | null | undefined;
+}
+
+export interface AifPlanManifestExpectedArtifact {
+  kind: string;
+  paths: string[];
+}
+
+export interface AifPlanManifestAcceptanceCriterion {
+  id: string;
+  description: string;
+  verification: string;
+}
+
+export interface AifPlanManifest {
+  version: 1;
+  taskId: string;
+  intent: TaskIntent;
+  scope: string[];
+  allowedChanges: string[];
+  forbiddenChanges: string[];
+  expectedArtifacts: AifPlanManifestExpectedArtifact[];
+  acceptanceCriteria: AifPlanManifestAcceptanceCriterion[];
+  verificationCommands: string[];
+}
+
+export interface AifPlanManifestValidationSummary {
+  required: boolean;
+  present: boolean;
+  status: "missing" | "invalid" | "valid" | "not_required";
+  taskId: string | null;
+  intent: TaskIntent | null;
+  issueCodes: TaskPlanQualityIssueCode[];
 }
 
 export interface DeterministicDiagnosticPlanInput {
@@ -70,6 +128,8 @@ export interface DeterministicDiagnosticPlanInput {
 
 const CHECKLIST_PATTERN = /^\s*[-*]\s+\[(?: |x|X)\]\s+\S/m;
 const CHECKLIST_ITEM_PATTERN = /^\s*[-*]\s+\[(?: |x|X)\]\s+(.+)$/gm;
+const PLAN_MANIFEST_BLOCK_PATTERN = /```aif-plan-manifest\b[^\r\n]*\r?\n([\s\S]*?)```/gi;
+export const PLAN_MANIFEST_REQUIRED_CREATED_AT = "2026-05-16T06:00:00.000Z";
 const THINKING_ARTIFACT_PATTERN = /<\/?think\b[^>]*>/i;
 const SLASH_FALLBACK_ECHO_PATTERN =
   /(^|\s)(?:\/|\$)aif-plan\b|<aif-plan\b|<\/aif-plan>|^\s*(?:docs|tests)\s*:\s*false\s*$/im;
@@ -103,6 +163,53 @@ const AUDIT_BOUNDARY_LINE_PATTERN =
 const REPORT_ARTIFACT_LINE_PATTERN = /^\s*report artifact\s*:\s*(.+)$/gim;
 const CONCRETE_SOURCE_ROOT_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:(?:packages|apps)\/[\w.@-]+(?:\/(?:src|test|tests|__tests__|config)(?:\/[\w.@-]+)*)?|(?:src|test|tests|__tests__|config|docs|scripts|lib|migrations|data)(?:\/[\w.@-]+)*))(?:[\s`'"),.;\]]|$)/gi;
+const PLAN_MANIFEST_PLACEHOLDER_PATTERN =
+  /^(?:n\/?a|none|no(?:ne)?|tbd|todo|placeholder|manual|not applicable|unknown|later)$/i;
+const PLAN_MANIFEST_WEAK_VERIFICATION_PATTERN =
+  /^(?:verify|check|review|inspect|test|validate|confirm)(?:\s+(?:manually|the\s+ui|output|results?|it|changes?|behavior|work|works|task|plan|implementation|report|docs?))*\.?$/i;
+const PLAN_MANIFEST_COMMAND_PATTERN =
+  /^(?:npm(?:\.cmd)?|pnpm|yarn|bun|node|npx|tsx|tsc|vitest|jest|playwright|eslint|prettier|turbo|git|python|py|pytest|ruff|go|cargo|dotnet|mvn|gradle|docker|docker-compose|make|cmake|bash|sh|powershell|pwsh|curl|rg)\b|^[\w./\\-]+(?:\.cmd|\.ps1|\.sh|\.py|\.js|\.ts|\.mjs|\.cjs)\b/i;
+const TASK_INTENT_CHANGE_CATEGORIES: readonly TaskIntentChangeCategory[] = [
+  "source",
+  "tests",
+  "docs",
+  "config",
+  "report",
+  "research",
+  "fixtures",
+  "metadata",
+];
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isUsefulManifestString(value: unknown): value is string {
+  return isNonEmptyString(value) && !PLAN_MANIFEST_PLACEHOLDER_PATTERN.test(value.trim());
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isUsefulStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every(isUsefulManifestString);
+}
+
+function isConcreteVerificationCommand(value: unknown): value is string {
+  if (!isUsefulManifestString(value)) return false;
+  const text = value.trim();
+  if (PLAN_MANIFEST_WEAK_VERIFICATION_PATTERN.test(text)) return false;
+  return PLAN_MANIFEST_COMMAND_PATTERN.test(text);
+}
+
+function isConcreteVerificationCommandArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every(isConcreteVerificationCommand);
+}
 
 function parseTags(tags: TaskPlanQualityTask["tags"]): string[] {
   if (Array.isArray(tags)) return tags.filter((tag) => typeof tag === "string");
@@ -119,6 +226,426 @@ function parseTags(tags: TaskPlanQualityTask["tags"]): string[] {
       .filter(Boolean);
   }
   return [];
+}
+
+function isPlanQualityFeedbackReplan(task: TaskPlanQualityTask): boolean {
+  return (
+    task.blockedFromStatus === "plan_ready" &&
+    typeof task.blockedReason === "string" &&
+    task.blockedReason.startsWith("Plan quality guard")
+  );
+}
+
+function isAtOrAfterPlanManifestRollout(createdAt: string | null | undefined): boolean {
+  if (!createdAt) return true;
+  const createdTime = Date.parse(createdAt);
+  const cutoffTime = Date.parse(PLAN_MANIFEST_REQUIRED_CREATED_AT);
+  if (!Number.isFinite(createdTime) || !Number.isFinite(cutoffTime)) return true;
+  return createdTime >= cutoffTime;
+}
+
+function isPlanManifestRequired(task: TaskPlanQualityTask): boolean {
+  return (
+    task.plannerMode === "full" &&
+    (isAtOrAfterPlanManifestRollout(task.createdAt) || isPlanQualityFeedbackReplan(task))
+  );
+}
+
+function extractPlanManifestBlocks(plan: string): string[] {
+  PLAN_MANIFEST_BLOCK_PATTERN.lastIndex = 0;
+  return [...plan.matchAll(PLAN_MANIFEST_BLOCK_PATTERN)].map((match) => match[1]?.trim() ?? "");
+}
+
+function buildPlanManifestSummary(input: {
+  required: boolean;
+  present: boolean;
+  status: AifPlanManifestValidationSummary["status"];
+  manifest?: Partial<AifPlanManifest> | null;
+  issueCodes: TaskPlanQualityIssueCode[];
+}): AifPlanManifestValidationSummary {
+  return {
+    required: input.required,
+    present: input.present,
+    status: input.status,
+    taskId: typeof input.manifest?.taskId === "string" ? input.manifest.taskId : null,
+    intent: isTaskIntent(input.manifest?.intent) ? input.manifest.intent : null,
+    issueCodes: uniqueIssueCodes(input.issueCodes),
+  };
+}
+
+function uniqueIssueCodes(codes: TaskPlanQualityIssueCode[]): TaskPlanQualityIssueCode[] {
+  return [...new Set(codes)];
+}
+
+function isExpectedArtifact(value: unknown): value is AifPlanManifestExpectedArtifact {
+  return (
+    isObject(value) &&
+    isUsefulManifestString(value.kind) &&
+    Array.isArray(value.paths) &&
+    value.paths.length > 0 &&
+    value.paths.every(isUsefulManifestString)
+  );
+}
+
+function isAcceptanceCriterion(value: unknown): value is AifPlanManifestAcceptanceCriterion {
+  return (
+    isObject(value) &&
+    isUsefulManifestString(value.id) &&
+    isUsefulManifestString(value.description) &&
+    isConcreteVerificationCommand(value.verification)
+  );
+}
+
+function parseAifPlanManifest(rawJson: string): Partial<AifPlanManifest> | null {
+  try {
+    const parsed: unknown = JSON.parse(rawJson);
+    return isObject(parsed) ? (parsed as Partial<AifPlanManifest>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeChangeCategory(value: string): TaskIntentChangeCategory | null {
+  const normalized = value.trim().toLowerCase().replaceAll("-", "_");
+  return TASK_INTENT_CHANGE_CATEGORIES.includes(normalized as TaskIntentChangeCategory)
+    ? (normalized as TaskIntentChangeCategory)
+    : null;
+}
+
+function classifyManifestArtifactText(value: string): TaskIntentChangeCategory | null {
+  const normalized = value.trim().toLowerCase().replaceAll("\\", "/").replaceAll("-", "_");
+  if (!normalized) return null;
+  if (
+    /\b(?:audit_report|review_report|findings_report|diagnostic_report|report|findings|audit)\b/.test(
+      normalized,
+    ) ||
+    isAuditReportArtifactPath(normalized)
+  ) {
+    return "report";
+  }
+  if (
+    /\b(?:test|tests|spec|regression)\b/.test(normalized) ||
+    /(?:^|\/)__tests__(?:\/|$)/.test(normalized) ||
+    /\.(?:test|spec)\.[\w]+$/.test(normalized)
+  ) {
+    return "tests";
+  }
+  if (
+    /\b(?:fixture|fixtures|snapshot|snapshots)\b/.test(normalized) ||
+    /(?:^|\/)fixtures?(?:\/|$)/.test(normalized)
+  ) {
+    return "fixtures";
+  }
+  if (
+    /\b(?:docs|documentation|readme|guide|runbook|example)\b/.test(normalized) ||
+    normalized.startsWith("docs/") ||
+    normalized.endsWith(".md") ||
+    normalized.endsWith(".mdx")
+  ) {
+    return "docs";
+  }
+  if (
+    /\b(?:config|configuration|settings|env|profile)\b/.test(normalized) ||
+    /(?:^|\/)(?:config|configs|\.github|\.codex)(?:\/|$)/.test(normalized) ||
+    /(?:^|\/)(?:package|tsconfig|vite|vitest|eslint|prettier|turbo|dockerfile|docker_compose)\b/.test(
+      normalized,
+    )
+  ) {
+    return "config";
+  }
+  if (/\b(?:research|design|spike|notes|adr|decision)\b/.test(normalized)) {
+    return "research";
+  }
+  if (/\b(?:metadata|status|index|manifest|catalog)\b/.test(normalized)) {
+    return "metadata";
+  }
+  if (
+    /\b(?:source|src|code|implementation|patch|diff|module|component|route|api|worker|service)\b/.test(
+      normalized,
+    ) ||
+    /(?:^|\/)src(?:\/|$)/.test(normalized) ||
+    /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|cs|c|cpp|h|hpp)$/.test(normalized)
+  ) {
+    return "source";
+  }
+  return null;
+}
+
+function classifyExpectedArtifactCategories(
+  artifact: AifPlanManifestExpectedArtifact,
+): TaskIntentChangeCategory[] {
+  const categories = new Set<TaskIntentChangeCategory>();
+  const kindCategory = classifyManifestArtifactText(artifact.kind);
+  if (kindCategory) categories.add(kindCategory);
+  for (const path of artifact.paths) {
+    const pathCategory = classifyManifestArtifactText(normalizePath(path));
+    if (pathCategory) categories.add(pathCategory);
+  }
+  return [...categories].sort();
+}
+
+function normalizeManifestChangeCategories(value: unknown): Set<TaskIntentChangeCategory> {
+  if (!Array.isArray(value)) return new Set();
+  return new Set(
+    value
+      .filter((entry): entry is string => typeof entry === "string")
+      .map(normalizeChangeCategory)
+      .filter((entry): entry is TaskIntentChangeCategory => entry !== null),
+  );
+}
+
+function validatePlanManifest(input: {
+  task: TaskPlanQualityTask;
+  plan: string;
+  taskIntent: TaskIntent;
+  taskPaths: string[];
+}): {
+  manifest: Partial<AifPlanManifest> | null;
+  summary: AifPlanManifestValidationSummary;
+  issues: TaskPlanQualityIssue[];
+} {
+  const required = isPlanManifestRequired(input.task);
+  const blocks = extractPlanManifestBlocks(input.plan);
+  const issues: TaskPlanQualityIssue[] = [];
+  const issueCodes: TaskPlanQualityIssueCode[] = [];
+
+  const addIssue = (code: TaskPlanQualityIssueCode, message: string): void => {
+    issues.push(issue(code, message));
+    issueCodes.push(code);
+  };
+
+  if (blocks.length === 0) {
+    if (required) {
+      addIssue(
+        "missing_plan_manifest",
+        "Full-mode task plan must include an aif-plan-manifest block.",
+      );
+    }
+    return {
+      manifest: null,
+      summary: buildPlanManifestSummary({
+        required,
+        present: false,
+        status: required ? "missing" : "not_required",
+        issueCodes,
+      }),
+      issues,
+    };
+  }
+
+  if (blocks.length !== 1) {
+    addIssue("invalid_plan_manifest", "Plan must include exactly one aif-plan-manifest block.");
+    return {
+      manifest: null,
+      summary: buildPlanManifestSummary({
+        required,
+        present: true,
+        status: "invalid",
+        issueCodes,
+      }),
+      issues,
+    };
+  }
+
+  const manifest = parseAifPlanManifest(blocks[0] ?? "");
+  if (!manifest) {
+    addIssue("invalid_plan_manifest", "aif-plan-manifest block must contain valid JSON.");
+    return {
+      manifest: null,
+      summary: buildPlanManifestSummary({
+        required,
+        present: true,
+        status: "invalid",
+        issueCodes,
+      }),
+      issues,
+    };
+  }
+
+  const manifestAllowedCategories = normalizeManifestChangeCategories(manifest.allowedChanges);
+  const manifestForbiddenCategories = normalizeManifestChangeCategories(manifest.forbiddenChanges);
+  const overlappingManifestCategories = [...manifestAllowedCategories].filter((category) =>
+    manifestForbiddenCategories.has(category),
+  );
+  if (overlappingManifestCategories.length > 0) {
+    addIssue(
+      "plan_manifest_allowed_change_violation",
+      `aif-plan-manifest allowedChanges and forbiddenChanges both include: ${overlappingManifestCategories.join(", ")}.`,
+    );
+  }
+
+  if (manifest.version !== 1) {
+    addIssue("unsupported_plan_manifest_version", "aif-plan-manifest version must be 1.");
+  }
+
+  const missingFields = [
+    !isUsefulManifestString(manifest.taskId) ? "taskId" : null,
+    !isTaskIntent(manifest.intent) ? "intent" : null,
+    !isUsefulStringArray(manifest.scope) ? "scope" : null,
+    !isStringArray(manifest.allowedChanges) || manifest.allowedChanges.length === 0
+      ? "allowedChanges"
+      : null,
+    !isStringArray(manifest.forbiddenChanges) || manifest.forbiddenChanges.length === 0
+      ? "forbiddenChanges"
+      : null,
+    !Array.isArray(manifest.expectedArtifacts) || manifest.expectedArtifacts.length === 0
+      ? "expectedArtifacts"
+      : null,
+    !Array.isArray(manifest.acceptanceCriteria) || manifest.acceptanceCriteria.length === 0
+      ? "acceptanceCriteria"
+      : null,
+    !isConcreteVerificationCommandArray(manifest.verificationCommands)
+      ? "verificationCommands"
+      : null,
+  ].filter((field): field is string => field !== null);
+
+  if (missingFields.length > 0) {
+    addIssue(
+      "missing_plan_manifest_fields",
+      `aif-plan-manifest is missing required field(s): ${missingFields.join(", ")}.`,
+    );
+  }
+
+  if (isUsefulManifestString(input.task.id) && manifest.taskId !== input.task.id) {
+    addIssue(
+      "plan_manifest_task_mismatch",
+      `aif-plan-manifest taskId must match task ${input.task.id}.`,
+    );
+  }
+
+  if (isTaskIntent(manifest.intent) && manifest.intent !== input.taskIntent) {
+    addIssue(
+      "plan_manifest_intent_mismatch",
+      `aif-plan-manifest intent ${manifest.intent} must match task intent ${input.taskIntent}.`,
+    );
+  }
+
+  if (!isUsefulStringArray(manifest.scope)) {
+    addIssue("plan_manifest_missing_scope", "aif-plan-manifest scope must name explicit scope.");
+  } else if (input.taskPaths.length > 0) {
+    const normalizedScope = manifest.scope.map(normalizePath);
+    const nonReportTaskPaths = input.taskPaths.filter((path) => !isAuditReportArtifactPath(path));
+    const missingScopePaths = nonReportTaskPaths.filter(
+      (path) =>
+        !normalizedScope.some(
+          (scopePath) =>
+            scopePath === path ||
+            scopePath.startsWith(`${path}/`) ||
+            path.startsWith(`${scopePath}/`),
+        ),
+    );
+    if (missingScopePaths.length > 0) {
+      addIssue(
+        "plan_manifest_scope_mismatch",
+        `aif-plan-manifest scope omitted task-specific path(s): ${missingScopePaths.join(", ")}.`,
+      );
+    }
+  }
+
+  if (
+    !Array.isArray(manifest.expectedArtifacts) ||
+    manifest.expectedArtifacts.length === 0 ||
+    !manifest.expectedArtifacts.every(isExpectedArtifact)
+  ) {
+    addIssue(
+      "plan_manifest_missing_expected_artifacts",
+      "aif-plan-manifest expectedArtifacts must list artifact kind and path(s).",
+    );
+  } else {
+    const policy = getTaskIntentPolicy(input.taskIntent);
+    const allowedByPolicy = new Set(policy.allowedChanges.categories);
+    const forbiddenByPolicy = new Set(policy.forbiddenChanges.categories);
+    const invalidExpectedArtifacts = manifest.expectedArtifacts.flatMap((artifact) =>
+      classifyExpectedArtifactCategories(artifact)
+        .filter(
+          (category) =>
+            forbiddenByPolicy.has(category) ||
+            !allowedByPolicy.has(category) ||
+            !manifestAllowedCategories.has(category) ||
+            manifestForbiddenCategories.has(category),
+        )
+        .map((category) => `${artifact.kind}:${category}`),
+    );
+    if (invalidExpectedArtifacts.length > 0) {
+      addIssue(
+        "plan_manifest_expected_artifact_violation",
+        `aif-plan-manifest expectedArtifacts contradict task intent ${input.taskIntent}: ${[
+          ...new Set(invalidExpectedArtifacts),
+        ].join(", ")}.`,
+      );
+    }
+  }
+
+  if (
+    !Array.isArray(manifest.acceptanceCriteria) ||
+    manifest.acceptanceCriteria.length === 0 ||
+    !manifest.acceptanceCriteria.every(isAcceptanceCriterion)
+  ) {
+    addIssue(
+      "plan_manifest_untestable_acceptance_criteria",
+      "aif-plan-manifest acceptanceCriteria must include id, description, and non-placeholder verification.",
+    );
+  }
+
+  if (!isConcreteVerificationCommandArray(manifest.verificationCommands)) {
+    addIssue(
+      "plan_manifest_missing_verification_commands",
+      "aif-plan-manifest verificationCommands must include concrete commands.",
+    );
+  }
+
+  const policy = getTaskIntentPolicy(input.taskIntent);
+  if (Array.isArray(manifest.allowedChanges)) {
+    const allowedByPolicy = new Set(policy.allowedChanges.categories);
+    const forbiddenByPolicy = new Set(policy.forbiddenChanges.categories);
+    const invalidAllowedChanges = manifest.allowedChanges.filter((entry) => {
+      const category = normalizeChangeCategory(entry);
+      return category === null || !allowedByPolicy.has(category) || forbiddenByPolicy.has(category);
+    });
+    if (invalidAllowedChanges.length > 0) {
+      addIssue(
+        "plan_manifest_allowed_change_violation",
+        `aif-plan-manifest allowedChanges contradict task intent ${input.taskIntent}: ${invalidAllowedChanges.join(", ")}.`,
+      );
+    }
+  }
+
+  if (Array.isArray(manifest.forbiddenChanges)) {
+    const normalizedForbiddenChanges = new Set(
+      manifest.forbiddenChanges
+        .filter(isUsefulManifestString)
+        .map(normalizeChangeCategory)
+        .filter((entry): entry is TaskIntentChangeCategory => entry !== null),
+    );
+    const requiredForbiddenCategories = policy.forbiddenChanges.categories;
+    const missingForbiddenCategories = requiredForbiddenCategories.filter(
+      (category) => !normalizedForbiddenChanges.has(category),
+    );
+    if (
+      manifest.forbiddenChanges.length === 0 ||
+      manifest.forbiddenChanges.some((entry) => !isUsefulManifestString(entry)) ||
+      missingForbiddenCategories.length > 0
+    ) {
+      addIssue(
+        "plan_manifest_forbidden_change_violation",
+        missingForbiddenCategories.length > 0
+          ? `aif-plan-manifest forbiddenChanges must include policy-forbidden categories for task intent ${input.taskIntent}: ${missingForbiddenCategories.join(", ")}.`
+          : "aif-plan-manifest forbiddenChanges must list useful forbidden change entries.",
+      );
+    }
+  }
+
+  return {
+    manifest,
+    summary: buildPlanManifestSummary({
+      required,
+      present: true,
+      status: issues.length === 0 ? "valid" : "invalid",
+      manifest,
+      issueCodes,
+    }),
+    issues,
+  };
 }
 
 function combinedTaskText(task: TaskPlanQualityTask): string {
@@ -214,6 +741,55 @@ function combinedDiagnosticSourceText(input: DeterministicDiagnosticPlanInput): 
   return [taskText, extraText].filter(Boolean).join("\n");
 }
 
+function formatAifPlanManifestBlock(manifest: AifPlanManifest): string {
+  return ["```aif-plan-manifest", JSON.stringify(manifest, null, 2), "```"].join("\n");
+}
+
+function fallbackTaskId(task: TaskPlanQualityTask): string {
+  return isUsefulManifestString(task.id) ? task.id : "deterministic-diagnostic-plan";
+}
+
+function buildDiagnosticPlanManifest(input: {
+  task: TaskPlanQualityTask;
+  scope: string[];
+  reportPath: string;
+  verificationCommands: string[];
+  synthesis?: boolean;
+}): string {
+  const scope = [...new Set(input.scope.map(normalizePath).filter(Boolean))].sort();
+  const manifest: AifPlanManifest = {
+    version: 1,
+    taskId: fallbackTaskId(input.task),
+    intent: "audit",
+    scope,
+    allowedChanges: ["report"],
+    forbiddenChanges: ["source", "tests", "docs", "config", "secrets"],
+    expectedArtifacts: [
+      {
+        kind: input.synthesis ? "audit_synthesis_report" : "audit_report",
+        paths: [normalizePath(input.reportPath)],
+      },
+    ],
+    acceptanceCriteria: [
+      {
+        id: "ac-report-artifact",
+        description: input.synthesis
+          ? "The synthesis report preserves source report state, trust, findings, and inconclusive outcomes."
+          : "The diagnostic report includes scoped evidence, findings or no-findings rationale, risks, and verification.",
+        verification: input.verificationCommands[0] ?? "git status --short",
+      },
+      {
+        id: "ac-report-only",
+        description:
+          "The plan remains diagnostic-only and does not authorize source, config, test, or child implementation work.",
+        verification: "git status --short",
+      },
+    ],
+    verificationCommands: input.verificationCommands,
+  };
+  return formatAifPlanManifestBlock(manifest);
+}
+
 export function findDeterministicDiagnosticReportPath(
   input: DeterministicDiagnosticPlanInput,
 ): string | null {
@@ -272,6 +848,14 @@ export function buildDeterministicDiagnosticPlan(
     const plan = [
       "## Deterministic audit synthesis plan",
       "",
+      buildDiagnosticPlanManifest({
+        task: input.task,
+        scope: sourcePaths,
+        reportPath,
+        verificationCommands: ["git status --short", "git log -1 --name-only --oneline"],
+        synthesis: true,
+      }),
+      "",
       `Report artifact: \`${reportPath}\``,
       "Scope: existing completed source audit reports from this roadmap batch.",
       `Scoped evidence targets: ${sourcePathText}.`,
@@ -305,6 +889,13 @@ export function buildDeterministicDiagnosticPlan(
 
   const plan = [
     "## Diagnostic-only plan",
+    "",
+    buildDiagnosticPlanManifest({
+      task: input.task,
+      scope: evidenceTargets,
+      reportPath,
+      verificationCommands: ["git status --short", "git log -1 --name-only --oneline"],
+    }),
     "",
     `Report artifact: \`${reportPath}\``,
     `Scope: ${evidenceTargetsText}`,
@@ -440,11 +1031,25 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
     ? parseExpectedAuditReportArtifactPath(input.task.description)
     : null;
   const issues: TaskPlanQualityIssue[] = [];
+  const planManifestValidation = validatePlanManifest({
+    task: input.task,
+    plan,
+    taskIntent,
+    taskPaths,
+  });
 
   if (!plan) {
     issues.push(issue("empty_plan", "Plan is empty."));
-    return { ok: false, issues, categories: uniqueCategories(issues) };
+    issues.push(...planManifestValidation.issues);
+    return {
+      ok: false,
+      issues,
+      categories: uniqueCategories(issues),
+      planManifest: planManifestValidation.summary,
+    };
   }
+
+  issues.push(...planManifestValidation.issues);
 
   if (!CHECKLIST_PATTERN.test(plan)) {
     issues.push(
@@ -608,7 +1213,12 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
     }
   }
 
-  return { ok: issues.length === 0, issues, categories: uniqueCategories(issues) };
+  return {
+    ok: issues.length === 0,
+    issues,
+    categories: uniqueCategories(issues),
+    planManifest: planManifestValidation.summary,
+  };
 }
 
 export function formatTaskPlanQualityBlockedReason(result: TaskPlanQualityResult): string {

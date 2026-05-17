@@ -13,6 +13,7 @@ export {
   type RuntimeMcpStatus,
   type RuntimeEvent,
   type RuntimeExecutionIntent,
+  type PermissionExecutionPolicy,
   type RuntimeLimitEventPayload,
   RuntimeLimitPrecision,
   RuntimeLimitScope,

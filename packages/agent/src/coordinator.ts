@@ -6,10 +6,12 @@ import {
   assertSafeRoadmapArtifactPath,
   clearTaskRuntimeLimitSnapshot,
   blockTaskForRuntimeGateIfEligible,
+  evaluateRuntimeBudgetGate,
   evaluateRuntimeLimitGate,
   findCoordinatorTaskCandidates,
   findProjectById,
   findTaskById,
+  getAppDefaultRuntimeProfileId,
   hasActiveLockedTaskForProject,
   claimTask,
   releaseTaskClaim,
@@ -25,6 +27,7 @@ import {
   persistTaskPlanForTask,
   persistTaskRuntimeLimitSnapshot,
   resolveEffectiveRuntimeProfile,
+  resolveEffectiveRuntimeProfileExcluding,
   findRoadmapBatchArtifactByTaskId,
   listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
@@ -56,6 +59,7 @@ import {
   type AuditFailureFamily,
   type AutoReviewFinding,
   type TaskStatus,
+  type RuntimeStage,
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
 import { runPlanChecker } from "./subagents/planChecker.js";
@@ -76,7 +80,8 @@ import {
 import { handleAutoReviewGate, type ReviewGateOutcome } from "./autoReviewHandler.js";
 import { classifyStageError } from "./stageErrorHandler.js";
 import { setActiveStageAbortController } from "./stageAbort.js";
-import { setCoordinatorId } from "./subagentQuery.js";
+import { setCoordinatorId, setRuntimeStageFallbackProfile } from "./subagentQuery.js";
+import { readGitWorktreeReworkSnapshot } from "./reworkSnapshot.js";
 import {
   getRandomBackoffMinutes,
   releaseDueBlockedTasks,
@@ -230,14 +235,69 @@ function updateTaskStatus(
   void notifyTaskBroadcast(taskId, broadcastType, { ...info, toStatus: status });
 }
 
-function runtimeProfileModeForStage(stage: CoordinatorStage): "task" | "plan" | "review" {
-  if (stage === "planner" || stage === "plan-checker") {
-    return "plan";
+function runtimeStageForCoordinatorStage(stage: CoordinatorStage): RuntimeStage {
+  if (stage === "plan-checker") return "plan_checker";
+  return stage;
+}
+
+function fallbackStagesForCoordinatorStage(stage: CoordinatorStage): RuntimeStage[] {
+  if (stage === "reviewer") return ["reviewer", "security"];
+  return [runtimeStageForCoordinatorStage(stage)];
+}
+
+function shouldBlockOnRuntimeLimit(stage: RuntimeStage): boolean {
+  return stage === "implementer" || stage === "audit" || stage === "synthesis";
+}
+
+function appendRuntimeBudgetActivity(task: TaskRow, stage: RuntimeStage): boolean {
+  const decision = evaluateRuntimeBudgetGate({ taskId: task.id, projectId: task.projectId, stage });
+  if (decision.status === "allow") return false;
+
+  const now = new Date().toISOString();
+  if (decision.status === "warn") {
+    const marker = `[runtime-budget:${decision.signature}]`;
+    if (!task.agentActivityLog?.includes(marker)) {
+      appendTaskActivityLog(
+        task.id,
+        `[${now}] ${marker} Runtime budget warning before ${stage}: spent=$${decision.spentUsd.toFixed(4)} budget=$${decision.budgetUsd?.toFixed(4)} percent=${decision.percentUsed?.toFixed(1)}%`,
+      );
+    }
+    return false;
   }
-  if (stage === "reviewer") {
-    return "review";
+
+  if (decision.status === "override") {
+    appendTaskActivityLog(
+      task.id,
+      `[${now}] Runtime budget override before ${stage}: spent=$${decision.spentUsd.toFixed(4)} budget=$${decision.budgetUsd?.toFixed(4)} justification=${decision.overrideJustification}`,
+    );
+    return false;
   }
-  return "task";
+
+  const blockedReason = `Runtime budget exhausted before ${stage}: spent=$${decision.spentUsd.toFixed(4)} budget=$${decision.budgetUsd?.toFixed(4)}. Add task.runtimeOptions.runtimeBudgetOverride.justification to override.`;
+  const applied = blockTaskForRuntimeGateIfEligible({
+    taskId: task.id,
+    expectedProjectId: task.projectId,
+    expectedStatus: task.status,
+    expectedAutoMode: task.status === "plan_ready" ? task.autoMode === true : undefined,
+    blockedFromStatus: task.status,
+    blockedReason,
+    retryAfter: null,
+    retryCount: task.retryCount ?? 0,
+    snapshot: null,
+    persistedAt: now,
+  });
+  if (applied) {
+    appendTaskActivityLog(
+      task.id,
+      `[${now}] Runtime budget blocked task before ${stage}: spent=$${decision.spentUsd.toFixed(4)} budget=$${decision.budgetUsd?.toFixed(4)}`,
+    );
+    void notifyTaskBroadcast(task.id, "task:moved", {
+      title: task.title,
+      fromStatus: task.status,
+      toStatus: "blocked_external",
+    });
+  }
+  return applied;
 }
 
 function resolveRuntimeGateRetryAfter(gateDecision: ReturnType<typeof evaluateRuntimeLimitGate>): {
@@ -957,7 +1017,51 @@ function blockTaskForNoSubstantiveReworkDeltaIfNeeded(input: {
   title: string;
 }): boolean {
   const snapshot = input.task.autoReviewState?.reworkSnapshot;
-  if (!snapshot?.artifactPath) return false;
+  if (!snapshot) return false;
+
+  const genericDigest =
+    typeof (snapshot as { changedFilesDigest?: unknown }).changedFilesDigest === "string"
+      ? (snapshot as { changedFilesDigest: string }).changedFilesDigest
+      : null;
+  if (genericDigest) {
+    const currentSnapshot = readGitWorktreeReworkSnapshot(input.projectRoot);
+    if (!currentSnapshot || currentSnapshot.changedFilesDigest !== genericDigest) return false;
+
+    const digestDisplay = genericDigest.slice(0, 16);
+    const findingIds =
+      snapshot.findingIds && snapshot.findingIds.length > 0
+        ? snapshot.findingIds.join(", ")
+        : "none";
+    const blockedReason =
+      `manual_review_required: no_substantive_rework_delta for task worktree; ` +
+      `changed files digest unchanged (${digestDisplay}); ` +
+      `rework iteration ${snapshot.iteration}; blocker ids: ${findingIds}; ` +
+      `unresolved blockers: ${formatAutoReviewFindingsForBlockedReason(input.task.autoReviewState?.findings)}`;
+
+    clearTaskRuntimeLimitSnapshot(input.task.id);
+    updateTaskStatus(
+      input.task.id,
+      "blocked_external",
+      {
+        blockedReason,
+        blockedFromStatus: input.fromStatus,
+        retryAfter: null,
+        retryCount: input.task.retryCount ?? 0,
+        reworkRequested: false,
+        reviewIterationCount: input.task.reviewIterationCount ?? 0,
+        manualReviewRequired: true,
+        autoReviewState: input.task.autoReviewState,
+      },
+      { title: input.title, fromStatus: input.fromStatus },
+    );
+    appendTaskActivityLog(
+      input.task.id,
+      `[${new Date().toISOString()}] Blocked unchanged rework before review: ${blockedReason}`,
+    );
+    return true;
+  }
+
+  if (!snapshot.artifactPath) return false;
 
   const baselineSha = snapshot.artifactContentSha ?? null;
   const currentArtifact = readRelativeFileSha(input.projectRoot, snapshot.artifactPath);
@@ -1034,7 +1138,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   fromStatus: TaskStatus;
   title: string;
   requireManualReview?: boolean;
-  phase?: "pre_implementation" | "completion";
+  phase?: "pre_implementation" | "review_handoff" | "completion";
   preventAuditRework?: boolean;
   extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
 }): boolean {
@@ -1189,6 +1293,16 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   return true;
 }
 
+function taskRequiresDevelopmentReviewHandoff(task: TaskRow): boolean {
+  return (
+    task.isFix === true ||
+    task.taskIntent === "feature" ||
+    task.taskIntent === "fix" ||
+    task.taskIntent === "docs" ||
+    task.taskIntent === "tests"
+  );
+}
+
 function reworkCompletionEvidenceAlreadySatisfied(task: TaskRow, projectRoot: string): boolean {
   if (!task.reworkRequested) return false;
   const artifact = findRoadmapBatchArtifactByTaskId(task.id);
@@ -1314,6 +1428,26 @@ function recoverSynthesisPlanQualityFailure(input: {
   return true;
 }
 
+function formatPlanQualityStructuredFeedback(input: {
+  attempt: number;
+  maxRetries: number;
+  terminal: boolean;
+  error: TaskPlanQualityError;
+}): string {
+  return JSON.stringify({
+    kind: "plan_quality_feedback",
+    attempt: input.attempt,
+    maxRetries: input.maxRetries,
+    terminal: input.terminal,
+    categories: input.error.result.categories,
+    issues: input.error.result.issues.map((entry) => ({
+      code: entry.code,
+      message: entry.message,
+    })),
+    planManifest: input.error.result.planManifest ?? null,
+  });
+}
+
 function handlePlanQualityFailure(input: {
   task: TaskRow;
   projectRoot: string;
@@ -1327,7 +1461,17 @@ function handlePlanQualityFailure(input: {
   const nowIso = new Date().toISOString();
 
   if (nextRetryCount <= PLAN_QUALITY_MAX_RETRIES) {
-    const feedback = `${input.error.message} Replan with concrete task-specific steps, required artifact paths, and diagnostic-only constraints where applicable.`;
+    const strictness =
+      nextRetryCount === 1
+        ? "Replan with concrete task-specific steps, required artifact paths, and diagnostic-only constraints where applicable."
+        : "Second plan-quality failure: produce a stricter plan with a valid manifest when required, explicit scope boundaries, testable acceptance criteria, concrete verification commands, and no intent drift.";
+    const feedback = `${input.error.message} ${strictness}`;
+    const structuredFeedback = formatPlanQualityStructuredFeedback({
+      attempt: nextRetryCount,
+      maxRetries: PLAN_QUALITY_MAX_RETRIES,
+      terminal: false,
+      error: input.error,
+    });
     clearTaskRuntimeLimitSnapshot(input.task.id);
     updateTaskStatus(
       input.task.id,
@@ -1343,6 +1487,10 @@ function handlePlanQualityFailure(input: {
     appendTaskActivityLog(
       input.task.id,
       `[${nowIso}] Plan quality guard requested replan ${nextRetryCount}/${PLAN_QUALITY_MAX_RETRIES}: ${categories}`,
+    );
+    appendTaskActivityLog(
+      input.task.id,
+      `[${nowIso}] Plan quality structured feedback: ${structuredFeedback}`,
     );
     log.warn(
       {
@@ -1366,6 +1514,17 @@ function handlePlanQualityFailure(input: {
   ) {
     return;
   }
+
+  const terminalStructuredFeedback = formatPlanQualityStructuredFeedback({
+    attempt: nextRetryCount,
+    maxRetries: PLAN_QUALITY_MAX_RETRIES,
+    terminal: true,
+    error: input.error,
+  });
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] Plan quality structured feedback: ${terminalStructuredFeedback}`,
+  );
 
   if (
     terminalizeRoadmapSourceReportAsInconclusive({
@@ -1405,6 +1564,7 @@ function handlePlanQualityFailure(input: {
       blockedFromStatus: input.stageInProgress,
       retryAfter: null,
       retryCount: nextRetryCount,
+      manualReviewRequired: true,
     },
     { title: input.taskTitle, fromStatus: input.stageInProgress },
   );
@@ -1712,6 +1872,24 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         return false;
       }
     }
+    if (
+      stage.label === "implementer" &&
+      stage.onSuccess === "review" &&
+      taskRequiresDevelopmentReviewHandoff(latestTask)
+    ) {
+      latestTask = findTaskById(task.id) ?? latestTask;
+      if (
+        blockTaskForCompletionEvidenceIfNeeded({
+          task: latestTask,
+          projectRoot: executionRoot,
+          fromStatus: stage.inProgress,
+          title: taskTitle,
+          phase: "review_handoff",
+        })
+      ) {
+        return false;
+      }
+    }
 
     const successReset: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt"> = {
       ...CLEAN_STATE_RESET,
@@ -1722,6 +1900,8 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     }
     if (stage.label === "planner" && isPlanQualityRetryState(latestTask)) {
       successReset.retryCount = latestTask.retryCount ?? 0;
+      successReset.blockedFromStatus = latestTask.blockedFromStatus;
+      successReset.blockedReason = latestTask.blockedReason;
     }
 
     clearTaskRuntimeLimitSnapshot(task.id);
@@ -2157,12 +2337,54 @@ export async function pollAndProcess(): Promise<void> {
         continue;
       }
 
-      const runtimeSelection = resolveEffectiveRuntimeProfile({
+      const runtimeStage = runtimeStageForCoordinatorStage(stage.label);
+      for (const fallbackStage of fallbackStagesForCoordinatorStage(stage.label)) {
+        setRuntimeStageFallbackProfile({
+          taskId: task.id,
+          stage: fallbackStage,
+          profileId: null,
+        });
+      }
+      if (appendRuntimeBudgetActivity(task, runtimeStage)) {
+        continue;
+      }
+
+      let runtimeSelection = resolveEffectiveRuntimeProfile({
         taskId: task.id,
         projectId: task.projectId,
-        mode: runtimeProfileModeForStage(stage.label),
+        mode: runtimeStage,
+        systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(runtimeStage),
       });
-      const gateDecision = evaluateRuntimeLimitGate(runtimeSelection.profile);
+      let gateDecision = evaluateRuntimeLimitGate(runtimeSelection.profile);
+      if (gateDecision.blocked) {
+        if (!shouldBlockOnRuntimeLimit(runtimeStage) && runtimeSelection.profile?.id) {
+          const fallbackSelection = resolveEffectiveRuntimeProfileExcluding({
+            taskId: task.id,
+            projectId: task.projectId,
+            mode: runtimeStage,
+            systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(runtimeStage),
+            excludedRuntimeProfileIds: [runtimeSelection.profile.id],
+          });
+          const fallbackGateDecision = evaluateRuntimeLimitGate(fallbackSelection.profile);
+          if (fallbackSelection.profile && !fallbackGateDecision.blocked) {
+            const now = new Date().toISOString();
+            for (const fallbackStage of fallbackStagesForCoordinatorStage(stage.label)) {
+              setRuntimeStageFallbackProfile({
+                taskId: task.id,
+                stage: fallbackStage,
+                profileId: fallbackSelection.profile.id,
+                source: fallbackSelection.source,
+              });
+            }
+            appendTaskActivityLog(
+              task.id,
+              `[${now}] Runtime gate fallback before ${runtimeStage}: blockedProfile=${runtimeSelection.profile.id} blockedSource=${runtimeSelection.source} selectedProfile=${fallbackSelection.profile.id} selectedSource=${fallbackSelection.source}`,
+            );
+            runtimeSelection = fallbackSelection;
+            gateDecision = fallbackGateDecision;
+          }
+        }
+      }
       if (gateDecision.blocked) {
         log.debug(
           {
@@ -2180,7 +2402,7 @@ export async function pollAndProcess(): Promise<void> {
         continue;
       }
 
-      if (!claimTask(task.id, COORDINATOR_ID, CLAIM_LOCK_DURATION_MS)) {
+      if (!claimTask(task.id, COORDINATOR_ID, CLAIM_LOCK_DURATION_MS, stage.label)) {
         log.debug({ taskId: task.id, stage: stage.label }, "Task claim failed (already claimed)");
         continue;
       }
@@ -2189,7 +2411,7 @@ export async function pollAndProcess(): Promise<void> {
         stageSemaphore.totalActive() >= globalMax ||
         !stageSemaphore.tryAcquire(stage.label, globalMax)
       ) {
-        releaseTaskClaim(task.id);
+        releaseTaskClaim(task.id, COORDINATOR_ID);
         log.debug({ stage: stage.label }, "Semaphore full after claim");
         break;
       }
@@ -2214,7 +2436,7 @@ export async function pollAndProcess(): Promise<void> {
         })
         .finally(() => {
           stageSemaphore.release(stage.label);
-          releaseTaskClaim(task.id);
+          releaseTaskClaim(task.id, COORDINATOR_ID);
         });
 
       spawned.push(taskPromise);

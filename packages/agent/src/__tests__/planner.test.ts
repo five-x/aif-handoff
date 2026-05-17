@@ -93,6 +93,8 @@ describe("runPlanner comment selection", () => {
     expect(call.prompt).toContain("Mode: fast, tests: false, docs: false.");
     expect(call.prompt).toContain("Plan file reference: @.ai-factory/PLAN.md");
     expect(call.prompt).toContain("Filesystem plan path: .ai-factory/PLAN.md");
+    expect(call.prompt).toContain("Fast-mode planning compatibility");
+    expect(call.prompt).toContain("do not require an aif-plan-manifest block");
     expect(call.prompt).toContain("message: comment-12");
     expect(call.prompt).not.toContain("message: comment-11");
     expect(call.prompt).not.toContain("message: comment-01");
@@ -140,6 +142,38 @@ describe("runPlanner comment selection", () => {
 
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-2")).get();
     expect(updatedTask?.plan).toBe("## New Plan\n- [ ] Step");
+  });
+
+  it("requires an aif-plan-manifest block in full-mode planner prompts", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-full-manifest-prompt",
+        projectId: "project-1",
+        title: "Full mode manifest prompt",
+        description: "Add manifest validation to packages/shared/src/planQuality.ts.",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        useSubagents: true,
+      })
+      .run();
+
+    await runPlanner("task-full-manifest-prompt", "/tmp/planner-test");
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("Full-mode planning requirement");
+    expect(call.prompt).toContain("fenced `aif-plan-manifest` JSON block");
+    expect(call.prompt).toContain("version 1");
+    expect(call.prompt).toContain("taskId");
+    expect(call.prompt).toContain("intent");
+    expect(call.prompt).toContain("scope");
+    expect(call.prompt).toContain("allowedChanges");
+    expect(call.prompt).toContain("forbiddenChanges");
+    expect(call.prompt).toContain("expectedArtifacts");
+    expect(call.prompt).toContain("acceptanceCriteria");
+    expect(call.prompt).toContain("verificationCommands");
+    expect(call.prompt).toContain("must not convert audit, spike, docs, or tests tasks");
   });
 
   it("uses narrowed diagnostic-only prompt wording", async () => {

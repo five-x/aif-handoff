@@ -4,7 +4,11 @@ import { spawn } from "node:child_process";
 import { lstat, mkdtemp, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { redactProviderText } from "@aif/shared";
+import {
+  decideShellPermission,
+  getPermissionExecutionPolicy,
+  redactProviderText,
+} from "@aif/shared";
 import { RuntimeExecutionError } from "../../errors.js";
 const DEFAULT_MAX_FILE_BYTES = 16_000;
 const DEFAULT_MAX_FILE_LINES = 240;
@@ -1047,6 +1051,21 @@ async function runShellTool(args, context) {
   }
   const commandArgs = readStringArray(args.args);
   assertShellArgumentsAreSafe(commandArgs);
+  const permissionPolicy = context.permissionPolicy ?? getPermissionExecutionPolicy("general");
+  const commandText = [command, ...commandArgs].join(" ");
+  const shellDecision = decideShellPermission({
+    intent: permissionPolicy.intent,
+    command: commandText,
+    requestedMode: permissionPolicy.defaultMode,
+    humanApprovalBridgeAvailable: false,
+  });
+  if (!shellDecision.allowed) {
+    throw new RuntimeExecutionError(
+      shellDecision.reasons.join(" ") || "Shell command denied by permission policy.",
+      undefined,
+      "permission",
+    );
+  }
   validateStructuredShellCommand(command, commandArgs);
   const cwd = await resolveExistingPathInsideProjectRoot(
     context.projectRoot,
@@ -1262,6 +1281,7 @@ export function createDefaultQwenToolContext(input) {
       maxOutputCharsLimit,
     ),
     toolTimeoutMs: readPositiveInt(options.toolTimeoutMs, DEFAULT_TOOL_TIMEOUT_MS),
+    permissionPolicy: input.execution?.permissionPolicy ?? getPermissionExecutionPolicy("general"),
   };
 }
 export function createTempPathForTests(name) {

@@ -11,6 +11,7 @@ resetEnvCache();
 const mockFindProjectById = vi.fn();
 const mockFindTaskById = vi.fn();
 const mockToTaskResponse = vi.fn();
+const mockAppendTaskActivityLog = vi.fn();
 const mockCreateChatSession = vi.fn();
 const mockFindChatSessionById = vi.fn();
 const mockUpdateChatSession = vi.fn();
@@ -26,6 +27,7 @@ const mockAssertApiRuntimeCapabilities = vi.fn();
 const mockGetApiRuntimeRegistry = vi.fn();
 const mockPersistAttachments = vi.fn();
 const mockRefreshRuntimeProfileLimitState = vi.fn();
+const mockSharedEnvOverrides: Record<string, unknown> = {};
 
 const mockAdapterRun = vi.fn();
 const mockAdapterResume = vi.fn();
@@ -55,6 +57,7 @@ const runtimeAdapter: RuntimeAdapter = {
 };
 
 vi.mock("@aif/data", () => ({
+  appendTaskActivityLog: (...args: unknown[]) => mockAppendTaskActivityLog(...args),
   findProjectById: (id: string) => mockFindProjectById(id),
   findTaskById: (id: string) => mockFindTaskById(id),
   toTaskResponse: (task: unknown) => mockToTaskResponse(task),
@@ -133,6 +136,7 @@ vi.mock("@aif/shared", async (importOriginal) => {
       AIF_DEFAULT_RUNTIME_ID: "claude",
       AIF_DEFAULT_PROVIDER_ID: "anthropic",
       AIF_USAGE_LIMITS_ENABLED: true,
+      ...mockSharedEnvOverrides,
     }),
   };
 });
@@ -151,6 +155,9 @@ describe("chat API", () => {
   beforeEach(() => {
     app = createApp();
     vi.clearAllMocks();
+    for (const key of Object.keys(mockSharedEnvOverrides)) {
+      delete mockSharedEnvOverrides[key];
+    }
 
     mockFindProjectById.mockReturnValue({
       id: "project-1",
@@ -267,6 +274,38 @@ describe("chat API", () => {
       "client-1",
       expect.objectContaining({ type: "chat:done" }),
     );
+  });
+
+  it("redacts secret-like chat transcript and websocket token content before persistence or send", async () => {
+    mockAdapterRun.mockImplementation(async (input: RuntimeRunInput) => {
+      const onEvent = input.execution?.onEvent as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+      onEvent?.({
+        type: "stream:text",
+        message: "assistant token=sk-SECRETSECRETSECRETSECRET",
+      });
+      return { outputText: "", sessionId: "runtime-session-1" };
+    });
+
+    const res = await app.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "project-1",
+        message: "user token=sk-SECRETSECRETSECRETSECRET",
+        clientId: "client-1",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const serializedMessages = JSON.stringify(mockCreateChatMessage.mock.calls);
+    expect(serializedMessages).not.toContain("sk-SECRET");
+    expect(serializedMessages).toContain("[REDACTED]");
+
+    const tokenCalls = mockSendToClient.mock.calls.filter((call) => call[1]?.type === "chat:token");
+    expect(JSON.stringify(tokenCalls)).not.toContain("sk-SECRET");
+    expect(JSON.stringify(tokenCalls)).toContain("[REDACTED]");
   });
 
   it("preserves runtime limit state after successful chat runs without snapshots", async () => {
@@ -490,6 +529,103 @@ describe("chat API", () => {
         runTimeoutMs: 600_000,
         maxTurns: 50,
       }),
+    );
+  });
+
+  it("passes task-intent permission policy into chat runtime execution", async () => {
+    mockFindTaskById.mockReturnValue({ id: "task-1", taskIntent: "audit" });
+    mockToTaskResponse.mockReturnValue({
+      id: "task-1",
+      title: "Audit",
+      status: "implementing",
+      taskIntent: "audit",
+      agentActivityLog: null,
+    });
+
+    const res = await app.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "project-1",
+        taskId: "task-1",
+        message: "plain prompt",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const runInput = mockAdapterRun.mock.calls[0]?.[0] as RuntimeRunInput;
+    expect(runInput.execution?.permissionPolicy).toEqual(
+      expect.objectContaining({
+        intent: "audit",
+        defaultMode: "audit_diagnostic_only",
+      }),
+    );
+  });
+
+  it("records task activity when task-scoped chat runs use bypass mode", async () => {
+    mockSharedEnvOverrides.AGENT_BYPASS_PERMISSIONS = true;
+    mockFindTaskById.mockReturnValue({ id: "task-docs", taskIntent: "docs" });
+    mockToTaskResponse.mockReturnValue({
+      id: "task-docs",
+      title: "Docs",
+      status: "implementing",
+      taskIntent: "docs",
+      agentActivityLog: null,
+    });
+
+    const res = await app.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "project-1",
+        taskId: "task-docs",
+        message: "plain prompt",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(mockAppendTaskActivityLog).toHaveBeenCalledWith(
+      "task-docs",
+      expect.stringContaining("[permission-policy:bypass] intent=docs defaultMode=workspace_write"),
+    );
+  });
+
+  it("clears native bypass and records blocked activity when audit chat intent disallows bypass", async () => {
+    mockSharedEnvOverrides.AGENT_BYPASS_PERMISSIONS = true;
+    mockFindTaskById.mockReturnValue({ id: "task-audit", taskIntent: "audit" });
+    mockToTaskResponse.mockReturnValue({
+      id: "task-audit",
+      title: "Audit",
+      status: "implementing",
+      taskIntent: "audit",
+      agentActivityLog: null,
+    });
+
+    const res = await app.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "project-1",
+        taskId: "task-audit",
+        message: "plain prompt",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const runInput = mockAdapterRun.mock.calls[0]?.[0] as RuntimeRunInput;
+    expect(runInput.execution).toEqual(
+      expect.objectContaining({
+        bypassPermissions: false,
+        permissionPolicy: expect.objectContaining({ intent: "audit" }),
+        hooks: expect.objectContaining({
+          permissionMode: "acceptEdits",
+          allowDangerouslySkipPermissions: false,
+        }),
+      }),
+    );
+    expect(mockAppendTaskActivityLog).toHaveBeenCalledWith(
+      "task-audit",
+      expect.stringContaining("[permission-policy:bypass-blocked] intent=audit"),
     );
   });
 

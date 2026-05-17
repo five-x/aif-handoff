@@ -14,6 +14,7 @@ import {
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
   type RoadmapBatchArtifactRow,
+  type TaskFieldsPatch,
   type TaskRow,
 } from "@aif/data";
 import {
@@ -29,10 +30,11 @@ import {
   computeAuditReportContentSha256,
   extractAuditSynthesisCommandEvidence,
   formatAuditSynthesisOutcomeForArtifact,
+  hashAifPlanManifest,
   resolveAuditPlanId,
-  type AutoReviewState,
+  toAuditPublicReportOutcome,
   type AuditEvidenceUnit,
-  type AuditSourceClassification,
+  type AuditPublicReportOutcome,
   type AuditReportSourceSnapshot,
 } from "@aif/shared";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
@@ -51,6 +53,7 @@ const PROMPT_BUDGET_CHARS_PER_TOKEN = 3;
 const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
   IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET * PROMPT_BUDGET_CHARS_PER_TOKEN;
 const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesis-no-findings";
+const DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS = new Set(["feature", "fix", "docs", "tests"]);
 const PROMPT_SECTION_LIMITS = {
   reworkComment: 8_000,
   reworkCommentMessage: 5_000,
@@ -211,6 +214,17 @@ function formatAutoReviewStateForPrompt(
         strategy: string;
         iteration: number;
         findings: Array<{ id: string; text: string; source: string }>;
+        reworkSnapshot?: {
+          iteration?: number;
+          artifactPath?: string;
+          artifactContentSha?: string | null;
+          baselineHeadSha?: string | null;
+          changedFilesDigest?: string | null;
+          changedFilesSummary?: string[];
+          findingIds?: string[];
+          requiredEvidenceByFindingId?: Record<string, string>;
+          forbiddenChanges?: string[];
+        };
       }
     | null
     | undefined,
@@ -234,6 +248,35 @@ function formatAutoReviewStateForPrompt(
       return `- [${finding.id}] ${finding.source} | ${text}`;
     }),
   ];
+  const snapshot = state.reworkSnapshot;
+  if (snapshot) {
+    lines.push("rework snapshot:");
+    if (snapshot.artifactPath) lines.push(`- artifactPath: ${snapshot.artifactPath}`);
+    if (snapshot.artifactContentSha) {
+      lines.push(`- artifactContentSha: ${snapshot.artifactContentSha}`);
+    }
+    if (snapshot.baselineHeadSha) lines.push(`- baselineHeadSha: ${snapshot.baselineHeadSha}`);
+    if (snapshot.changedFilesDigest) {
+      lines.push(`- changedFilesDigest: ${snapshot.changedFilesDigest}`);
+    }
+    if (snapshot.findingIds && snapshot.findingIds.length > 0) {
+      lines.push(`- exact blocker ids: ${snapshot.findingIds.join(", ")}`);
+    }
+    if (snapshot.requiredEvidenceByFindingId) {
+      lines.push("- required evidence by blocker id:");
+      for (const [findingId, evidence] of Object.entries(snapshot.requiredEvidenceByFindingId)) {
+        lines.push(`  - [${findingId}] ${evidence}`);
+      }
+    }
+    if (snapshot.forbiddenChanges && snapshot.forbiddenChanges.length > 0) {
+      lines.push("- forbidden unrelated changes:");
+      for (const change of snapshot.forbiddenChanges) lines.push(`  - ${change}`);
+    }
+    if (snapshot.changedFilesSummary && snapshot.changedFilesSummary.length > 0) {
+      lines.push("- prior attempt changed files summary:");
+      for (const entry of snapshot.changedFilesSummary.slice(0, 25)) lines.push(`  - ${entry}`);
+    }
+  }
   if (omittedCount > 0) {
     lines.push(`- [... ${omittedCount} additional blocking finding(s) omitted ...]`);
   }
@@ -255,6 +298,77 @@ function isBlockedImplementationResult(resultText: string): boolean {
     normalized.includes("cannot proceed") ||
     normalized.includes("blocked —")
   );
+}
+
+type OptionalImplementationManifestHelpers = {
+  extractImplementationManifestBlock?: (text: string) => unknown;
+  normalizeImplementationManifestJson?: (manifestJson: unknown) => unknown;
+};
+
+function shouldRequestImplementationManifest(task: Pick<TaskRow, "taskIntent" | "isFix">): boolean {
+  return task.isFix || DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS.has(task.taskIntent);
+}
+
+function formatImplementationManifestPrompt(
+  task: Pick<TaskRow, "taskIntent" | "isFix">,
+  planText: string | null | undefined,
+): string {
+  if (!shouldRequestImplementationManifest(task)) return "";
+  const intent = task.isFix ? "fix" : task.taskIntent;
+  const expectedPlanManifestHash = hashAifPlanManifest(planText);
+  const regressionField = intent === "fix" ? ", `regressionExplanation`" : "";
+  const regressionInstruction =
+    intent === "fix"
+      ? "\n- Because this is a fix task, `regressionExplanation` is required and must explain the regression or failure mode that was fixed."
+      : "";
+  const planHashInstruction = expectedPlanManifestHash
+    ? `\n- The approved plan contains an \`aif-plan-manifest\`; set \`planManifestHash\` exactly to \`${expectedPlanManifestHash}\`.`
+    : "\n- The approved plan has no `aif-plan-manifest`; set `planManifestHash` to null.";
+  return `- Your final result MUST include exactly one fenced \`aif-implementation-manifest\` JSON block.
+- The manifest must be a JSON object with: \`version\`, \`taskId\`, \`intent\`, \`planManifestHash\`, \`changedFiles\`, \`diffSummary\`, \`verificationEvidence\`, \`acceptanceCriteria\`, \`evidenceRefs\`, \`planChecklist\`, \`reviewClosure\`, \`commitEvidence\`${regressionField}, and \`knownLimitations\`.
+- Set \`intent\` to \`${intent}\`. Every passed \`verificationEvidence\` item must include \`command\`, \`status\`, \`outputSha256\`, \`outputPreview\`, and \`outputPreviewTruncated\`; \`acceptanceCriteria\` and \`reviewClosure\` evidence refs must point to concrete verification evidence or actual review comments. Keep file paths and evidence arrays deterministic; use an empty array only when there is no applicable evidence.${planHashInstruction}${regressionInstruction}
+- Put the manifest in the final result text, not in a repository file.`;
+}
+
+function serializeImplementationManifest(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch {
+      return trimmed;
+    }
+  }
+  if (value && typeof value === "object") {
+    return JSON.stringify(value, null, 2);
+  }
+  return null;
+}
+
+async function extractNormalizedImplementationManifest(resultText: string): Promise<string | null> {
+  const helpers = (await import("@aif/shared")) as OptionalImplementationManifestHelpers;
+  if (
+    typeof helpers.extractImplementationManifestBlock !== "function" ||
+    typeof helpers.normalizeImplementationManifestJson !== "function"
+  ) {
+    return null;
+  }
+
+  try {
+    const manifestBlock = helpers.extractImplementationManifestBlock(resultText);
+    if (manifestBlock == null) return null;
+    return serializeImplementationManifest(
+      helpers.normalizeImplementationManifestJson(manifestBlock),
+    );
+  } catch (err) {
+    log.warn({ err }, "Failed to extract implementation manifest from implementer result");
+    return null;
+  }
+}
+
+function taskSupportsImplementationManifestField(task: TaskRow): boolean {
+  return Object.prototype.hasOwnProperty.call(task, "implementationManifestJson");
 }
 
 function readCanonicalPlan(
@@ -1154,7 +1268,7 @@ function buildAuditSynthesisManifest(input: {
   sourceArtifacts: ValidatedAuditArtifactContent[];
   weakArtifacts: WeakAuditArtifactSummary[];
   evidenceUnit: AuditEvidenceUnit | null;
-  outcome: AuditSourceClassification;
+  outcome: AuditPublicReportOutcome;
 }): Record<string, unknown> {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   const evidenceRefs = input.evidenceUnit ? [input.evidenceUnit.id] : [];
@@ -1741,7 +1855,10 @@ function buildDeterministicAuditSynthesisContent(
     weakArtifacts,
   );
 
-  if (sourceOutcome.kind === "inconclusive_batch_evidence") {
+  if (
+    sourceOutcome.kind === "source_inconclusive" ||
+    sourceOutcome.kind === "inconclusive_batch_evidence"
+  ) {
     const lines = [
       "# Audit Inconclusive",
       "",
@@ -2041,12 +2158,13 @@ function buildDeterministicAuditSynthesisContentWithManifest(input: {
   const weakArtifactPaths = [
     ...new Set(input.weakArtifacts.map((artifact) => artifact.artifactPath).filter(Boolean)),
   ].sort();
-  const outcome = classifyAuditSourceEvidence({
+  const sourceClassification = classifyAuditSourceEvidence({
     text: body,
     projectRoot: input.projectRoot,
     excludedReferencedPaths: [input.artifactPath],
     requireProposedFix: true,
   }).classification;
+  const outcome = toAuditPublicReportOutcome(sourceClassification);
   const evidenceOutput = [
     `summaryArtifact=${input.artifactPath}`,
     `sourceReportCount=${input.artifacts.length}`,
@@ -2116,14 +2234,11 @@ function runDeterministicAuditSynthesisRework(input: {
 }
 
 type DeterministicAuditReportRepairResult = {
-  status: "accepted" | "terminal_source_inconclusive" | "runtime_rework_required";
+  status: "accepted" | "terminal_source_inconclusive";
   resultText: string;
   blockedReason: string | null;
   issueCodes: string[];
-  autoReviewState: AutoReviewState | null;
 };
-
-type TaskRowWithAutoReviewState = TaskRow & { autoReviewState?: AutoReviewState | null };
 
 function runDeterministicAuditReportRepair(input: {
   task: TaskRow;
@@ -2154,7 +2269,6 @@ function runDeterministicAuditReportRepair(input: {
   }
   let status: DeterministicAuditReportRepairResult["status"];
   let blockedReason: string | null = null;
-  let autoReviewState: AutoReviewState | null = null;
   if (isTrustedValidAuditReportValidation(validation)) {
     updateRoadmapBatchArtifactState({
       taskId: input.task.id,
@@ -2190,7 +2304,7 @@ function runDeterministicAuditReportRepair(input: {
         sourceClassification: "source_inconclusive",
       },
     };
-    terminalizeSourceInconclusiveAuditReport({
+    blockedReason = terminalizeSourceInconclusiveAuditReport({
       task: input.task,
       projectRoot: input.projectRoot,
       artifactPath: input.artifactPath,
@@ -2201,40 +2315,55 @@ function runDeterministicAuditReportRepair(input: {
     });
     status = "terminal_source_inconclusive";
   } else {
-    const runtimeRework = persistDeterministicAuditRepairRuntimeRework({
-      task: input.task,
-      projectRoot: input.projectRoot,
-      artifactPath: input.artifactPath,
-      validation,
+    const validationDetails = buildAuditReportValidationDetails(validation, {
       deterministicRepair: {
         outcome: repair.decision.outcome,
         reasons: repair.decision.reasons,
+        terminalHandling:
+          "Strict validation failed after deterministic repair; source_inconclusive is terminal and runtime implementation rework is not allowed.",
       },
     });
-    status = "runtime_rework_required";
-    blockedReason = runtimeRework.blockedReason;
-    autoReviewState = runtimeRework.autoReviewState;
+    validationDetails.evidence = {
+      auditReportValidation: {
+        ...((validationDetails.evidence as { auditReportValidation?: Record<string, unknown> })
+          .auditReportValidation ?? {}),
+        sourceClassification: "source_inconclusive",
+        validatorSourceClassification: validation.sourceClassification,
+      },
+    };
+    blockedReason = terminalizeSourceInconclusiveAuditReport({
+      task: input.task,
+      projectRoot: input.projectRoot,
+      artifactPath: input.artifactPath,
+      reasons: repair.decision.reasons,
+      validation,
+      sourceSnapshotId: validation.sourceSnapshot?.id ?? repair.sourceSnapshot.id,
+      validationDetails,
+    });
+    status = "terminal_source_inconclusive";
   }
   const issueCodes = auditReportValidationIssueCodes(validation);
   const resultText = [
     status === "accepted"
       ? "Deterministic audit report repair completed from risk-specific declared scope evidence and passed strict validation."
-      : status === "terminal_source_inconclusive"
-        ? "Deterministic audit report repair completed as source_inconclusive."
-        : "Deterministic audit report repair could not satisfy strict validation; routing to runtime implementation rework.",
+      : "Deterministic audit report repair completed as source_inconclusive.",
     `Report artifact: ${input.artifactPath}`,
     status === "accepted"
       ? "Rejected prior candidate findings that did not meet the technical finding contract."
-      : status === "terminal_source_inconclusive"
-        ? "Rejected prior candidate findings and persisted a terminal non-trusted source_inconclusive artifact state."
-        : `Runtime rework required for unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}.`,
+      : "Rejected prior candidate findings and persisted a terminal non-trusted source_inconclusive artifact state.",
+    ...(status === "terminal_source_inconclusive"
+      ? [
+          `Unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}`,
+          ...(blockedReason ? [`Blocked reason: ${blockedReason}`] : []),
+        ]
+      : []),
     ...(repair.decision.reasons.length > 0
       ? repair.decision.reasons.map((reason) => `Inconclusive reason: ${reason}`)
       : []),
     "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
     gitLog,
   ].join("\n");
-  return { status, resultText, blockedReason, issueCodes, autoReviewState };
+  return { status, resultText, blockedReason, issueCodes };
 }
 
 function auditReportValidationIssueCodes(
@@ -2280,10 +2409,19 @@ function terminalizeSourceInconclusiveAuditReport(input: {
   artifactPath: string;
   reasons?: string[];
   validation?: ReturnType<typeof validateAuditReportArtifact> | null;
+  fallbackIssueCodes?: string[];
   sourceSnapshotId?: string | null;
   validationDetails?: Record<string, unknown>;
 }): string {
-  const issueCodes = input.validation ? auditReportValidationIssueCodes(input.validation) : [];
+  const issueCodes = input.validation
+    ? auditReportValidationIssueCodes(input.validation)
+    : [
+        ...new Set(
+          input.fallbackIssueCodes?.length
+            ? input.fallbackIssueCodes
+            : ["missing_report_file_references"],
+        ),
+      ].sort();
   const details = [
     ...(input.reasons ?? []).map((reason) => reason.trim()).filter(Boolean),
     ...(issueCodes.length > 0 ? [`validator issue codes: ${issueCodes.join(", ")}`] : []),
@@ -2303,6 +2441,18 @@ function terminalizeSourceInconclusiveAuditReport(input: {
           },
         })
       : {
+          issues: issueCodes.map((code) => ({
+            code,
+            message: `Strict deterministic repair validation could not read ${input.artifactPath}.`,
+          })),
+          evidence: {
+            auditReportValidation: {
+              ok: false,
+              issueCodes,
+              sourceClassification: "source_inconclusive",
+              manifestStatus: "missing",
+            },
+          },
           sourceInconclusiveTerminal: {
             artifactPath: input.artifactPath,
             reasons: input.reasons ?? [],
@@ -2375,113 +2525,6 @@ function validateAuditReportArtifactWithTaskContext(input: {
     auditEvidenceUnits,
     requireLedgerEvidence: input.requireLedgerEvidence ?? false,
   });
-}
-
-function buildDeterministicRepairRuntimeAutoReviewState(input: {
-  task: TaskRowWithAutoReviewState;
-  artifactPath: string;
-  issueCodes: string[];
-  artifactContentSha: string | null;
-}): AutoReviewState {
-  const base: AutoReviewState = input.task.autoReviewState ?? {
-    strategy: "full_re_review",
-    iteration: input.task.reviewIterationCount ?? 0,
-    findings: [],
-  };
-  const findingsById = new Map(base.findings.map((finding) => [finding.id, finding]));
-  for (const code of input.issueCodes.length > 0 ? input.issueCodes : ["unknown"]) {
-    const id = `deterministic_repair_${code.replace(/[^a-z0-9_]+/gi, "_").toLowerCase()}`;
-    findingsById.set(id, {
-      id,
-      source: "review_gate",
-      text: `Deterministic audit report repair could not resolve strict validator issue ${code} for ${input.artifactPath}; runtime rework must address this exact report contract failure.`,
-      firstSeenIteration: base.iteration,
-      lastSeenIteration: base.iteration,
-      streak: 1,
-    });
-  }
-  const findings = [...findingsById.values()];
-  return {
-    ...base,
-    findings,
-    reworkSnapshot: {
-      iteration: base.iteration,
-      artifactPath: input.artifactPath,
-      artifactContentSha: input.artifactContentSha,
-      findingIds: findings.map((finding) => finding.id),
-    },
-  };
-}
-
-function persistDeterministicAuditRepairRuntimeRework(input: {
-  task: TaskRow;
-  projectRoot: string;
-  artifactPath: string;
-  validation: ReturnType<typeof validateAuditReportArtifact> | null;
-  fallbackIssueCodes?: string[];
-  deterministicRepair?: Record<string, unknown>;
-}): { blockedReason: string; issueCodes: string[]; autoReviewState: AutoReviewState } {
-  const issueCodes =
-    input.validation != null
-      ? auditReportValidationIssueCodes(input.validation)
-      : [
-          ...new Set(
-            input.fallbackIssueCodes?.length
-              ? input.fallbackIssueCodes
-              : ["missing_report_file_references"],
-          ),
-        ].sort();
-  const blockedReason = `deterministic_audit_repair_rework_required: deterministic audit report repair could not resolve strict validator issue codes for ${input.artifactPath}: ${
-    issueCodes.join(", ") || "unknown"
-  }`;
-  const validationDetails =
-    input.validation != null
-      ? buildAuditReportValidationDetails(input.validation, {
-          deterministicRepair: {
-            ...(input.deterministicRepair ?? {}),
-            terminalHandling:
-              "Strict validation failed after deterministic repair; runtime implementation is allowed one normal rework attempt and must still satisfy the same validator before acceptance.",
-          },
-          runtimeReworkRequired: {
-            artifactPath: input.artifactPath,
-            issueCodes,
-          },
-        })
-      : {
-          issues: issueCodes.map((code) => ({
-            code,
-            message: `Strict deterministic repair validation could not read ${input.artifactPath}.`,
-          })),
-          deterministicRepair: {
-            ...(input.deterministicRepair ?? {}),
-            terminalHandling:
-              "Strict validation failed after deterministic repair; runtime implementation is allowed one normal rework attempt and must still satisfy the same validator before acceptance.",
-          },
-          runtimeReworkRequired: {
-            artifactPath: input.artifactPath,
-            issueCodes,
-          },
-        };
-  const artifactContentSha = input.validation?.artifactSha256 ?? null;
-  const autoReviewState = buildDeterministicRepairRuntimeAutoReviewState({
-    task: input.task,
-    artifactPath: input.artifactPath,
-    issueCodes,
-    artifactContentSha,
-  });
-  updateRoadmapBatchArtifactState({
-    taskId: input.task.id,
-    state: input.validation == null ? "missing" : "invalid",
-    failureFamily: input.validation == null ? "missing_artifact" : undefined,
-    classification: input.validation?.sourceClassification,
-    reworkStatus: "rework_requested",
-    createAttemptBoundary: true,
-    projectRoot: input.projectRoot,
-    contentSha: artifactContentSha,
-    sourceSnapshotId: input.validation?.sourceSnapshot?.id,
-    validationDetails,
-  });
-  return { blockedReason, issueCodes, autoReviewState };
 }
 
 async function runChecklistSyncQuery(input: {
@@ -2643,7 +2686,6 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       code,
     ),
   );
-  let deterministicRepairFallbackResultText: string | null = null;
 
   if (
     selectedPlan &&
@@ -2851,117 +2893,87 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       projectRoot,
       artifactPath: expectedAuditReportArtifactPath,
     });
-    if (repairResult.status === "runtime_rework_required") {
-      deterministicRepairFallbackResultText = repairResult.resultText;
-      if (repairResult.blockedReason) {
-        reworkBlockedReasonForPrompt = compactTextForPrompt(
-          "REWORK_BLOCKED_REASON",
-          repairResult.blockedReason,
-          PROMPT_SECTION_LIMITS.blockedReason,
-        );
-      }
-      if (repairResult.autoReviewState) {
-        blockingFindingsSnapshot = formatAutoReviewStateForPrompt(repairResult.autoReviewState);
-      }
-      setTaskFields(taskId, {
-        implementationLog: repairResult.resultText,
-        blockedReason: repairResult.blockedReason,
-        reworkRequested: true,
-        manualReviewRequired: false,
-        autoReviewState: repairResult.autoReviewState,
-        lastHeartbeatAt: nowIso,
-        updatedAt: nowIso,
-      });
-      logActivity(
-        taskId,
-        "Agent",
-        `Deterministic audit report repair requested runtime rework: ${repairResult.issueCodes.join(", ") || "unknown"}`,
-      );
-      log.info(
-        {
-          taskId,
-          artifactPath: expectedAuditReportArtifactPath,
-          issueCodes: repairResult.issueCodes,
-        },
-        "Audit report deterministic repair fell through to runtime implementation rework",
-      );
-    } else {
-      const resultText = repairResult.resultText;
-      setTaskFields(taskId, {
-        implementationLog: resultText,
-        reworkRequested: false,
-        lastHeartbeatAt: nowIso,
-        updatedAt: nowIso,
-      });
-      logActivity(
-        taskId,
-        "Agent",
-        repairResult.status === "terminal_source_inconclusive"
-          ? "Deterministic audit report repair terminalized as source_inconclusive"
-          : "Deterministic audit report repair complete",
-      );
-      log.info(
-        { taskId, artifactPath: expectedAuditReportArtifactPath },
-        repairResult.status === "terminal_source_inconclusive"
-          ? "Audit report rework completed deterministically as source_inconclusive"
-          : "Audit report rework completed deterministically",
-      );
-      return;
-    }
-  }
-
-  if (
-    expectedAuditReportArtifactPath &&
-    repeatedDeterministicAuditReportRepair &&
-    (auditEvidenceRepairMode || currentReportNeedsDeterministicRepair) &&
-    shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)
-  ) {
-    const nowIso = new Date().toISOString();
-    const runtimeRework = persistDeterministicAuditRepairRuntimeRework({
-      task,
-      projectRoot,
-      artifactPath: expectedAuditReportArtifactPath,
-      validation: currentAuditReportValidation,
-      fallbackIssueCodes: currentAuditReportIssueCodes,
-      deterministicRepair: {
-        outcome: "runtime_rework_required",
-        repeatedDeterministicRepair: true,
-      },
-    });
-    const resultText = [
-      "Repeated deterministic audit report repair did not satisfy strict validation; routing to runtime implementation rework.",
-      `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Unresolved strict validator issue codes: ${runtimeRework.issueCodes.join(", ") || "unknown"}`,
-    ].join("\n");
-    deterministicRepairFallbackResultText = resultText;
-    reworkBlockedReasonForPrompt = compactTextForPrompt(
-      "REWORK_BLOCKED_REASON",
-      runtimeRework.blockedReason,
-      PROMPT_SECTION_LIMITS.blockedReason,
-    );
-    blockingFindingsSnapshot = formatAutoReviewStateForPrompt(runtimeRework.autoReviewState);
+    const resultText = repairResult.resultText;
     setTaskFields(taskId, {
       implementationLog: resultText,
-      blockedReason: runtimeRework.blockedReason,
-      reworkRequested: true,
-      manualReviewRequired: false,
-      autoReviewState: runtimeRework.autoReviewState,
+      reworkRequested: false,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
     logActivity(
       taskId,
       "Agent",
-      `Repeated deterministic audit report repair requested runtime rework: ${runtimeRework.issueCodes.join(", ") || "unknown"}`,
+      repairResult.status === "terminal_source_inconclusive"
+        ? `Deterministic audit report repair terminalized as source_inconclusive: ${repairResult.issueCodes.join(", ") || "unknown"}`
+        : "Deterministic audit report repair complete",
     );
     log.info(
       {
         taskId,
         artifactPath: expectedAuditReportArtifactPath,
-        issueCodes: runtimeRework.issueCodes,
+        issueCodes: repairResult.issueCodes,
       },
-      "Repeated deterministic audit report repair fell through to runtime implementation rework",
+      repairResult.status === "terminal_source_inconclusive"
+        ? "Audit report rework completed deterministically as source_inconclusive"
+        : "Audit report rework completed deterministically",
     );
+    return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    task.reworkRequested &&
+    repeatedDeterministicAuditReportRepair &&
+    (currentAuditReportValidation == null ||
+      !isTrustedValidAuditReportValidation(currentAuditReportValidation))
+  ) {
+    const nowIso = new Date().toISOString();
+    const issueCodes =
+      currentAuditReportValidation != null
+        ? auditReportValidationIssueCodes(currentAuditReportValidation)
+        : [
+            ...new Set(
+              currentAuditReportIssueCodes.length
+                ? currentAuditReportIssueCodes
+                : ["missing_report_file_references"],
+            ),
+          ].sort();
+    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      validation: currentAuditReportValidation,
+      fallbackIssueCodes: currentAuditReportIssueCodes,
+      reasons: ["repeated deterministic audit report repair still failed strict validation"],
+    });
+    const resultText = [
+      "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
+      `Report artifact: ${expectedAuditReportArtifactPath}`,
+      `Unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}`,
+      `Blocked reason: ${blockedReason}`,
+    ].join("\n");
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      blockedReason,
+      reworkRequested: false,
+      manualReviewRequired: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      `Repeated deterministic audit report repair terminalized as source_inconclusive: ${issueCodes.join(", ") || "unknown"}`,
+    );
+    log.info(
+      {
+        taskId,
+        artifactPath: expectedAuditReportArtifactPath,
+        issueCodes,
+      },
+      "Repeated deterministic audit report repair terminalized before runtime implementation rework",
+    );
+    return;
   }
 
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
@@ -3115,6 +3127,7 @@ Execution rules:
 - Do not loop on \`git_commit\`. For diagnostic audit/report work, make one bounded report-only commit attempt after writing the report artifact; stage only the report artifact, never broad-stage unrelated changes. If it reports no changes or the artifact is already committed, run \`git_status\` and \`git log -1 --name-only --oneline\`, record the observed result, then stop using tools and return.
 - Before closing diagnostic audit/report work, verify every cited repository path exists under the project root. Replace directory references, nonexistent paths, and placeholders with concrete existing file references and line numbers.
 - When VALIDATED_AUDIT_BATCH_INPUTS contains report artifacts, use those exact validated report contents as the synthesis source of truth; do not synthesize from unvalidated report-like files.
+${formatImplementationManifestPrompt(task, selectedPlan)}
 - IMPORTANT: The plan file is ${effectivePlanPath}. Always read from and annotate this exact file — do not create plan files at other paths.${reworkProtocolBlock}`;
   const promptBudget = compactImplementerPromptToBudget(rawPrompt);
   const prompt = promptBudget.prompt;
@@ -3158,6 +3171,7 @@ Execution rules:
     maxBudgetUsd: implementerBudget,
     agent: useSubagents ? AGENT_NAME : undefined,
     skipReview: task.skipReview ?? false,
+    profileMode: "implementer",
     workflowSpec,
     workflowKind: "implementer",
     fallbackSlashCommand: implementSlashCommand,
@@ -3171,9 +3185,7 @@ Execution rules:
     assertCurrentBranch(projectRoot, task.branchName);
   }
 
-  let finalResultText = deterministicRepairFallbackResultText
-    ? `${deterministicRepairFallbackResultText}\n\nRuntime implementer result:\n${resultText}`
-    : resultText;
+  let finalResultText = resultText;
 
   if (isBlockedImplementationResult(resultText)) {
     throw new Error("Implementer blocked by permissions");
@@ -3235,6 +3247,7 @@ Execution rules:
     finalResultNotes.length > 0
       ? `${finalResultText}\n\n${finalResultNotes.join("\n")}`
       : finalResultText;
+  const implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
 
   const nowIso = new Date().toISOString();
   if (syncedPlan) {
@@ -3248,12 +3261,16 @@ Execution rules:
     });
   }
 
-  setTaskFields(taskId, {
+  const taskPatch: TaskFieldsPatch & { implementationManifestJson?: string | null } = {
     implementationLog: enrichedResult,
     reworkRequested: false,
     lastHeartbeatAt: nowIso,
     updatedAt: nowIso,
-  });
+  };
+  if (implementationManifestJson && taskSupportsImplementationManifestField(task)) {
+    taskPatch.implementationManifestJson = implementationManifestJson;
+  }
+  setTaskFields(taskId, taskPatch);
 
   log.debug({ taskId }, "Implementation log saved to task");
 }

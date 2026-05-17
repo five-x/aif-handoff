@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { chatSessions, tasks } from "../schema.js";
 import { closeDb, createTestDb, getDb } from "../db.js";
 
-const CURRENT_DB_USER_VERSION = 26;
+const CURRENT_DB_USER_VERSION = 32;
 
 function removeSqliteArtifacts(dbPath: string): void {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
@@ -23,6 +23,39 @@ describe("db", () => {
   it("createTestDb returns a working database with indexes", () => {
     const db = createTestDb();
     expect(db).toBeDefined();
+  });
+
+  it("creates durable task lock provenance columns for fresh databases", () => {
+    closeDb();
+    const dbPath = join(
+      tmpdir(),
+      `aif-shared-lock-provenance-${Date.now()}-${Math.random()}.sqlite`,
+    );
+
+    try {
+      getDb(dbPath);
+      closeDb();
+
+      const sqlite = new Database(dbPath, { readonly: true });
+      const columns = sqlite.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>;
+      const userVersion = sqlite.pragma("user_version", { simple: true }) as number;
+      sqlite.close();
+
+      expect(columns.map((column) => column.name)).toEqual(
+        expect.arrayContaining([
+          "locked_by",
+          "locked_until",
+          "last_heartbeat_at",
+          "lock_stage",
+          "coordinator_id",
+          "source_ref",
+        ]),
+      );
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
   });
 
   it("creates Codex index tables for fresh databases", () => {
@@ -651,11 +684,15 @@ describe("db", () => {
           WHERE type = 'index'
             AND name IN (
               'idx_runtime_warmup_active_lookup',
+              'idx_runtime_warmup_stage_lookup',
               'idx_runtime_warmup_expires'
             )
         `,
         )
         .all() as Array<{ name: string }>;
+      const columns = sqlite.prepare(`PRAGMA table_info(runtime_warmup_sessions)`).all() as Array<{
+        name: string;
+      }>;
       const userVersion = sqlite.pragma("user_version", { simple: true }) as number;
       sqlite.close();
 
@@ -663,7 +700,9 @@ describe("db", () => {
       expect(indexes.map((row) => row.name).sort()).toEqual([
         "idx_runtime_warmup_active_lookup",
         "idx_runtime_warmup_expires",
+        "idx_runtime_warmup_stage_lookup",
       ]);
+      expect(columns.map((column) => column.name)).toContain("stage");
       expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();
@@ -789,6 +828,9 @@ describe("db", () => {
         `,
         )
         .all() as Array<{ name: string }>;
+      const columns = sqlite.prepare(`PRAGMA table_info(memory_items)`).all() as Array<{
+        name: string;
+      }>;
 
       sqlite
         .prepare(
@@ -838,6 +880,9 @@ describe("db", () => {
         "trg_memory_items_fts_insert",
         "trg_memory_items_fts_update",
       ]);
+      expect(columns.map((row) => row.name)).toEqual(
+        expect.arrayContaining(["item_type", "failure_family", "claims_json"]),
+      );
       expect(ftsRow?.item_id).toBe("memory-1");
       expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
@@ -883,6 +928,54 @@ describe("db", () => {
         "memory_lifecycle_events",
         "memory_usage_events",
       ]);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
+  });
+
+  it("upgrades a v26 schema by adding structured implementation manifests to tasks", () => {
+    closeDb();
+    const dbPath = join(
+      tmpdir(),
+      `aif-shared-v26-implementation-manifest-${Date.now()}-${Math.random()}.sqlite`,
+    );
+    const sqlite = new Database(dbPath);
+
+    sqlite.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'backlog',
+        position REAL NOT NULL DEFAULT 1000.0,
+        retry_after TEXT,
+        locked_by TEXT,
+        locked_until TEXT,
+        scheduled_at TEXT,
+        runtime_profile_id TEXT,
+        manual_review_required INTEGER NOT NULL DEFAULT 0,
+        runtime_limit_snapshot_json TEXT,
+        runtime_limit_updated_at TEXT,
+        task_intent TEXT NOT NULL DEFAULT 'general'
+      );
+    `);
+    sqlite.pragma("user_version = 26");
+    sqlite.close();
+
+    try {
+      getDb(dbPath);
+      closeDb();
+
+      const migratedSqlite = new Database(dbPath, { readonly: true });
+      const taskColumns = migratedSqlite.prepare(`PRAGMA table_info(tasks)`).all() as Array<{
+        name: string;
+      }>;
+      const userVersion = migratedSqlite.pragma("user_version", { simple: true }) as number;
+      migratedSqlite.close();
+
+      expect(taskColumns.map((column) => column.name)).toContain("implementation_manifest_json");
       expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();

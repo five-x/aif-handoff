@@ -126,6 +126,7 @@ export function WarmupDialog({ open, onOpenChange, project, enabled }: WarmupDia
       targets.map((target) => {
         const matchingWarmup = warmups.find(
           (item) =>
+            item.stage === target.stage &&
             item.runtimeProfileId === target.runtimeProfileId &&
             item.runtimeId === target.runtimeId &&
             item.providerId === target.providerId &&
@@ -135,6 +136,7 @@ export function WarmupDialog({ open, onOpenChange, project, enabled }: WarmupDia
         return {
           key: [
             target.workflowKind ?? "target",
+            target.stage ?? "stage",
             target.runtimeProfileId ?? "default",
             target.runtimeId ?? "runtime",
             target.providerId ?? "provider",

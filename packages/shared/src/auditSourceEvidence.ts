@@ -11,6 +11,33 @@ export const AUDIT_SOURCE_CLASSIFICATIONS = [
 
 export type AuditSourceClassification = (typeof AUDIT_SOURCE_CLASSIFICATIONS)[number];
 
+export const AUDIT_PUBLIC_REPORT_OUTCOMES = [
+  "validated_findings_present",
+  "validated_no_findings",
+  "source_inconclusive",
+] as const;
+
+export type AuditPublicReportOutcome = (typeof AUDIT_PUBLIC_REPORT_OUTCOMES)[number];
+
+export function isAuditPublicReportOutcome(value: unknown): value is AuditPublicReportOutcome {
+  return (
+    typeof value === "string" &&
+    AUDIT_PUBLIC_REPORT_OUTCOMES.includes(value as AuditPublicReportOutcome)
+  );
+}
+
+export function toAuditPublicReportOutcome(
+  classification: AuditSourceClassification,
+): AuditPublicReportOutcome {
+  if (
+    classification === "validated_findings_present" ||
+    classification === "validated_no_findings"
+  ) {
+    return classification;
+  }
+  return "source_inconclusive";
+}
+
 export interface AuditCommandEvidence {
   command: string;
   evidence: string;

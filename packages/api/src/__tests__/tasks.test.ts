@@ -9,9 +9,12 @@ import {
   appSettings,
   buildEvidenceUnit,
   buildEvidenceUnitPayload,
+  configAuditEvents,
   projects,
   roadmapBatchArtifacts,
   runtimeProfiles,
+  usageEvents,
+  memoryItems,
   taskComments,
   tasks,
 } from "@aif/shared";
@@ -118,6 +121,50 @@ function initGitProject(rootPath: string) {
   });
 }
 
+function implementationManifest(input: {
+  taskId: string;
+  intent: "feature" | "fix" | "docs" | "tests";
+  changedFiles: string[];
+  regressionExplanation?: string | null;
+}): string {
+  return JSON.stringify({
+    version: 1,
+    taskId: input.taskId,
+    intent: input.intent,
+    planManifestHash: null,
+    changedFiles: input.changedFiles.map((path) => ({ path, status: "modified" })),
+    diffSummary: {
+      summary: input.changedFiles.length
+        ? `Changed ${input.changedFiles.join(", ")}`
+        : "No source file delta required.",
+      filesChanged: input.changedFiles.length,
+    },
+    verificationEvidence: [
+      {
+        id: "verify-api",
+        command: "npm.cmd test --workspace=@aif/api -- --run src/__tests__/tasks.test.ts",
+        status: "passed",
+        outputSha256: "a".repeat(64),
+        outputPreview: "tests passed",
+        outputPreviewTruncated: false,
+      },
+    ],
+    acceptanceCriteria: [
+      {
+        id: "AC1",
+        status: "satisfied",
+        evidenceRefs: ["verify-api"],
+      },
+    ],
+    evidenceRefs: ["verify-api"],
+    planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+    reviewClosure: { status: "passed", evidenceRefs: ["verify-api"] },
+    commitEvidence: { status: "not_required", evidenceRefs: [] },
+    regressionExplanation: input.regressionExplanation ?? null,
+    knownLimitations: [],
+  });
+}
+
 describe("tasks API", () => {
   let app: ReturnType<typeof createApp>;
 
@@ -125,6 +172,7 @@ describe("tasks API", () => {
     testDb.current = createTestDb();
     app = createApp();
     mockInternalBroadcastToken.value = "";
+    vi.mocked(mockBroadcast).mockClear();
     mockRunApiRuntimeOneShot.mockReset();
     mockRunApiRuntimeOneShot.mockResolvedValue({
       result: {
@@ -567,6 +615,72 @@ describe("tasks API", () => {
       expect(body.fieldErrors.runtimeProfileId).toBeDefined();
     });
 
+    it("should reject secret-like runtime option keys on create", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Secret runtime option",
+          projectId: "test-project",
+          runtimeOptions: { nested: { apiKey: "raw-secret-value" } },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.reasonCodes).toEqual(["TASK_RUNTIME_SECRET_LIKE_OPTION_KEY"]);
+      expect(body.fieldErrors.runtimeOptions[0]).toContain("nested.apiKey");
+    });
+
+    it("should append redacted config audit and activity for create-time runtime overrides", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(runtimeProfiles)
+        .values({
+          id: "task-profile",
+          projectId: "test-project",
+          name: "Task Profile",
+          runtimeId: "claude",
+          providerId: "anthropic",
+          enabled: true,
+        })
+        .run();
+
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Create override",
+          projectId: "test-project",
+          runtimeProfileId: "task-profile",
+          modelOverride: "sonnet",
+          runtimeOptions: { timeoutMs: 1000 },
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const task = await res.json();
+      const audit = db
+        .select()
+        .from(configAuditEvents)
+        .where(eq(configAuditEvents.taskId, task.id))
+        .get();
+      expect(audit).toMatchObject({
+        projectId: "test-project",
+        runtimeProfileId: "task-profile",
+        action: "task_runtime_override_updated",
+        sourceKind: "task_override",
+      });
+      expect(audit?.afterJson).toContain("timeoutMs");
+      expect(audit?.afterJson).not.toContain("sonnet");
+      const persisted = db.select().from(tasks).where(eq(tasks.id, task.id)).get();
+      expect(persisted?.agentActivityLog).toContain("Task runtime override updated");
+      expect(persisted?.agentActivityLog).not.toContain("sonnet");
+    });
+
     it("should persist planner settings from create payload", async () => {
       const res = await app.request("/tasks", {
         method: "POST",
@@ -966,7 +1080,30 @@ describe("tasks API", () => {
               {
                 id: "finding-1",
                 source: "code_review",
-                text: "Add manual review badge",
+                status: "still_blocking",
+                text: "Add manual review badge without client_secret=secret-value",
+              },
+            ],
+            securityCoverage: [
+              {
+                area: "secret_leaks",
+                status: "covered",
+                note: "checked access_token=oauth-token in review output",
+              },
+              {
+                area: "permissions_sandbox",
+                status: "covered",
+                note: "checked sandbox boundaries",
+              },
+              {
+                area: "unsafe_shell_network_file",
+                status: "covered",
+                note: "checked shell and file operations",
+              },
+              {
+                area: "dependency_config",
+                status: "covered",
+                note: "checked dependency configuration",
               },
             ],
           }),
@@ -984,10 +1121,35 @@ describe("tasks API", () => {
           {
             id: "finding-1",
             source: "code_review",
-            text: "Add manual review badge",
+            status: "still_blocking",
+            text: "Add manual review badge without client_secret=[REDACTED]",
+          },
+        ],
+        securityCoverage: [
+          {
+            area: "secret_leaks",
+            status: "covered",
+            note: "checked access_token=[REDACTED] in review output",
+          },
+          {
+            area: "permissions_sandbox",
+            status: "covered",
+            note: "checked sandbox boundaries",
+          },
+          {
+            area: "unsafe_shell_network_file",
+            status: "covered",
+            note: "checked shell and file operations",
+          },
+          {
+            area: "dependency_config",
+            status: "covered",
+            note: "checked dependency configuration",
           },
         ],
       });
+      expect(JSON.stringify(body.autoReviewState)).not.toContain("secret-value");
+      expect(JSON.stringify(body.autoReviewState)).not.toContain("oauth-token");
     });
 
     it("should return 404 for non-existent task", async () => {
@@ -1107,7 +1269,7 @@ describe("tasks API", () => {
       );
       expect(body.artifacts[0]).toEqual(
         expect.objectContaining({
-          kind: "audit.source_report",
+          kind: "audit_report",
           state: "inconclusive",
         }),
       );
@@ -1123,7 +1285,7 @@ describe("tasks API", () => {
       );
     });
 
-    it("returns an empty generic timeline for non-audit tasks", async () => {
+    it("returns task-record timeline data for non-audit tasks", async () => {
       const db = testDb.current;
       db.insert(tasks)
         .values({
@@ -1131,7 +1293,13 @@ describe("tasks API", () => {
           projectId: "test-project",
           title: "Timeline feature",
           taskIntent: "feature",
-          status: "backlog",
+          status: "done",
+          implementationLog: "Changed packages/api/src/__tests__/tasks.test.ts\nTests passed",
+          implementationManifestJson: implementationManifest({
+            taskId: "timeline-feature",
+            intent: "feature",
+            changedFiles: ["packages/api/src/__tests__/tasks.test.ts"],
+          }),
         })
         .run();
       appendEvidenceUnitEvent(
@@ -1158,20 +1326,177 @@ describe("tasks API", () => {
           taskId: "timeline-feature",
           workflowPackId: "feature",
           workflowKind: "feature",
-          sourceKind: "none",
+          sourceKind: "task_record",
         }),
       );
-      expect(body.artifacts).toEqual([]);
-      expect(body.claims).toEqual([]);
-      expect(body.evidence).toEqual([]);
-      expect(body.evidenceLinks).toEqual([]);
-      expect(body.events).toEqual([]);
+      expect(body.artifacts.map((artifact: { kind: string }) => artifact.kind)).toEqual(
+        expect.arrayContaining(["implementation_manifest", "source_diff", "test_result"]),
+      );
+      expect(body.evidence.map((unit: { id: string }) => unit.id)).not.toContain(
+        "timeline-feature-ev",
+      );
+      expect(body.claims.length).toBeGreaterThan(0);
+      expect(body.evidenceLinks.length).toBeGreaterThan(0);
+      expect(body.events.map((event: { kind: string }) => event.kind)).toContain("claim_evaluated");
+      expect(body.selectedArtifact).toBeUndefined();
     });
 
     it("returns 404 for missing tasks", async () => {
       const res = await app.request("/tasks/missing-task/timeline");
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: "Task not found" });
+    });
+  });
+
+  describe("operator trust surfaces", () => {
+    it("returns artifact trust, evidence, memory, and runtime projections", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "operator-task",
+          projectId: "test-project",
+          title: "Operator task",
+          status: "review",
+          tokenInput: 7,
+          tokenOutput: 11,
+          tokenTotal: 18,
+          costUsd: 0.04,
+        })
+        .run();
+      appendEvidenceUnitEvent(
+        buildEvidenceUnit(
+          {
+            taskId: "operator-task",
+            auditPlanId: "task:operator-task",
+            sourceSnapshotId: "git:test",
+          },
+          buildEvidenceUnitPayload({
+            id: "operator-evidence",
+            toolName: "npm",
+            evidenceKind: "shell_command",
+            output: "Tests passed",
+          }),
+        ),
+      );
+      db.insert(memoryItems)
+        .values({
+          id: "operator-memory",
+          projectId: "test-project",
+          sourceTaskId: "operator-task",
+          sourceKind: "task",
+          sourceRef: "task:operator-task",
+          title: "Operator memory",
+          summary: "Memory summary",
+          content: "Memory content",
+          claimsJson: "[]",
+          tagsJson: "[]",
+        })
+        .run();
+      db.insert(usageEvents)
+        .values({
+          id: "operator-usage",
+          source: "agent",
+          projectId: "test-project",
+          taskId: "operator-task",
+          runtimeId: "codex",
+          providerId: "openai",
+          profileId: "profile-1",
+          usageReporting: "reported",
+          inputTokens: 7,
+          outputTokens: 11,
+          totalTokens: 18,
+          costUsd: 0.04,
+        })
+        .run();
+
+      const trustRes = await app.request("/tasks/operator-task/artifact-trust");
+      expect(trustRes.status).toBe(200);
+      expect(await trustRes.json()).toEqual(expect.objectContaining({ taskStatus: "review" }));
+
+      const evidenceRes = await app.request("/tasks/operator-task/evidence");
+      expect(evidenceRes.status).toBe(200);
+      expect(await evidenceRes.json()).toEqual(
+        expect.objectContaining({
+          taskId: "operator-task",
+          projectId: "test-project",
+          evidence: expect.arrayContaining([expect.objectContaining({ taskId: "operator-task" })]),
+        }),
+      );
+
+      const memoryRes = await app.request("/tasks/operator-task/memory");
+      expect(memoryRes.status).toBe(200);
+      expect(await memoryRes.json()).toEqual(
+        expect.objectContaining({
+          taskId: "operator-task",
+          candidates: [expect.objectContaining({ id: "operator-memory" })],
+        }),
+      );
+
+      const usageRes = await app.request("/tasks/operator-task/runtime-usage");
+      expect(usageRes.status).toBe(200);
+      expect(await usageRes.json()).toEqual(
+        expect.objectContaining({
+          totals: expect.objectContaining({ totalTokens: 18, costUsd: 0.04 }),
+          events: [expect.objectContaining({ id: "operator-usage" })],
+        }),
+      );
+    });
+
+    it("builds bounded internal task broadcast payloads", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "broadcast-task",
+          projectId: "test-project",
+          title: "Broadcast task",
+          status: "blocked_external",
+          blockedReason: `manual input: ${"x".repeat(800)}`,
+        })
+        .run();
+
+      const res = await app.request("/tasks/broadcast-task/broadcast", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "task:manual_handoff_required" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:manual_handoff_required",
+        payload: expect.objectContaining({
+          id: "broadcast-task",
+          projectId: "test-project",
+          blockedReason: expect.stringMatching(/^\S[\s\S]{0,503}$/),
+        }),
+      });
+
+      vi.mocked(mockBroadcast).mockClear();
+
+      const movedRes = await app.request("/tasks/broadcast-task/broadcast", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "task:moved" }),
+      });
+
+      expect(movedRes.status).toBe(200);
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:moved",
+        payload: expect.objectContaining({ id: "broadcast-task", status: "blocked_external" }),
+      });
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:timeline_updated",
+        payload: expect.objectContaining({ id: "broadcast-task", projectId: "test-project" }),
+      });
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:trust_updated",
+        payload: expect.objectContaining({ id: "broadcast-task", projectId: "test-project" }),
+      });
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "project:queue_updated",
+        payload: { projectId: "test-project", taskId: "broadcast-task" },
+      });
     });
   });
 
@@ -1610,6 +1935,51 @@ describe("tasks API", () => {
       expect(body.attachments[0].path).toBeDefined();
     });
 
+    it("should keep existing attachment file when a replacement is rejected", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-put-attach-safe-"));
+      const oldDir = join(rootPath, ".ai-factory", "files", "tasks", "upd-attach-safe");
+      const oldPath = ".ai-factory/files/tasks/upd-attach-safe/keep.txt";
+      mkdirSync(oldDir, { recursive: true });
+      writeFileSync(join(oldDir, "keep.txt"), "old", "utf8");
+      const oldAttachments = [
+        { name: "keep.txt", mimeType: "text/plain", size: 3, content: null, path: oldPath },
+      ];
+
+      db.insert(projects)
+        .values({ id: "project-attach-safe", name: "Attach Safe", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "upd-attach-safe",
+          projectId: "project-attach-safe",
+          title: "Attach task",
+          attachments: JSON.stringify(oldAttachments),
+        })
+        .run();
+
+      const res = await app.request("/tasks/upd-attach-safe", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attachments: [
+            {
+              name: "evil.txt",
+              mimeType: "text/plain",
+              size: 1,
+              content: null,
+              path: ".ai-factory/files/tasks/other-task/evil.txt",
+            },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const row = db.select().from(tasks).where(eq(tasks.id, "upd-attach-safe")).get();
+      expect(JSON.parse(row!.attachments)).toEqual(oldAttachments);
+      expect(existsSync(join(oldDir, "keep.txt"))).toBe(true);
+    });
+
     it("should sync physical plan file when updating plan via PUT", async () => {
       const db = testDb.current;
       const rootPath = mkdtempSync(join(tmpdir(), "aif-put-plan-sync-"));
@@ -1860,6 +2230,46 @@ describe("tasks API", () => {
   });
 
   describe("POST /tasks/:id/events", () => {
+    it("blocks runtime-starting events when project config has deterministic errors", async () => {
+      const projectRoot = mkdtempSync(join(tmpdir(), "config-governance-block-"));
+      mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+      writeFileSync(
+        join(projectRoot, ".ai-factory", "config.yaml"),
+        "workflow:\n  auto_create_dirs: yes\n",
+      );
+      testDb.current
+        .insert(projects)
+        .values({ id: "test-project", name: "Test Project", rootPath: projectRoot })
+        .run();
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "task-config-blocked",
+          projectId: "test-project",
+          title: "Blocked",
+          description: "",
+          status: "backlog",
+        })
+        .run();
+
+      const res = await app.request("/tasks/task-config-blocked/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_ai" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("PROJECT_CONFIG_INVALID_BOOLEAN");
+      const blocked = testDb.current
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, "task-config-blocked"))
+        .get();
+      expect(blocked?.status).toBe("blocked_external");
+      expect(blocked?.blockedReason).toContain("PROJECT_CONFIG_INVALID_BOOLEAN");
+    });
+
     it("should return 404 for events on non-existent task", async () => {
       const res = await app.request("/tasks/missing/events", {
         method: "POST",
@@ -2212,7 +2622,7 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.status).toBe("verified");
+      expect(body).toEqual(expect.objectContaining({ status: "verified" }));
     });
 
     it("should block approve_done for risky generic no-delta audit tasks", async () => {
@@ -2245,6 +2655,177 @@ describe("tasks API", () => {
       expect(body.blockedFromStatus).toBe("done");
       expect(body.blockedReason).toContain("generic_plan");
       expect(body.blockedReason).toContain("missing_report_artifact");
+    });
+
+    it("should block approve_done when docs intent changed files contradict policy", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-docs-block-"));
+      initGitProject(rootPath);
+      mkdirSync(join(rootPath, "src"), { recursive: true });
+      writeFileSync(join(rootPath, "src", "api.ts"), "export const api = true;\n", "utf8");
+      db.insert(projects).values({ id: "project-docs-block", name: "Docs Block", rootPath }).run();
+      db.insert(tasks)
+        .values({
+          id: "ev-docs-block-1",
+          projectId: "project-docs-block",
+          title: "Update API docs",
+          taskIntent: "docs",
+          status: "done",
+          plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-docs-block-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("done");
+      expect(body.blockedReason).toContain("intent_changed_files_contradiction");
+      expect(body.blockedReason).toContain("src/api.ts");
+    });
+
+    it("should block approve_done when docs intent plan forbids source code changes", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-docs-no-source-"));
+      initGitProject(rootPath);
+      mkdirSync(join(rootPath, "docs"), { recursive: true });
+      mkdirSync(join(rootPath, "src"), { recursive: true });
+      writeFileSync(join(rootPath, "docs", "api.md"), "# API\n", "utf8");
+      writeFileSync(join(rootPath, "src", "api.ts"), "export const api = true;\n", "utf8");
+      db.insert(projects)
+        .values({ id: "project-docs-no-source", name: "Docs No Source", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-docs-no-source-1",
+          projectId: "project-docs-no-source",
+          title: "Update API docs",
+          taskIntent: "docs",
+          status: "done",
+          plan: "## Plan\n- [ ] Do not change source code for docs correctness.\n- [ ] Update docs/api.md",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-docs-no-source-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("done");
+      expect(body.blockedReason).toContain("intent_changed_files_contradiction");
+      expect(body.blockedReason).toContain("src/api.ts");
+    });
+
+    it("should allow approve_done when docs intent changed files match policy", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-docs-allow-"));
+      initGitProject(rootPath);
+      mkdirSync(join(rootPath, "docs"), { recursive: true });
+      writeFileSync(join(rootPath, "docs", "api.md"), "# API\n", "utf8");
+      db.insert(projects).values({ id: "project-docs-allow", name: "Docs Allow", rootPath }).run();
+      db.insert(tasks)
+        .values({
+          id: "ev-docs-allow-1",
+          projectId: "project-docs-allow",
+          title: "Update API docs",
+          taskIntent: "docs",
+          status: "done",
+          plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+          implementationManifestJson: implementationManifest({
+            taskId: "ev-docs-allow-1",
+            intent: "docs",
+            changedFiles: ["docs/api.md"],
+          }),
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-docs-allow-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual(expect.objectContaining({ status: "verified" }));
+    });
+
+    it("should block approve_done when audit intent changes source beside its report", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-source-block-"));
+      initGitProject(rootPath);
+      execFileSync("git", ["checkout", "-b", "feature/audit-source-block"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      mkdirSync(join(rootPath, "audit"), { recursive: true });
+      mkdirSync(join(rootPath, "src"), { recursive: true });
+      writeFileSync(join(rootPath, "src", "api.ts"), "export const api = true;\n", "utf8");
+      writeFileSync(
+        join(rootPath, "audit", "report.md"),
+        [
+          "## Finding",
+          "Evidence: `src/api.ts:1` defines the API surface inspected by this audit.",
+          "Risk: Audit completion could otherwise smuggle source changes beside the report.",
+          "Verification: Command `rg api src/api.ts` output matched `src/api.ts:1:export const api = true;`.",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      execFileSync("git", ["add", "audit/report.md", "src/api.ts"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["commit", "-m", "add report and source", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      db.insert(projects)
+        .values({ id: "project-audit-source-block", name: "Audit Source Block", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-audit-source-block-1",
+          projectId: "project-audit-source-block",
+          title: "Audit API surface",
+          description: "Report artifact: audit/report.md",
+          taskIntent: "audit",
+          status: "done",
+          plan: "## Plan\n- [ ] Inspect src/api.ts\n- [ ] Write audit/report.md",
+          branchName: "feature/audit-source-block",
+          agentActivityLog: [
+            "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started",
+            "[2026-05-09T00:00:01.000Z] Tool: read_file src/api.ts",
+            "[2026-05-09T00:00:02.000Z] Tool: write_file audit/report.md",
+            "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator complete",
+            "[2026-05-09T00:00:04.000Z] Agent: review-gate started",
+            "[2026-05-09T00:00:05.000Z] Tool: read_file audit/report.md",
+            "[2026-05-09T00:00:06.000Z] Agent: review-gate complete",
+          ].join("\n"),
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-audit-source-block-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("done");
+      expect(body.blockedReason).toContain("intent_changed_files_contradiction");
+      expect(body.blockedReason).toContain("src/api.ts");
     });
 
     it("should return audit roadmap report tasks to rework on recoverable approve_done failures", async () => {
@@ -2652,6 +3233,12 @@ describe("tasks API", () => {
           status: "done",
           isFix: true,
           planPath: ".ai-factory/PLAN.md",
+          implementationManifestJson: implementationManifest({
+            taskId: "ev-approve-fix-plan-1",
+            intent: "fix",
+            changedFiles: [],
+            regressionExplanation: "Verified fix-plan approval cleanup does not delete PLAN.md.",
+          }),
         })
         .run();
 
@@ -2709,6 +3296,94 @@ describe("tasks API", () => {
       expect(callArgs.workflowKind).toBe("commit");
       expect(callArgs.fallbackSlashCommand).toBe("/aif-commit");
       expect(callArgs.prompt).toContain("git add -A");
+    });
+
+    it("should block commitOnApprove when project config has deterministic errors", async () => {
+      const db = testDb.current;
+      const projectRoot = mkdtempSync(join(tmpdir(), "aif-commit-config-block-"));
+      mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+      writeFileSync(
+        join(projectRoot, ".ai-factory", "config.yaml"),
+        "workflow:\n  auto_create_dirs: yes\n",
+        "utf8",
+      );
+      db.insert(projects)
+        .values({ id: "test-project", name: "Test Project", rootPath: projectRoot })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-commit-config-block",
+          projectId: "test-project",
+          title: "Done commit blocked",
+          status: "done",
+        })
+        .run();
+
+      mockRunApiRuntimeOneShot.mockClear();
+      vi.mocked(mockBroadcast).mockClear();
+
+      const res = await app.request("/tasks/ev-commit-config-block/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done", commitOnApprove: true }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("config_governance_blocked:");
+      expect(body.reasonCodes).toContain("PROJECT_CONFIG_INVALID_BOOLEAN");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+      const types = vi.mocked(mockBroadcast).mock.calls.map((c) => (c[0] as { type: string }).type);
+      expect(types).not.toContain("task:commit_started");
+      expect(types).not.toContain("task:commit_done");
+      expect(types).not.toContain("task:commit_failed");
+      const task = db.select().from(tasks).where(eq(tasks.id, "ev-commit-config-block")).get();
+      expect(task?.status).toBe("done");
+    });
+
+    it("should block commitOnApprove when task runtime profile is disabled", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(runtimeProfiles)
+        .values({
+          id: "disabled-commit-profile",
+          projectId: "test-project",
+          name: "Disabled Commit Profile",
+          runtimeId: "claude",
+          providerId: "anthropic",
+          enabled: false,
+        })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-commit-disabled-profile",
+          projectId: "test-project",
+          title: "Done commit disabled profile",
+          status: "done",
+          runtimeProfileId: "disabled-commit-profile",
+        })
+        .run();
+
+      mockRunApiRuntimeOneShot.mockClear();
+      vi.mocked(mockBroadcast).mockClear();
+
+      const res = await app.request("/tasks/ev-commit-disabled-profile/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done", commitOnApprove: true }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("config_governance_blocked:");
+      expect(body.reasonCodes).toContain("TASK_RUNTIME_PROFILE_DISABLED");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+      const types = vi.mocked(mockBroadcast).mock.calls.map((c) => (c[0] as { type: string }).type);
+      expect(types).not.toContain("task:commit_started");
+      expect(types).not.toContain("task:commit_done");
+      expect(types).not.toContain("task:commit_failed");
+      const task = db.select().from(tasks).where(eq(tasks.id, "ev-commit-disabled-profile")).get();
+      expect(task?.status).toBe("done");
     });
 
     it("should broadcast task:commit_failed when runtime throws", async () => {
@@ -3370,6 +4045,39 @@ describe("tasks API", () => {
       const listed = await listRes.json();
       expect(listed).toHaveLength(1);
       expect(listed[0].attachments[0].name).toBe("notes.md");
+    });
+
+    it("should reject path-backed comment attachments without creating a comment", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({ id: "c-path-reject", projectId: "test-project", title: "Comment target" })
+        .run();
+
+      const createRes = await app.request("/tasks/c-path-reject/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: "Please review this file",
+          attachments: [
+            {
+              name: "notes.md",
+              mimeType: "text/markdown",
+              size: 5,
+              content: null,
+              path: ".ai-factory/files/tasks/c-path-reject/comments/other/notes.md",
+            },
+          ],
+        }),
+      });
+
+      expect(createRes.status).toBe(400);
+      const comments = db
+        .select()
+        .from(taskComments)
+        .where(eq(taskComments.taskId, "c-path-reject"))
+        .all();
+      expect(comments).toHaveLength(0);
     });
 
     it("should delete task comments when deleting a task", async () => {

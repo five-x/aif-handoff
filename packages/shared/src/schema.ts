@@ -1,14 +1,20 @@
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
+import type { ConfigAuditAction, ConfigSourceKind } from "./configGovernance.js";
 import type {
   MemoryLifecycleAction,
+  MemoryFailureFamily,
   MemoryItemStatus,
+  MemoryItemType,
   MemoryRedactionStatus,
   MemoryScope,
   MemorySourceKind,
   MemoryWorkflowKind,
   TaskStatus,
+  CoordinatorStage,
+  UsageEventOutcome,
 } from "./types.js";
+import type { RuntimeStage } from "./constants.js";
 import type { TaskIntent } from "./taskIntent.js";
 import type {
   AuditEvidenceGrade,
@@ -77,6 +83,7 @@ export const tasks = sqliteTable("tasks", {
   isFix: integer("is_fix", { mode: "boolean" }).notNull().default(false),
   plannerMode: text("planner_mode").notNull().default("fast"),
   planPath: text("plan_path").notNull().default(".ai-factory/PLAN.md"),
+  sourceRef: text("source_ref"),
   planDocs: integer("plan_docs", { mode: "boolean" }).notNull().default(false),
   planTests: integer("plan_tests", { mode: "boolean" }).notNull().default(false),
   skipReview: integer("skip_review", { mode: "boolean" }).notNull().default(false),
@@ -86,6 +93,7 @@ export const tasks = sqliteTable("tasks", {
   position: real("position").notNull().default(1000.0),
   plan: text("plan"),
   implementationLog: text("implementation_log"),
+  implementationManifestJson: text("implementation_manifest_json"),
   reviewComments: text("review_comments"),
   agentActivityLog: text("agent_activity_log"),
   blockedReason: text("blocked_reason"),
@@ -116,6 +124,8 @@ export const tasks = sqliteTable("tasks", {
   runtimeLimitUpdatedAt: text("runtime_limit_updated_at"),
   lockedBy: text("locked_by"),
   lockedUntil: text("locked_until"),
+  lockStage: text("lock_stage").$type<CoordinatorStage | null>(),
+  coordinatorId: text("coordinator_id"),
   scheduledAt: text("scheduled_at"),
   branchName: text("branch_name"),
   worktreePath: text("worktree_path"),
@@ -269,6 +279,27 @@ export const auditEvidenceEvents = sqliteTable("audit_evidence_events", {
 export type AuditEvidenceEventRow = typeof auditEvidenceEvents.$inferSelect;
 export type NewAuditEvidenceEventRow = typeof auditEvidenceEvents.$inferInsert;
 
+export const configAuditEvents = sqliteTable("config_audit_events", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  projectId: text("project_id").notNull(),
+  taskId: text("task_id"),
+  runtimeProfileId: text("runtime_profile_id"),
+  action: text("action").$type<ConfigAuditAction>().notNull(),
+  sourceKind: text("source_kind").$type<ConfigSourceKind>().notNull(),
+  actor: text("actor"),
+  reasonCodesJson: text("reason_codes_json").$type<string>().notNull().default("[]"),
+  beforeJson: text("before_json"),
+  afterJson: text("after_json"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type ConfigAuditEventRow = typeof configAuditEvents.$inferSelect;
+export type NewConfigAuditEventRow = typeof configAuditEvents.$inferInsert;
+
 export const runtimeProfiles = sqliteTable("runtime_profiles", {
   id: text("id")
     .primaryKey()
@@ -360,6 +391,8 @@ export const usageEvents = sqliteTable("usage_events", {
   transport: text("transport"),
   workflowKind: text("workflow_kind"),
   usageReporting: text("usage_reporting").notNull(),
+  outcome: text("outcome").$type<UsageEventOutcome>().notNull().default("success"),
+  errorCategory: text("error_category"),
   inputTokens: integer("input_tokens").notNull().default(0),
   outputTokens: integer("output_tokens").notNull().default(0),
   totalTokens: integer("total_tokens").notNull().default(0),
@@ -381,6 +414,9 @@ export const memoryItems = sqliteTable("memory_items", {
   sourceTaskId: text("source_task_id"),
   sourceKind: text("source_kind").$type<MemorySourceKind>().notNull().default("task"),
   sourceRef: text("source_ref"),
+  itemType: text("item_type").$type<MemoryItemType>().notNull().default("architecture_note"),
+  failureFamily: text("failure_family").$type<MemoryFailureFamily | null>(),
+  claimsJson: text("claims_json").notNull().default("[]"),
   status: text("status").$type<MemoryItemStatus>().notNull().default("pending"),
   redactionStatus: text("redaction_status")
     .$type<MemoryRedactionStatus>()
@@ -458,6 +494,7 @@ export const runtimeWarmupSessions = sqliteTable("runtime_warmup_sessions", {
   providerId: text("provider_id").notNull(),
   transport: text("transport"),
   model: text("model"),
+  stage: text("stage").$type<RuntimeStage>(),
   sourceSessionId: text("source_session_id"),
   status: text("status").$type<RuntimeWarmupSessionStatus>().notNull().default("creating"),
   ttlSeconds: integer("ttl_seconds").notNull(),

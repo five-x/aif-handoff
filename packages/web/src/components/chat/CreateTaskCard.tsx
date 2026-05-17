@@ -2,18 +2,39 @@ import { useState } from "react";
 import { Plus, CheckCircle2, ClipboardList } from "lucide-react";
 import { useCreateTask } from "@/hooks/useTasks";
 import { Button } from "@/components/ui/button";
-import type { ChatActionCreateTask } from "@aif/shared/browser";
+import { Badge } from "@/components/ui/badge";
+import {
+  TASK_INTENT_CONTRACTS,
+  formatTaskIntentPrimaryConstraints,
+  type ChatActionCreateTask,
+  type ChatActionCreateFollowUp,
+  type TaskIntent,
+} from "@aif/shared/browser";
 
 interface CreateTaskCardProps {
-  action: ChatActionCreateTask;
+  action: ChatActionCreateTask | ChatActionCreateFollowUp;
   projectId: string;
+  sourceRefFallback: string;
   onCreated: () => void;
   onOpenTask?: (taskId: string) => void;
 }
 
-export function CreateTaskCard({ action, projectId, onCreated, onOpenTask }: CreateTaskCardProps) {
+function resolveActionIntent(action: ChatActionCreateTask | ChatActionCreateFollowUp): TaskIntent {
+  return action.taskIntent ?? (action.isFix ? "fix" : "general");
+}
+
+export function CreateTaskCard({
+  action,
+  projectId,
+  sourceRefFallback,
+  onCreated,
+  onOpenTask,
+}: CreateTaskCardProps) {
   const createTask = useCreateTask();
   const [createdTaskId, setCreatedTaskId] = useState<string | null>(null);
+  const taskIntent = resolveActionIntent(action);
+  const intentContract = TASK_INTENT_CONTRACTS[taskIntent];
+  const primaryConstraints = formatTaskIntentPrimaryConstraints(taskIntent);
 
   const handleCreate = () => {
     createTask.mutate(
@@ -21,8 +42,9 @@ export function CreateTaskCard({ action, projectId, onCreated, onOpenTask }: Cre
         projectId,
         title: action.title,
         description: action.description,
-        taskIntent: action.taskIntent,
-        ...(action.isFix ? { isFix: true } : {}),
+        sourceRef: action.sourceRef ?? sourceRefFallback,
+        taskIntent,
+        ...(taskIntent === "fix" || action.isFix ? { isFix: true } : {}),
       },
       {
         onSuccess: (task) => {
@@ -37,12 +59,24 @@ export function CreateTaskCard({ action, projectId, onCreated, onOpenTask }: Cre
     <div className="mx-3 my-1.5 rounded border border-emerald-500/40 bg-emerald-500/10 p-3">
       <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-400 mb-2">
         <ClipboardList className="h-3.5 w-3.5" />
-        {action.isFix ? "Bug Fix" : "New Task"}
+        {action.type === "create_follow_up"
+          ? "Follow-up Task"
+          : action.isFix
+            ? "Bug Fix"
+            : "New Task"}
       </div>
       <p className="text-sm font-medium text-foreground">{action.title}</p>
       {action.description && (
         <p className="mt-1 text-xs text-muted-foreground line-clamp-3">{action.description}</p>
       )}
+      <div className="mt-2 space-y-1">
+        <Badge size="sm" variant="outline">
+          {intentContract.label}
+        </Badge>
+        <p className="text-[10px] text-muted-foreground">
+          Primary constraints: {primaryConstraints}
+        </p>
+      </div>
       <div className="mt-2 flex items-center gap-2">
         {createdTaskId ? (
           <>

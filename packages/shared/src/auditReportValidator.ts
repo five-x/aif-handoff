@@ -7,6 +7,9 @@ import {
   extractSubstantiveAuditCommandEvidence,
   hasScopedNoFindingsRiskClaim,
   isConservativeMetadataOnlyLineOne,
+  isAuditPublicReportOutcome,
+  toAuditPublicReportOutcome,
+  type AuditPublicReportOutcome,
   type AuditSourceClassification,
 } from "./auditSourceEvidence.js";
 import type { AuditEvidenceUnit } from "./auditEvidenceLedger.js";
@@ -91,7 +94,7 @@ export interface AuditReportManifest {
   artifactPath: string;
   contentSha256: string;
   sourceSnapshot: AuditReportSourceSnapshot;
-  outcome: AuditSourceClassification;
+  outcome: AuditPublicReportOutcome;
   scopeCoverage: unknown[];
   riskHypotheses: unknown[];
   findings: unknown[];
@@ -317,16 +320,15 @@ function normalizeManifestCandidate(
   candidate: Record<string, unknown>,
 ): AuditReportManifest | null {
   const sourceSnapshot = normalizeSourceSnapshotCandidate(candidate.sourceSnapshot);
+  const version = typeof candidate.version === "number" ? candidate.version : Number.NaN;
   const outcome = candidate.outcome;
-  if (
-    !sourceSnapshot ||
-    typeof outcome !== "string" ||
-    !AUDIT_SOURCE_CLASSIFICATION_SET.has(outcome)
-  ) {
+  if (!sourceSnapshot || typeof outcome !== "string") {
     return null;
   }
+  const normalizedOutcome = normalizeManifestOutcome(version, outcome);
+  if (!normalizedOutcome) return null;
   return {
-    version: typeof candidate.version === "number" ? candidate.version : Number.NaN,
+    version,
     auditPlanId: typeof candidate.auditPlanId === "string" ? candidate.auditPlanId : "",
     taskId: optionalString(candidate.taskId) ?? null,
     batchId: optionalString(candidate.batchId) ?? null,
@@ -334,7 +336,7 @@ function normalizeManifestCandidate(
     artifactPath: typeof candidate.artifactPath === "string" ? candidate.artifactPath : "",
     contentSha256: typeof candidate.contentSha256 === "string" ? candidate.contentSha256 : "",
     sourceSnapshot,
-    outcome: outcome as AuditSourceClassification,
+    outcome: normalizedOutcome,
     scopeCoverage: normalizeUnknownArray(candidate.scopeCoverage),
     riskHypotheses: normalizeUnknownArray(candidate.riskHypotheses),
     findings: normalizeUnknownArray(candidate.findings),
@@ -350,6 +352,21 @@ const AUDIT_SOURCE_CLASSIFICATION_SET = new Set<string>([
   "insufficient_substantive_evidence",
   "source_inconclusive",
 ]);
+
+function normalizeManifestOutcome(
+  version: number,
+  outcome: string,
+): AuditPublicReportOutcome | null {
+  if (version === 2) {
+    return isAuditPublicReportOutcome(outcome) ? outcome : null;
+  }
+  if (version === 1 || Number.isNaN(version)) {
+    return AUDIT_SOURCE_CLASSIFICATION_SET.has(outcome)
+      ? toAuditPublicReportOutcome(outcome as AuditSourceClassification)
+      : null;
+  }
+  return isAuditPublicReportOutcome(outcome) ? outcome : null;
+}
 
 function safeGitObjectPath(path: string): string | null {
   const normalized = normalizeRelativePath(path);
@@ -1502,7 +1519,7 @@ export function validateAuditReportArtifact(
       input.expectedReportArtifactPath ?? reportArtifactPaths[0] ?? manifest.artifactPath,
     );
     const missingFields: string[] = [];
-    if (manifest.version !== 1) {
+    if (manifest.version !== 1 && manifest.version !== 2) {
       issues.push(
         issue(
           "unsupported_report_manifest_version",
@@ -1590,11 +1607,12 @@ export function validateAuditReportArtifact(
         ),
       );
     }
-    if (manifest.outcome !== sourceClassification) {
+    const publicSourceOutcome = toAuditPublicReportOutcome(sourceClassification);
+    if (manifest.outcome !== publicSourceOutcome) {
       issues.push(
         issue(
           "manifest_outcome_mismatch",
-          `Audit report manifest outcome ${manifest.outcome} does not match validator source classification ${sourceClassification}.`,
+          `Audit report manifest outcome ${manifest.outcome} does not match validator public outcome ${publicSourceOutcome}.`,
         ),
       );
     }

@@ -9,6 +9,8 @@ import {
   roadmapBatchArtifacts,
   taskComments,
   tasks,
+  hashAifPlanManifest,
+  validateImplementationManifest,
   validateAuditReportArtifact,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
@@ -160,6 +162,7 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain(
       "For diagnostic-only audit/review/discovery/validation plans",
     );
+    expect(implementCall.prompt).not.toContain("aif-implementation-manifest");
     expect(implementCall.prompt).toContain("git log -1 --name-only --oneline");
     expect(implementCall.prompt).toContain("Do not loop on `git_commit`");
     const reportPath = join(projectRoot, "audit/2026-05-08-initial-audit.md");
@@ -1032,7 +1035,7 @@ describe("runImplementer rework behavior", () => {
     expect(queryMock).not.toHaveBeenCalled();
     const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
     expect(summary).toContain("# Audit Inconclusive");
-    expect(summary).toContain('"kind":"inconclusive_batch_evidence"');
+    expect(summary).toContain('"kind":"source_inconclusive"');
     expect(summary).toContain("## Child Report Status");
     expect(summary).toContain("| `audit/source-1.md` | `task-inventory-source-1` | passed |");
     expect(summary).toContain("Inventory-only no-findings source reports: 6.");
@@ -1654,7 +1657,7 @@ describe("runImplementer rework behavior", () => {
     );
   }, 60_000);
 
-  it("routes repeated deterministic audit report repair to runtime rework", async () => {
+  it("terminalizes repeated deterministic audit report repair before runtime rework", async () => {
     const db = testDb.current;
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
     writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
@@ -1710,52 +1713,36 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repeated-deterministic-loop", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(queryMock).not.toHaveBeenCalled();
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-deterministic-loop");
     if (!artifact) throw new Error("missing repeated deterministic artifact");
-    expect(artifact.state).toBe("missing");
-    expect(artifact.failureFamily).toBe("missing_artifact");
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
     const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
     expect(attempts.at(-1)).toMatchObject({
-      state: "missing",
-      failureFamily: "missing_artifact",
-      reworkStatus: "rework_requested",
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
     });
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-deterministic-loop"))
       .get();
-    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.status).toBe("blocked_external");
     expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
-      "Repeated deterministic audit report repair did not satisfy strict validation; routing to runtime implementation rework.",
+      "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
     );
-    expect(updatedTask?.implementationLog).toContain("Runtime implementer result:");
-    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.implementationLog).not.toContain("Implementation done");
     expect(updatedTask?.implementationLog).toContain("missing_report_file_references");
-    expect(updatedTask?.blockedReason).toContain("deterministic_audit_repair_rework_required");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
     expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
     expect(updatedTask?.blockedReason).toContain("missing_report_file_references");
-    const autoReviewState = JSON.parse(updatedTask?.autoReviewStateJson ?? "{}");
-    expect(autoReviewState.findings).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: "deterministic_repair_missing_report_file_references",
-          source: "review_gate",
-        }),
-      ]),
-    );
-    expect(autoReviewState.reworkSnapshot).toMatchObject({
-      artifactPath: "audit/architecture.md",
-      findingIds: expect.arrayContaining(["deterministic_repair_missing_report_file_references"]),
-    });
-    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
-    expect(implementCall.prompt).toContain("deterministic_audit_repair_rework_required");
-    expect(implementCall.prompt).toContain("deterministic_repair_missing_report_file_references");
     expect(updatedTask?.agentActivityLog).toContain(
-      "Repeated deterministic audit report repair requested runtime rework",
+      "Repeated deterministic audit report repair terminalized as source_inconclusive",
     );
   });
 
@@ -1807,26 +1794,140 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repeated-deterministic-activity-log", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(queryMock).not.toHaveBeenCalled();
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-deterministic-activity-log"))
       .get();
-    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.status).toBe("blocked_external");
     expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
-      "Repeated deterministic audit report repair did not satisfy strict validation; routing to runtime implementation rework.",
+      "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
     );
-    expect(updatedTask?.implementationLog).toContain("Runtime implementer result:");
-    expect(updatedTask?.blockedReason).toContain("deterministic_audit_repair_rework_required");
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
     expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
-    expect(JSON.parse(updatedTask?.autoReviewStateJson ?? "{}").reworkSnapshot).toMatchObject({
-      artifactPath: "audit/architecture.md",
-    });
     expect(updatedTask?.agentActivityLog).toContain(
-      "Repeated deterministic audit report repair requested runtime rework",
+      "Repeated deterministic audit report repair terminalized as source_inconclusive",
+    );
+  });
+
+  it("terminalizes repeated deterministic repair for strict low-quality validator issues", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "audit", "architecture.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository overview.",
+        "Risk: Placeholder author metadata can make an audit report look verified without observed command output.",
+        "Proposed fix: Replace placeholder metadata with exact observed command output.",
+        "Verification: Command `git log -1 --oneline -- audit/architecture.md` output:",
+        "```",
+        "Author: Your Name <your.email@example.com>",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md", "audit/architecture.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-repeated-low-quality-validator",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "Runtime repair required.",
+        reworkRequested: true,
+        useSubagents: true,
+        implementationLog: [
+          "Deterministic audit report repair completed from risk-specific declared scope evidence.",
+          "Report artifact: audit/architecture.md",
+        ].join("\n"),
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 50,
+          findings: [
+            {
+              id: "deterministic_repair_placeholder_author_metadata",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (placeholder_author_metadata): Report artifact contains placeholder author metadata instead of real git output.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-repeated-low-quality-validator",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-repeated-low-quality-validator"],
+      artifacts: [
+        {
+          taskId: "task-audit-repeated-low-quality-validator",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-repeated-low-quality-validator", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-low-quality-validator");
+    if (!artifact) throw new Error("missing repeated low-quality validator artifact");
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    expect(attempts.at(-1)).toMatchObject({
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
+    });
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-repeated-low-quality-validator"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
+    );
+    expect(updatedTask?.implementationLog).toContain("placeholder_author_metadata");
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
+    expect(updatedTask?.blockedReason).toContain("placeholder_author_metadata");
+    expect(updatedTask?.agentActivityLog).toContain(
+      "Repeated deterministic audit report repair terminalized as source_inconclusive",
     );
   });
 
@@ -2626,7 +2727,7 @@ describe("runImplementer rework behavior", () => {
       sourceInconclusiveTerminal?: { artifactPath?: string };
     };
     expect(details.evidence?.auditReportValidation?.issueCodes).toEqual(
-      expect.arrayContaining(["manifest_outcome_mismatch", "missing_report_manifest_fields"]),
+      expect.arrayContaining(["missing_report_manifest_fields"]),
     );
     expect(details.sourceInconclusiveTerminal?.artifactPath).toBe("audit/inconclusive.md");
     const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
@@ -2805,6 +2906,225 @@ describe("runImplementer rework behavior", () => {
 
     const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
     expect(call.prompt).toContain("/aif-implement @.ai-factory/PLAN.md");
+  });
+
+  it("asks development intents for an implementation manifest in the result", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        [
+          "Implementation done",
+          "",
+          "```aif-implementation-manifest",
+          JSON.stringify({
+            version: 1,
+            taskId: "task-feature-manifest",
+            intent: "feature",
+            planManifestHash: null,
+            changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+            diffSummary: { summary: "Updated feature behavior." },
+            verificationEvidence: [
+              {
+                id: "verify-1",
+                command: "npm.cmd test",
+                status: "passed",
+                outputSha256: "a".repeat(64),
+                outputPreview: "tests passed",
+                outputPreviewTruncated: false,
+              },
+            ],
+            acceptanceCriteria: [
+              {
+                id: "ac-1",
+                status: "satisfied",
+                evidenceRefs: ["verify-1"],
+              },
+            ],
+            evidenceRefs: ["verify-1"],
+            planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+            reviewClosure: { status: "pending", evidenceRefs: [] },
+            commitEvidence: { status: "not_required" },
+            knownLimitations: [],
+          }),
+          "```",
+        ].join("\n"),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-feature-manifest",
+        projectId: "project-1",
+        title: "Feature manifest",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "Plan:\n- add the feature",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-manifest", projectRoot);
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("fenced `aif-implementation-manifest` JSON block");
+    expect(call.prompt).toContain("`intent` to `feature`");
+    expect(call.prompt).toContain("`changedFiles`");
+    expect(call.prompt).toContain("`verificationEvidence`");
+    expect(call.prompt).toContain("`outputSha256`");
+    expect(call.prompt).toContain("`outputPreview`");
+    expect(call.prompt).toContain("`outputPreviewTruncated`");
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-feature-manifest")).get();
+    const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
+      ?.implementationManifestJson;
+    expect(manifestJson).toBeTruthy();
+    expect(JSON.parse(manifestJson ?? "{}")).toMatchObject({
+      taskId: "task-feature-manifest",
+      intent: "feature",
+      changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+    });
+  });
+
+  it("prompts plan-manifest-backed tasks with the expected hash and stores validating evidence", async () => {
+    const db = testDb.current;
+    const plan = [
+      "```aif-plan-manifest",
+      JSON.stringify({
+        version: 1,
+        taskId: "task-feature-plan-hash",
+        intent: "feature",
+        scope: ["src/feature.ts"],
+        allowedChanges: ["source", "tests"],
+        forbiddenChanges: ["audit-report"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "AC1",
+            description: "Feature behavior is implemented.",
+            verification: "npm.cmd test",
+          },
+        ],
+        verificationCommands: ["npm.cmd test"],
+      }),
+      "```",
+      "",
+      "## Plan",
+      "- [x] Implement feature behavior",
+      "- [x] Run tests",
+    ].join("\n");
+    const expectedPlanManifestHash = hashAifPlanManifest(plan);
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        [
+          "Implementation done",
+          "",
+          "```aif-implementation-manifest",
+          JSON.stringify({
+            version: 1,
+            taskId: "task-feature-plan-hash",
+            intent: "feature",
+            planManifestHash: expectedPlanManifestHash,
+            changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+            diffSummary: { summary: "Updated feature behavior." },
+            verificationEvidence: [
+              {
+                id: "verify-1",
+                command: "npm.cmd test",
+                status: "passed",
+                outputSha256: "a".repeat(64),
+                outputPreview: "tests passed",
+                outputPreviewTruncated: false,
+              },
+            ],
+            acceptanceCriteria: [
+              {
+                id: "AC1",
+                status: "satisfied",
+                evidenceRefs: ["verify-1"],
+              },
+            ],
+            evidenceRefs: ["verify-1"],
+            planChecklist: { total: 2, completed: 2, pending: 0, synced: true },
+            reviewClosure: { status: "pending", evidenceRefs: [] },
+            commitEvidence: { status: "not_required" },
+            knownLimitations: [],
+          }),
+          "```",
+        ].join("\n"),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-feature-plan-hash",
+        projectId: "project-1",
+        title: "Feature manifest with plan hash",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan,
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-plan-hash", projectRoot);
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain(
+      `set \`planManifestHash\` exactly to \`${expectedPlanManifestHash}\``,
+    );
+    expect(call.prompt).toContain(
+      "`acceptanceCriteria` and `reviewClosure` evidence refs must point to concrete verification evidence or actual review comments",
+    );
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-feature-plan-hash")).get();
+    const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
+      ?.implementationManifestJson;
+    expect(manifestJson).toBeTruthy();
+    const validation = validateImplementationManifest({
+      task: {
+        id: "task-feature-plan-hash",
+        title: "Feature manifest with plan hash",
+        taskIntent: "feature",
+        plan,
+      },
+      manifestJson,
+      changedFiles: ["src/feature.ts"],
+      meaningfulChangedFiles: ["src/feature.ts"],
+      dirtyChangedFiles: ["src/feature.ts"],
+      phase: "review_handoff",
+    });
+    expect(validation.ok).toBe(true);
+    expect(validation.planManifestHash).toBe(expectedPlanManifestHash);
+  });
+
+  it("asks fix tasks to include a regression explanation in the implementation manifest", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-fix-manifest",
+        projectId: "project-1",
+        title: "Fix stale cache invalidation",
+        description: "Patch the cache invalidation regression.",
+        taskIntent: "fix",
+        isFix: true,
+        status: "implementing",
+        plan: "Plan:\n- patch the regression\n- run regression tests",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-fix-manifest", projectRoot);
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("fenced `aif-implementation-manifest` JSON block");
+    expect(call.prompt).toContain("`intent` to `fix`");
+    expect(call.prompt).toContain("`regressionExplanation`");
+    expect(call.prompt).toContain(
+      "`regressionExplanation` is required and must explain the regression or failure mode that was fixed",
+    );
   });
 
   it("applies rework header and disables resume in skill mode", async () => {

@@ -1,13 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { logger, TASK_STATUSES } from "@aif/shared";
 import {
-  findTaskById,
-  updateTaskStatus,
-  touchLastSyncedAt,
-  toTaskResponse,
-  setTaskFields,
-} from "@aif/data";
+  applyHumanTaskEvent,
+  logger,
+  TASK_STATUSES,
+  type TaskEvent,
+  type TaskStatus,
+} from "@aif/shared";
+import { findTaskById, touchLastSyncedAt, toTaskResponse, setTaskFields } from "@aif/data";
 import { registerMcpTool, type ToolContext } from "./index.js";
 import { rateLimitError, toMcpError, validationError } from "../middleware/errorHandler.js";
 import { resolveConflict } from "../sync/conflictResolver.js";
@@ -20,6 +20,7 @@ const syncStatusInputSchema: Record<string, z.ZodTypeAny> = {
   newStatus: z.enum(TASK_STATUSES).describe("New status to set"),
   sourceTimestamp: z
     .string()
+    .datetime({ offset: true })
     .describe("ISO timestamp with millisecond precision from the source system"),
   direction: z.enum(["aif_to_handoff", "handoff_to_aif"]).describe("Sync direction"),
   paused: z
@@ -35,6 +36,40 @@ type SyncStatusArgs = {
   sourceTimestamp: string;
   taskId: string;
 };
+
+function resolveSyncEvent(
+  currentStatus: TaskStatus,
+  requestedStatus: TaskStatus,
+  blockedFromStatus?: TaskStatus | null,
+): TaskEvent | null {
+  if (currentStatus === "backlog" && requestedStatus === "planning") return "start_ai";
+  if (currentStatus === "backlog" && requestedStatus === "plan_ready")
+    return "accept_existing_plan";
+  if (currentStatus === "plan_ready" && requestedStatus === "implementing") {
+    return "start_implementation";
+  }
+  if (currentStatus === "plan_ready" && requestedStatus === "planning") {
+    return "request_replanning";
+  }
+  if (
+    currentStatus === "blocked_external" &&
+    blockedFromStatus !== null &&
+    blockedFromStatus !== undefined &&
+    requestedStatus === blockedFromStatus
+  ) {
+    return "retry_from_blocked";
+  }
+  return null;
+}
+
+function assertValidSourceTimestamp(value: string): void {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw validationError("Invalid sourceTimestamp", {
+      sourceTimestamp: ["Expected a valid ISO-8601 timestamp after the Unix epoch"],
+    });
+  }
+}
 
 export function register(server: McpServer, context: ToolContext): void {
   registerMcpTool(
@@ -56,6 +91,7 @@ export function register(server: McpServer, context: ToolContext): void {
           taskId: ["Task does not exist"],
         });
       }
+      assertValidSourceTimestamp(args.sourceTimestamp);
 
       // Guard: terminal statuses (done, verified) cannot be overwritten by sync.
       // Only human events (request_changes, approve_done) can transition out of these.
@@ -85,6 +121,32 @@ export function register(server: McpServer, context: ToolContext): void {
         };
       }
 
+      if (args.newStatus === "done" || args.newStatus === "verified") {
+        log.warn(
+          {
+            taskId: args.taskId,
+            currentStatus: row.status,
+            requestedStatus: args.newStatus,
+            direction: args.direction,
+          },
+          "Rejecting sync: terminal statuses require guarded workflow events",
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                applied: false,
+                conflict: false,
+                reason: `Sync cannot set terminal status '${args.newStatus}'. Use workflow review/completion events instead.`,
+                task: compactTaskResponse(toTaskResponse(row)),
+                lastSyncedAt: row.lastSyncedAt,
+              }),
+            },
+          ],
+        };
+      }
+
       // If status is already the same, no-op
       if (row.status === args.newStatus) {
         log.info(
@@ -98,6 +160,33 @@ export function register(server: McpServer, context: ToolContext): void {
               text: JSON.stringify({
                 applied: false,
                 conflict: false,
+                task: compactTaskResponse(toTaskResponse(row)),
+                lastSyncedAt: row.lastSyncedAt,
+              }),
+            },
+          ],
+        };
+      }
+
+      const event = resolveSyncEvent(row.status, args.newStatus, row.blockedFromStatus);
+      if (event === null) {
+        log.warn(
+          {
+            taskId: args.taskId,
+            currentStatus: row.status,
+            requestedStatus: args.newStatus,
+            direction: args.direction,
+          },
+          "Rejecting sync: unsupported status transition",
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                applied: false,
+                conflict: false,
+                reason: `Unsupported sync transition '${row.status}' -> '${args.newStatus}'.`,
                 task: compactTaskResponse(toTaskResponse(row)),
                 lastSyncedAt: row.lastSyncedAt,
               }),
@@ -144,7 +233,25 @@ export function register(server: McpServer, context: ToolContext): void {
 
       try {
         // Source is newer — apply the status change
-        updateTaskStatus(args.taskId, args.newStatus);
+        const transition = applyHumanTaskEvent(toTaskResponse(row), event);
+        if (!transition.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  applied: false,
+                  conflict: false,
+                  reason: transition.error,
+                  task: compactTaskResponse(toTaskResponse(row)),
+                  lastSyncedAt: row.lastSyncedAt,
+                }),
+              },
+            ],
+          };
+        }
+
+        setTaskFields(args.taskId, transition.patch);
         touchLastSyncedAt(args.taskId);
 
         // Apply paused flag atomically if provided

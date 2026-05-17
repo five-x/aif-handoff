@@ -14,6 +14,7 @@ import { formatRuntimeProfileOptionLabel } from "@/lib/runtimeProfiles";
 import {
   TASK_INTENT_CONTRACTS,
   TASK_INTENTS,
+  formatTaskIntentPrimaryConstraints,
   generatePlanPath,
   defaultsForMode,
   resolveTaskIntentDefaults,
@@ -193,6 +194,8 @@ export function AddTaskForm({ projectId }: Props) {
   const effectiveSkipReview = effectiveIntent === "audit" ? false : skipReview;
   const effectiveUseSubagents =
     effectiveIntent === "audit" || effectiveIntent === "spike" ? true : useSubagents;
+  const selectedIntentContract = TASK_INTENT_CONTRACTS[taskIntent];
+  const selectedIntentConstraints = formatTaskIntentPrimaryConstraints(taskIntent);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -275,7 +278,10 @@ export function AddTaskForm({ projectId }: Props) {
             className="w-full"
           />
           <p className="text-[10px] text-muted-foreground">
-            {TASK_INTENT_CONTRACTS[taskIntent].decomposition}
+            {selectedIntentContract.decomposition}
+          </p>
+          <p className="text-[10px] text-muted-foreground">
+            Primary constraints: {selectedIntentConstraints}
           </p>
         </div>
         <label className="flex items-start gap-2 text-xs text-muted-foreground">

@@ -26,6 +26,8 @@ import {
   findTaskById,
   getLatestHumanComment,
   appendTaskActivityLog,
+  listProjectConfigWorkBlockers,
+  collectTaskRuntimeOverrideBlockers,
   listAuditEvidenceEvents,
   listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
@@ -49,6 +51,40 @@ export type EventHandlerResult =
   | { ok: true; task: TaskRow; broadcastType: "task:moved" | "task:updated" };
 
 const AUDIT_REPORT_MANIFEST_BLOCK_PATTERN = /```audit-report-manifest\b/i;
+const RUNTIME_STARTING_EVENTS = new Set<TaskEvent>([
+  "start_ai",
+  "accept_existing_plan",
+  "start_implementation",
+  "fast_fix",
+  "retry_from_blocked",
+]);
+
+function checkConfigGovernanceBlocker(task: TaskRow, event: TaskEvent): EventHandlerResult | null {
+  if (!RUNTIME_STARTING_EVENTS.has(event)) return null;
+  const blockers = listProjectConfigWorkBlockers(task.projectId);
+  if (!blockers) {
+    return null;
+  }
+  const taskBlockers = collectTaskRuntimeOverrideBlockers(task);
+  const allBlockers = [...blockers, ...taskBlockers];
+  if (allBlockers.length === 0) return null;
+  const reasonCodes = [...new Set(allBlockers.map((issue) => issue.reasonCode))].sort();
+  const message = `config_governance_blocked:${reasonCodes.join(",")}`;
+  setTaskFields(task.id, {
+    status: "blocked_external",
+    blockedFromStatus: task.status,
+    blockedReason: message,
+    retryAfter: null,
+    retryCount: task.retryCount,
+    lastHeartbeatAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  appendTaskActivityLog(
+    task.id,
+    `[config-governance] Blocked ${event}; reasonCodes=${reasonCodes.join(",")}`,
+  );
+  return { ok: false, status: 409, error: message };
+}
 
 function restoreTaskBranchForMutation(
   task: TaskRow,
@@ -879,6 +915,12 @@ export async function handleTaskEvent(input: EventHandlerInput): Promise<EventHa
   if (input.event === "manual_exception") {
     return handleManualException(input);
   }
+  const task = findTaskById(input.taskId);
+  if (!task) {
+    return { ok: false, status: 404, error: "Task not found" };
+  }
+  const configBlocker = checkConfigGovernanceBlocker(task, input.event);
+  if (configBlocker) return configBlocker;
   if (input.event === "fast_fix") {
     return await handleFastFix(input);
   }

@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-15",
+  "updated": "2026-05-17",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -413,6 +413,150 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260515-enforce-exact-rework-closure",
       "updated": "2026-05-15"
+    },
+    {
+      "taskId": "work-20260515-harden-audit-report-runtime-rework",
+      "title": "Harden Audit Report Runtime Rework Boundary",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-harden-audit-report-runtime-rework",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-contract-inventory-freeze",
+      "title": "System TZ Contract Inventory And Freeze",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-contract-inventory-freeze",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-task-intent-contract-v2",
+      "title": "System TZ Task Intent Contract V2",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-task-intent-contract-v2",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-plan-manifest-quality-gate",
+      "title": "System TZ Plan Manifest Quality Gate",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-plan-manifest-quality-gate",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-workflow-timeline-trust-backbone",
+      "title": "System TZ Workflow Timeline Trust Backbone",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-workflow-timeline-trust-backbone",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-audit-classifier-synthesis-v2",
+      "title": "System TZ Audit Classifier And Synthesis V2",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-audit-classifier-synthesis-v2",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-development-evidence-completion-guard",
+      "title": "System TZ Development Evidence Completion Guard",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-development-evidence-completion-guard",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-review-security-rework-closure",
+      "title": "System TZ Review Security Rework Closure",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-review-security-rework-closure",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-source-backed-memory-knowledge",
+      "title": "System TZ Source Backed Memory Knowledge",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-source-backed-memory-knowledge",
+      "updated": "2026-05-16"
+    },
+    {
+      "taskId": "work-20260515-system-tz-runtime-governance-usage-budget",
+      "title": "System TZ Runtime Governance Usage Budget",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-runtime-governance-usage-budget",
+      "updated": "2026-05-17"
+    },
+    {
+      "taskId": "work-20260515-system-tz-orchestration-worktree-reliability",
+      "title": "System TZ Orchestration Worktree Reliability",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-orchestration-worktree-reliability",
+      "updated": "2026-05-17"
+    },
+    {
+      "taskId": "work-20260515-system-tz-operator-api-ws-trust-surfaces",
+      "title": "System TZ Operator API WS Trust Surfaces",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-operator-api-ws-trust-surfaces",
+      "updated": "2026-05-17"
+    },
+    {
+      "taskId": "work-20260515-system-tz-chat-mcp-attachments-gates",
+      "title": "System TZ Chat MCP Attachments Gates",
+      "status": "done",
+      "priority": "medium",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-chat-mcp-attachments-gates",
+      "updated": "2026-05-17"
+    },
+    {
+      "taskId": "work-20260515-system-tz-security-permission-policy",
+      "title": "System TZ Security Permission Policy",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-security-permission-policy",
+      "updated": "2026-05-17"
+    },
+    {
+      "taskId": "work-20260515-system-tz-golden-regression-corpus",
+      "title": "System TZ Golden Regression Corpus",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-golden-regression-corpus",
+      "updated": "2026-05-17"
+    },
+    {
+      "taskId": "work-20260515-system-tz-configuration-governance",
+      "title": "System TZ Configuration Governance",
+      "status": "done",
+      "priority": "medium",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-configuration-governance",
+      "updated": "2026-05-17"
     }
   ]
 }

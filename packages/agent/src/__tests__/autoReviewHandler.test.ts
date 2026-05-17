@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -275,6 +276,79 @@ describe("handleAutoReviewGate", () => {
         }),
       }),
     );
+  });
+
+  it("adds a generic worktree rework snapshot when no roadmap artifact exists", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-auto-review-generic-snapshot-"));
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    writeFileSync(join(projectRoot, "README.md"), "# Generic\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "README.md"), "# Generic\n\nchanged\n", "utf8");
+
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      reviewComments: "needs fixes",
+      reviewIterationCount: 0,
+      maxReviewIterations: 10,
+      autoReviewState: null,
+    });
+    mockFindRoadmapBatchArtifactByTaskId.mockReturnValue(null);
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "request_changes",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      blockingFindings: [
+        { id: "finding-1", source: "code_review", text: "Fix generic workflow", streak: 1 },
+      ],
+      fixesMarkdown: "- [finding-1] code_review | Fix generic workflow",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 1,
+        findings: [
+          { id: "finding-1", source: "code_review", text: "Fix generic workflow", streak: 1 },
+        ],
+      },
+    });
+
+    const result = await handleAutoReviewGate({ taskId: "task-1", projectRoot });
+    const snapshot = result?.autoReviewState?.reworkSnapshot as
+      | {
+          changedFilesDigest?: string;
+          changedFilesSummary?: string[];
+          requiredEvidenceByFindingId?: Record<string, string>;
+          forbiddenChanges?: string[];
+        }
+      | undefined;
+
+    expect(result?.status).toBe("rework_requested");
+    expect(snapshot).toEqual(
+      expect.objectContaining({
+        artifactPath: ".",
+        artifactContentSha: null,
+        findingIds: ["finding-1"],
+        changedFilesDigest: expect.any(String),
+        changedFilesSummary: expect.arrayContaining([expect.stringContaining("README.md")]),
+      }),
+    );
+    expect(snapshot?.requiredEvidenceByFindingId?.["finding-1"]).toContain("Fix generic workflow");
+    expect(snapshot?.forbiddenChanges?.join(" ")).toContain("unrelated");
   });
 
   it("terminalizes repeated same-blocker loops before max iterations", async () => {

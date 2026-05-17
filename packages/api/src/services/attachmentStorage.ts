@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, unlinkSync, readdirSync, rmSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, normalize, basename, extname, resolve } from "node:path";
-import { logger } from "@aif/shared";
+import { join, normalize, basename, extname, resolve, relative, isAbsolute } from "node:path";
+import { isSafeAttachmentFilename, logger } from "@aif/shared";
 
 const log = logger("attachmentStorage");
 
@@ -64,7 +64,8 @@ function chatAttachmentDir(projectRoot: string, chatSessionId: string): string {
 function assertWithinBase(resolvedPath: string, baseDir: string): void {
   const normalizedResolved = normalize(resolvedPath);
   const normalizedBase = normalize(baseDir);
-  if (!normalizedResolved.startsWith(normalizedBase)) {
+  const relativePath = relative(normalizedBase, normalizedResolved);
+  if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
     log.error(
       { resolvedPath: normalizedResolved, baseDir: normalizedBase },
       "Path traversal attempt blocked",
@@ -110,6 +111,9 @@ export interface SaveAttachmentResult {
  * Creates directories as needed. Returns the relative path for DB storage.
  */
 export async function saveAttachment(input: SaveAttachmentInput): Promise<SaveAttachmentResult> {
+  if (!isSafeAttachmentFilename(input.filename)) {
+    throw new Error("Unsafe attachment filename");
+  }
   const sanitizedName = sanitizeFilename(input.filename);
   let dir: string;
   if (input.chatSessionId) {

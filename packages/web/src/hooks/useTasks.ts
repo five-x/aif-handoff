@@ -35,6 +35,62 @@ export function useTaskTimeline(id: string | null) {
   });
 }
 
+export function useTaskEvidence(id: string | null) {
+  return useQuery({
+    queryKey: ["task-evidence", id],
+    queryFn: () => api.getTaskEvidence(id!),
+    enabled: !!id,
+  });
+}
+
+export function useTaskMemoryCandidates(id: string | null) {
+  return useQuery({
+    queryKey: ["task-memory", id],
+    queryFn: () => api.getTaskMemoryCandidates(id!),
+    enabled: !!id,
+  });
+}
+
+export function useTaskRuntimeUsage(id: string | null) {
+  return useQuery({
+    queryKey: ["task-runtime-usage", id],
+    queryFn: () => api.getTaskRuntimeUsage(id!),
+    enabled: !!id,
+  });
+}
+
+export function useTaskWorktree(id: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["task-worktree", id],
+    queryFn: () => api.getTaskWorktree(id!),
+    enabled: !!id && enabled,
+  });
+}
+
+export function useProjectKnowledge(projectId: string | null) {
+  return useQuery({
+    queryKey: ["project-knowledge", projectId],
+    queryFn: () => api.getProjectKnowledge(projectId!),
+    enabled: !!projectId,
+  });
+}
+
+export function useProjectRuntimeUsage(projectId: string | null) {
+  return useQuery({
+    queryKey: ["project-runtime-usage", projectId],
+    queryFn: () => api.getProjectRuntimeUsage(projectId!),
+    enabled: !!projectId,
+  });
+}
+
+export function useProjectQueue(projectId: string | null) {
+  return useQuery({
+    queryKey: ["project-queue", projectId],
+    queryFn: () => api.getProjectQueue(projectId!),
+    enabled: !!projectId,
+  });
+}
+
 export function useTaskComments(id: string | null) {
   return useQuery<TaskComment[]>({
     queryKey: ["task-comments", id],
@@ -145,6 +201,19 @@ export function useSyncTaskPlan() {
     onSuccess: (task) => {
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["task", task.id] });
+    },
+  });
+}
+
+export function useCleanupTaskWorktree() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, action }: { id: string; action: "archive" | "delete" }) =>
+      api.cleanupTaskWorktree(id, action),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task", result.taskId] });
+      queryClient.invalidateQueries({ queryKey: ["task-worktree", result.taskId] });
     },
   });
 }

@@ -35,6 +35,117 @@ const mockAppRuntimeDefaults = {
     resolvedDefaultChatRuntimeProfileId: null,
   },
 };
+const mockConfigGovernance = {
+  data: {
+    projectId: "project-a",
+    generatedAt: "2026-05-17T00:00:00.000Z",
+    fingerprint: "cfg-123",
+    status: "blocked" as const,
+    issues: [
+      {
+        code: "runtime_secret_option",
+        severity: "error" as const,
+        message: "Runtime profile stores a secret-like option key.",
+        source: "runtime_profile",
+        blocksWork: true,
+      },
+    ],
+    env: {
+      files: { env: true, envLocal: true },
+      runtime: {
+        defaultRuntimeId: "claude",
+        defaultProviderId: "anthropic",
+        modules: [],
+        openAiBaseUrlConfigured: true,
+        codexCliPathConfigured: false,
+      },
+      features: {
+        useSubagents: true,
+        memoryEnabled: true,
+        usageLimitsEnabled: true,
+        warmupEnabled: false,
+        taskWorktreesEnabled: true,
+        bypassPermissions: false,
+      },
+    },
+    appRuntimeDefaults: {
+      defaultTaskRuntimeProfileId: "global-1",
+      defaultPlanRuntimeProfileId: null,
+      defaultReviewRuntimeProfileId: null,
+      defaultChatRuntimeProfileId: null,
+      resolvedDefaultTaskRuntimeProfileId: "global-1",
+      resolvedDefaultPlanRuntimeProfileId: "global-1",
+      resolvedDefaultReviewRuntimeProfileId: "global-1",
+      resolvedDefaultChatRuntimeProfileId: null,
+    },
+    projectRuntimeDefaults: {
+      defaultTaskRuntimeProfileId: "project-1",
+      defaultPlanRuntimeProfileId: null,
+      defaultReviewRuntimeProfileId: null,
+      defaultChatRuntimeProfileId: null,
+    },
+    runtimeProfiles: [
+      {
+        id: "project-1",
+        projectId: "project-a",
+        name: "Project Local",
+        runtimeId: "claude",
+        providerId: "anthropic",
+        transport: "sdk",
+        defaultModel: "sonnet",
+        apiKeyEnvVar: "ANTHROPIC_API_KEY",
+        apiKeyConfigured: true,
+        enabled: true,
+        headerKeys: [],
+        optionKeys: ["timeoutMs"],
+      },
+    ],
+    projectConfig: {
+      exists: true,
+      path: "C:/projects/project-a/.ai-factory/config.yaml",
+      paths: { plan: ".ai-factory/PLAN.md" },
+      workflow: { verify_mode: "strict" },
+      git: { enabled: true, base_branch: "main" },
+      language: { artifacts: "en" },
+    },
+    mcp: {
+      exists: true,
+      serverCount: 1,
+      servers: [
+        {
+          name: "handoff",
+          transport: "stdio",
+          commandConfigured: true,
+          urlConfigured: false,
+          envKeys: ["DATABASE_URL"],
+        },
+      ],
+    },
+    permissionPolicy: {
+      modes: ["workspace_write", "read_only"],
+      intents: ["general", "audit"],
+      defaultByIntent: { general: "workspace_write" },
+    },
+    recentAuditEvents: [
+      {
+        id: "audit-1",
+        projectId: "project-a",
+        taskId: null,
+        runtimeProfileId: "project-1",
+        action: "runtime_profile_updated",
+        sourceKind: "runtime_profile",
+        actor: null,
+        reasonCodes: ["runtime_profile_updated"],
+        before: null,
+        after: null,
+        createdAt: "2026-05-17T00:00:00.000Z",
+      },
+    ],
+  },
+};
+const mockConfigAudit = {
+  data: mockConfigGovernance.data.recentAuditEvents,
+};
 
 let mockProfiles: RuntimeProfile[] = [];
 let mockProjectProfiles: RuntimeProfile[] = [];
@@ -47,6 +158,8 @@ vi.mock("@/hooks/useRuntimeProfiles", () => ({
   useAppRuntimeDefaults: () => mockAppRuntimeDefaults,
   useCreateRuntimeProfile: () => mockCreateRuntimeProfile,
   useDeleteRuntimeProfile: () => mockDeleteRuntimeProfile,
+  useProjectConfigAudit: () => mockConfigAudit,
+  useProjectConfigGovernance: () => mockConfigGovernance,
   useProjectRuntimeProfiles: () => ({ data: mockProjectProfiles, isLoading: false }),
   useRuntimes: () => ({ data: [] }),
   useRuntimeModels: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -180,6 +293,21 @@ describe("ProjectRuntimeSettings", () => {
     expect(screen.getAllByText(/5% remaining/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Provider reset/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Last checked/).length).toBeGreaterThan(0);
+  });
+
+  it("renders resolved config governance without raw secret values", () => {
+    render(
+      <ProjectRuntimeSettings project={project} open={true} onOpenChange={vi.fn()} hideTrigger />,
+    );
+
+    expect(screen.getByText("Config Governance")).toBeDefined();
+    expect(screen.getByText("BLOCKED")).toBeDefined();
+    expect(screen.getByText("runtime_secret_option")).toBeDefined();
+    expect(screen.getByText(/git=true branch=main/)).toBeDefined();
+    expect(screen.getByText(/memory on \/ limits on/)).toBeDefined();
+    expect(screen.getByText(/Project Local:ANTHROPIC_API_KEY=set/)).toBeDefined();
+    expect(screen.getAllByText("runtime_profile_updated").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/sk-/i)).toBeNull();
   });
 
   it("shows both project and global profiles in separate sections", async () => {

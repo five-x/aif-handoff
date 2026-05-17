@@ -62,9 +62,29 @@ export function useAppRuntimeDefaults(enabled = true) {
   });
 }
 
+export function useProjectConfigGovernance(projectId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["projectConfigGovernance", projectId],
+    queryFn: () => api.getProjectConfigGovernance(projectId!),
+    enabled: Boolean(projectId) && enabled,
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectConfigAudit(projectId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["projectConfigAudit", projectId],
+    queryFn: () => api.listProjectConfigAudit(projectId!),
+    enabled: Boolean(projectId) && enabled,
+    staleTime: 30_000,
+  });
+}
+
 function invalidateRuntimeQueries(queryClient: QueryClient) {
   queryClient.invalidateQueries({ queryKey: ["runtimeProfiles"] });
   queryClient.invalidateQueries({ queryKey: ["appRuntimeDefaults"] });
+  queryClient.invalidateQueries({ queryKey: ["projectConfigGovernance"] });
+  queryClient.invalidateQueries({ queryKey: ["projectConfigAudit"] });
   queryClient.invalidateQueries({ queryKey: ["settings"] });
   queryClient.invalidateQueries({ queryKey: ["effectiveChatRuntime"] });
   queryClient.invalidateQueries({ queryKey: ["effectiveTaskRuntime"] });

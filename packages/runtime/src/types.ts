@@ -8,6 +8,7 @@ import {
   RuntimeTransport as _RuntimeTransport,
 } from "@aif/shared";
 import type {
+  PermissionExecutionPolicy as _PermissionExecutionPolicy,
   RuntimeLimitEventPayload as _RuntimeLimitEventPayload,
   RuntimeLimitSnapshot as _RuntimeLimitSnapshot,
   RuntimeLimitWindow as _RuntimeLimitWindow,
@@ -30,6 +31,7 @@ export type RuntimeLimitScope = (typeof RuntimeLimitScope)[keyof typeof RuntimeL
 export type RuntimeLimitWindow = _RuntimeLimitWindow;
 export type RuntimeLimitSnapshot = _RuntimeLimitSnapshot;
 export type RuntimeLimitEventPayload = _RuntimeLimitEventPayload;
+export type PermissionExecutionPolicy = _PermissionExecutionPolicy;
 
 /** Canonical runtime event type for provider limit-state updates. */
 export const RUNTIME_LIMIT_EVENT_TYPE = "runtime:limit" as const;
@@ -225,6 +227,8 @@ export interface RuntimeExecutionIntent {
   runTimeoutMs?: number;
   /** Whether to bypass runtime permission checks (requires trust token in hooks). */
   bypassPermissions?: boolean;
+  /** Provider-neutral permission policy selected from the task intent. */
+  permissionPolicy?: PermissionExecutionPolicy;
   /** JSON Schema for structured output — adapter passes it to the provider if supported. */
   outputSchema?: Record<string, unknown>;
   /** Opaque adapter-specific hooks — passed through to the adapter without interpretation. */

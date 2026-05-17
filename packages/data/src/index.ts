@@ -1,4 +1,10 @@
 import {
+  existsSync,
+  readFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import YAML from "yaml";
+import {
   and,
   asc,
   count,
@@ -20,9 +26,21 @@ import {
 } from "drizzle-orm";
 import {
   AUTO_REVIEW_FINDING_SOURCES,
+  AUTO_REVIEW_SECURITY_COVERAGE_AREAS,
   AUTO_REVIEW_STRATEGIES,
+  MEMORY_CLAIM_SOURCE_KINDS,
+  MEMORY_CLAIM_STATUSES,
+  MEMORY_FAILURE_FAMILIES,
+  MEMORY_ITEM_TYPES,
+  PERMISSION_EXECUTION_POLICIES,
+  PERMISSION_MODES,
+  PERMISSION_POLICY_INTENTS,
+  findMonorepoRootFromUrl,
+  normalizeRuntimeStage,
+  runtimeProfileModeForStage,
   buildRuntimeLimitSignature,
   appSettings,
+  evaluateTaskPlanQuality,
   generatePlanPath,
   getEnv,
   getProjectConfig,
@@ -37,6 +55,7 @@ import {
   taskComments,
   tasks,
   runtimeProfiles,
+  configAuditEvents,
   chatSessions,
   chatMessages,
   usageEvents,
@@ -54,17 +73,34 @@ import {
   memoryLifecycleEvents,
   memoryUsageEvents,
   type AppSettings,
+  type CoordinatorStage,
   type CreateRuntimeProfileInput,
+  type ConfigAuditAction,
+  type ConfigAuditEvent,
+  type ConfigReasonCode,
+  type ConfigSourceKind,
   type CreateMemoryItemInput,
   type EffectiveRuntimeProfileSelection,
+  type MemoryClaim,
+  type MemoryClaimSource,
+  type MemoryClaimStatus,
+  type MemoryFailureFamily,
   type MemoryItem,
   type MemoryItemStatus,
+  type MemoryItemType,
   type MemoryLifecycleAction,
   type MemoryLifecycleEvent,
   type MemoryScope,
   type MemoryUsageEvent,
   type MemoryWorkflowKind,
+  type ProjectKnowledgeResponse,
+  type ProjectQueueStateResponse,
+  type ProjectRuntimeUsageResponse,
   type RuntimeProfile,
+  type RuntimeProfileMode,
+  type RuntimeStage,
+  type RuntimeStageOrProfileMode,
+  type UsageEventOutcome,
   type RuntimeProfileUsage,
   type RuntimeLimitSnapshot,
   type RuntimeLimitWindow,
@@ -77,6 +113,10 @@ import {
   type TaskArtifactTrustBatchCounts,
   type TaskArtifactTrustNextAction,
   type TaskArtifactTrustRollup,
+  type TaskMemoryCandidatesResponse,
+  type TaskRuntimeUsageEvent,
+  type TaskRuntimeUsageResponse,
+  type ImplementationManifest,
   type TaskIntent,
   type TaskStatus,
   type WorkflowTimeline,
@@ -88,12 +128,16 @@ import {
   type WorkflowTimelineEvent,
   type WorkflowTimelineEvidence,
   type WorkflowTimelineEvidenceLink,
+  type WorkflowTimelineGenericArtifactKind,
   type WorkflowTimelineTrustLevel,
+  validateImplementationManifest,
+  isDevelopmentImplementationIntent,
   normalizeTaskIntent,
   resolveRuntimeLimitFutureHint,
   sanitizeRuntimeLimitSnapshotForExposure,
   selectViolatedWindowForExactThreshold,
   type AutoReviewState,
+  type AutoReviewSecurityCoverage,
   type ChatSession,
   type ChatSessionMessage,
   type ChatSessionRow,
@@ -113,12 +157,24 @@ import {
   type AuditArtifactState,
   type AuditArtifactReworkStatus,
   type AuditFailureFamily,
+  type ResolvedConfigIssue,
+  type ResolvedProjectConfigView,
+  findSecretLikeKeys,
+  fingerprintConfig,
+  isSecretLikeConfigKey,
+  summarizeRuntimeProfileConfig,
+  summarizeRuntimeProfileForAudit,
+  summarizeTaskRuntimeOverride,
+  validateProjectConfigObject,
 } from "@aif/shared";
 import { getDb } from "@aif/shared/server";
 
 const log = createLogger("data");
 const AUTO_REVIEW_STRATEGY_SET = new Set<string>(AUTO_REVIEW_STRATEGIES);
 const AUTO_REVIEW_FINDING_SOURCE_SET = new Set<string>(AUTO_REVIEW_FINDING_SOURCES);
+const AUTO_REVIEW_SECURITY_COVERAGE_AREA_SET = new Set<string>(
+  AUTO_REVIEW_SECURITY_COVERAGE_AREAS,
+);
 const APP_SETTINGS_ID = 1;
 
 function resolvePersistedTaskIntent(input: {
@@ -152,7 +208,7 @@ export type HydratedTaskRow = TaskRow & {
   runtimeLimitSnapshot?: RuntimeLimitSnapshot | null;
 };
 
-export type CoordinatorStage = "planner" | "plan-checker" | "implementer" | "reviewer";
+export type { CoordinatorStage };
 
 export interface RuntimeWarmupScopeInput {
   projectId: string;
@@ -161,6 +217,7 @@ export interface RuntimeWarmupScopeInput {
   providerId: string;
   transport?: string | null;
   model?: string | null;
+  stage?: RuntimeStage | null;
 }
 
 export interface CreateRuntimeWarmupSessionInput extends RuntimeWarmupScopeInput {
@@ -207,11 +264,13 @@ export type TaskFieldsUpdate = {
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
+  sourceRef?: string | null;
   planDocs?: boolean;
   planTests?: boolean;
   skipReview?: boolean;
   useSubagents?: boolean;
   implementationLog?: string | null;
+  implementationManifest?: ImplementationManifest | Record<string, unknown> | null;
   reviewComments?: string | null;
   agentActivityLog?: string | null;
   blockedReason?: string | null;
@@ -249,6 +308,18 @@ function redactTaskTextForExternalUse(text: string | null | undefined): string |
     .join("\n");
 }
 
+function redactChatMessageAttachments(
+  attachments: ChatMessageAttachment[] | undefined,
+): ChatMessageAttachment[] | undefined {
+  if (!attachments?.length) return attachments;
+  return attachments.map((attachment) => ({
+    ...attachment,
+    name: redactProviderText(attachment.name),
+    mimeType: redactProviderText(attachment.mimeType),
+    path: attachment.path === undefined ? undefined : redactProviderText(attachment.path),
+  }));
+}
+
 function parseTaskRuntimeLimitSnapshot(
   raw: string | null | undefined,
   taskId: string,
@@ -264,6 +335,7 @@ export function toTaskResponse(task: TaskRow): Task {
     runtimeOptionsJson,
     autoReviewStateJson,
     runtimeLimitSnapshotJson,
+    implementationManifestJson,
     ...rest
   } = task;
   return {
@@ -272,6 +344,9 @@ export function toTaskResponse(task: TaskRow): Task {
     tags: parseTags(tags),
     autoReviewState: parseAutoReviewState(autoReviewStateJson),
     runtimeOptions: parseRuntimeObject(runtimeOptionsJson),
+    implementationManifest: parseRuntimeObject(
+      implementationManifestJson,
+    ) as Task["implementationManifest"],
     agentActivityLog: redactTaskTextForExternalUse(task.agentActivityLog),
     runtimeLimitSnapshot: parseTaskRuntimeLimitSnapshot(runtimeLimitSnapshotJson, task.id),
   };
@@ -579,14 +654,40 @@ function parseAutoReviewState(raw: string | null | undefined): AutoReviewState |
       );
       const streak = readStoredOptionalPositiveInteger(finding, "streak");
 
-      normalizedFindings.push({
+      const normalizedFinding = {
         id: finding.id,
-        text: finding.text,
+        text: redactProviderText(finding.text),
         source: finding.source as AutoReviewState["findings"][number]["source"],
         ...(firstSeenIteration !== undefined ? { firstSeenIteration } : {}),
         ...(lastSeenIteration !== undefined ? { lastSeenIteration } : {}),
         ...(streak !== undefined ? { streak } : {}),
-      });
+      } as AutoReviewState["findings"][number] & Record<string, unknown>;
+
+      const status = readStoredOptionalString(finding, "status");
+      if (
+        status !== undefined &&
+        status != null &&
+        AUTO_REVIEW_PREVIOUS_FINDING_STATUS_SET.has(status)
+      ) {
+        normalizedFinding.status = status as AutoReviewState["findings"][number]["status"];
+      }
+
+      for (const key of [
+        "severity",
+        "location",
+        "claim",
+        "requiredFix",
+        "verification",
+        "decision",
+        "closureEvidence",
+      ]) {
+        const value = readStoredOptionalString(finding, key);
+        if (value !== undefined) {
+          normalizedFinding[key] = value == null ? null : redactProviderText(value);
+        }
+      }
+
+      normalizedFindings.push(normalizedFinding);
     }
 
     if (normalizedFindings.length !== findings.length) {
@@ -601,18 +702,151 @@ function parseAutoReviewState(raw: string | null | undefined): AutoReviewState |
       ? parseAutoReviewReworkSnapshot(candidate.reworkSnapshot, warnMalformed)
       : undefined;
 
-    return {
+    const normalizedState = {
       strategy: strategy as AutoReviewState["strategy"],
       iteration,
       findings: normalizedFindings,
       ...(reworkSnapshot !== undefined ? { reworkSnapshot } : {}),
-    };
+    } as AutoReviewState & Record<string, unknown>;
+
+    const securityCoverage = parseAutoReviewSecurityCoverage(candidate.securityCoverage);
+    if (securityCoverage) {
+      normalizedState.securityCoverage = securityCoverage;
+    }
+
+    const blockerHistory = parseAutoReviewBlockerHistory(candidate.blockerHistory, warnMalformed);
+    if (blockerHistory) {
+      normalizedState.blockerHistory = blockerHistory;
+    }
+
+    return normalizedState;
   } catch (error) {
     warnMalformed("json_parse_failed", {
       error: error instanceof Error ? error.message : String(error),
     });
     return null;
   }
+}
+
+const AUTO_REVIEW_PREVIOUS_FINDING_STATUS_SET = new Set([
+  "resolved",
+  "still_blocking",
+  "new_blocker",
+  "not_reproducible",
+  "manual_review_required",
+]);
+
+function parseAutoReviewSecurityCoverage(value: unknown): AutoReviewSecurityCoverage[] | undefined {
+  if (Array.isArray(value)) {
+    const seenAreas = new Set<AutoReviewSecurityCoverage["area"]>();
+    const normalized = value
+      .filter((entry): entry is Record<string, unknown> => isObjectRecord(entry))
+      .filter(
+        (entry) =>
+          typeof entry.area === "string" &&
+          AUTO_REVIEW_SECURITY_COVERAGE_AREA_SET.has(entry.area) &&
+          typeof entry.status === "string" &&
+          ["covered", "issue_found", "not_applicable", "not_checked"].includes(entry.status) &&
+          typeof entry.note === "string",
+      )
+      .map((entry) => ({
+        area: entry.area as AutoReviewSecurityCoverage["area"],
+        status: entry.status as AutoReviewSecurityCoverage["status"],
+        note: redactProviderText(entry.note as string),
+      }))
+      .filter((entry) => {
+        if (seenAreas.has(entry.area)) return false;
+        seenAreas.add(entry.area);
+        return true;
+      });
+    return normalized.length === AUTO_REVIEW_SECURITY_COVERAGE_AREAS.length &&
+      AUTO_REVIEW_SECURITY_COVERAGE_AREAS.every((area) => seenAreas.has(area))
+      ? normalized
+      : undefined;
+  }
+
+  if (!isObjectRecord(value)) return undefined;
+  const legacyMappings: Array<[string, AutoReviewSecurityCoverage["area"]]> = [
+    ["secretLeakCheck", "secret_leaks"],
+    ["permissionSandbox", "permissions_sandbox"],
+    ["unsafeShellNetwork", "unsafe_shell_network_file"],
+    ["dependencyConfig", "dependency_config"],
+  ];
+  const normalized: AutoReviewSecurityCoverage[] = [];
+  for (const [legacyKey, area] of legacyMappings) {
+    const entry = readStoredOptionalString(value, legacyKey);
+    if (entry !== undefined && entry != null) {
+      normalized.push({ area, status: "covered", note: redactProviderText(entry) });
+    }
+  }
+  return normalized.length === AUTO_REVIEW_SECURITY_COVERAGE_AREAS.length
+    ? normalized
+    : undefined;
+}
+
+function parseAutoReviewBlockerHistory(
+  value: unknown,
+  warnMalformed: (reason: string, extra?: Record<string, unknown>) => void,
+): AutoReviewState["blockerHistory"] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  type BlockerHistoryEntry = NonNullable<AutoReviewState["blockerHistory"]>[number];
+  const normalized: BlockerHistoryEntry[] = [];
+  for (const item of value) {
+    if (!isObjectRecord(item)) {
+      warnMalformed("invalid_blocker_history_entry");
+      continue;
+    }
+    if (
+      typeof item.id !== "string" ||
+      typeof item.source !== "string" ||
+      !AUTO_REVIEW_FINDING_SOURCE_SET.has(item.source) ||
+      typeof item.status !== "string" ||
+      !AUTO_REVIEW_PREVIOUS_FINDING_STATUS_SET.has(item.status)
+    ) {
+      warnMalformed("invalid_blocker_history_fields", {
+        findingId: item.id,
+        findingSource: item.source,
+        status: item.status,
+      });
+      continue;
+    }
+    const note = readStoredOptionalString(item, "note");
+    const text = readStoredOptionalString(item, "text");
+    const noteText = typeof note === "string" ? note : typeof text === "string" ? text : null;
+    if (noteText == null) {
+      warnMalformed("invalid_blocker_history_note", {
+        findingId: item.id,
+        findingSource: item.source,
+        status: item.status,
+      });
+      continue;
+    }
+
+    const entry: BlockerHistoryEntry = {
+      id: item.id,
+      source: item.source as BlockerHistoryEntry["source"],
+      status: item.status as BlockerHistoryEntry["status"],
+      note: redactProviderText(noteText),
+    };
+    if (text !== undefined) {
+      entry.text = text == null ? null : redactProviderText(text);
+    }
+    const closureEvidence = readStoredOptionalString(item, "closureEvidence");
+    if (typeof closureEvidence === "string") {
+      entry.closureEvidence = redactProviderText(closureEvidence);
+    }
+    const requiredEvidence = readStoredOptionalString(item, "requiredEvidence");
+    if (requiredEvidence !== undefined) {
+      entry.requiredEvidence =
+        requiredEvidence == null ? null : redactProviderText(requiredEvidence);
+    }
+    const iteration = readStoredOptionalNonNegativeInteger(item, "iteration");
+    if (iteration !== undefined) {
+      entry.iteration = iteration;
+    }
+    normalized.push(entry);
+  }
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function parseAutoReviewReworkSnapshot(
@@ -632,10 +866,27 @@ function parseAutoReviewReworkSnapshot(
     ? snapshot.findingIds.filter((findingId): findingId is string => typeof findingId === "string")
     : null;
   const findingIdCount = Array.isArray(snapshot.findingIds) ? snapshot.findingIds.length : null;
+  const changedFilesDigest = readStoredOptionalString(snapshot, "changedFilesDigest");
+  const baselineHeadSha = readStoredOptionalString(snapshot, "baselineHeadSha");
+  const changedFilesSummary = Array.isArray(snapshot.changedFilesSummary)
+    ? snapshot.changedFilesSummary.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
+  const requiredEvidenceByFindingId = isObjectRecord(snapshot.requiredEvidenceByFindingId)
+    ? Object.fromEntries(
+        Object.entries(snapshot.requiredEvidenceByFindingId)
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+          .map(([key, value]) => [key, redactProviderText(value)]),
+      )
+    : undefined;
+  const forbiddenChanges = Array.isArray(snapshot.forbiddenChanges)
+    ? snapshot.forbiddenChanges
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => redactProviderText(entry))
+    : undefined;
 
   if (
     iteration === undefined ||
-    artifactPath == null ||
+    (artifactPath == null && changedFilesDigest === undefined) ||
     artifactContentSha === undefined ||
     findingIds == null ||
     findingIds.length !== findingIdCount
@@ -649,12 +900,31 @@ function parseAutoReviewReworkSnapshot(
     return undefined;
   }
 
-  return {
+  const normalized = {
     iteration,
-    artifactPath,
+    artifactPath: artifactPath ?? ".",
     artifactContentSha,
     findingIds,
-  };
+  } as AutoReviewState["reworkSnapshot"] & Record<string, unknown>;
+
+  if (changedFilesDigest !== undefined) {
+    normalized.changedFilesDigest =
+      changedFilesDigest == null ? null : redactProviderText(changedFilesDigest);
+  }
+  if (baselineHeadSha !== undefined) {
+    normalized.baselineHeadSha = baselineHeadSha == null ? null : redactProviderText(baselineHeadSha);
+  }
+  if (changedFilesSummary !== undefined) {
+    normalized.changedFilesSummary = changedFilesSummary.map((entry) => redactProviderText(entry));
+  }
+  if (requiredEvidenceByFindingId !== undefined) {
+    normalized.requiredEvidenceByFindingId = requiredEvidenceByFindingId;
+  }
+  if (forbiddenChanges !== undefined) {
+    normalized.forbiddenChanges = forbiddenChanges;
+  }
+
+  return normalized;
 }
 
 function parseRuntimeHeaders(raw: string | null | undefined): Record<string, string> {
@@ -710,6 +980,37 @@ export function listTasks(projectId?: string): TaskRow[] {
       .all();
   }
   return db.select().from(tasks).orderBy(asc(tasks.status), asc(tasks.position)).all();
+}
+
+export function buildProjectQueueState(projectId: string): ProjectQueueStateResponse | null {
+  const project = findProjectById(projectId);
+  if (!project) return null;
+  const projectTasks = listTasks(projectId);
+  const countsByStatus: ProjectQueueStateResponse["countsByStatus"] = {};
+  for (const task of projectTasks) {
+    countsByStatus[task.status] = (countsByStatus[task.status] ?? 0) + 1;
+  }
+
+  return {
+    projectId,
+    autoQueueMode: Boolean(project.autoQueueMode),
+    countsByStatus,
+    backlog: projectTasks
+      .filter((task) => task.status === "backlog" || task.status === "planning")
+      .slice(0, 100)
+      .map((task) => ({
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        priority: task.priority,
+        position: task.position,
+        autoMode: Boolean(task.autoMode),
+        scheduledAt: task.scheduledAt,
+        blockedReason: task.blockedReason,
+        runtimeProfileId: task.runtimeProfileId,
+        updatedAt: task.updatedAt,
+      })),
+  };
 }
 
 export function getMinBacklogPosition(projectId: string): number | null {
@@ -869,6 +1170,7 @@ export function createTask(input: {
   isFix?: boolean;
   plannerMode?: string;
   planPath?: string;
+  sourceRef?: string | null;
   planDocs?: boolean;
   planTests?: boolean;
   skipReview?: boolean;
@@ -937,6 +1239,7 @@ export function createTask(input: {
       isFix,
       plannerMode,
       planPath: resolvedPlanPath,
+      sourceRef: input.sourceRef ?? null,
       planDocs,
       planTests,
       skipReview,
@@ -971,7 +1274,8 @@ export function createTask(input: {
 }
 
 export function updateTask(id: string, fields: TaskFieldsUpdate): TaskRow | undefined {
-  const { attachments, tags, runtimeOptions, autoReviewState, ...rest } = fields;
+  const { attachments, tags, runtimeOptions, autoReviewState, implementationManifest, ...rest } =
+    fields;
   const patch: TaskFieldsPatch = { ...rest, updatedAt: new Date().toISOString() };
   const existing = findTaskById(id);
   let effectiveIntent = existing?.taskIntent;
@@ -1021,6 +1325,10 @@ export function updateTask(id: string, fields: TaskFieldsUpdate): TaskRow | unde
   }
   if (runtimeOptions !== undefined) {
     patch.runtimeOptionsJson = runtimeOptions === null ? null : JSON.stringify(runtimeOptions);
+  }
+  if (implementationManifest !== undefined) {
+    patch.implementationManifestJson =
+      implementationManifest === null ? null : JSON.stringify(implementationManifest);
   }
   if (autoReviewState !== undefined) {
     patch.autoReviewStateJson =
@@ -1159,6 +1467,10 @@ export function updateTaskComment(
   return getDb().select().from(taskComments).where(eq(taskComments.id, commentId)).get();
 }
 
+export function deleteTaskComment(commentId: string): void {
+  getDb().delete(taskComments).where(eq(taskComments.id, commentId)).run();
+}
+
 export function getLatestHumanComment(taskId: string): CommentRow | undefined {
   return listTaskComments(taskId).filter((comment) => comment.author === "human").at(-1);
 }
@@ -1249,8 +1561,10 @@ export function updateAppSettings(input: UpdateAppSettingsInput): AppSettingsRow
 }
 
 export function getAppDefaultRuntimeProfileId(
-  mode: "task" | "plan" | "review" | "chat",
+  modeOrStage: RuntimeStageOrProfileMode,
 ): string | null {
+  const mode = runtimeProfileModeForStage(modeOrStage);
+  const stage = normalizeRuntimeStage(modeOrStage);
   const settings = getAppSettings();
   const candidates =
     mode === "chat"
@@ -1276,7 +1590,7 @@ export function getAppDefaultRuntimeProfileId(
     const profile = findRuntimeProfileById(candidate.profileId);
     if (!profile) {
       log.warn(
-        { mode, appDefaultSlot: candidate.slot, runtimeProfileId: candidate.profileId },
+        { mode, stage, appDefaultSlot: candidate.slot, runtimeProfileId: candidate.profileId },
         "App runtime default points to a missing profile",
       );
       continue;
@@ -1285,6 +1599,7 @@ export function getAppDefaultRuntimeProfileId(
       log.warn(
         {
           mode,
+          stage,
           appDefaultSlot: candidate.slot,
           runtimeProfileId: candidate.profileId,
           ownerProjectId: profile.projectId,
@@ -1295,7 +1610,7 @@ export function getAppDefaultRuntimeProfileId(
     }
     if (!profile.enabled) {
       log.warn(
-        { mode, appDefaultSlot: candidate.slot, runtimeProfileId: candidate.profileId },
+        { mode, stage, appDefaultSlot: candidate.slot, runtimeProfileId: candidate.profileId },
         "App runtime default points to a disabled profile",
       );
       continue;
@@ -1484,13 +1799,25 @@ export function findCoordinatorTaskCandidates(stage: CoordinatorStage, limit: nu
 }
 
 /** Atomically claim a task for processing. Returns true if claim succeeded. */
-export function claimTask(taskId: string, coordinatorId: string, lockDurationMs: number): boolean {
+export function claimTask(
+  taskId: string,
+  coordinatorId: string,
+  lockDurationMs: number,
+  lockStage: CoordinatorStage = "planner",
+): boolean {
   const nowIso = new Date().toISOString();
   const lockedUntil = new Date(Date.now() + lockDurationMs).toISOString();
 
   const result = getDb()
     .update(tasks)
-    .set({ lockedBy: coordinatorId, lockedUntil })
+    .set({
+      lockedBy: coordinatorId,
+      lockedUntil,
+      coordinatorId,
+      lockStage,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    })
     .where(and(
       eq(tasks.id, taskId),
       or(
@@ -1687,21 +2014,45 @@ export function hasActiveLockedTaskForProject(projectId: string): boolean {
 
 /** Extend lock expiry for a task owned by this coordinator. */
 export function renewTaskClaim(taskId: string, coordinatorId: string, lockDurationMs: number): void {
+  const nowIso = new Date().toISOString();
   const lockedUntil = new Date(Date.now() + lockDurationMs).toISOString();
   getDb()
     .update(tasks)
-    .set({ lockedUntil })
+    .set({ lockedUntil, lastHeartbeatAt: nowIso, updatedAt: nowIso })
     .where(and(eq(tasks.id, taskId), eq(tasks.lockedBy, coordinatorId)))
     .run();
 }
 
-/** Release a task claim after processing completes. */
-export function releaseTaskClaim(taskId: string): void {
-  getDb()
+/** Release a task claim after processing completes. Owner-scoped by design. */
+export function releaseTaskClaim(taskId: string, coordinatorId: string): boolean {
+  const result = getDb()
     .update(tasks)
-    .set({ lockedBy: null, lockedUntil: null })
-    .where(eq(tasks.id, taskId))
+    .set({
+      lockedBy: null,
+      lockedUntil: null,
+      coordinatorId: null,
+      lockStage: null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(and(eq(tasks.id, taskId), eq(tasks.lockedBy, coordinatorId)))
     .run();
+  return result.changes > 0;
+}
+
+/** Release all task claims owned by one coordinator during shutdown. */
+export function releaseTaskClaimsForCoordinator(coordinatorId: string): number {
+  const result = getDb()
+    .update(tasks)
+    .set({
+      lockedBy: null,
+      lockedUntil: null,
+      coordinatorId: null,
+      lockStage: null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(tasks.lockedBy, coordinatorId))
+    .run();
+  return result.changes;
 }
 
 /** Release expired or abandoned task claims. Returns count of released claims. */
@@ -1712,7 +2063,13 @@ export function releaseStaleTaskClaims(): number {
 
   const result = getDb()
     .update(tasks)
-    .set({ lockedBy: null, lockedUntil: null })
+    .set({
+      lockedBy: null,
+      lockedUntil: null,
+      coordinatorId: null,
+      lockStage: null,
+      updatedAt: nowIso,
+    })
     .where(and(
       isNotNull(tasks.lockedBy),
       or(
@@ -1764,6 +2121,7 @@ export function listDueScheduledTasks(nowIso: string): TaskRow[] {
         lte(tasks.scheduledAt, nowIso),
       ),
     )
+    .orderBy(asc(tasks.scheduledAt), asc(tasks.position), asc(tasks.createdAt), asc(tasks.id))
     .all();
   log.debug({ dueCount: rows.length }, "Due scheduled tasks resolved");
   return rows;
@@ -1865,7 +2223,8 @@ export function listStaleInProgressTasks(): TaskRow[] {
 export function appendTaskActivityLog(taskId: string, newLines: string): void {
   const task = findTaskById(taskId);
   const currentLog = task?.agentActivityLog ?? "";
-  const updatedLog = currentLog ? `${currentLog}\n${newLines}` : newLines;
+  const redactedLines = redactProviderText(newLines);
+  const updatedLog = currentLog ? `${currentLog}\n${redactedLines}` : redactedLines;
   const nowIso = new Date().toISOString();
 
   setTaskFields(taskId, {
@@ -1994,6 +2353,8 @@ export interface DbUsageEvent {
   transport?: string;
   workflowKind?: string;
   usageReporting: string;
+  outcome?: UsageEventOutcome;
+  errorCategory?: string | null;
   usage: {
     inputTokens: number;
     outputTokens: number;
@@ -2041,6 +2402,8 @@ export function recordUsageEvent(event: DbUsageEvent): void {
         transport: event.transport ?? null,
         workflowKind: event.workflowKind ?? null,
         usageReporting: event.usageReporting,
+        outcome: event.outcome ?? "success",
+        errorCategory: event.errorCategory ?? null,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         totalTokens: usage.totalTokens,
@@ -2091,6 +2454,604 @@ export function recordUsageEvent(event: DbUsageEvent): void {
   });
 }
 
+function clampOperatorLimit(limit: number | undefined, fallback = 50, maxLimit = 200): number {
+  return Math.max(1, Math.min(limit ?? fallback, maxLimit));
+}
+
+function parseConfigAuditJson(raw: string | null | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return isObjectRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseReasonCodes(raw: string | null | undefined): ConfigReasonCode[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is ConfigReasonCode => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function toConfigAuditEvent(row: typeof configAuditEvents.$inferSelect): ConfigAuditEvent {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    taskId: row.taskId,
+    runtimeProfileId: row.runtimeProfileId,
+    action: row.action,
+    sourceKind: row.sourceKind,
+    actor: row.actor,
+    reasonCodes: parseReasonCodes(row.reasonCodesJson),
+    before: parseConfigAuditJson(row.beforeJson),
+    after: parseConfigAuditJson(row.afterJson),
+    createdAt: row.createdAt,
+  };
+}
+
+export interface AppendConfigAuditEventInput {
+  projectId: string;
+  taskId?: string | null;
+  runtimeProfileId?: string | null;
+  action: ConfigAuditAction;
+  sourceKind: ConfigSourceKind;
+  actor?: string | null;
+  reasonCodes?: ConfigReasonCode[];
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  createdAt?: string;
+}
+
+export function appendConfigAuditEvent(input: AppendConfigAuditEventInput): ConfigAuditEvent {
+  const id = crypto.randomUUID();
+  getDb()
+    .insert(configAuditEvents)
+    .values({
+      id,
+      projectId: input.projectId,
+      taskId: input.taskId ?? null,
+      runtimeProfileId: input.runtimeProfileId ?? null,
+      action: input.action,
+      sourceKind: input.sourceKind,
+      actor: input.actor ?? null,
+      reasonCodesJson: JSON.stringify([...(input.reasonCodes ?? [])].sort()),
+      beforeJson: input.before == null ? null : JSON.stringify(input.before),
+      afterJson: input.after == null ? null : JSON.stringify(input.after),
+      createdAt: input.createdAt ?? nowIso(),
+    })
+    .run();
+  return toConfigAuditEvent(
+    getDb().select().from(configAuditEvents).where(eq(configAuditEvents.id, id)).get()!,
+  );
+}
+
+export function listConfigAuditEvents(input: {
+  projectId: string;
+  taskId?: string | null;
+  runtimeProfileId?: string | null;
+  limit?: number;
+}): ConfigAuditEvent[] | null {
+  if (!findProjectById(input.projectId)) return null;
+  const conditions: SQL[] = [eq(configAuditEvents.projectId, input.projectId)];
+  if (input.taskId) conditions.push(eq(configAuditEvents.taskId, input.taskId));
+  if (input.runtimeProfileId) {
+    conditions.push(eq(configAuditEvents.runtimeProfileId, input.runtimeProfileId));
+  }
+  return getDb()
+    .select()
+    .from(configAuditEvents)
+    .where(and(...conditions))
+    .orderBy(desc(configAuditEvents.createdAt))
+    .limit(clampOperatorLimit(input.limit, 50, 200))
+    .all()
+    .map(toConfigAuditEvent);
+}
+
+function readRootEnvFiles(): ResolvedProjectConfigView["env"]["files"] {
+  const root = findMonorepoRootFromUrl(import.meta.url);
+  return {
+    env: existsSync(join(root, ".env")),
+    envLocal: existsSync(join(root, ".env.local")),
+  };
+}
+
+function readProjectConfigIssues(projectRoot: string): {
+  exists: boolean;
+  parseOk: boolean;
+  issues: ResolvedConfigIssue[];
+} {
+  const configPath = join(projectRoot, ".ai-factory", "config.yaml");
+  if (!existsSync(configPath)) return { exists: false, parseOk: true, issues: [] };
+  try {
+    const parsed = YAML.parse(readFileSync(configPath, "utf-8")) as unknown;
+    return {
+      exists: true,
+      parseOk: true,
+      issues: validateProjectConfigObject(parsed),
+    };
+  } catch {
+    return {
+      exists: true,
+      parseOk: false,
+      issues: [
+        {
+          severity: "error",
+          reasonCode: "PROJECT_CONFIG_PARSE_FAILED",
+          sourceKind: "project_config",
+          message: "Project config could not be parsed",
+          path: ".ai-factory/config.yaml",
+          blocksWork: true,
+        },
+      ],
+    };
+  }
+}
+
+function readMcpSummary(projectRoot: string): ResolvedProjectConfigView["mcp"] {
+  const mcpPath = join(projectRoot, ".mcp.json");
+  if (!existsSync(mcpPath)) return { exists: false, servers: [] };
+  try {
+    const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
+    const servers = isObjectRecord(parsed?.mcpServers) ? parsed.mcpServers : {};
+    return {
+      exists: true,
+      servers: Object.entries(servers)
+        .map(([name, raw]) => {
+          const server = isObjectRecord(raw) ? raw : {};
+          const env = isObjectRecord(server.env) ? server.env : {};
+          return {
+            name,
+            transport: typeof server.transport === "string" ? server.transport : null,
+            hasCommand: typeof server.command === "string" && server.command.trim().length > 0,
+            hasUrl: typeof server.url === "string" && server.url.trim().length > 0,
+            envKeys: Object.keys(env).sort(),
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    };
+  } catch {
+    return { exists: true, servers: [] };
+  }
+}
+
+function collectMcpIssues(mcp: ResolvedProjectConfigView["mcp"]): ResolvedConfigIssue[] {
+  const issues: ResolvedConfigIssue[] = [];
+  for (const server of mcp.servers) {
+    for (const key of server.envKeys.filter(isSecretLikeConfigKey)) {
+      issues.push({
+        severity: "warning",
+        reasonCode: "MCP_SECRET_LIKE_KEY",
+        sourceKind: "mcp",
+        path: `.mcp.json:${server.name}.env.${key}`,
+        message: "MCP env key is secret-like; only the key name is exposed",
+        blocksWork: false,
+      });
+    }
+  }
+  return issues;
+}
+
+function collectRuntimeProfileIssues(
+  profiles: RuntimeProfile[],
+  projectId: string,
+): ResolvedConfigIssue[] {
+  const issues: ResolvedConfigIssue[] = [];
+  for (const profile of profiles) {
+    const sourceKind: ConfigSourceKind = "runtime_profile";
+    for (const key of findSecretLikeKeys(profile.headers)) {
+      issues.push({
+        severity: "error",
+        reasonCode: "RUNTIME_PROFILE_SECRET_LIKE_HEADER_KEY",
+        sourceKind,
+        path: `runtimeProfiles.${profile.id}.headers.${key}`,
+        message: "Persisted runtime profile header key looks secret-like",
+        blocksWork: true,
+      });
+    }
+    for (const key of findSecretLikeKeys(profile.options)) {
+      issues.push({
+        severity: "error",
+        reasonCode: "RUNTIME_PROFILE_SECRET_LIKE_OPTION_KEY",
+        sourceKind,
+        path: `runtimeProfiles.${profile.id}.options.${key}`,
+        message: "Persisted runtime profile option key looks secret-like",
+        blocksWork: true,
+      });
+    }
+    if (profile.projectId != null && profile.projectId !== projectId) {
+      issues.push({
+        severity: "error",
+        reasonCode: "RUNTIME_PROFILE_SCOPE_MISMATCH",
+        sourceKind,
+        path: `runtimeProfiles.${profile.id}.projectId`,
+        message: "Runtime profile is scoped to a different project",
+        blocksWork: true,
+      });
+    }
+  }
+  return issues;
+}
+
+function issueForDefaultProfile(
+  profileId: string | null | undefined,
+  sourceKind: ConfigSourceKind,
+  path: string,
+  projectId: string,
+): ResolvedConfigIssue[] {
+  if (!profileId) return [];
+  const profile = findRuntimeProfileById(profileId);
+  if (!profile) {
+    return [{
+      severity: "error",
+      reasonCode: "RUNTIME_PROFILE_MISSING",
+      sourceKind,
+      path,
+      message: "Configured runtime profile does not exist",
+      blocksWork: true,
+    }];
+  }
+  if (!profile.enabled) {
+    return [{
+      severity: "error",
+      reasonCode: "RUNTIME_PROFILE_DISABLED",
+      sourceKind,
+      path,
+      message: "Configured runtime profile is disabled",
+      blocksWork: true,
+    }];
+  }
+  if (sourceKind === "app_settings" && profile.projectId != null) {
+    return [{
+      severity: "error",
+      reasonCode: "RUNTIME_PROFILE_SCOPE_MISMATCH",
+      sourceKind,
+      path,
+      message: "App default runtime profile must be global",
+      blocksWork: true,
+    }];
+  }
+  if (sourceKind === "project" && profile.projectId != null && profile.projectId !== projectId) {
+    return [{
+      severity: "error",
+      reasonCode: "RUNTIME_PROFILE_SCOPE_MISMATCH",
+      sourceKind,
+      path,
+      message: "Project default runtime profile belongs to a different project",
+      blocksWork: true,
+    }];
+  }
+  return [];
+}
+
+function sanitizeProjectConfigForGovernance(
+  cfg: ResolvedProjectConfigView["projectConfig"],
+): ResolvedProjectConfigView["projectConfig"] {
+  return {
+    exists: cfg.exists,
+    parseOk: cfg.parseOk,
+    paths: {
+      description: cfg.paths.description,
+      architecture: cfg.paths.architecture,
+      docs: cfg.paths.docs,
+      roadmap: cfg.paths.roadmap,
+      research: cfg.paths.research,
+      rules_file: cfg.paths.rules_file,
+      plan: cfg.paths.plan,
+      plans: cfg.paths.plans,
+      fix_plan: cfg.paths.fix_plan,
+      security: cfg.paths.security,
+      references: cfg.paths.references,
+      patches: cfg.paths.patches,
+      evolutions: cfg.paths.evolutions,
+      evolution: cfg.paths.evolution,
+      specs: cfg.paths.specs,
+      rules: cfg.paths.rules,
+    },
+    workflow: {
+      auto_create_dirs: cfg.workflow.auto_create_dirs,
+      plan_id_format: cfg.workflow.plan_id_format,
+      analyze_updates_architecture: cfg.workflow.analyze_updates_architecture,
+      architecture_updates_roadmap: cfg.workflow.architecture_updates_roadmap,
+      verify_mode: cfg.workflow.verify_mode,
+    },
+    git: {
+      enabled: cfg.git.enabled,
+      base_branch: cfg.git.base_branch,
+      create_branches: cfg.git.create_branches,
+      branch_prefix: cfg.git.branch_prefix,
+      skip_push_after_commit: cfg.git.skip_push_after_commit,
+      strict_base_update: cfg.git.strict_base_update,
+    },
+    language: {
+      ui: cfg.language.ui,
+      artifacts: cfg.language.artifacts,
+      technical_terms: cfg.language.technical_terms,
+    },
+  };
+}
+
+export function buildProjectConfigGovernance(projectId: string): ResolvedProjectConfigView | null {
+  const project = findProjectById(projectId);
+  if (!project) return null;
+  const env = getEnv();
+  const settings = getAppSettings();
+  const projectConfigStatus = readProjectConfigIssues(project.rootPath);
+  const cfg = projectConfigStatus.parseOk
+    ? getProjectConfig(project.rootPath)
+    : {
+        paths: {
+          plan: ".ai-factory/PLAN.md",
+          plans: ".ai-factory/plans/",
+          fix_plan: ".ai-factory/FIX_PLAN.md",
+          roadmap: ".ai-factory/ROADMAP.md",
+          description: ".ai-factory/DESCRIPTION.md",
+          architecture: ".ai-factory/ARCHITECTURE.md",
+          docs: "docs/",
+          research: ".ai-factory/RESEARCH.md",
+          rules_file: ".ai-factory/RULES.md",
+          security: ".ai-factory/SECURITY.md",
+          references: ".ai-factory/references/",
+          patches: ".ai-factory/patches/",
+          evolutions: ".ai-factory/evolutions/",
+          evolution: ".ai-factory/evolution/",
+          specs: ".ai-factory/specs/",
+          rules: ".ai-factory/rules/",
+        },
+        workflow: {
+          auto_create_dirs: true,
+          plan_id_format: "slug" as const,
+          analyze_updates_architecture: true,
+          architecture_updates_roadmap: true,
+          verify_mode: "normal" as const,
+        },
+        git: {
+          enabled: true,
+          base_branch: "main",
+          create_branches: true,
+          branch_prefix: "feature/",
+          skip_push_after_commit: false,
+          strict_base_update: false,
+        },
+        language: { ui: "en", artifacts: "en", technical_terms: "keep" as const },
+      };
+  const mcp = readMcpSummary(project.rootPath);
+  const profiles = listRuntimeProfileResponses({ projectId, includeGlobal: true });
+  const stages: RuntimeStageOrProfileMode[] = ["task", "plan", "review", "chat"];
+  const effectiveRuntime = stages.map((stage) => {
+    const effective = resolveEffectiveRuntimeProfile({
+      projectId,
+      mode: stage,
+      systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(stage),
+    });
+    return {
+      stage,
+      source: effective.source,
+      profileId: effective.profile?.id ?? null,
+      profileName: effective.profile?.name ?? null,
+      runtimeId: effective.profile?.runtimeId ?? null,
+      providerId: effective.profile?.providerId ?? null,
+    };
+  });
+
+  const defaultIds = {
+    task: project.defaultTaskRuntimeProfileId ?? null,
+    plan: project.defaultPlanRuntimeProfileId ?? null,
+    review: project.defaultReviewRuntimeProfileId ?? null,
+    chat: project.defaultChatRuntimeProfileId ?? null,
+  };
+  const appDefaultIds = {
+    task: settings.defaultTaskRuntimeProfileId ?? null,
+    plan: settings.defaultPlanRuntimeProfileId ?? null,
+    review: settings.defaultReviewRuntimeProfileId ?? null,
+    chat: settings.defaultChatRuntimeProfileId ?? null,
+  };
+
+  const issues: ResolvedConfigIssue[] = [
+    ...projectConfigStatus.issues,
+    ...collectMcpIssues(mcp),
+    ...collectRuntimeProfileIssues(profiles, projectId),
+  ];
+  for (const [slot, profileId] of Object.entries(defaultIds)) {
+    issues.push(...issueForDefaultProfile(profileId, "project", `project.defaultRuntimeProfileIds.${slot}`, projectId));
+  }
+  for (const [slot, profileId] of Object.entries(appDefaultIds)) {
+    issues.push(...issueForDefaultProfile(profileId, "app_settings", `appRuntimeDefaults.${slot}`, projectId));
+  }
+  for (const selection of effectiveRuntime) {
+    if (!selection.profileId) {
+      issues.push({
+        severity: "warning",
+        reasonCode: "EFFECTIVE_RUNTIME_PROFILE_MISSING",
+        sourceKind: "runtime_profile",
+        path: `effectiveRuntime.${selection.stage}`,
+        message: "No enabled effective runtime profile is configured; runtime env fallback may be used",
+        blocksWork: false,
+      });
+    }
+  }
+
+  const projectConfig = sanitizeProjectConfigForGovernance({
+    exists: projectConfigStatus.exists,
+    parseOk: projectConfigStatus.parseOk,
+    paths: cfg.paths,
+    workflow: cfg.workflow,
+    git: cfg.git,
+    language: cfg.language,
+  });
+
+  const viewBase = {
+    projectId,
+    generatedAt: nowIso(),
+    project: {
+      name: project.name,
+      rootPath: project.rootPath,
+      parallelEnabled: project.parallelEnabled,
+      autoQueueMode: project.autoQueueMode,
+      defaultRuntimeProfileIds: defaultIds,
+    },
+    env: {
+      files: readRootEnvFiles(),
+      runtimeModules: env.AIF_RUNTIME_MODULES,
+      defaultRuntimeId: env.AIF_DEFAULT_RUNTIME_ID,
+      defaultProviderId: env.AIF_DEFAULT_PROVIDER_ID,
+      configuredKeys: [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "CODEX_CLI_PATH",
+      ].filter((key) => Boolean(process.env[key])),
+      flags: {
+        agentUseSubagents: env.AGENT_USE_SUBAGENTS,
+        agentBypassPermissions: env.AGENT_BYPASS_PERMISSIONS,
+        memoryEnabled: env.AIF_MEMORY_ENABLED,
+        usageLimitsEnabled: env.AIF_USAGE_LIMITS_ENABLED,
+        warmupEnabled: env.AIF_WARMUP_ENABLED,
+        taskWorktreesEnabled: env.AIF_TASK_WORKTREES_ENABLED,
+      },
+    },
+    appRuntimeDefaults: appDefaultIds,
+    projectConfig,
+    mcp,
+    permissionPolicy: {
+      bypassEnabled: env.AGENT_BYPASS_PERMISSIONS,
+      modes: [...PERMISSION_MODES],
+      intents: [...PERMISSION_POLICY_INTENTS],
+      defaultByIntent: Object.fromEntries(
+        PERMISSION_POLICY_INTENTS.map((intent) => [
+          intent,
+          PERMISSION_EXECUTION_POLICIES[intent].defaultMode,
+        ]),
+      ),
+    },
+    usageLimits: { enabled: env.AIF_USAGE_LIMITS_ENABLED },
+    memory: { enabled: env.AIF_MEMORY_ENABLED },
+    runtimeProfiles: profiles.map(summarizeRuntimeProfileConfig),
+    effectiveRuntime,
+    issues: issues.sort((a, b) => a.reasonCode.localeCompare(b.reasonCode)),
+  };
+  return {
+    ...viewBase,
+    fingerprint: fingerprintConfig({ ...viewBase, generatedAt: undefined }),
+  };
+}
+
+export function listProjectConfigWorkBlockers(projectId: string): ResolvedConfigIssue[] | null {
+  const view = buildProjectConfigGovernance(projectId);
+  return view ? view.issues.filter((issue) => issue.severity === "error" && issue.blocksWork) : null;
+}
+
+export function collectTaskRuntimeOverrideBlockers(task: TaskRow): Array<{ reasonCode: string }> {
+  const blockers: Array<{ reasonCode: string }> = [];
+  if (task.runtimeOptionsJson) {
+    try {
+      const parsed = JSON.parse(task.runtimeOptionsJson);
+      if (findSecretLikeKeys(parsed).length > 0) {
+        blockers.push({ reasonCode: "TASK_RUNTIME_SECRET_LIKE_OPTION_KEY" });
+      }
+    } catch {
+      blockers.push({ reasonCode: "TASK_RUNTIME_SECRET_LIKE_OPTION_KEY" });
+    }
+  }
+  if (task.runtimeProfileId) {
+    const profile = findRuntimeProfileById(task.runtimeProfileId);
+    if (!profile) {
+      blockers.push({ reasonCode: "TASK_RUNTIME_PROFILE_MISSING" });
+    } else if (!profile.enabled) {
+      blockers.push({ reasonCode: "TASK_RUNTIME_PROFILE_DISABLED" });
+    } else if (profile.projectId != null && profile.projectId !== task.projectId) {
+      blockers.push({ reasonCode: "TASK_RUNTIME_PROFILE_SCOPE_MISMATCH" });
+    }
+  }
+  return blockers;
+}
+
+function toTaskRuntimeUsageEvent(row: typeof usageEvents.$inferSelect): TaskRuntimeUsageEvent {
+  return {
+    id: row.id,
+    source: row.source,
+    projectId: row.projectId,
+    taskId: row.taskId,
+    chatSessionId: row.chatSessionId,
+    runtimeId: row.runtimeId,
+    providerId: row.providerId,
+    profileId: row.profileId,
+    transport: row.transport,
+    workflowKind: row.workflowKind,
+    usageReporting: row.usageReporting,
+    outcome: row.outcome,
+    errorCategory: row.errorCategory,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    totalTokens: row.totalTokens,
+    costUsd: row.costUsd,
+    createdAt: row.createdAt,
+  };
+}
+
+export function listTaskRuntimeUsageEvents(
+  taskId: string,
+  limit?: number,
+): TaskRuntimeUsageResponse | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const rows = getDb()
+    .select()
+    .from(usageEvents)
+    .where(eq(usageEvents.taskId, taskId))
+    .orderBy(desc(usageEvents.createdAt))
+    .limit(clampOperatorLimit(limit))
+    .all();
+
+  return {
+    taskId,
+    projectId: task.projectId,
+    totals: {
+      inputTokens: task.tokenInput ?? 0,
+      outputTokens: task.tokenOutput ?? 0,
+      totalTokens: task.tokenTotal ?? 0,
+      costUsd: task.costUsd ?? 0,
+    },
+    events: rows.map(toTaskRuntimeUsageEvent),
+  };
+}
+
+export function listProjectRuntimeUsageEvents(
+  projectId: string,
+  limit?: number,
+): ProjectRuntimeUsageResponse | null {
+  const project = findProjectById(projectId);
+  if (!project) return null;
+  const rows = getDb()
+    .select()
+    .from(usageEvents)
+    .where(eq(usageEvents.projectId, projectId))
+    .orderBy(desc(usageEvents.createdAt))
+    .limit(clampOperatorLimit(limit))
+    .all();
+
+  return {
+    projectId,
+    totals: {
+      inputTokens: project.tokenInput ?? 0,
+      outputTokens: project.tokenOutput ?? 0,
+      totalTokens: project.tokenTotal ?? 0,
+      costUsd: project.costUsd ?? 0,
+    },
+    events: rows.map(toTaskRuntimeUsageEvent),
+  };
+}
+
 /**
  * Build a `DbUsageSink` (structurally compatible with
  * `@aif/runtime.RuntimeUsageSink`) that persists every event via
@@ -2125,6 +3086,129 @@ export function createDbUsageSink(options: CreateDbUsageSinkOptions = {}): DbUsa
         );
       }
     },
+  };
+}
+
+export type RuntimeBudgetGateStatus = "allow" | "warn" | "block" | "override";
+
+export interface RuntimeBudgetGateDecision {
+  status: RuntimeBudgetGateStatus;
+  stage: RuntimeStage;
+  profileMode: RuntimeProfileMode;
+  budgetField:
+    | "plannerMaxBudgetUsd"
+    | "planCheckerMaxBudgetUsd"
+    | "implementerMaxBudgetUsd"
+    | "reviewSidecarMaxBudgetUsd"
+    | null;
+  budgetUsd: number | null;
+  spentUsd: number;
+  percentUsed: number | null;
+  overrideJustification: string | null;
+  signature: string;
+}
+
+const RUNTIME_BUDGET_WORKFLOW_KINDS: Record<RuntimeStage, string[]> = {
+  planner: ["planner"],
+  plan_checker: ["plan_checker", "plan-checker"],
+  implementer: ["implementer", "implementer_checklist_sync"],
+  reviewer: ["reviewer", "review-gate", "security", "security_review", "review-security"],
+  security: ["reviewer", "review-gate", "security", "security_review", "review-security"],
+  chat: ["chat"],
+  audit: ["audit"],
+  synthesis: ["synthesis"],
+};
+
+function budgetFieldForStage(stage: RuntimeStage): RuntimeBudgetGateDecision["budgetField"] {
+  if (stage === "planner") return "plannerMaxBudgetUsd";
+  if (stage === "plan_checker") return "planCheckerMaxBudgetUsd";
+  if (stage === "implementer" || stage === "audit" || stage === "synthesis") {
+    return "implementerMaxBudgetUsd";
+  }
+  if (stage === "reviewer" || stage === "security") return "reviewSidecarMaxBudgetUsd";
+  return null;
+}
+
+function readBudgetOverrideJustification(task: TaskRow | undefined): string | null {
+  const options = parseRuntimeObject(task?.runtimeOptionsJson);
+  const override = options?.runtimeBudgetOverride;
+  if (!override || typeof override !== "object" || Array.isArray(override)) return null;
+  const justification = (override as Record<string, unknown>).justification;
+  return typeof justification === "string" && justification.trim().length > 0
+    ? justification.trim()
+    : null;
+}
+
+function sumTaskUsageCostForStage(taskId: string, stage: RuntimeStage): number {
+  const workflowKinds = RUNTIME_BUDGET_WORKFLOW_KINDS[stage];
+  const row = getDb()
+    .select({ costUsd: sql<number>`coalesce(sum(coalesce(${usageEvents.costUsd}, 0)), 0)` })
+    .from(usageEvents)
+    .where(and(eq(usageEvents.taskId, taskId), inArray(usageEvents.workflowKind, workflowKinds)))
+    .get();
+  return Number(row?.costUsd ?? 0);
+}
+
+export function evaluateRuntimeBudgetGate(input: {
+  taskId: string;
+  projectId?: string | null;
+  stage: RuntimeStageOrProfileMode;
+}): RuntimeBudgetGateDecision {
+  const stage = normalizeRuntimeStage(input.stage);
+  const profileMode = runtimeProfileModeForStage(stage);
+  const task = findTaskById(input.taskId);
+  const project = findProjectById(input.projectId ?? task?.projectId ?? "");
+  const budgetField = budgetFieldForStage(stage);
+  const budgetUsd = budgetField ? (project?.[budgetField] ?? null) : null;
+  const spentUsd = sumTaskUsageCostForStage(input.taskId, stage);
+  const percentUsed = budgetUsd && budgetUsd > 0 ? (spentUsd / budgetUsd) * 100 : null;
+  const overrideJustification = readBudgetOverrideJustification(task);
+  const signature = [
+    "runtime-budget",
+    stage,
+    budgetField ?? "none",
+    budgetUsd ?? "none",
+    Math.floor(percentUsed ?? 0),
+  ].join(":");
+
+  if (!budgetUsd || budgetUsd <= 0 || percentUsed == null) {
+    return {
+      status: "allow",
+      stage,
+      profileMode,
+      budgetField,
+      budgetUsd,
+      spentUsd,
+      percentUsed,
+      overrideJustification,
+      signature,
+    };
+  }
+
+  if (percentUsed >= 100) {
+    return {
+      status: overrideJustification ? "override" : "block",
+      stage,
+      profileMode,
+      budgetField,
+      budgetUsd,
+      spentUsd,
+      percentUsed,
+      overrideJustification,
+      signature,
+    };
+  }
+
+  return {
+    status: percentUsed >= 80 ? "warn" : "allow",
+    stage,
+    profileMode,
+    budgetField,
+    budgetUsd,
+    spentUsd,
+    percentUsed,
+    overrideJustification,
+    signature,
   };
 }
 
@@ -2293,6 +3377,15 @@ const MEMORY_SECRET_PATTERNS = [
   /\bBearer\s+[a-z0-9._~+/-]+=*/i,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
 ];
+const MEMORY_ITEM_TYPE_SET = new Set<string>(MEMORY_ITEM_TYPES);
+const MEMORY_FAILURE_FAMILY_SET = new Set<string>(MEMORY_FAILURE_FAMILIES);
+const MEMORY_CLAIM_SOURCE_KIND_SET = new Set<string>(MEMORY_CLAIM_SOURCE_KINDS);
+const MEMORY_CLAIM_STATUS_SET = new Set<string>(MEMORY_CLAIM_STATUSES);
+const MEMORY_BLOCKING_FAILURE_FAMILIES = new Set<MemoryFailureFamily>([
+  "missing_source_backed_claim",
+  "invalid_source_claim",
+  "redaction_blocked",
+]);
 
 function memoryEnabled(): boolean {
   return getEnv().AIF_MEMORY_ENABLED;
@@ -2349,39 +3442,325 @@ function redactMemoryText(value: string): string {
   return redacted;
 }
 
+function memoryTextHasRedactionMarker(value: string | null | undefined): boolean {
+  return Boolean(value?.includes("[REDACTED]"));
+}
+
+function memoryTextsHaveRedactionMarker(texts: Array<string | null | undefined>): boolean {
+  return texts.some(memoryTextHasRedactionMarker);
+}
+
 function sanitizeMemoryNote(value: string | null | undefined): string | null {
   if (value === undefined || value === null) return null;
   const redacted = truncateText(redactMemoryText(value), MEMORY_NOTE_MAX_LENGTH);
   return redacted.length > 0 ? redacted : null;
 }
 
+function sanitizeMemorySourceField(
+  value: string | null | undefined,
+  maxLength: number,
+): string | null {
+  if (value === undefined || value === null) return null;
+  const redacted = truncateText(redactMemoryText(value), maxLength);
+  return redacted.length > 0 ? redacted : null;
+}
+
+function normalizeMemoryItemType(value: unknown): MemoryItemType {
+  return typeof value === "string" && MEMORY_ITEM_TYPE_SET.has(value)
+    ? (value as MemoryItemType)
+    : "architecture_note";
+}
+
+function normalizeMemoryFailureFamily(value: unknown): MemoryFailureFamily | null {
+  return typeof value === "string" && MEMORY_FAILURE_FAMILY_SET.has(value)
+    ? (value as MemoryFailureFamily)
+    : null;
+}
+
+function normalizeMemoryClaimStatus(value: unknown): MemoryClaimStatus {
+  return typeof value === "string" && MEMORY_CLAIM_STATUS_SET.has(value)
+    ? (value as MemoryClaimStatus)
+    : "pending";
+}
+
+function isBlockingMemoryFailureFamily(value: MemoryFailureFamily | null | undefined): boolean {
+  return value != null && MEMORY_BLOCKING_FAILURE_FAMILIES.has(value);
+}
+
+function sanitizeMemoryClaimSource(value: unknown): MemoryClaimSource | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.kind !== "string" ||
+    !MEMORY_CLAIM_SOURCE_KIND_SET.has(candidate.kind)
+  ) {
+    return null;
+  }
+  const optionalText = (key: string, maxLength: number): string | null | undefined => {
+    const raw = candidate[key];
+    if (raw === undefined) return undefined;
+    if (raw === null) return null;
+    return typeof raw === "string" ? truncateText(redactMemoryText(raw), maxLength) || null : undefined;
+  };
+  const ref = optionalText("ref", 500);
+  const taskId = optionalText("taskId", 200);
+  const artifactId = optionalText("artifactId", 200);
+  const evidenceId = optionalText("evidenceId", 200);
+  const memoryId = optionalText("memoryId", 200);
+  const path = optionalText("path", 500);
+  const label = optionalText("label", 200);
+  const excerpt = optionalText("excerpt", 1_000);
+  const observedAt = optionalText("observedAt", 100);
+
+  return {
+    kind: candidate.kind as MemoryClaimSource["kind"],
+    ...(ref !== undefined ? { ref } : {}),
+    ...(taskId !== undefined ? { taskId } : {}),
+    ...(artifactId !== undefined ? { artifactId } : {}),
+    ...(evidenceId !== undefined ? { evidenceId } : {}),
+    ...(memoryId !== undefined ? { memoryId } : {}),
+    ...(path !== undefined ? { path } : {}),
+    ...(label !== undefined ? { label } : {}),
+    ...(excerpt !== undefined ? { excerpt } : {}),
+    ...(observedAt !== undefined ? { observedAt } : {}),
+  };
+}
+
+function normalizeMemoryStringArray(value: unknown, maxLength = 120): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const normalized = truncateText(redactMemoryText(entry), maxLength);
+    if (!normalized || seen.has(normalized.toLowerCase())) continue;
+    seen.add(normalized.toLowerCase());
+    result.push(normalized);
+    if (result.length >= 20) break;
+  }
+  return result;
+}
+
+function sanitizeMemoryClaim(value: unknown): MemoryClaim | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.text !== "string") return null;
+  const text = truncateText(redactMemoryText(candidate.text), MEMORY_SUMMARY_MAX_LENGTH);
+  if (!text) return null;
+  const rawClaimId = candidate.claimId ?? candidate.id;
+  const claimId =
+    typeof rawClaimId === "string" && rawClaimId.trim()
+      ? truncateText(redactMemoryText(rawClaimId), 120)
+      : crypto.randomUUID();
+  const sources = Array.isArray(candidate.sources)
+    ? candidate.sources.map(sanitizeMemoryClaimSource).filter((source): source is MemoryClaimSource => source != null)
+    : [];
+  const lastValidatedAt =
+    typeof candidate.lastValidatedAt === "string"
+      ? truncateText(redactMemoryText(candidate.lastValidatedAt), 100) || null
+      : candidate.lastValidatedAt === null
+        ? null
+        : undefined;
+  return {
+    claimId,
+    type: normalizeMemoryItemType(candidate.type),
+    status: normalizeMemoryClaimStatus(candidate.status),
+    text,
+    sources,
+    supersedes: normalizeMemoryStringArray(candidate.supersedes),
+    contradicts: normalizeMemoryStringArray(candidate.contradicts),
+    lastValidatedAt: lastValidatedAt ?? null,
+  };
+}
+
+function normalizeMemoryClaims(claims: unknown): MemoryClaim[] {
+  if (!Array.isArray(claims)) return [];
+  const seen = new Set<string>();
+  const normalized: MemoryClaim[] = [];
+  for (const claim of claims) {
+    const sanitized = sanitizeMemoryClaim(claim);
+    if (!sanitized) continue;
+    const key = sanitized.claimId.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(sanitized);
+    if (normalized.length >= 20) break;
+  }
+  return normalized;
+}
+
+function parseMemoryClaims(raw: string | null | undefined): MemoryClaim[] {
+  if (!raw) return [];
+  try {
+    return normalizeMemoryClaims(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+function buildCompatibilityMemoryClaims(row: MemoryItemRow): MemoryClaim[] {
+  const sources: MemoryClaimSource[] = [];
+  if (row.sourceTaskId) {
+    sources.push({
+      kind: "task",
+      ref: row.sourceRef ?? `task:${row.sourceTaskId}`,
+      taskId: row.sourceTaskId,
+    });
+  } else if (row.sourceRef) {
+    sources.push({
+      kind: row.sourceKind === "task" ? "task" : "document",
+      ref: row.sourceRef,
+    });
+  }
+  if (sources.length === 0) return [];
+  return [
+    {
+      claimId: `memory-${row.id}-source`,
+      type: normalizeMemoryItemType(row.itemType),
+      status: row.status === "approved" ? "approved" : row.status === "rejected" ? "rejected" : row.status === "expired" ? "expired" : "pending",
+      text: row.summary || row.title,
+      sources,
+      supersedes: [],
+      contradicts: [],
+      lastValidatedAt: row.approvedAt,
+    },
+  ];
+}
+
+function memoryClaimRedactionTexts(claims: MemoryClaim[]): string[] {
+  return claims.flatMap((claim) => [
+    claim.text,
+    ...claim.supersedes,
+    ...claim.contradicts,
+    ...claim.sources.flatMap((source) => [
+      source.ref ?? "",
+      source.taskId ?? "",
+      source.artifactId ?? "",
+      source.evidenceId ?? "",
+      source.memoryId ?? "",
+      source.path ?? "",
+      source.label ?? "",
+      source.excerpt ?? "",
+      source.observedAt ?? "",
+    ]),
+  ]);
+}
+
+function collectMemoryClaimInputTexts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const claim = entry as Record<string, unknown>;
+    const texts: string[] = [];
+    if (typeof claim.text === "string") texts.push(claim.text);
+    if (Array.isArray(claim.supersedes)) {
+      texts.push(...claim.supersedes.filter((item): item is string => typeof item === "string"));
+    }
+    if (Array.isArray(claim.contradicts)) {
+      texts.push(...claim.contradicts.filter((item): item is string => typeof item === "string"));
+    }
+    if (Array.isArray(claim.sources)) {
+      for (const rawSource of claim.sources) {
+        if (!rawSource || typeof rawSource !== "object" || Array.isArray(rawSource)) continue;
+        const source = rawSource as Record<string, unknown>;
+        if (typeof source.ref === "string") texts.push(source.ref);
+        if (typeof source.taskId === "string") texts.push(source.taskId);
+        if (typeof source.artifactId === "string") texts.push(source.artifactId);
+        if (typeof source.evidenceId === "string") texts.push(source.evidenceId);
+        if (typeof source.memoryId === "string") texts.push(source.memoryId);
+        if (typeof source.path === "string") texts.push(source.path);
+        if (typeof source.label === "string") texts.push(source.label);
+        if (typeof source.excerpt === "string") texts.push(source.excerpt);
+        if (typeof source.observedAt === "string") texts.push(source.observedAt);
+      }
+    }
+    return texts;
+  });
+}
+
+function memoryClaimSourceHasReference(source: MemoryClaimSource): boolean {
+  switch (source.kind) {
+    case "task":
+      return Boolean(source.taskId || source.ref);
+    case "artifact":
+      return Boolean(source.artifactId || source.path || source.ref);
+    case "evidence":
+      return Boolean(source.evidenceId || source.ref);
+    case "code":
+      return Boolean(source.path || source.ref);
+    case "memory":
+      return Boolean(source.memoryId || source.ref);
+    case "document":
+      return Boolean(source.path || source.ref);
+    case "commit":
+      return Boolean(source.ref);
+    case "url":
+      return Boolean(source.ref && /^https?:\/\//i.test(source.ref));
+  }
+}
+
+function memoryClaimIsSourceBacked(claim: MemoryClaim): boolean {
+  return (
+    claim.text.trim().length > 0 &&
+    claim.sources.length > 0 &&
+    claim.sources.some(memoryClaimSourceHasReference)
+  );
+}
+
+function hasOnlySourceBackedClaims(claims: MemoryClaim[]): boolean {
+  return claims.length > 0 && claims.every(memoryClaimIsSourceBacked);
+}
+
+function stampClaimsLastValidatedAt(claims: MemoryClaim[], validatedAt: string): MemoryClaim[] {
+  return claims.map((claim) => ({
+    ...claim,
+    status: "approved",
+    lastValidatedAt: claim.lastValidatedAt ?? validatedAt,
+  }));
+}
+
+function memoryClaimFailureFamily(claims: MemoryClaim[]): MemoryFailureFamily | null {
+  if (hasOnlySourceBackedClaims(claims)) return null;
+  return claims.length > 0 ? "invalid_source_claim" : "missing_source_backed_claim";
+}
+
 function evaluateMemoryRedaction(texts: string[]): {
   redactionStatus: "clean" | "blocked";
   publishBlockReason: string | null;
 } {
-  const combined = texts.join("\n");
-  if (!combined.trim()) {
+  const populatedTexts = texts.filter((text) => text.trim().length > 0);
+  if (populatedTexts.length === 0) {
     return { redactionStatus: "clean", publishBlockReason: null };
   }
-  const redacted = redactMemoryText(combined);
-  if (redacted !== combined || MEMORY_SECRET_PATTERNS.some((pattern) => pattern.test(combined))) {
-    return {
-      redactionStatus: "blocked",
-      publishBlockReason:
-        "Potential secret or provider metadata was detected. Edit the memory text before publishing.",
-    };
+  for (const text of populatedTexts) {
+    const redacted = redactMemoryText(text);
+    if (redacted !== text || MEMORY_SECRET_PATTERNS.some((pattern) => pattern.test(text))) {
+      return {
+        redactionStatus: "blocked",
+        publishBlockReason:
+          "Potential secret or provider metadata was detected. Edit the memory text before publishing.",
+      };
+    }
   }
   return { redactionStatus: "clean", publishBlockReason: null };
 }
 
 function toMemoryItemResponse(row: MemoryItemRow): MemoryItem {
+  const parsedClaims = parseMemoryClaims(row.claimsJson);
+  const sourceTaskId = sanitizeMemorySourceField(row.sourceTaskId, 200);
+  const sourceRef = sanitizeMemorySourceField(row.sourceRef, 500);
+  const compatibilityRow = { ...row, sourceTaskId, sourceRef };
   return {
     id: row.id,
     projectId: row.projectId,
     scope: row.scope,
-    sourceTaskId: row.sourceTaskId,
+    sourceTaskId,
     sourceKind: row.sourceKind,
-    sourceRef: row.sourceRef,
+    sourceRef,
+    itemType: normalizeMemoryItemType(row.itemType),
+    failureFamily: normalizeMemoryFailureFamily(row.failureFamily),
+    claims:
+      parsedClaims.length > 0 ? parsedClaims : buildCompatibilityMemoryClaims(compatibilityRow),
     status: row.status,
     redactionStatus: row.redactionStatus,
     publishBlockReason: row.publishBlockReason,
@@ -2464,16 +3843,30 @@ export function createMemoryItem(input: CreateMemoryItemInput): MemoryItem | und
   if (!memoryEnabled()) return undefined;
   const id = crypto.randomUUID();
   const createdAt = nowIso();
+  const sourceTaskId = sanitizeMemorySourceField(input.sourceTaskId, 200);
+  const sourceRef = sanitizeMemorySourceField(input.sourceRef, 500);
   const title = truncateText(redactMemoryText(input.title), MEMORY_TITLE_MAX_LENGTH);
   const summary = truncateText(redactMemoryText(input.summary), MEMORY_SUMMARY_MAX_LENGTH);
   const content = truncateText(redactMemoryText(input.content), MEMORY_TEXT_MAX_LENGTH);
   const tags = normalizeMemoryTags(input.tags);
-  const redaction = evaluateMemoryRedaction([
+  const claims = normalizeMemoryClaims(input.claims);
+  const claimFailureFamily = memoryClaimFailureFamily(claims);
+  const inputFailureFamily = normalizeMemoryFailureFamily(input.failureFamily);
+  const redactionInputs = [
+    input.sourceTaskId ?? "",
+    input.sourceRef ?? "",
     input.title,
     input.summary,
     input.content,
     ...(input.tags ?? []),
-  ]);
+    ...collectMemoryClaimInputTexts(input.claims),
+  ];
+  const failureFamily =
+    claimFailureFamily ??
+    (evaluateMemoryRedaction(redactionInputs).redactionStatus === "blocked"
+      ? "redaction_blocked"
+      : inputFailureFamily);
+  const redaction = evaluateMemoryRedaction(redactionInputs);
   const projectId = resolveMemoryScopeProjectId(input);
 
   getDb().transaction((tx) => {
@@ -2482,9 +3875,12 @@ export function createMemoryItem(input: CreateMemoryItemInput): MemoryItem | und
         id,
         projectId,
         scope: input.scope,
-        sourceTaskId: input.sourceTaskId ?? null,
+        sourceTaskId,
         sourceKind: input.sourceKind ?? "manual",
-        sourceRef: input.sourceRef ?? null,
+        sourceRef,
+        itemType: normalizeMemoryItemType(input.itemType),
+        failureFamily: redaction.redactionStatus === "blocked" ? "redaction_blocked" : failureFamily,
+        claimsJson: JSON.stringify(claims),
         status: "pending",
         redactionStatus: redaction.redactionStatus,
         publishBlockReason: redaction.publishBlockReason,
@@ -2501,7 +3897,7 @@ export function createMemoryItem(input: CreateMemoryItemInput): MemoryItem | und
       memoryItemId: id,
       action: "created",
       actor: "system",
-      note: input.sourceTaskId ? `Created from task ${input.sourceTaskId}` : "Created manually",
+      note: sourceTaskId ? `Created from task ${sourceTaskId}` : "Created manually",
       createdAt,
     });
   });
@@ -2532,9 +3928,29 @@ function buildVerifiedTaskMemoryCandidate(task: HydratedTaskRow): CreateMemoryIt
     sourceTaskId: response.id,
     sourceKind: "task",
     sourceRef: `task:${response.id}`,
+    itemType: "review_learning",
     title: `Verified task: ${response.title}`,
     summary: truncateText(preferredSummary, MEMORY_SUMMARY_MAX_LENGTH),
     content: sections.join("\n\n"),
+    claims: [
+      {
+        claimId: `task-${response.id}-verified`,
+        type: "review_learning",
+        status: "pending",
+        text: "The source task was verified and may be used as source-backed project memory.",
+        sources: [
+          {
+            kind: "task",
+            ref: `task:${response.id}`,
+            taskId: response.id,
+            observedAt: response.updatedAt,
+          },
+        ],
+        supersedes: [],
+        contradicts: [],
+        lastValidatedAt: response.updatedAt,
+      },
+    ],
     tags: ["task-closeout", response.taskIntent ?? "general", ...response.tags],
   };
 }
@@ -2578,6 +3994,82 @@ export function listMemoryItems(options: ListMemoryItemsOptions = {}): MemoryIte
   return query.all().map(toMemoryItemResponse);
 }
 
+export function listTaskMemoryCandidates(taskId: string): TaskMemoryCandidatesResponse | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const candidates = getDb()
+    .select()
+    .from(memoryItems)
+    .where(eq(memoryItems.sourceTaskId, taskId))
+    .orderBy(desc(memoryItems.updatedAt))
+    .limit(50)
+    .all()
+    .map(toMemoryItemResponse);
+
+  return {
+    taskId,
+    projectId: task.projectId,
+    candidates,
+  };
+}
+
+export function countTaskMemoryCandidates(taskId: string): number {
+  const row = getDb()
+    .select({ value: count() })
+    .from(memoryItems)
+    .where(eq(memoryItems.sourceTaskId, taskId))
+    .get();
+  return Number(row?.value ?? 0);
+}
+
+export function buildProjectKnowledge(
+  projectId: string,
+  options: { includeGlobal?: boolean; limit?: number } = {},
+): ProjectKnowledgeResponse | null {
+  const project = findProjectById(projectId);
+  if (!project) return null;
+  const includeGlobal = options.includeGlobal === true;
+  const limit = clampOperatorLimit(options.limit, 100, 200);
+  const items = includeGlobal
+    ? getDb()
+        .select()
+        .from(memoryItems)
+        .where(
+          or(
+            and(eq(memoryItems.scope, "project"), eq(memoryItems.projectId, projectId)),
+            and(eq(memoryItems.scope, "global"), eq(memoryItems.status, "approved")),
+          ),
+        )
+        .orderBy(desc(memoryItems.updatedAt))
+        .limit(limit)
+        .all()
+        .map(toMemoryItemResponse)
+    : listMemoryItems({
+        projectId,
+        includeGlobal,
+        limit,
+      });
+  const counts: ProjectKnowledgeResponse["counts"] = {
+    byStatus: {},
+    byType: {},
+    byFailureFamily: {},
+  };
+
+  for (const item of items) {
+    counts.byStatus[item.status] = (counts.byStatus[item.status] ?? 0) + 1;
+    counts.byType[item.itemType] = (counts.byType[item.itemType] ?? 0) + 1;
+    const failureFamily = item.failureFamily ?? "none";
+    counts.byFailureFamily[failureFamily] = (counts.byFailureFamily[failureFamily] ?? 0) + 1;
+  }
+
+  return {
+    projectId,
+    includeGlobal,
+    counts,
+    items,
+  };
+}
+
 export function updateMemoryItem(
   id: string,
   input: UpdateMemoryItemInput,
@@ -2598,25 +4090,62 @@ export function updateMemoryItem(
     input.content !== undefined
       ? truncateText(redactMemoryText(input.content), MEMORY_TEXT_MAX_LENGTH)
       : existing.content;
+  const nextTags = input.tags !== undefined ? normalizeMemoryTags(input.tags) : existing.tags;
+  const nextClaims = input.claims !== undefined ? normalizeMemoryClaims(input.claims) : existing.claims;
   const textTouched =
     input.title !== undefined || input.summary !== undefined || input.content !== undefined;
   const tagsTouched = input.tags !== undefined;
-  const redaction =
-    textTouched || tagsTouched
+  const claimsTouched = input.claims !== undefined;
+  const claimRedactionInputs = claimsTouched
+    ? collectMemoryClaimInputTexts(input.claims)
+    : memoryClaimRedactionTexts(existing.claims);
+  const evaluatedRedaction =
+    textTouched || tagsTouched || claimsTouched
     ? evaluateMemoryRedaction([
         input.title ?? existing.title,
         input.summary ?? existing.summary,
         input.content ?? existing.content,
         ...(input.tags ?? existing.tags),
+        ...claimRedactionInputs,
       ])
     : {
         redactionStatus: existing.redactionStatus,
         publishBlockReason: existing.publishBlockReason,
       };
+  const preservedRedactionMarkerTexts = [
+    input.title === undefined ? existing.title : "",
+    input.summary === undefined ? existing.summary : "",
+    input.content === undefined ? existing.content : "",
+    ...(input.tags === undefined ? existing.tags : []),
+    ...(input.claims === undefined ? memoryClaimRedactionTexts(existing.claims) : []),
+    existing.sourceTaskId ?? "",
+    existing.sourceRef ?? "",
+  ];
+  const preservesExistingRedactionMarker =
+    existing.redactionStatus === "blocked" &&
+    memoryTextsHaveRedactionMarker(preservedRedactionMarkerTexts);
+  const redaction =
+    preservesExistingRedactionMarker && evaluatedRedaction.redactionStatus === "clean"
+      ? {
+          redactionStatus: "blocked" as const,
+          publishBlockReason:
+            existing.publishBlockReason ??
+            "Potential secret or provider metadata was detected. Edit the memory text before publishing.",
+        }
+      : evaluatedRedaction;
+  const nextFailureFamily =
+    redaction.redactionStatus === "blocked"
+      ? "redaction_blocked"
+      : memoryClaimFailureFamily(nextClaims) ??
+        normalizeMemoryFailureFamily(input.failureFamily) ??
+        (input.failureFamily === null || isBlockingMemoryFailureFamily(existing.failureFamily)
+          ? null
+          : existing.failureFamily);
   const nextScope = input.scope ?? existing.scope;
   const nextProjectId = nextScope === "global" ? null : existing.projectId;
   const nextStatus =
-    existing.status === "approved" && redaction.redactionStatus === "blocked"
+    existing.status === "approved" &&
+    (redaction.redactionStatus === "blocked" || isBlockingMemoryFailureFamily(nextFailureFamily))
       ? "pending"
       : existing.status;
   const updatedAt = nowIso();
@@ -2626,13 +4155,14 @@ export function updateMemoryItem(
       .set({
         scope: nextScope,
         projectId: nextProjectId,
+        itemType:
+          input.itemType !== undefined ? normalizeMemoryItemType(input.itemType) : existing.itemType,
+        failureFamily: nextFailureFamily,
         title: nextTitle,
         summary: nextSummary,
         content: nextContent,
-        tagsJson:
-          input.tags !== undefined
-            ? JSON.stringify(normalizeMemoryTags(input.tags))
-            : JSON.stringify(existing.tags),
+        claimsJson: JSON.stringify(nextClaims),
+        tagsJson: JSON.stringify(nextTags),
         reviewNote:
           input.reviewNote !== undefined ? sanitizeMemoryNote(input.reviewNote) : existing.reviewNote,
         expiresAt: input.expiresAt !== undefined ? input.expiresAt : existing.expiresAt,
@@ -2664,15 +4194,49 @@ function transitionMemoryItemStatus(
 ): MemoryItem | undefined {
   const existing = findMemoryItemById(id);
   if (!existing) return undefined;
+  const existingRow = getDb().select().from(memoryItems).where(eq(memoryItems.id, id)).get();
+  const sourceTexts = [existingRow?.sourceTaskId ?? "", existingRow?.sourceRef ?? ""];
+  const sourceRedaction = evaluateMemoryRedaction(sourceTexts);
+  const storedRedactionMarkerTexts = [
+    existing.title,
+    existing.summary,
+    existing.content,
+    ...existing.tags,
+    ...memoryClaimRedactionTexts(existing.claims),
+    ...sourceTexts,
+  ];
   if (status === "approved" && existing.redactionStatus === "blocked") {
     throw new Error(existing.publishBlockReason ?? "Memory item is blocked by redaction review");
   }
+  if (status === "approved" && memoryTextsHaveRedactionMarker(storedRedactionMarkerTexts)) {
+    throw new Error("Memory item is blocked by redaction review");
+  }
+  if (status === "approved" && sourceRedaction.redactionStatus === "blocked") {
+    throw new Error(
+      sourceRedaction.publishBlockReason ?? "Memory item source is blocked by redaction review",
+    );
+  }
+  if (status === "approved" && !hasOnlySourceBackedClaims(existing.claims)) {
+    throw new Error("Memory item approval requires every claim to be source-backed");
+  }
 
   const updatedAt = nowIso();
+  const approvedClaims =
+    status === "approved" ? stampClaimsLastValidatedAt(existing.claims, updatedAt) : existing.claims;
+  const failureFamily =
+    status === "approved"
+      ? isBlockingMemoryFailureFamily(existing.failureFamily)
+        ? null
+        : existing.failureFamily
+      : existing.redactionStatus === "blocked"
+        ? "redaction_blocked"
+        : memoryClaimFailureFamily(existing.claims);
   getDb().transaction((tx) => {
     tx.update(memoryItems)
       .set({
         status,
+        failureFamily,
+        claimsJson: JSON.stringify(approvedClaims),
         reviewNote:
           input.note !== undefined ? sanitizeMemoryNote(input.note) : existing.reviewNote,
         approvedAt: status === "approved" ? updatedAt : existing.approvedAt,
@@ -2790,6 +4354,9 @@ function queryApprovedMemoryWithFts(input: {
         mi.source_task_id AS sourceTaskId,
         mi.source_kind AS sourceKind,
         mi.source_ref AS sourceRef,
+        mi.item_type AS itemType,
+        mi.failure_family AS failureFamily,
+        mi.claims_json AS claimsJson,
         mi.status AS status,
         mi.redaction_status AS redactionStatus,
         mi.publish_block_reason AS publishBlockReason,
@@ -2861,7 +4428,12 @@ export function retrieveApprovedMemoryForPrompt(options: RetrieveMemoryOptions =
         now,
       }) ?? queryApprovedMemoryFallback({ ...options, limit, now })
     : queryApprovedMemoryFallback({ ...options, limit, now });
-  return rows.map(toMemoryItemResponse);
+  return rows
+    .map(toMemoryItemResponse)
+    .filter(
+      (item) =>
+        !isBlockingMemoryFailureFamily(item.failureFamily) && hasOnlySourceBackedClaims(item.claims),
+    );
 }
 
 export function recordMemoryUsageEvents(input: RecordMemoryUsageInput): MemoryUsageEvent[] {
@@ -2886,11 +4458,42 @@ function formatMemoryItemForPrompt(item: MemoryItem): string {
     item.scope === "global" ? "global" : item.projectId ? `project:${item.projectId}` : "project";
   const tags = item.tags.length > 0 ? `\nTags: ${item.tags.join(", ")}` : "";
   const expiry = item.expiresAt ? `\nExpires: ${item.expiresAt}` : "";
+  const failureFamily = item.failureFamily ? `Failure family: ${item.failureFamily}` : "";
+  const sourceBackedClaims = item.claims.filter(memoryClaimIsSourceBacked);
+  const claims =
+    sourceBackedClaims.length > 0
+      ? [
+          "Source-backed claims:",
+          ...sourceBackedClaims.slice(0, 5).map((claim) => {
+            const sources = claim.sources
+              .slice(0, 3)
+              .map((source) =>
+                [
+                  source.kind,
+                  source.ref ?? null,
+                  source.path ? `path:${source.path}` : null,
+                  source.taskId ? `task:${source.taskId}` : null,
+                  source.artifactId ? `artifact:${source.artifactId}` : null,
+                  source.evidenceId ? `evidence:${source.evidenceId}` : null,
+                  source.memoryId ? `memory:${source.memoryId}` : null,
+                  claim.lastValidatedAt ? `validated:${claim.lastValidatedAt}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" "),
+              )
+              .join("; ");
+            return `- [claim:${claim.claimId}] ${claim.type}/${claim.status}: ${truncateText(claim.text, 300)}${sources ? ` (sources: ${truncateText(sources, 500)})` : ""}`;
+          }),
+        ].join("\n")
+      : "";
   return [
     `[memory:${item.id}] ${item.title}`,
     `Scope: ${scope}`,
+    `Type: ${item.itemType}`,
+    failureFamily,
     `Summary: ${truncateText(item.summary, 600)}`,
     `${tags}${expiry}`,
+    claims,
     "Content:",
     truncateText(item.content, MEMORY_CONTEXT_ITEM_CONTENT_MAX_LENGTH),
   ]
@@ -3299,6 +4902,10 @@ function artifactTrustNextActionLabel(action: TaskArtifactTrustNextAction): stri
   switch (action) {
     case "none":
       return "No action needed";
+    case "continue_task":
+      return "Continue task";
+    case "review_task":
+      return "Review task";
     case "retry_source_rework":
       return "Retry source artifact rework";
     case "retry_synthesis":
@@ -3349,11 +4956,627 @@ function buildArtifactTrustSummary(input: {
   return `${input.task.status.replaceAll("_", " ")} with ${state} artifact`;
 }
 
+type GenericArtifactSeed = {
+  kind: WorkflowTimelineGenericArtifactKind;
+  label: string;
+  path: string | null;
+  sourceRef: string | null;
+  summary: string;
+  hasBackingData: boolean;
+  required: boolean;
+  reasonCodes: string[];
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+};
+
+type GenericTaskProjection = WorkflowTimeline & {
+  selectedArtifact: WorkflowTimelineArtifact | null;
+};
+
+function listMemoryItemsBySourceTaskId(taskId: string): MemoryItemRow[] {
+  return getDb()
+    .select()
+    .from(memoryItems)
+    .where(eq(memoryItems.sourceTaskId, taskId))
+    .orderBy(asc(memoryItems.createdAt))
+    .all();
+}
+
+function taskStatusTerminalForGenericTrust(status: TaskStatus): boolean {
+  return status === "done" || status === "verified";
+}
+
+function genericArtifactTrust(input: {
+  task: TaskRow;
+  hasBackingData: boolean;
+  reasonCodes: string[];
+}): WorkflowTimelineTrustLevel {
+  if (
+    input.task.status === "blocked_external" ||
+    input.task.manualReviewRequired ||
+    input.task.blockedReason ||
+    input.reasonCodes.some((code) =>
+      [
+        "blocked",
+        "manual_review_required",
+        "missing_plan_manifest",
+        "invalid_plan_manifest",
+        "memory_rejected",
+        "memory_expired",
+        "redaction_blocked",
+      ].includes(code),
+    )
+  ) {
+    return "untrusted";
+  }
+  if (input.reasonCodes.includes("memory_pending")) return "weak";
+  return taskStatusTerminalForGenericTrust(input.task.status as TaskStatus) && input.hasBackingData
+    ? "trusted"
+    : "weak";
+}
+
+function genericArtifactState(input: {
+  trustLevel: WorkflowTimelineTrustLevel;
+  hasBackingData: boolean;
+  required: boolean;
+  reasonCodes: string[];
+}): WorkflowTimelineArtifactState {
+  if (input.reasonCodes.includes("blocked") || input.reasonCodes.includes("manual_review_required")) {
+    return "blocked";
+  }
+  if (!input.hasBackingData && input.required) return "missing";
+  if (input.trustLevel === "trusted") return "accepted";
+  if (input.trustLevel === "untrusted") return "rejected";
+  return "expected";
+}
+
+function genericClaimOutcome(input: {
+  state: WorkflowTimelineArtifactState;
+  trustLevel: WorkflowTimelineTrustLevel;
+}): WorkflowTimelineClaimOutcome {
+  if (input.state === "blocked") return "blocked";
+  if (input.state === "missing" || input.state === "rejected") return "refuted";
+  if (input.trustLevel === "trusted") return "supported";
+  return "not_evaluated";
+}
+
+function genericFailureFamily(reasonCodes: string[]): string | null {
+  if (reasonCodes.includes("blocked")) return "external_blocker";
+  if (reasonCodes.includes("manual_review_required")) return "manual_review_required";
+  if (reasonCodes.includes("missing_plan_manifest")) return "missing_plan_manifest";
+  if (reasonCodes.includes("invalid_plan_manifest")) return "invalid_plan_manifest";
+  return null;
+}
+
+function genericFailureSignature(input: {
+  kind: string;
+  trustLevel: WorkflowTimelineTrustLevel;
+  reasonCodes: string[];
+}): string | null {
+  if (input.trustLevel !== "untrusted") return null;
+  return ["task_record", input.kind, ...input.reasonCodes].filter(Boolean).join(":");
+}
+
+function buildGenericArtifactSeeds(task: TaskRow): GenericArtifactSeed[] {
+  const createdAt = task.createdAt;
+  const updatedAt = task.updatedAt;
+  const seeds: GenericArtifactSeed[] = [];
+  const workflowKind = normalizeTaskIntent(task.taskIntent, task.isFix ? "fix" : "general");
+  const planQuality = evaluateTaskPlanQuality({
+    task: { ...task, tags: parseTags(task.tags) },
+    plan: task.plan,
+  });
+  const planManifest = planQuality.planManifest;
+  const manifestObject = parseRuntimeObject(task.implementationManifestJson) as {
+    changedFiles?: Array<string | { path?: unknown }>;
+  } | null;
+  const manifestChangedFiles =
+    manifestObject?.changedFiles
+      ?.map((entry) => (typeof entry === "string" ? entry : String(entry.path ?? "")))
+      .filter((entry) => entry.trim().length > 0) ?? [];
+  const requiresImplementationManifest =
+    isDevelopmentImplementationIntent(workflowKind) &&
+    (task.status === "review" || taskStatusTerminalForGenericTrust(task.status as TaskStatus));
+  const implementationManifestValidation =
+    task.implementationManifestJson || requiresImplementationManifest
+      ? validateImplementationManifest({
+          task,
+          manifestJson: task.implementationManifestJson,
+          changedFiles: manifestChangedFiles,
+          meaningfulChangedFiles: manifestChangedFiles,
+          dirtyChangedFiles: [],
+          phase: task.status === "review" ? "review_handoff" : "completion",
+        })
+      : null;
+
+  if (task.plan) {
+    seeds.push({
+      kind: "plan",
+      label: "Plan",
+      path: task.planPath,
+      sourceRef: "task.plan",
+      summary: "Task plan field is populated.",
+      hasBackingData: true,
+      required: false,
+      reasonCodes: planQuality.ok ? ["plan_present"] : planQuality.categories,
+      createdAt,
+      updatedAt,
+      metadata: { planQuality },
+    });
+  }
+  if (planManifest?.present || planManifest?.required) {
+    const valid = planManifest?.status === "valid";
+    seeds.push({
+      kind: "plan_manifest",
+      label: "Plan manifest",
+      path: task.planPath,
+      sourceRef: "task.plan",
+      summary: valid ? "Plan manifest is valid." : "Plan manifest is missing or invalid.",
+      hasBackingData: valid,
+      required: planManifest?.required ?? false,
+      reasonCodes: valid
+        ? ["plan_manifest_valid"]
+        : planManifest?.status === "missing"
+          ? ["missing_plan_manifest", ...planQuality.categories]
+          : ["invalid_plan_manifest", ...planQuality.categories],
+      createdAt,
+      updatedAt,
+      metadata: { planManifest, planQualityCategories: planQuality.categories },
+    });
+  }
+  if (implementationManifestValidation) {
+    seeds.push({
+      kind: "implementation_manifest",
+      label: "Implementation manifest",
+      path: null,
+      sourceRef: "task.implementationManifest",
+      summary: implementationManifestValidation.ok
+        ? "Implementation manifest is valid."
+        : "Implementation manifest is missing or invalid.",
+      hasBackingData: implementationManifestValidation.ok,
+      required: implementationManifestValidation.required,
+      reasonCodes: implementationManifestValidation.ok
+        ? ["implementation_manifest_valid"]
+        : implementationManifestValidation.issues.map((entry) => entry.code),
+      createdAt,
+      updatedAt,
+      metadata: {
+        planManifestHash: implementationManifestValidation.planManifestHash,
+        manifest: implementationManifestValidation.manifest,
+      },
+    });
+  }
+  const implementationManifest = implementationManifestValidation?.manifest ?? null;
+  if (implementationManifest) {
+    seeds.push({
+      kind: "source_diff",
+      label: "Source diff",
+      path: null,
+      sourceRef: "task.implementationManifest.changedFiles",
+      summary: implementationManifest.diffSummary.summary,
+      hasBackingData: implementationManifest.changedFiles.length > 0,
+      required: false,
+      reasonCodes:
+        implementationManifest.changedFiles.length > 0
+          ? ["implementation_changed_files_recorded"]
+          : ["implementation_changed_files_empty"],
+      createdAt,
+      updatedAt,
+      metadata: { changedFiles: implementationManifest.changedFiles },
+    });
+    const verificationPassed = implementationManifest.verificationEvidence.some(
+      (entry) => entry.status === "passed",
+    );
+    seeds.push({
+      kind: "test_result",
+      label: "Test result",
+      path: null,
+      sourceRef: "task.implementationManifest.verificationEvidence",
+      summary: verificationPassed
+        ? "Implementation manifest records passing verification."
+        : "Implementation manifest lacks passing verification.",
+      hasBackingData: verificationPassed,
+      required: true,
+      reasonCodes: verificationPassed ? ["verification_passed"] : ["missing_verification_evidence"],
+      createdAt,
+      updatedAt,
+      metadata: { verificationEvidence: implementationManifest.verificationEvidence },
+    });
+    if (implementationManifest.commitEvidence.status !== "not_required") {
+      const committed = implementationManifest.commitEvidence.status === "committed";
+      seeds.push({
+        kind: "commit_evidence",
+        label: "Commit evidence",
+        path: null,
+        sourceRef: "task.implementationManifest.commitEvidence",
+        summary: committed
+          ? "Implementation manifest records commit evidence."
+          : "Implementation manifest records uncommitted implementation evidence.",
+        hasBackingData: committed,
+        required: false,
+        reasonCodes: [`commit_${implementationManifest.commitEvidence.status}`],
+        createdAt,
+        updatedAt,
+        metadata: { commitEvidence: implementationManifest.commitEvidence },
+      });
+    }
+  }
+  if (task.reviewComments) {
+    for (const [kind, label] of [
+      ["review_report", "Review report"],
+      ["security_report", "Security report"],
+    ] as const) {
+      seeds.push({
+        kind,
+        label,
+        path: null,
+        sourceRef: "task.reviewComments",
+        summary: "Review comments field is populated.",
+        hasBackingData: true,
+        required: false,
+        reasonCodes: ["review_comments_present"],
+        createdAt,
+        updatedAt,
+      });
+    }
+  }
+  if (
+    !isDevelopmentImplementationIntent(workflowKind) &&
+    taskStatusTerminalForGenericTrust(task.status as TaskStatus) &&
+    (task.branchName || task.worktreePath)
+  ) {
+    seeds.push({
+      kind: "commit_evidence",
+      label: "Commit evidence",
+      path: null,
+      sourceRef: "task.branchName",
+      summary: "Branch or worktree metadata is present; durable commit evidence is not attached.",
+      hasBackingData: false,
+      required: false,
+      reasonCodes: ["commit_evidence_expected"],
+      createdAt,
+      updatedAt,
+      metadata: { branchName: task.branchName, worktreePath: task.worktreePath },
+    });
+  }
+  if (
+    !taskStatusTerminalForGenericTrust(task.status as TaskStatus) &&
+    (task.branchName || task.worktreePath)
+  ) {
+    seeds.push({
+      kind: "commit_evidence",
+      label: "Work branch",
+      path: null,
+      sourceRef: "task.branchName",
+      summary: "Branch or worktree metadata is present while implementation is still in progress.",
+      hasBackingData: false,
+      required: false,
+      reasonCodes: ["work_in_progress"],
+      createdAt,
+      updatedAt,
+      metadata: { branchName: task.branchName, worktreePath: task.worktreePath },
+    });
+  }
+  for (const item of listMemoryItemsBySourceTaskId(task.id)) {
+    seeds.push({
+      kind: "memory_candidate",
+      label: "Memory candidate",
+      path: null,
+      sourceRef: item.sourceRef,
+      summary: item.summary,
+      hasBackingData: true,
+      required: false,
+      reasonCodes: [`memory_${item.status}`, `redaction_${item.redactionStatus}`],
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      metadata: {
+        memoryItemId: item.id,
+        status: item.status,
+        redactionStatus: item.redactionStatus,
+        publishBlockReason: item.publishBlockReason,
+      },
+    });
+  }
+  if (task.blockedReason || task.manualReviewRequired) {
+    seeds.push({
+      kind: "implementation_manifest",
+      label: "Blocker",
+      path: null,
+      sourceRef: "task.blockedReason",
+      summary: task.blockedReason ?? "Manual review is required.",
+      hasBackingData: Boolean(task.blockedReason || task.manualReviewRequired),
+      required: true,
+      reasonCodes: [
+        "blocked",
+        ...(task.manualReviewRequired ? ["manual_review_required"] : []),
+      ],
+      createdAt,
+      updatedAt,
+    });
+  }
+  return seeds;
+}
+
+function buildGenericTaskProjection(task: TaskRow, generatedAt = new Date().toISOString()): GenericTaskProjection {
+  const workflowKind = normalizeTaskIntent(task.taskIntent, task.isFix ? "fix" : "general");
+  const seeds = buildGenericArtifactSeeds(task);
+  const artifacts: WorkflowTimelineArtifact[] = [];
+  const attempts: WorkflowTimelineAttempt[] = [];
+  const claims: WorkflowTimelineClaim[] = [];
+  const evidence: WorkflowTimelineEvidence[] = [];
+  const evidenceLinks: WorkflowTimelineEvidenceLink[] = [];
+
+  for (const seed of seeds) {
+    const artifactId = `${task.id}:task-record:${seed.kind}:${artifacts.length + 1}`;
+    const reasonCodes = [...new Set(seed.reasonCodes)].sort();
+    const trustLevel = genericArtifactTrust({ task, hasBackingData: seed.hasBackingData, reasonCodes });
+    const state = genericArtifactState({
+      trustLevel,
+      hasBackingData: seed.hasBackingData,
+      required: seed.required,
+      reasonCodes,
+    });
+    const outcome = genericClaimOutcome({ state, trustLevel });
+    const attemptId = `${artifactId}:attempt:1`;
+    const claimId = `${artifactId}:claim:current`;
+    const evidenceId = `${artifactId}:evidence`;
+    const failureFamily = genericFailureFamily(reasonCodes);
+    const failureSignature = genericFailureSignature({ kind: seed.kind, trustLevel, reasonCodes });
+
+    artifacts.push({
+      id: artifactId,
+      taskId: task.id,
+      kind: seed.kind,
+      label: seed.label,
+      path: seed.path,
+      state,
+      currentAttemptNumber: 1,
+      createdAt: seed.createdAt,
+      updatedAt: seed.updatedAt,
+      metadata: {
+        compatibilitySource: "task_record",
+        sourceRef: seed.sourceRef,
+        reasonCodes,
+        failureFamily,
+        failureSignature,
+        branchName: task.branchName,
+        worktreePath: task.worktreePath,
+        ...seed.metadata,
+      },
+    });
+    attempts.push({
+      id: attemptId,
+      artifactId,
+      taskId: task.id,
+      attemptNumber: 1,
+      state,
+      outcome,
+      trustLevel,
+      sourceSnapshotId: null,
+      createdAt: seed.updatedAt,
+      metadata: { compatibilitySource: "task_record", sourceRef: seed.sourceRef, reasonCodes },
+    });
+    claims.push({
+      id: claimId,
+      artifactId,
+      taskId: task.id,
+      attemptId,
+      label: `${seed.label} claim`,
+      outcome,
+      trustLevel,
+      evaluatedAt: seed.updatedAt,
+      metadata: {
+        compatibilitySource: "task_record",
+        sourceRef: seed.sourceRef,
+        reasonCodes,
+        failureFamily,
+        failureSignature,
+      },
+    });
+    evidence.push({
+      id: evidenceId,
+      taskId: task.id,
+      kind: seed.kind === "memory_candidate" ? "memory_candidate" : "task_record",
+      grade: trustLevel === "trusted" ? "substantive" : "context",
+      toolName: "task_record",
+      summary: seed.summary,
+      createdAt: seed.updatedAt,
+      metadata: { compatibilitySource: "task_record", sourceRef: seed.sourceRef, reasonCodes },
+    });
+    evidenceLinks.push({
+      id: `${evidenceId}:link:${claimId}`,
+      evidenceId,
+      artifactId,
+      claimId,
+      relation: outcome === "supported" ? "supports" : "context",
+      metadata: { compatibilitySource: "task_record" },
+    });
+  }
+
+  const events: WorkflowTimelineEvent[] = [
+    ...artifacts.flatMap((artifact) => [
+      {
+        id: `${artifact.id}:created`,
+        kind: "artifact_created" as const,
+        occurredAt: artifact.createdAt,
+        title: "Artifact created",
+        artifactId: artifact.id,
+        attemptId: null,
+        claimId: null,
+        evidenceId: null,
+        metadata: { state: artifact.state },
+      },
+      {
+        id: `${artifact.id}:updated`,
+        kind: "artifact_updated" as const,
+        occurredAt: artifact.updatedAt,
+        title: "Artifact updated",
+        artifactId: artifact.id,
+        attemptId: null,
+        claimId: `${artifact.id}:claim:current`,
+        evidenceId: null,
+        metadata: { state: artifact.state },
+      },
+    ]),
+    ...attempts.map((attempt) => ({
+      id: `${attempt.id}:attempt`,
+      kind: "attempt_recorded" as const,
+      occurredAt: attempt.createdAt,
+      title: "Attempt recorded",
+      artifactId: attempt.artifactId,
+      attemptId: attempt.id,
+      claimId: `${attempt.artifactId}:claim:current`,
+      evidenceId: null,
+      metadata: { state: attempt.state, outcome: attempt.outcome },
+    })),
+    ...claims.map((claim) => ({
+      id: `${claim.id}:evaluated`,
+      kind: "claim_evaluated" as const,
+      occurredAt: claim.evaluatedAt ?? generatedAt,
+      title: "Claim evaluated",
+      artifactId: claim.artifactId,
+      attemptId: claim.attemptId,
+      claimId: claim.id,
+      evidenceId: null,
+      metadata: { outcome: claim.outcome, trustLevel: claim.trustLevel },
+    })),
+    ...evidence.map((unit) => ({
+      id: `${unit.id}:recorded`,
+      kind: "evidence_recorded" as const,
+      occurredAt: unit.createdAt,
+      title: "Evidence recorded",
+      artifactId: null,
+      attemptId: null,
+      claimId: null,
+      evidenceId: unit.id,
+      metadata: { kind: unit.kind, grade: unit.grade, toolName: unit.toolName },
+    })),
+  ].sort(timelineEventSort);
+
+  const selectedArtifact = selectGenericRollupArtifact(artifacts);
+  return {
+    context: {
+      taskId: task.id,
+      projectId: task.projectId,
+      workflowPackId: workflowKind,
+      workflowKind,
+      roadmapAlias: task.roadmapAlias,
+      sourceKind: artifacts.length > 0 ? "task_record" : "none",
+      sourceId: artifacts.length > 0 ? task.id : null,
+      status: task.status,
+      generatedAt,
+    },
+    artifacts,
+    attempts,
+    claims,
+    evidence,
+    evidenceLinks,
+    events,
+    selectedArtifact,
+  };
+}
+
+function selectGenericRollupArtifact(
+  artifacts: WorkflowTimelineArtifact[],
+): WorkflowTimelineArtifact | null {
+  return [...artifacts].sort((a, b) => {
+    const priority = (artifact: WorkflowTimelineArtifact): number => {
+      if (artifact.state === "blocked") return -2;
+      if (
+        artifact.kind === "plan_manifest" &&
+        (artifact.state === "missing" || artifact.state === "rejected")
+      ) {
+        return -1;
+      }
+      if (artifact.state === "missing" || artifact.state === "rejected") {
+        return 0;
+      }
+      if (artifact.state === "expected" || artifact.state === "inconclusive") return 1;
+      return 2;
+    };
+    const byPriority = priority(a) - priority(b);
+    return byPriority === 0 ? b.updatedAt.localeCompare(a.updatedAt) : byPriority;
+  })[0] ?? null;
+}
+
+function buildGenericArtifactTrustBatchCounts(
+  artifacts: WorkflowTimelineArtifact[],
+  claims: WorkflowTimelineClaim[],
+): TaskArtifactTrustBatchCounts {
+  const claimByArtifactId = new Map(claims.map((claim) => [claim.artifactId, claim]));
+  return {
+    trustedValid: artifacts.filter((artifact) => claimByArtifactId.get(artifact.id)?.trustLevel === "trusted")
+      .length,
+    inconclusive: artifacts.filter((artifact) => claimByArtifactId.get(artifact.id)?.trustLevel === "weak")
+      .length,
+    rejected: artifacts.filter((artifact) => claimByArtifactId.get(artifact.id)?.outcome === "refuted")
+      .length,
+    missing: artifacts.filter((artifact) => artifact.state === "missing").length,
+    externalBlocked: artifacts.filter((artifact) => artifact.state === "blocked").length,
+    synthesisPending: artifacts.filter((artifact) => artifact.state === "expected").length,
+    total: artifacts.length,
+  };
+}
+
+function buildGenericTaskArtifactTrustRollup(task: TaskRow): TaskArtifactTrustRollup | null {
+  const projection = buildGenericTaskProjection(task);
+  const artifact = projection.selectedArtifact;
+  if (!artifact) return null;
+  const claim = projection.claims.find((candidate) => candidate.artifactId === artifact.id) ?? null;
+  const attempt = projection.attempts.find((candidate) => candidate.artifactId === artifact.id) ?? null;
+  const reasonCodes = Array.isArray(artifact.metadata.reasonCodes)
+    ? artifact.metadata.reasonCodes.filter((value): value is string => typeof value === "string")
+    : [];
+  const trustLevel = claim?.trustLevel ?? "weak";
+  const nextAction: TaskArtifactTrustNextAction =
+    artifact.state === "blocked"
+      ? "provide_operator_input"
+      : trustLevel === "untrusted"
+        ? "retry_source_rework"
+        : trustLevel === "weak"
+          ? task.status === "review"
+            ? "review_task"
+            : "continue_task"
+          : "none";
+
+  return {
+    taskStatus: task.status as TaskStatus,
+    artifactRole: artifact.kind,
+    artifactState: artifact.state,
+    artifactTrustLevel: trustLevel,
+    claimOutcome: claim?.outcome ?? "not_evaluated",
+    failureFamily:
+      typeof artifact.metadata.failureFamily === "string" ? artifact.metadata.failureFamily : null,
+    reasonCodes,
+    latestAttemptOutcome: attempt?.outcome ?? null,
+    trustedSynthesisInput: trustLevel === "trusted",
+    synthesisReady: trustLevel === "trusted",
+    nextAction,
+    nextActionLabel: artifactTrustNextActionLabel(nextAction),
+    summary:
+      task.status === "done" && trustLevel !== "trusted"
+        ? `Done with untrusted ${artifact.label.toLowerCase()}`
+        : `${task.status.replaceAll("_", " ")} with ${trustLevel} ${artifact.label.toLowerCase()}`,
+    artifactPath: artifact.path,
+    batchId: task.id,
+    roadmapAlias: task.roadmapAlias,
+    attemptNumber: attempt?.attemptNumber ?? artifact.currentAttemptNumber,
+    failureSignature:
+      typeof artifact.metadata.failureSignature === "string"
+        ? artifact.metadata.failureSignature
+        : null,
+    branchName: task.branchName,
+    worktreePath: task.worktreePath,
+    batchCounts: buildGenericArtifactTrustBatchCounts(projection.artifacts, projection.claims),
+  };
+}
+
 export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustRollup | null {
   const task = findTaskById(taskId);
   if (!task) return null;
   const artifact = findRoadmapBatchArtifactByTaskId(taskId);
-  if (!artifact) return null;
+  if (!artifact) return buildGenericTaskArtifactTrustRollup(task);
   const batch = getDb()
     .select()
     .from(roadmapBatches)
@@ -3765,8 +5988,8 @@ function mapWorkflowTrustLevel(input: {
 }
 
 function artifactKindFromCompatibilityRole(role: string): string {
-  if (role === "synthesis") return "audit.synthesis_report";
-  if (role === "report") return "audit.source_report";
+  if (role === "synthesis") return "audit_synthesis";
+  if (role === "report") return "audit_report";
   return role;
 }
 
@@ -3803,6 +6026,7 @@ function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimel
       batchId: artifact.batchId,
       originalState: artifact.state,
       failureFamily: artifact.failureFamily,
+      validationDetails: parseValidationDetails(artifact.validationDetailsJson),
       reasonCodes: buildArtifactTrustReasonCodes({
         artifact,
         latestAttempt: listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null,
@@ -3915,29 +6139,15 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
 
   const workflowKind = normalizeTaskIntent(task.taskIntent, task.isFix ? "fix" : "general");
   const generatedAt = new Date().toISOString();
-  if (workflowKind !== "audit") {
-    return {
-      context: {
-        taskId: task.id,
-        projectId: task.projectId,
-        workflowPackId: workflowKind,
-        workflowKind,
-        roadmapAlias: task.roadmapAlias,
-        sourceKind: "none",
-        sourceId: null,
-        status: task.status,
-        generatedAt,
-      },
-      artifacts: [],
-      attempts: [],
-      claims: [],
-      evidence: [],
-      evidenceLinks: [],
-      events: [],
-    };
+  const artifacts = listRoadmapBatchArtifactsByTaskId(taskId);
+  if (artifacts.length === 0) {
+    const { selectedArtifact: _selectedArtifact, ...timeline } = buildGenericTaskProjection(
+      task,
+      generatedAt,
+    );
+    return timeline;
   }
 
-  const artifacts = listRoadmapBatchArtifactsByTaskId(taskId);
   const firstArtifact = artifacts[0] ?? null;
   const attempts = artifacts.flatMap((artifact) => listRoadmapBatchArtifactAttempts(artifact.id));
   const evidenceUnits = listEvidenceUnitEvents({ taskId });
@@ -3959,6 +6169,7 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
         roadmapAlias: artifact.roadmapAlias,
         originalState: artifact.state,
         failureFamily: artifact.failureFamily,
+        validationDetails: parseValidationDetails(artifact.validationDetailsJson),
         reasonCodes: buildArtifactTrustReasonCodes({
           artifact,
           latestAttempt: listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null,
@@ -4160,6 +6371,9 @@ function runtimeWarmupScopeConditions(input: RuntimeWarmupScopeInput) {
     input.model == null
       ? isNull(runtimeWarmupSessions.model)
       : eq(runtimeWarmupSessions.model, input.model),
+    input.stage == null
+      ? isNull(runtimeWarmupSessions.stage)
+      : eq(runtimeWarmupSessions.stage, input.stage),
   ];
 }
 
@@ -4189,6 +6403,7 @@ export function createRuntimeWarmupSession(
       providerId: input.providerId,
       transport: input.transport ?? null,
       model: input.model ?? null,
+      stage: input.stage ?? null,
       sourceSessionId: input.sourceSessionId ?? null,
       status: "creating",
       ttlSeconds: input.ttlSeconds,
@@ -4338,7 +6553,13 @@ function findLatestRuntimeProfileUsageByIds(
       latestCreatedAt: max(usageEvents.createdAt).as("latest_created_at"),
     })
     .from(usageEvents)
-    .where(and(isNotNull(usageEvents.profileId), inArray(usageEvents.profileId, uniqueProfileIds)))
+    .where(
+      and(
+        isNotNull(usageEvents.profileId),
+        inArray(usageEvents.profileId, uniqueProfileIds),
+        eq(usageEvents.outcome, "success"),
+      ),
+    )
     .groupBy(usageEvents.profileId)
     .as("latest_usage_by_profile");
 
@@ -4461,7 +6682,7 @@ export function listRuntimeProfileResponses(input: {
 
 function getProjectRuntimeProfileId(
   project: ProjectRow | undefined,
-  mode: "task" | "plan" | "review" | "chat",
+  mode: RuntimeProfileMode,
 ): string | null {
   if (mode === "chat") {
     return project?.defaultChatRuntimeProfileId ?? null;
@@ -4841,10 +7062,11 @@ export function evaluateRuntimeLimitGate(
 export function resolveEffectiveRuntimeProfile(input: {
   taskId?: string;
   projectId?: string;
-  mode?: "task" | "plan" | "review" | "chat";
+  mode?: RuntimeStageOrProfileMode;
   systemDefaultRuntimeProfileId?: string | null;
 }): EffectiveRuntimeProfileSelection {
-  const mode = input.mode ?? "task";
+  const stage = normalizeRuntimeStage(input.mode ?? "task");
+  const mode = runtimeProfileModeForStage(input.mode ?? "task");
   const task = input.taskId ? findTaskById(input.taskId) : undefined;
   const projectId = input.projectId ?? task?.projectId;
   const project = projectId ? findProjectById(projectId) : undefined;
@@ -4897,6 +7119,8 @@ export function resolveEffectiveRuntimeProfile(input: {
       taskRuntimeProfileId,
       projectRuntimeProfileId,
       systemRuntimeProfileId,
+      stage,
+      profileMode: mode,
     };
   }
 
@@ -4906,6 +7130,62 @@ export function resolveEffectiveRuntimeProfile(input: {
     taskRuntimeProfileId,
     projectRuntimeProfileId,
     systemRuntimeProfileId,
+    stage,
+    profileMode: mode,
+  };
+}
+
+export function resolveEffectiveRuntimeProfileExcluding(input: {
+  taskId?: string;
+  projectId?: string;
+  mode?: RuntimeStageOrProfileMode;
+  systemDefaultRuntimeProfileId?: string | null;
+  excludedRuntimeProfileIds: readonly string[];
+}): EffectiveRuntimeProfileSelection {
+  const stage = normalizeRuntimeStage(input.mode ?? "task");
+  const mode = runtimeProfileModeForStage(input.mode ?? "task");
+  const excluded = new Set(input.excludedRuntimeProfileIds);
+  const task = input.taskId ? findTaskById(input.taskId) : undefined;
+  const projectId = input.projectId ?? task?.projectId;
+  const project = projectId ? findProjectById(projectId) : undefined;
+  const taskRuntimeProfileId = task?.runtimeProfileId ?? null;
+  const projectRuntimeProfileId = getProjectRuntimeProfileId(project, mode);
+  const systemRuntimeProfileId = input.systemDefaultRuntimeProfileId ?? null;
+  const candidates: Array<{
+    source: EffectiveRuntimeProfileSelection["source"];
+    profileId: string | null;
+  }> = [
+    { source: "task_override", profileId: taskRuntimeProfileId },
+    { source: "project_default", profileId: projectRuntimeProfileId },
+    { source: "system_default", profileId: systemRuntimeProfileId },
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate.profileId || excluded.has(candidate.profileId)) continue;
+    const profile = findRuntimeProfileById(candidate.profileId);
+    if (!profile || !profile.enabled) continue;
+    return {
+      source: candidate.source,
+      profile: toRuntimeProfileResponse(
+        profile,
+        findLatestRuntimeProfileUsageByIds([profile.id]).get(profile.id) ?? null,
+      ),
+      taskRuntimeProfileId,
+      projectRuntimeProfileId,
+      systemRuntimeProfileId,
+      stage,
+      profileMode: mode,
+    };
+  }
+
+  return {
+    source: "none",
+    profile: null,
+    taskRuntimeProfileId,
+    projectRuntimeProfileId,
+    systemRuntimeProfileId,
+    stage,
+    profileMode: mode,
   };
 }
 
@@ -4916,11 +7196,12 @@ type RuntimeResolvableTask = Pick<TaskRow, "id" | "projectId" | "runtimeProfileI
 export function resolveEffectiveRuntimeProfilesForTasks(
   taskRows: RuntimeResolvableTask[],
   input: {
-    mode?: "task" | "plan" | "review" | "chat";
+    mode?: RuntimeStageOrProfileMode;
     systemDefaultRuntimeProfileId?: string | null;
   } = {},
 ): Map<string, EffectiveRuntimeProfileSelection> {
-  const mode = input.mode ?? "task";
+  const stage = normalizeRuntimeStage(input.mode ?? "task");
+  const mode = runtimeProfileModeForStage(input.mode ?? "task");
   const systemRuntimeProfileId = input.systemDefaultRuntimeProfileId ?? null;
   const results = new Map<string, EffectiveRuntimeProfileSelection>();
   if (taskRows.length === 0) {
@@ -5012,6 +7293,8 @@ export function resolveEffectiveRuntimeProfilesForTasks(
         taskRuntimeProfileId,
         projectRuntimeProfileId,
         systemRuntimeProfileId,
+        stage,
+        profileMode: mode,
       });
       break;
     }
@@ -5023,6 +7306,8 @@ export function resolveEffectiveRuntimeProfilesForTasks(
         taskRuntimeProfileId,
         projectRuntimeProfileId,
         systemRuntimeProfileId,
+        stage,
+        profileMode: mode,
       });
     }
   }
@@ -5060,7 +7345,7 @@ export function toChatMessageResponse(row: ChatMessageRow): ChatSessionMessage {
   let attachments: ChatMessageAttachment[] | undefined;
   if (row.attachments) {
     try {
-      attachments = JSON.parse(row.attachments) as ChatMessageAttachment[];
+      attachments = redactChatMessageAttachments(JSON.parse(row.attachments) as ChatMessageAttachment[]);
     } catch {
       // ignore malformed JSON
     }
@@ -5069,7 +7354,7 @@ export function toChatMessageResponse(row: ChatMessageRow): ChatSessionMessage {
     id: row.id,
     sessionId: row.sessionId,
     role: row.role,
-    content: row.content,
+    content: redactProviderText(row.content),
     ...(attachments?.length ? { attachments } : {}),
     createdAt: row.createdAt,
   };
@@ -5168,8 +7453,10 @@ export function createChatMessage(input: {
       id,
       sessionId: input.sessionId,
       role: input.role,
-      content: input.content,
-      attachments: input.attachments?.length ? JSON.stringify(input.attachments) : null,
+      content: redactProviderText(input.content),
+      attachments: input.attachments?.length
+        ? JSON.stringify(redactChatMessageAttachments(input.attachments))
+        : null,
       createdAt: now,
     })
     .run();

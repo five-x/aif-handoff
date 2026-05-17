@@ -150,7 +150,7 @@ describe("audit contract corpus", () => {
           content: fixture.body,
         })),
     });
-    expect(weak.kind).toBe("inconclusive_batch_evidence");
+    expect(weak.kind).toBe("source_inconclusive");
     expect(weak.inventoryOnlyNoFindingsReportCount).toBeGreaterThan(0);
   });
 

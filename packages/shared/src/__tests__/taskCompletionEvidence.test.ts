@@ -7,6 +7,7 @@ import {
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
 } from "../taskCompletionEvidence.js";
+import { hashAifPlanManifest } from "../implementationManifest.js";
 import { formatAuditSynthesisOutcomeForArtifact } from "../auditSynthesisClassifier.js";
 import { computeAuditReportContentSha256 } from "../auditReportValidator.js";
 
@@ -26,6 +27,84 @@ function initRepo(): string {
 
 function codes(result: ReturnType<typeof evaluateTaskCompletionEvidence>): string[] {
   return result.issues.map((issue) => issue.code);
+}
+
+function implementationManifest(input: {
+  taskId: string;
+  intent: "feature" | "fix" | "docs" | "tests";
+  changedFiles: string[];
+  planManifestHash?: string | null;
+  acceptanceCriteria?: Array<{
+    id: string;
+    description?: string;
+    status?: "satisfied" | "unsatisfied" | "waived";
+    evidenceRefs?: string[];
+    notes?: string | null;
+  }>;
+  regressionExplanation?: string | null;
+}): string {
+  return JSON.stringify({
+    version: 1,
+    taskId: input.taskId,
+    intent: input.intent,
+    planManifestHash: input.planManifestHash ?? null,
+    changedFiles: input.changedFiles.map((path) => ({ path, status: "modified" })),
+    diffSummary: {
+      summary: `Changed ${input.changedFiles.join(", ")}`,
+      filesChanged: input.changedFiles.length,
+    },
+    verificationEvidence: [
+      {
+        id: "verify-1",
+        command:
+          "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts",
+        status: "passed",
+        outputSha256: "a".repeat(64),
+        outputPreview: "tests passed",
+        outputPreviewTruncated: false,
+      },
+    ],
+    acceptanceCriteria: input.acceptanceCriteria ?? [
+      {
+        id: "AC1",
+        description: "Implementation evidence is recorded.",
+        status: "satisfied",
+        evidenceRefs: ["verify-1"],
+      },
+    ],
+    evidenceRefs: ["verify-1"],
+    planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+    reviewClosure: { status: "passed", evidenceRefs: ["verify-1"] },
+    commitEvidence: { status: "not_committed", evidenceRefs: [] },
+    regressionExplanation: input.regressionExplanation ?? null,
+    knownLimitations: [],
+  });
+}
+
+function planWithManifest(input: {
+  taskId: string;
+  intent: "feature" | "fix" | "docs" | "tests";
+  acceptanceCriteria: Array<{ id: string; description: string; verification: string }>;
+}): string {
+  return [
+    "```aif-plan-manifest",
+    JSON.stringify({
+      version: 1,
+      taskId: input.taskId,
+      intent: input.intent,
+      scope: ["src/feature.ts"],
+      allowedChanges: ["source", "tests"],
+      forbiddenChanges: ["audit-report"],
+      expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+      acceptanceCriteria: input.acceptanceCriteria,
+      verificationCommands: ["npm.cmd test"],
+    }),
+    "```",
+    "",
+    "## Plan",
+    "- [x] Implement feature",
+    "- [x] Run tests",
+  ].join("\n");
 }
 
 function commitAuditSynthesisWithMetadata(
@@ -358,6 +437,740 @@ describe("taskCompletionEvidence", () => {
 
     expect(result.ok).toBe(true);
     expect(codes(result)).not.toContain("generic_plan");
+  });
+
+  it("blocks development review handoff without an implementation manifest", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-no-manifest",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("missing_implementation_manifest");
+  });
+
+  it("allows development review handoff with structured implementation evidence", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-with-manifest",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-with-manifest",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("missing_implementation_manifest");
+  });
+
+  it("allows plan-backed development review handoff when all plan criteria are covered", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const plan = planWithManifest({
+      taskId: "feature-with-plan-backed-manifest",
+      intent: "feature",
+      acceptanceCriteria: [
+        {
+          id: "AC1",
+          description: "Feature code changed.",
+          verification: "npm.cmd test",
+        },
+        {
+          id: "AC2",
+          description: "Verification evidence exists.",
+          verification: "npm.cmd test",
+        },
+      ],
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-with-plan-backed-manifest",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan,
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-with-plan-backed-manifest",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+          planManifestHash: hashAifPlanManifest(plan),
+          acceptanceCriteria: [
+            { id: "AC1", status: "satisfied", evidenceRefs: ["verify-1"] },
+            { id: "AC2", status: "satisfied", evidenceRefs: ["verify-1"] },
+          ],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("missing_acceptance_evidence");
+    expect(codes(result)).not.toContain("implementation_plan_manifest_hash_mismatch");
+  });
+
+  it("blocks plan-backed implementation manifests that omit plan acceptance criteria", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const plan = planWithManifest({
+      taskId: "feature-missing-plan-criterion",
+      intent: "feature",
+      acceptanceCriteria: [
+        {
+          id: "AC1",
+          description: "Feature code changed.",
+          verification: "npm.cmd test",
+        },
+        {
+          id: "AC2",
+          description: "Verification evidence exists.",
+          verification: "npm.cmd test",
+        },
+      ],
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-missing-plan-criterion",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan,
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-missing-plan-criterion",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+          planManifestHash: hashAifPlanManifest(plan),
+          acceptanceCriteria: [{ id: "AC1", status: "satisfied", evidenceRefs: ["verify-1"] }],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("missing_acceptance_evidence");
+  });
+
+  it("allows development review handoff when a dirty plan artifact is outside the manifest", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, ".ai-factory"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    writeFileSync(join(root, ".ai-factory", "PLAN.md"), "- [x] Implement feature\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-with-dirty-plan",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [x] Implement feature\n- [x] Run tests",
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-with-dirty-plan",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("unintended_uncommitted_changes");
+    expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
+  });
+
+  it("blocks implementation evidence when acceptance refs do not resolve", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const manifest = JSON.parse(
+      implementationManifest({
+        taskId: "feature-with-bogus-evidence-ref",
+        intent: "feature",
+        changedFiles: ["src/feature.ts"],
+      }),
+    ) as { acceptanceCriteria: Array<{ evidenceRefs: string[] }> };
+    manifest.acceptanceCriteria[0]!.evidenceRefs = ["missing-verification-ref"];
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-with-bogus-evidence-ref",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        implementationManifestJson: JSON.stringify(manifest),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("missing_acceptance_evidence");
+  });
+
+  it("blocks implementation evidence when acceptance refs are only self-authorized", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const manifest = JSON.parse(
+      implementationManifest({
+        taskId: "feature-with-self-authorized-evidence-ref",
+        intent: "feature",
+        changedFiles: ["src/feature.ts"],
+      }),
+    ) as {
+      acceptanceCriteria: Array<{ evidenceRefs: string[] }>;
+      evidenceRefs: string[];
+    };
+    manifest.acceptanceCriteria[0]!.evidenceRefs = ["fake-ref"];
+    manifest.evidenceRefs = ["fake-ref"];
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-with-self-authorized-evidence-ref",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        implementationManifestJson: JSON.stringify(manifest),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("missing_acceptance_evidence");
+  });
+
+  it("blocks fix completion without a regression explanation", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "bug.ts"), "export const bug = false;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "fix-no-regression-explanation",
+        title: "Fix broken bug flag",
+        taskIntent: "fix",
+        plan: "## Plan\n- [ ] Patch bug\n- [ ] Run regression",
+        implementationManifestJson: implementationManifest({
+          taskId: "fix-no-regression-explanation",
+          intent: "fix",
+          changedFiles: ["src/bug.ts"],
+        }),
+        skipReview: true,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("missing_fix_regression_explanation");
+  });
+
+  it("blocks completion when manifest review closure has no evidence refs", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const manifest = JSON.parse(
+      implementationManifest({
+        taskId: "feature-review-closure-without-evidence",
+        intent: "feature",
+        changedFiles: ["src/feature.ts"],
+      }),
+    ) as { reviewClosure: { status: string; evidenceRefs: string[] } };
+    manifest.reviewClosure = { status: "passed", evidenceRefs: [] };
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "completion",
+      task: {
+        id: "feature-review-closure-without-evidence",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [x] Implement feature\n- [x] Run tests",
+        implementationManifestJson: JSON.stringify(manifest),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("missing_review_closure_evidence");
+  });
+
+  it("blocks completion when manifest checklist counts are inconsistent", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const manifest = JSON.parse(
+      implementationManifest({
+        taskId: "feature-inconsistent-checklist",
+        intent: "feature",
+        changedFiles: ["src/feature.ts"],
+      }),
+    ) as {
+      planChecklist: { total: number; completed: number; pending: number; synced: boolean };
+    };
+    manifest.planChecklist = { total: 3, completed: 1, pending: 0, synced: true };
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "completion",
+      task: {
+        id: "feature-inconsistent-checklist",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [x] Implement feature\n- [x] Run tests",
+        implementationManifestJson: JSON.stringify(manifest),
+        reviewComments: "REVIEW PASS: validated implementation.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("plan_checklist_drift");
+  });
+
+  it("blocks docs intent completion when changed files contradict the policy", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "docs-source-drift",
+        title: "Update API docs",
+        taskIntent: "docs",
+        plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/api.ts"]);
+  });
+
+  it("allows docs intent completion when pre-implementation context authorizes support edits", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs"), { recursive: true });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "docs", "api.md"), "# API\n", "utf8");
+    writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "docs-authorized-source",
+        title: "Update API docs",
+        description: "Supporting source edits for docs correctness are required.",
+        taskIntent: "docs",
+        plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+        implementationManifestJson: implementationManifest({
+          taskId: "docs-authorized-source",
+          intent: "docs",
+          changedFiles: ["docs/api.md", "src/api.ts"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("intent_changed_files_contradiction");
+  });
+
+  it("allows docs intent completion when docs/plan.md is recorded in changedFiles", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "docs", "plan.md"), "# Project plan\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "docs-plan-file-recorded",
+        title: "Update project plan docs",
+        taskIntent: "docs",
+        plan: "## Plan\n- [ ] Update docs/plan.md\n- [ ] Run docs validation",
+        implementationManifestJson: implementationManifest({
+          taskId: "docs-plan-file-recorded",
+          intent: "docs",
+          changedFiles: ["docs/plan.md"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
+  });
+
+  it("blocks docs intent completion when docs/plan.md is omitted from changedFiles", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "docs", "plan.md"), "# Project plan\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "docs-plan-file-omitted",
+        title: "Update project plan docs",
+        taskIntent: "docs",
+        plan: "## Plan\n- [ ] Update docs/plan.md\n- [ ] Run docs validation",
+        implementationManifestJson: implementationManifest({
+          taskId: "docs-plan-file-omitted",
+          intent: "docs",
+          changedFiles: [],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("implementation_changed_files_mismatch");
+  });
+
+  it("blocks docs intent source exceptions from allowing config or test drift", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs"), { recursive: true });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "docs", "api.md"), "# API\n", "utf8");
+    writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+    writeFileSync(join(root, "src", "api.test.ts"), "it('works', () => {});\n", "utf8");
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n', "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "docs-source-plus-drift",
+        title: "Update API docs",
+        description: "Supporting source edits for docs correctness are required.",
+        taskIntent: "docs",
+        plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual([
+      "package.json",
+      "src/api.test.ts",
+    ]);
+  });
+
+  it("blocks docs intent completion when plan says not to change source code", () => {
+    for (const plan of [
+      "## Plan\n- [ ] Do not change source code for docs correctness.\n- [ ] Update docs/api.md",
+      "## Plan\n- [ ] Never change source code for docs correctness.\n- [ ] Update docs/api.md",
+    ]) {
+      const root = initRepo();
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+
+      const result = evaluateTaskCompletionEvidence({
+        projectRoot: root,
+        task: {
+          id: `docs-no-source-code-change-${plan.includes("Never") ? "never" : "do-not"}`,
+          title: "Update API docs",
+          taskIntent: "docs",
+          plan,
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(codes(result)).toContain("intent_changed_files_contradiction");
+      expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/api.ts"]);
+    }
+  });
+
+  it("blocks docs intent completion when support edits appear only in completion evidence", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "docs-after-the-fact-source",
+        title: "Update API docs",
+        taskIntent: "docs",
+        plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+        implementationLog: "Supporting source edits for docs correctness were made.",
+        reviewComments: "Docs correctness required source edits.",
+        agentActivityLog: "Edited src/api.ts for documentation correctness.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/api.ts"]);
+  });
+
+  it("allows docs intent completion for documentation-only changes", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "docs", "api.md"), "# API\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "docs-only",
+        title: "Update API docs",
+        taskIntent: "docs",
+        plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+        implementationManifestJson: implementationManifest({
+          taskId: "docs-only",
+          intent: "docs",
+          changedFiles: ["docs/api.md"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("intent_changed_files_contradiction");
+  });
+
+  it("blocks tests intent completion when production files change without a testability exception", () => {
+    for (const plan of [
+      "## Plan\n- [ ] Add API coverage\n- [ ] Run the API test command",
+      "## Plan\n- [ ] Never make source changes for testing.\n- [ ] Add API coverage",
+    ]) {
+      const root = initRepo();
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+
+      const result = evaluateTaskCompletionEvidence({
+        projectRoot: root,
+        task: {
+          id: `tests-source-drift-${plan.includes("Never") ? "never" : "plain"}`,
+          title: "Add API tests",
+          taskIntent: "tests",
+          plan,
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(codes(result)).toContain("intent_changed_files_contradiction");
+    }
+  });
+
+  it("allows tests intent completion when pre-implementation context authorizes support edits", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "tests-authorized-source",
+        title: "Add API tests",
+        taskIntent: "tests",
+        plan: "## Plan\n- [ ] Minimal source changes for testing are required.\n- [ ] Add API coverage",
+        implementationManifestJson: implementationManifest({
+          taskId: "tests-authorized-source",
+          intent: "tests",
+          changedFiles: ["src/api.ts"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("intent_changed_files_contradiction");
+  });
+
+  it("allows tests intent completion for text fixture files", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "__tests__", "fixtures"), { recursive: true });
+    writeFileSync(join(root, "src", "__tests__", "fixtures", "input.txt"), "fixture\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "tests-text-fixture",
+        title: "Add API fixture coverage",
+        taskIntent: "tests",
+        plan: "## Plan\n- [ ] Add fixture coverage\n- [ ] Run the API test command",
+        implementationManifestJson: implementationManifest({
+          taskId: "tests-text-fixture",
+          intent: "tests",
+          changedFiles: ["src/__tests__/fixtures/input.txt"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("intent_changed_files_contradiction");
+  });
+
+  it("blocks tests intent source exceptions from allowing docs or config drift", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs"), { recursive: true });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "docs", "api.md"), "# API\n", "utf8");
+    writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n', "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "tests-source-plus-drift",
+        title: "Add API tests",
+        taskIntent: "tests",
+        plan: "## Plan\n- [ ] Minimal source changes for testing are required.\n- [ ] Add API coverage",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["docs/api.md", "package.json"]);
+  });
+
+  it("blocks tests intent completion when support edits appear only in completion evidence", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "api.ts"), "export const api = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "tests-after-the-fact-source",
+        title: "Add API tests",
+        taskIntent: "tests",
+        plan: "## Plan\n- [ ] Add API coverage\n- [ ] Run the API test command",
+        implementationLog: "Minimal source changes for testing were made.",
+        reviewComments: "Source changes support regression coverage.",
+        agentActivityLog: "Edited src/api.ts for testability.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/api.ts"]);
+  });
+
+  it("blocks spike intent completion when production files change without an explicit POC", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "adapter.ts"), "export const adapter = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "spike-source-drift",
+        title: "Research adapter options",
+        taskIntent: "spike",
+        plan: "## Plan\n- [ ] Compare adapter options\n- [ ] Write the recommendation",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+  });
+
+  it("blocks spike intent completion when changed source differs from the named POC artifact", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "adapter.ts"), "export const adapter = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "spike-wrong-poc",
+        title: "Research adapter options",
+        description: "Proof-of-concept artifact: src/poc.ts",
+        taskIntent: "spike",
+        plan: "## Plan\n- [ ] Compare adapter options\n- [ ] Write the recommendation",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/adapter.ts"]);
+  });
+
+  it("blocks spike intent completion when POC artifact path casing differs", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "poc.ts"), "export const poc = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "spike-poc-case-mismatch",
+        title: "Research adapter options",
+        description: "Proof-of-concept artifact: src/POC.ts",
+        taskIntent: "spike",
+        plan: "## Plan\n- [ ] Compare adapter options",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/poc.ts"]);
+  });
+
+  it("blocks spike intent completion when POC artifact paths appear only in completion evidence", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "adapter.ts"), "export const adapter = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "spike-after-the-fact-poc",
+        title: "Research adapter options",
+        taskIntent: "spike",
+        plan: "## Plan\n- [ ] Compare adapter options\n- [ ] Write the recommendation",
+        implementationLog: "Implemented proof-of-concept artifact: src/adapter.ts",
+        reviewComments: "Reviewed POC file path: src/adapter.ts",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/adapter.ts"]);
+  });
+
+  it("blocks spike intent completion when POC artifact paths are negated in pre-implementation context", () => {
+    for (const plan of [
+      "Do not create proof-of-concept artifact path: src/poc.ts",
+      "No prototype file src/poc.ts",
+      "Prototype artifact src/poc.ts is forbidden",
+      "Never create proof-of-concept artifact path: src/poc.ts",
+    ]) {
+      const root = initRepo();
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "poc.ts"), "export const poc = true;\n", "utf8");
+
+      const result = evaluateTaskCompletionEvidence({
+        projectRoot: root,
+        task: {
+          id: `spike-negated-poc-${plan.slice(0, 8)}`,
+          title: "Research adapter options",
+          taskIntent: "spike",
+          plan,
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(codes(result)).toContain("intent_changed_files_contradiction");
+      expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["src/poc.ts"]);
+    }
   });
 
   it("requires report artifacts for verification report tasks", () => {
@@ -2220,7 +3033,7 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("source_inconclusive");
     expect(codes(result)).not.toContain("audit_inconclusive");
   });
 
@@ -2289,7 +3102,7 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("source_inconclusive");
     expect(codes(result)).toContain("audit_inconclusive");
   });
 
@@ -2358,7 +3171,7 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("source_inconclusive");
     expect(codes(result)).toContain("audit_inconclusive");
   });
 
@@ -2421,7 +3234,7 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("source_inconclusive");
     expect(codes(result)).toContain("audit_inconclusive");
   });
 
@@ -2454,7 +3267,7 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("source_inconclusive");
     expect(codes(result)).toContain("audit_inconclusive");
   });
 
@@ -2487,7 +3300,7 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("inconclusive_batch_evidence");
+    expect(result.evidence.auditSynthesisOutcome?.kind).toBe("source_inconclusive");
     expect(result.evidence.auditSynthesisOutcome?.inventoryOnlyNoFindingsReportCount).toBe(6);
     expect(codes(result)).toContain("audit_inconclusive");
   });
@@ -2691,6 +3504,8 @@ describe("taskCompletionEvidence", () => {
     expect(result.evidence.reportArtifactFiles).toEqual(["reports/audit.md"]);
     expect(result.evidence.unexpectedNonReportChangedFiles).toEqual(["AGENTS.md"]);
     expect(codes(result)).toContain("unexpected_non_report_changes");
+    expect(codes(result)).toContain("intent_changed_files_contradiction");
+    expect(result.evidence.intentPolicyIssues[0]?.files).toEqual(["AGENTS.md"]);
   });
 
   it("allows clean committed changes limited to the declared report artifact", () => {

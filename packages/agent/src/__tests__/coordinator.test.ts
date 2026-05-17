@@ -2,9 +2,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   TaskPlanQualityError,
   evaluateTaskPlanQuality,
+  appSettings,
   tasks,
   projects,
   runtimeProfiles,
+  usageEvents,
   resetEnvCache,
   formatAuditSynthesisOutcomeForArtifact,
   computeAuditReportContentSha256,
@@ -96,6 +98,7 @@ const { runPlanChecker } = await import("../subagents/planChecker.js");
 const { runImplementer } = await import("../subagents/implementer.js");
 const { runReviewer } = await import("../subagents/reviewer.js");
 const { handleAutoReviewGate } = await import("../autoReviewHandler.js");
+const { readGitWorktreeReworkSnapshot } = await import("../reworkSnapshot.js");
 const {
   createRoadmapBatchContract,
   listRoadmapBatchArtifactAttempts,
@@ -192,22 +195,60 @@ describe("coordinator", () => {
   function insertRuntimeProfile(input: {
     id: string;
     projectId?: string | null;
-    snapshot: Record<string, unknown>;
+    snapshot?: Record<string, unknown> | null;
   }): void {
     const now = new Date().toISOString();
     testDb.current
       .insert(runtimeProfiles)
       .values({
         id: input.id,
-        projectId: input.projectId ?? "test-project",
+        projectId: input.projectId === undefined ? "test-project" : input.projectId,
         name: `Profile ${input.id}`,
         runtimeId: "claude",
         providerId: "anthropic",
         enabled: true,
-        runtimeLimitSnapshotJson: JSON.stringify(input.snapshot),
-        runtimeLimitUpdatedAt: now,
+        runtimeLimitSnapshotJson: input.snapshot ? JSON.stringify(input.snapshot) : null,
+        runtimeLimitUpdatedAt: input.snapshot ? now : null,
         createdAt: now,
         updatedAt: now,
+      })
+      .run();
+  }
+
+  function blockedRuntimeSnapshot(profileId: string, resetAt: string): Record<string, unknown> {
+    return {
+      source: "sdk_event",
+      status: "blocked",
+      precision: "heuristic",
+      checkedAt: "2026-04-17T00:00:00.000Z",
+      providerId: "anthropic",
+      runtimeId: "claude",
+      profileId,
+      primaryScope: "time",
+      resetAt,
+      retryAfterSeconds: null,
+      warningThreshold: null,
+      windows: [{ scope: "time", resetAt }],
+      providerMeta: null,
+    };
+  }
+
+  function insertTaskUsage(input: { taskId: string; workflowKind: string; costUsd: number }): void {
+    testDb.current
+      .insert(usageEvents)
+      .values({
+        source: "agent",
+        projectId: "test-project",
+        taskId: input.taskId,
+        runtimeId: "claude",
+        providerId: "anthropic",
+        workflowKind: input.workflowKind,
+        usageReporting: "full",
+        outcome: "success",
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        costUsd: input.costUsd,
       })
       .run();
   }
@@ -227,6 +268,32 @@ describe("coordinator", () => {
     expect(runReviewer).toHaveBeenCalledWith("task-1", "/tmp/test");
     const task = db.select().from(tasks).where(eq(tasks.id, "task-1")).get();
     expect(task!.status).toBe("done");
+  });
+
+  it("persists lock stage and coordinator while a stage is running", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-lock-provenance",
+        projectId: "test-project",
+        title: "Lock provenance",
+        status: "planning",
+      })
+      .run();
+
+    vi.mocked(runPlanner).mockImplementationOnce(async (taskId) => {
+      const claimed = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+      expect(claimed!.lockedBy).toBeTruthy();
+      expect(claimed!.coordinatorId).toBe(claimed!.lockedBy);
+      expect(claimed!.lockStage).toBe("planner");
+    });
+
+    await pollAndProcess();
+
+    const released = db.select().from(tasks).where(eq(tasks.id, "task-lock-provenance")).get();
+    expect(released!.lockedBy).toBeNull();
+    expect(released!.coordinatorId).toBeNull();
+    expect(released!.lockStage).toBeNull();
   });
 
   it("recovers synthesis plan-quality retry exhaustion with a deterministic exact-source plan", async () => {
@@ -405,6 +472,97 @@ describe("coordinator", () => {
     expect(runReviewer).toHaveBeenCalledWith("task-2", "/tmp/test");
     const task = db.select().from(tasks).where(eq(tasks.id, "task-2")).get();
     expect(task!.status).toBe("done");
+  });
+
+  it("should warn but still run reviewer when security review usage reaches 80 percent", async () => {
+    const db = testDb.current;
+    db.update(projects)
+      .set({ reviewSidecarMaxBudgetUsd: 1 })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-security-budget-warn",
+        projectId: "test-project",
+        title: "Security budget warning",
+        status: "review",
+      })
+      .run();
+    insertTaskUsage({
+      taskId: "task-security-budget-warn",
+      workflowKind: "review-security",
+      costUsd: 0.8,
+    });
+
+    await pollAndProcess();
+
+    expect(runReviewer).toHaveBeenCalledWith("task-security-budget-warn", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-security-budget-warn")).get();
+    expect(task!.status).toBe("done");
+    expect(task!.agentActivityLog).toContain("Runtime budget warning before reviewer");
+    expect(task!.agentActivityLog).toContain("spent=$0.8000");
+  });
+
+  it("should block reviewer when security review usage exhausts the shared review budget", async () => {
+    const db = testDb.current;
+    db.update(projects)
+      .set({ reviewSidecarMaxBudgetUsd: 1 })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-security-budget-block",
+        projectId: "test-project",
+        title: "Security budget block",
+        status: "review",
+      })
+      .run();
+    insertTaskUsage({
+      taskId: "task-security-budget-block",
+      workflowKind: "review-security",
+      costUsd: 1,
+    });
+
+    await pollAndProcess();
+
+    expect(runReviewer).not.toHaveBeenCalledWith("task-security-budget-block", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-security-budget-block")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("Runtime budget exhausted before reviewer");
+    expect(task!.agentActivityLog).toContain("Runtime budget blocked task before reviewer");
+  });
+
+  it("should allow reviewer when security review budget exhaustion has an override", async () => {
+    const db = testDb.current;
+    db.update(projects)
+      .set({ reviewSidecarMaxBudgetUsd: 1 })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-security-budget-override",
+        projectId: "test-project",
+        title: "Security budget override",
+        status: "review",
+        runtimeOptionsJson: JSON.stringify({
+          runtimeBudgetOverride: { justification: "finish mandatory security review" },
+        }),
+      })
+      .run();
+    insertTaskUsage({
+      taskId: "task-security-budget-override",
+      workflowKind: "review-security",
+      costUsd: 1,
+    });
+
+    await pollAndProcess();
+
+    expect(runReviewer).toHaveBeenCalledWith("task-security-budget-override", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-security-budget-override")).get();
+    expect(task!.status).toBe("done");
+    expect(task!.agentActivityLog).toContain("Runtime budget override before reviewer");
+    expect(task!.agentActivityLog).toContain("finish mandatory security review");
   });
 
   it("should block generic plan_ready plans before implementer dispatch", async () => {
@@ -1948,6 +2106,123 @@ describe("coordinator", () => {
     expect(task!.runtimeLimitSnapshotJson).toContain('"profileId":"profile-plan-blocked"');
   });
 
+  it("should proactively block app-default planning work when the app profile is provider-blocked", async () => {
+    const db = testDb.current;
+    const resetAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    insertRuntimeProfile({
+      id: "profile-app-plan-blocked",
+      projectId: null,
+      snapshot: blockedRuntimeSnapshot("profile-app-plan-blocked", resetAt),
+    });
+    db.update(appSettings)
+      .set({ defaultPlanRuntimeProfileId: "profile-app-plan-blocked" })
+      .where(eq(appSettings.id, 1))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-app-default-preblocked",
+        projectId: "test-project",
+        title: "App default preblocked plan",
+        status: "planning",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runPlanner).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-app-default-preblocked")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.retryAfter).toBe(resetAt);
+    expect(task!.runtimeLimitSnapshotJson).toContain('"profileId":"profile-app-plan-blocked"');
+  });
+
+  it("should fall back from a blocked project planner profile to an unblocked app default", async () => {
+    const db = testDb.current;
+    const resetAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    insertRuntimeProfile({
+      id: "profile-project-plan-blocked",
+      snapshot: blockedRuntimeSnapshot("profile-project-plan-blocked", resetAt),
+    });
+    insertRuntimeProfile({
+      id: "profile-app-plan-open",
+      projectId: null,
+      snapshot: null,
+    });
+    db.update(projects)
+      .set({ defaultPlanRuntimeProfileId: "profile-project-plan-blocked" })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.update(appSettings)
+      .set({ defaultPlanRuntimeProfileId: "profile-app-plan-open" })
+      .where(eq(appSettings.id, 1))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-app-default-fallback",
+        projectId: "test-project",
+        title: "Fallback to app default",
+        status: "planning",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runPlanner).toHaveBeenCalledWith("task-app-default-fallback", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-app-default-fallback")).get();
+    expect(task!.status).toBe("done");
+    expect(task!.agentActivityLog).toContain("Runtime gate fallback before planner");
+    expect(task!.agentActivityLog).toContain("blockedProfile=profile-project-plan-blocked");
+    expect(task!.agentActivityLog).toContain("selectedProfile=profile-app-plan-open");
+  });
+
+  it("should proactively block implementer work when the app-default task profile is blocked", async () => {
+    const db = testDb.current;
+    const resetAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    insertRuntimeProfile({
+      id: "profile-app-task-blocked",
+      projectId: null,
+      snapshot: blockedRuntimeSnapshot("profile-app-task-blocked", resetAt),
+    });
+    insertRuntimeProfile({
+      id: "profile-app-plan-open-for-impl",
+      projectId: null,
+      snapshot: null,
+    });
+    db.update(appSettings)
+      .set({
+        defaultPlanRuntimeProfileId: "profile-app-plan-open-for-impl",
+        defaultTaskRuntimeProfileId: "profile-app-task-blocked",
+      })
+      .where(eq(appSettings.id, 1))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-app-default-implementer-block",
+        projectId: "test-project",
+        title: "Implementer app default block",
+        status: "plan_ready",
+        autoMode: true,
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runPlanChecker).toHaveBeenCalledWith("task-app-default-implementer-block", "/tmp/test");
+    expect(runImplementer).not.toHaveBeenCalledWith(
+      "task-app-default-implementer-block",
+      "/tmp/test",
+    );
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-app-default-implementer-block"))
+      .get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.retryAfter).toBe(resetAt);
+    expect(task!.runtimeLimitSnapshotJson).toContain('"profileId":"profile-app-task-blocked"');
+  });
+
   it("should proactively block exact-threshold planning work before the provider hard-fails", async () => {
     const db = testDb.current;
     const resetAt = new Date(Date.now() + 45 * 60_000).toISOString();
@@ -2301,6 +2576,10 @@ describe("coordinator", () => {
     expect(task!.retryCount).toBe(1);
     expect(task!.blockedReason).toContain("Plan quality guard replan 1/2");
     expect(task!.blockedReason).toContain("slash_fallback_echo");
+    expect(task!.agentActivityLog).toContain("Plan quality structured feedback");
+    expect(task!.agentActivityLog).toContain('"kind":"plan_quality_feedback"');
+    expect(task!.agentActivityLog).toContain('"attempt":1');
+    expect(task!.agentActivityLog).toContain('"terminal":false');
     expect(runImplementer).not.toHaveBeenCalled();
   });
 
@@ -2320,12 +2599,18 @@ describe("coordinator", () => {
       })
       .run();
 
-    vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());
+    vi.mocked(runPlanChecker).mockImplementationOnce(async (taskId) => {
+      const taskAtPlanCheck = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+      expect(taskAtPlanCheck!.blockedFromStatus).toBe("plan_ready");
+      expect(taskAtPlanCheck!.blockedReason).toContain("Plan quality guard replan 1/2");
+      throw createPlanQualityError();
+    });
 
     await pollAndProcess();
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-plan-quality-preserve")).get();
     expect(runPlanner).toHaveBeenCalledWith("task-plan-quality-preserve", "/tmp/test");
+    expect(runPlanChecker).toHaveBeenCalledWith("task-plan-quality-preserve", "/tmp/test");
     expect(task!.status).toBe("planning");
     expect(task!.retryCount).toBe(2);
     expect(task!.blockedReason).toContain("Plan quality guard replan 2/2");
@@ -2354,8 +2639,11 @@ describe("coordinator", () => {
     expect(task!.blockedFromStatus).toBe("plan_ready");
     expect(task!.retryAfter).toBeNull();
     expect(task!.retryCount).toBe(3);
+    expect(task!.manualReviewRequired).toBe(true);
     expect(task!.blockedReason).toContain("Retry limit reached");
     expect(task!.blockedReason).toContain("Operator next step");
+    expect(task!.agentActivityLog).toContain("Plan quality structured feedback");
+    expect(task!.agentActivityLog).toContain('"terminal":true');
     expect(runImplementer).not.toHaveBeenCalled();
   });
 
@@ -2469,6 +2757,31 @@ describe("coordinator", () => {
     expect(runReviewer).not.toHaveBeenCalled();
     const task = db.select().from(tasks).where(eq(tasks.id, "task-skip-review")).get();
     expect(task!.status).toBe("done");
+  });
+
+  it("should block development tasks before review when implementation manifest is missing", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-handoff-");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-handoff-manifest",
+        projectId: "test-project",
+        title: "Development task",
+        taskIntent: "feature",
+        status: "implementing",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-manifest", rootPath);
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-dev-handoff-manifest")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toContain("Completion evidence guard");
+    expect(task!.blockedReason).toContain("missing_implementation_manifest");
   });
 
   it("should block skipReview audit tasks with generic plan and no evidence delta", async () => {
@@ -3172,6 +3485,70 @@ describe("coordinator", () => {
     const attempts = listRoadmapBatchArtifactAttempts(artifact!.id);
     expect(attempts.at(-1)?.reworkStatus).toBe("terminal_inconclusive");
     expect(attempts.at(-1)?.validationDetailsJson).toContain("no_substantive_rework_delta");
+  });
+
+  it("should terminalize generic rework that returns with an unchanged worktree snapshot", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-generic-no-delta-rework-");
+    const snapshot = readGitWorktreeReworkSnapshot(rootPath);
+    expect(snapshot).not.toBeNull();
+
+    db.insert(projects)
+      .values({ id: "generic-no-delta-project", name: "Generic No Delta", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-generic-no-delta-rework",
+        projectId: "generic-no-delta-project",
+        title: "Generic no-delta rework",
+        description: "Fix the generic workflow issue.",
+        taskIntent: "general",
+        status: "implementing",
+        autoMode: true,
+        reworkRequested: true,
+        reviewIterationCount: 2,
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 2,
+          findings: [
+            {
+              id: "fix-generic",
+              source: "code_review",
+              text: "Add generic workflow evidence",
+              firstSeenIteration: 1,
+              lastSeenIteration: 2,
+              streak: 2,
+            },
+          ],
+          reworkSnapshot: {
+            iteration: 2,
+            artifactContentSha: null,
+            findingIds: ["fix-generic"],
+            changedFilesDigest: snapshot!.changedFilesDigest,
+            changedFilesSummary: snapshot!.changedFilesSummary,
+            baselineHeadSha: snapshot!.baselineHeadSha,
+            requiredEvidenceByFindingId: {
+              "fix-generic": "Show the current attempt changed code or tests.",
+            },
+            forbiddenChanges: ["Do not edit unrelated files."],
+          },
+        }),
+      })
+      .run();
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-generic-no-delta-rework")).get();
+    expect(runImplementer).toHaveBeenCalledWith("task-generic-no-delta-rework", rootPath);
+    expect(runReviewer).not.toHaveBeenCalledWith("task-generic-no-delta-rework", rootPath);
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedReason).toContain("manual_review_required: no_substantive_rework_delta");
+    expect(task!.blockedReason).toContain("task worktree");
+    expect(task!.blockedReason).toContain("blocker ids: fix-generic");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.autoReviewStateJson).toContain("fix-generic");
   });
 
   it("should not terminalize no-delta rework by hashing unsafe snapshot paths outside the project", async () => {

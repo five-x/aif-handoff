@@ -12,12 +12,15 @@ import {
 } from "@aif/runtime";
 import {
   getEnv,
+  findSecretLikeKeys,
   logger,
   normalizeRuntimeLimitSnapshot,
+  summarizeRuntimeProfileForAudit,
   type RuntimeLimitSnapshot,
 } from "@aif/shared";
 import {
   createRuntimeProfile,
+  appendConfigAuditEvent,
   deleteRuntimeProfile,
   findRuntimeProfileById,
   findProjectById,
@@ -581,6 +584,7 @@ runtimeProfilesRouter.post(
   async (c) => {
     const body = c.req.valid("json") as CreateRuntimeProfilePayload;
     const sensitiveHeaderKeys = listSensitiveHeaderKeys(body.headers);
+    const secretLikeOptionKeys = findSecretLikeKeys(body.options ?? {});
     if (sensitiveHeaderKeys.length > 0) {
       log.warn(
         { profileName: body.name, runtimeId: body.runtimeId, sensitiveHeaderKeys },
@@ -596,6 +600,18 @@ runtimeProfilesRouter.post(
         400,
       );
     }
+    if (secretLikeOptionKeys.length > 0) {
+      return c.json(
+        {
+          error: "Secret-like option keys are not allowed in persisted runtime profiles",
+          reasonCodes: ["RUNTIME_PROFILE_SECRET_LIKE_OPTION_KEY"],
+          fieldErrors: {
+            options: secretLikeOptionKeys.map((key) => `Disallowed option key: ${key}`),
+          },
+        },
+        400,
+      );
+    }
 
     const created = createRuntimeProfile(body);
     if (!created) return c.json({ error: "Failed to create runtime profile" }, 500);
@@ -604,6 +620,14 @@ runtimeProfilesRouter.post(
       "[runtime-profile-route] Created runtime profile",
     );
     const response = toRuntimeProfileResponse(created);
+    appendConfigAuditEvent({
+      projectId: created.projectId ?? "global",
+      runtimeProfileId: created.id,
+      action: "runtime_profile_created",
+      sourceKind: "runtime_profile",
+      actor: "api",
+      after: summarizeRuntimeProfileForAudit(response),
+    });
     broadcast({ type: "runtime_profile:created", payload: response });
     return c.json(response, 201);
   },
@@ -620,6 +644,7 @@ runtimeProfilesRouter.put(
     const existing = findRuntimeProfileById(id);
     if (!existing) return c.json({ error: "Runtime profile not found" }, 404);
     const sensitiveHeaderKeys = listSensitiveHeaderKeys(body.headers);
+    const secretLikeOptionKeys = findSecretLikeKeys(body.options ?? {});
     if (sensitiveHeaderKeys.length > 0) {
       log.warn(
         { profileId: id, runtimeId: existing.runtimeId, sensitiveHeaderKeys },
@@ -635,9 +660,31 @@ runtimeProfilesRouter.put(
         400,
       );
     }
+    if (secretLikeOptionKeys.length > 0) {
+      return c.json(
+        {
+          error: "Secret-like option keys are not allowed in persisted runtime profiles",
+          reasonCodes: ["RUNTIME_PROFILE_SECRET_LIKE_OPTION_KEY"],
+          fieldErrors: {
+            options: secretLikeOptionKeys.map((key) => `Disallowed option key: ${key}`),
+          },
+        },
+        400,
+      );
+    }
+    const before = toRuntimeProfileResponse(existing);
     const updated = updateRuntimeProfile(id, body);
     if (!updated) return c.json({ error: "Failed to update runtime profile" }, 500);
     const response = toRuntimeProfileResponse(updated);
+    appendConfigAuditEvent({
+      projectId: updated.projectId ?? existing.projectId ?? "global",
+      runtimeProfileId: id,
+      action: "runtime_profile_updated",
+      sourceKind: "runtime_profile",
+      actor: "api",
+      before: summarizeRuntimeProfileForAudit(before),
+      after: summarizeRuntimeProfileForAudit(response),
+    });
     broadcast({ type: "runtime_profile:updated", payload: response });
     return c.json(response);
   },
@@ -648,7 +695,17 @@ runtimeProfilesRouter.delete("/:id", mutationRateLimit, async (c) => {
   const { id } = c.req.param();
   const existing = findRuntimeProfileById(id);
   if (!existing) return c.json({ error: "Runtime profile not found" }, 404);
+  const before = toRuntimeProfileResponse(existing);
   deleteRuntimeProfile(id);
+  appendConfigAuditEvent({
+    projectId: existing.projectId ?? "global",
+    runtimeProfileId: id,
+    action: "runtime_profile_deleted",
+    sourceKind: "runtime_profile",
+    actor: "api",
+    before: summarizeRuntimeProfileForAudit(before),
+    after: null,
+  });
   broadcast({
     type: "runtime_profile:deleted",
     payload: { id, projectId: existing.projectId ?? null },

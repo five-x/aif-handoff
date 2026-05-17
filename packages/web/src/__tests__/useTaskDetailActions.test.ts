@@ -18,17 +18,17 @@ describe("toAttachmentPayload", () => {
     const result = await toAttachmentPayload(file);
     expect(result).toEqual({
       name: "app.ts",
-      mimeType: "application/octet-stream",
+      mimeType: "text/plain",
       size: 12,
       content: "const x = 1;",
     });
   });
 
-  it("should return null content for large text file", async () => {
+  it("should read text content up to the hard attachment limit", async () => {
     const bigContent = "x".repeat(300_000);
     const file = new File([bigContent], "big.txt", { type: "text/plain" });
     const result = await toAttachmentPayload(file);
-    expect(result.content).toBeNull();
+    expect(result.content).toBe(bigContent);
   });
 
   it("should encode small image as base64 data URI", async () => {
@@ -38,11 +38,11 @@ describe("toAttachmentPayload", () => {
     expect(result.content).toMatch(/^data:image\/png;base64,/);
   });
 
-  it("should return null content for large image", async () => {
+  it("should encode allowed binary files within the hard attachment limit", async () => {
     const bigImage = new Uint8Array(2_000_000);
     const file = new File([bigImage], "huge.png", { type: "image/png" });
     const result = await toAttachmentPayload(file);
-    expect(result.content).toBeNull();
+    expect(result.content).toMatch(/^data:image\/png;base64,/);
   });
 
   it("should return null content for binary non-image file", async () => {

@@ -1,5 +1,9 @@
-import type { Task, TaskEvent, TaskStatus } from "@aif/shared/browser";
-import { STATUS_CONFIG } from "@aif/shared/browser";
+import type { Task, TaskEvent, TaskIntent, TaskStatus } from "@aif/shared/browser";
+import {
+  STATUS_CONFIG,
+  TASK_INTENT_CONTRACTS,
+  formatTaskIntentPrimaryConstraints,
+} from "@aif/shared/browser";
 import { statusColorStyle } from "@/hooks/useStatusColor";
 import { Pause, Play, Clock, AlertTriangle } from "lucide-react";
 import { SheetHeader, SheetTitle, SheetClose } from "@/components/ui/sheet";
@@ -11,9 +15,22 @@ import { Tabs } from "@/components/ui/tabs";
 import { AlertBox } from "@/components/ui/alert-box";
 import { getRuntimeLimitDisplay } from "@/lib/runtimeLimits";
 import { getArtifactTrustPresentation } from "@/lib/artifactTrust";
+import { getPlanQualityPresentation } from "@/lib/planQuality";
 import { useUsageLimitsEnabled } from "@/hooks/useSettings";
 
-export type TaskDetailTab = "implementation" | "review" | "comments" | "activity" | "timeline";
+export type TaskDetailTab =
+  | "overview"
+  | "plan"
+  | "implementation"
+  | "review"
+  | "timeline"
+  | "evidence"
+  | "artifacts"
+  | "memory"
+  | "runtime"
+  | "git"
+  | "comments"
+  | "activity";
 
 const ACTION_BUTTONS_BY_STATUS: Partial<
   Record<
@@ -55,6 +72,10 @@ const ACTION_BUTTONS_BY_STATUS: Partial<
   ],
 };
 
+function resolveDisplayIntent(task: Task): TaskIntent {
+  return task.taskIntent ?? (task.isFix ? "fix" : "general");
+}
+
 interface TaskDetailHeaderProps {
   task: Task;
   activeTab: TaskDetailTab;
@@ -89,6 +110,10 @@ export function TaskDetailHeader({
       })
     : null;
   const artifactTrust = getArtifactTrustPresentation(task.artifactTrust);
+  const planQuality = getPlanQualityPresentation(task);
+  const taskIntent = resolveDisplayIntent(task);
+  const taskIntentContract = TASK_INTENT_CONTRACTS[taskIntent];
+  const taskIntentConstraints = formatTaskIntentPrimaryConstraints(taskIntent);
   // Pause is also shown in `backlog` so users can park a task that auto-queue
   // would otherwise advance — paused backlog tasks are skipped by both the
   // scheduler and the auto-queue advancer.
@@ -123,11 +148,26 @@ export function TaskDetailHeader({
               {artifactTrust.label}
             </Badge>
           )}
+          {planQuality && (
+            <Badge
+              size="sm"
+              className={
+                planQuality.isTerminal
+                  ? "border-red-500/35 bg-red-500/15 text-red-700 dark:text-red-300"
+                  : "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-300"
+              }
+            >
+              PLAN QUALITY
+            </Badge>
+          )}
           {task.priority > 0 && (
             <Badge variant="outline" size="sm">
               P{task.priority}
             </Badge>
           )}
+          <Badge variant="outline" size="sm">
+            {taskIntentContract.label}
+          </Badge>
           <TaskTagsList tags={task.tags} roadmapAlias={task.roadmapAlias ?? undefined} />
         </div>
         {task.scheduledAt && task.status === "backlog" && (
@@ -154,6 +194,12 @@ export function TaskDetailHeader({
           </Badge>
         </div>
         <SheetTitle className="tracking-tight">{task.title}</SheetTitle>
+        <div className="mt-2 border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+          <div className="font-medium text-foreground">{taskIntentContract.decomposition}</div>
+          <div className="mt-1 text-muted-foreground">
+            Primary constraints: {taskIntentConstraints}
+          </div>
+        </div>
       </SheetHeader>
 
       {task.status === "blocked_external" && runtimeLimitDisplay && (
@@ -170,6 +216,17 @@ export function TaskDetailHeader({
           <span>{runtimeLimitDisplay.summary}</span>
           {runtimeLimitDisplay.resetText && <span>{runtimeLimitDisplay.resetText}</span>}
           {runtimeLimitDisplay.taskRetryText && <span>{runtimeLimitDisplay.taskRetryText}</span>}
+        </AlertBox>
+      )}
+
+      {planQuality && (
+        <AlertBox
+          variant={planQuality.isTerminal ? "error" : "warning"}
+          className="mb-3 px-3 py-2 text-xs"
+          icon={<AlertTriangle className="h-3.5 w-3.5" />}
+        >
+          <div className="font-medium">{planQuality.label}</div>
+          <div className="mt-1 text-muted-foreground">{planQuality.summary}</div>
         </AlertBox>
       )}
 
@@ -258,11 +315,18 @@ export function TaskDetailHeader({
       <Tabs
         className="mt-3 border border-border bg-background/55 p-2"
         items={[
+          { value: "overview", label: "Overview" },
+          { value: "plan", label: "Plan" },
           { value: "implementation", label: "Implementation" },
           { value: "review", label: "Review" },
+          { value: "timeline", label: "Timeline" },
+          { value: "evidence", label: "Evidence" },
+          { value: "artifacts", label: "Artifacts" },
+          { value: "memory", label: "Memory" },
+          { value: "runtime", label: "Runtime" },
+          { value: "git", label: "Git" },
           { value: "comments", label: "Comments" },
           { value: "activity", label: "Activity" },
-          { value: "timeline", label: "Timeline" },
         ]}
         value={activeTab}
         onValueChange={(v) => onTabChange(v as TaskDetailTab)}

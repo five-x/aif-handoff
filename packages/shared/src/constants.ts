@@ -23,18 +23,71 @@ export const ORDERED_STATUSES: TaskStatus[] = [
 ];
 
 export const WARMUP_TARGETS = [
-  { workflowKind: "planner", profileMode: "plan" },
-  { workflowKind: "implementer", profileMode: "task" },
-  { workflowKind: "reviewer", profileMode: "review" },
+  { stage: "planner", workflowKind: "planner", profileMode: "plan" },
+  { stage: "implementer", workflowKind: "implementer", profileMode: "task" },
+  { stage: "reviewer", workflowKind: "reviewer", profileMode: "review" },
+  { stage: "security", workflowKind: "review-security", profileMode: "review" },
+  { stage: "audit", workflowKind: "audit", profileMode: "task" },
+  { stage: "synthesis", workflowKind: "synthesis", profileMode: "task" },
 ] as const;
 
 export const WARMUP_WORKFLOW_KINDS = [
   "planner",
   "implementer",
   "reviewer",
-  // Security review uses the review profile/mode and can fork the reviewer warmup seed.
+  // Security review uses the review profile/mode but keeps a separate stage seed.
   "review-security",
+  "audit",
+  "synthesis",
 ] as const;
+
+export const RUNTIME_PROFILE_MODES = ["task", "plan", "review", "chat"] as const;
+export type RuntimeProfileMode = (typeof RUNTIME_PROFILE_MODES)[number];
+
+export const RUNTIME_STAGES = [
+  "planner",
+  "plan_checker",
+  "implementer",
+  "reviewer",
+  "security",
+  "chat",
+  "audit",
+  "synthesis",
+] as const;
+export type RuntimeStage = (typeof RUNTIME_STAGES)[number];
+export type RuntimeStageOrProfileMode = RuntimeStage | RuntimeProfileMode;
+
+export const RUNTIME_STAGE_PROFILE_MODE: Record<RuntimeStage, RuntimeProfileMode> = {
+  planner: "plan",
+  plan_checker: "plan",
+  implementer: "task",
+  reviewer: "review",
+  security: "review",
+  chat: "chat",
+  audit: "task",
+  synthesis: "task",
+};
+
+export function isRuntimeProfileMode(value: unknown): value is RuntimeProfileMode {
+  return typeof value === "string" && RUNTIME_PROFILE_MODES.includes(value as RuntimeProfileMode);
+}
+
+export function isRuntimeStage(value: unknown): value is RuntimeStage {
+  return typeof value === "string" && RUNTIME_STAGES.includes(value as RuntimeStage);
+}
+
+export function normalizeRuntimeStage(value: RuntimeStageOrProfileMode): RuntimeStage {
+  if (isRuntimeStage(value)) return value;
+  const mode = value as RuntimeProfileMode;
+  if (mode === "plan") return "planner";
+  if (mode === "review") return "reviewer";
+  if (mode === "chat") return "chat";
+  return "implementer";
+}
+
+export function runtimeProfileModeForStage(stage: RuntimeStageOrProfileMode): RuntimeProfileMode {
+  return isRuntimeProfileMode(stage) ? stage : RUNTIME_STAGE_PROFILE_MODE[stage];
+}
 
 export type WarmupTarget = (typeof WARMUP_TARGETS)[number];
 export type WarmupWorkflowKind = (typeof WARMUP_WORKFLOW_KINDS)[number];

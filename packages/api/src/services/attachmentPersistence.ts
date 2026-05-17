@@ -1,9 +1,22 @@
 /**
  * Attachment persistence pipeline: converts incoming attachment payloads
- * (with inline content) into file-backed metadata (with paths relative to project root).
+ * into file-backed metadata under the project's .ai-factory/files directory.
  */
 
-import { logger } from "@aif/shared";
+import {
+  ATTACHMENT_MAX_BYTES,
+  isAllowedAttachmentMimeType,
+  isBinaryAttachmentMimeType,
+  isSafeAttachmentFilename,
+  isSafeAttachmentStoragePath,
+  isTextAttachmentMimeType,
+  isValidBase64AttachmentContent,
+  logger,
+  normalizeAttachmentMimeType,
+  redactAttachmentTextContent,
+  type AttachmentRedactionStatus,
+  type AttachmentSourceKind,
+} from "@aif/shared";
 import { saveAttachment, deleteAttachment } from "./attachmentStorage.js";
 
 const log = logger("attachmentPersistence");
@@ -14,6 +27,9 @@ interface IncomingAttachment {
   size: number;
   content: string | null;
   path?: string;
+  sourceKind?: AttachmentSourceKind;
+  sourceRef?: string;
+  redactionStatus?: AttachmentRedactionStatus;
 }
 
 interface PersistedAttachment {
@@ -22,25 +38,100 @@ interface PersistedAttachment {
   size: number;
   content: string | null;
   path?: string;
+  sourceKind?: AttachmentSourceKind;
+  sourceRef?: string;
+  redactionStatus?: AttachmentRedactionStatus;
+}
+
+interface AttachmentEntityContext {
+  projectRoot: string;
+  taskId?: string;
+  commentId?: string;
+  chatSessionId?: string;
+}
+
+export class AttachmentValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttachmentValidationError";
+  }
+}
+
+function sourceKindForContext(entityContext: AttachmentEntityContext): AttachmentSourceKind {
+  if (entityContext.chatSessionId) return "chat";
+  if (entityContext.commentId) return "comment";
+  return "task";
+}
+
+function sourceRefForContext(entityContext: AttachmentEntityContext): string {
+  if (entityContext.chatSessionId) return `chat:session:${entityContext.chatSessionId}`;
+  if (entityContext.taskId && entityContext.commentId) {
+    return `task:${entityContext.taskId}:comment:${entityContext.commentId}`;
+  }
+  if (entityContext.taskId) return `task:${entityContext.taskId}`;
+  return "attachment:unknown";
+}
+
+function withProvenance(
+  attachment: Pick<PersistedAttachment, "name" | "mimeType" | "size" | "content" | "path">,
+  entityContext: AttachmentEntityContext,
+  redactionStatus: AttachmentRedactionStatus,
+): PersistedAttachment {
+  return {
+    ...attachment,
+    sourceKind: sourceKindForContext(entityContext),
+    sourceRef: sourceRefForContext(entityContext),
+    redactionStatus,
+  };
+}
+
+function validateAttachmentMetadata(attachment: IncomingAttachment): void {
+  if (!isSafeAttachmentFilename(attachment.name)) {
+    throw new AttachmentValidationError("Unsafe attachment filename");
+  }
+  if (!isAllowedAttachmentMimeType(attachment.mimeType)) {
+    throw new AttachmentValidationError("Unsupported attachment MIME type");
+  }
+  if (
+    !Number.isInteger(attachment.size) ||
+    attachment.size < 0 ||
+    attachment.size > ATTACHMENT_MAX_BYTES
+  ) {
+    throw new AttachmentValidationError("Attachment size exceeds limit");
+  }
+}
+
+function assertDecodedSize(buffer: Buffer): void {
+  if (buffer.length > ATTACHMENT_MAX_BYTES) {
+    throw new AttachmentValidationError("Decoded attachment size exceeds limit");
+  }
+}
+
+function decodeBase64Content(content: string): Buffer {
+  if (!isValidBase64AttachmentContent(content)) {
+    throw new AttachmentValidationError("Binary attachment content must be valid base64");
+  }
+  const compact = (content.match(/^data:[^;]+;base64,(.+)$/s)?.[1] ?? content).replace(/\s/g, "");
+  return Buffer.from(compact, "base64");
+}
+
+function decodeContent(content: string, mimeType: string): Buffer {
+  if (content.match(/^data:[^;]+;base64,/s)) {
+    return decodeBase64Content(content);
+  }
+  if (isBinaryAttachmentMimeType(mimeType)) {
+    return decodeBase64Content(content);
+  }
+  return Buffer.from(content, "utf-8");
 }
 
 /**
- * Persist incoming attachments to the project's .ai-factory/files/ directory
+ * Persist incoming attachments to the project's .ai-factory/files directory
  * and return DB-ready metadata.
- *
- * For each attachment:
- * - If it already has a `path` (re-sent from a previous save), keep it as-is.
- * - If it has inline `content`, write to disk and replace with path reference.
- * - If no content and no path, store as metadata-only.
  */
 export async function persistAttachments(
   attachments: IncomingAttachment[],
-  entityContext: {
-    projectRoot: string;
-    taskId?: string;
-    commentId?: string;
-    chatSessionId?: string;
-  },
+  entityContext: AttachmentEntityContext,
 ): Promise<PersistedAttachment[]> {
   if (attachments.length === 0) return [];
 
@@ -58,70 +149,82 @@ export async function persistAttachments(
   const persisted: PersistedAttachment[] = [];
 
   for (const attachment of attachments) {
-    // Already file-backed — keep as-is
+    validateAttachmentMetadata(attachment);
+    const mimeType = normalizeAttachmentMimeType(attachment.mimeType);
+
     if (attachment.path) {
-      log.debug(
-        { name: attachment.name, path: attachment.path },
-        "Attachment already file-backed, skipping write",
+      if (!isSafeAttachmentStoragePath(attachment.path, entityContext)) {
+        throw new AttachmentValidationError("Unsafe attachment storage path");
+      }
+      persisted.push(
+        withProvenance(
+          {
+            name: attachment.name,
+            mimeType,
+            size: attachment.size,
+            content: null,
+            path: attachment.path,
+          },
+          entityContext,
+          attachment.redactionStatus ??
+            (isTextAttachmentMimeType(mimeType) ? "none" : "not_scanned"),
+        ),
       );
-      persisted.push({
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        size: attachment.size,
-        content: null,
-        path: attachment.path,
-      });
       continue;
     }
 
-    // No content — metadata-only
     if (attachment.content === null) {
-      log.debug({ name: attachment.name }, "Metadata-only attachment, no content to persist");
-      persisted.push({
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        size: attachment.size,
-        content: null,
-      });
+      persisted.push(
+        withProvenance(
+          {
+            name: attachment.name,
+            mimeType,
+            size: attachment.size,
+            content: null,
+          },
+          entityContext,
+          isTextAttachmentMimeType(mimeType) ? "none" : "not_scanned",
+        ),
+      );
       continue;
     }
 
-    // Has content — write to disk
-    try {
-      const buffer = decodeContent(attachment.content, attachment.mimeType);
-      const result = await saveAttachment({
-        projectRoot: entityContext.projectRoot,
-        taskId: entityContext.taskId,
-        commentId: entityContext.commentId,
-        chatSessionId: entityContext.chatSessionId,
-        filename: attachment.name,
-        content: buffer,
-      });
-
-      log.debug(
-        { name: attachment.name, relativePath: result.relativePath, size: result.size },
-        "Attachment written to project files",
-      );
-
-      persisted.push({
-        name: result.sanitizedName,
-        mimeType: attachment.mimeType,
-        size: result.size,
-        content: null,
-        path: result.relativePath,
-      });
-    } catch (err) {
-      log.error(
-        { name: attachment.name, taskId: entityContext.taskId, err },
-        "Failed to persist attachment — storing as metadata-only",
-      );
-      persisted.push({
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        size: attachment.size,
-        content: null,
-      });
+    let buffer = decodeContent(attachment.content, mimeType);
+    let redactionStatus: AttachmentRedactionStatus = "not_scanned";
+    if (isTextAttachmentMimeType(mimeType)) {
+      const redacted = redactAttachmentTextContent(buffer.toString("utf-8"));
+      buffer = Buffer.from(redacted.content, "utf-8");
+      redactionStatus = redacted.redactionStatus;
     }
+    assertDecodedSize(buffer);
+
+    const result = await saveAttachment({
+      projectRoot: entityContext.projectRoot,
+      taskId: entityContext.taskId,
+      commentId: entityContext.commentId,
+      chatSessionId: entityContext.chatSessionId,
+      filename: attachment.name,
+      content: buffer,
+    });
+
+    log.debug(
+      { name: attachment.name, relativePath: result.relativePath, size: result.size },
+      "Attachment written to project files",
+    );
+
+    persisted.push(
+      withProvenance(
+        {
+          name: result.sanitizedName,
+          mimeType,
+          size: result.size,
+          content: null,
+          path: result.relativePath,
+        },
+        entityContext,
+        redactionStatus,
+      ),
+    );
   }
 
   return persisted;
@@ -129,7 +232,7 @@ export async function persistAttachments(
 
 /**
  * Clean up storage files for attachments that are being replaced.
- * Call this before persisting the new set when updating.
+ * Call this after the replacement metadata has been persisted successfully.
  */
 export function cleanupReplacedAttachments(
   projectRoot: string,
@@ -144,38 +247,4 @@ export function cleanupReplacedAttachments(
       deleteAttachment(projectRoot, old.path);
     }
   }
-}
-
-/**
- * Decode content string to buffer.
- * Handles base64 data URIs and plain text.
- */
-function decodeContent(content: string, mimeType: string): Buffer {
-  // data URI: "data:<mime>;base64,<data>"
-  const dataUriMatch = content.match(/^data:[^;]+;base64,(.+)$/s);
-  if (dataUriMatch) {
-    return Buffer.from(dataUriMatch[1], "base64");
-  }
-
-  // Plain base64 for binary MIME types
-  if (
-    mimeType.startsWith("image/") ||
-    mimeType.startsWith("audio/") ||
-    mimeType.startsWith("video/") ||
-    mimeType === "application/pdf" ||
-    mimeType === "application/octet-stream"
-  ) {
-    try {
-      const buf = Buffer.from(content, "base64");
-      // Sanity check: if re-encoding matches, it was valid base64
-      if (buf.toString("base64") === content.replace(/\s/g, "")) {
-        return buf;
-      }
-    } catch {
-      // Fall through to text
-    }
-  }
-
-  // Text content
-  return Buffer.from(content, "utf-8");
 }

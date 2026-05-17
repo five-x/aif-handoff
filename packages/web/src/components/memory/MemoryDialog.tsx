@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
 import { Ban, Check, Clock, RefreshCw, Save, X } from "lucide-react";
-import type { MemoryItem, MemoryItemStatus } from "@aif/shared/browser";
+import type {
+  MemoryClaim,
+  MemoryClaimSource,
+  MemoryItem,
+  MemoryItemStatus,
+} from "@aif/shared/browser";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -46,6 +51,163 @@ function formatDate(value: string | null): string {
   return new Date(value).toLocaleString();
 }
 
+function claimSourceHasReference(source: MemoryClaimSource): boolean {
+  if (source.kind === "task") return Boolean(source.taskId || source.ref);
+  if (source.kind === "artifact") return Boolean(source.artifactId || source.path || source.ref);
+  if (source.kind === "evidence") return Boolean(source.evidenceId || source.ref);
+  if (source.kind === "code") return Boolean(source.path || source.ref);
+  if (source.kind === "memory") return Boolean(source.memoryId || source.ref);
+  if (source.kind === "document") return Boolean(source.path || source.ref);
+  if (source.kind === "commit") return Boolean(source.ref);
+  if (source.kind === "url") return Boolean(source.ref && /^https?:\/\//i.test(source.ref));
+  return false;
+}
+
+function claimIsSourceBacked(claim: MemoryClaim): boolean {
+  return claim.text.trim().length > 0 && claim.sources.some(claimSourceHasReference);
+}
+
+function hasOnlySourceBackedClaims(item: MemoryItem): boolean {
+  return item.claims.length > 0 && item.claims.every(claimIsSourceBacked);
+}
+
+interface ClaimSourceLink {
+  label: string;
+  href: string;
+  external?: boolean;
+}
+
+function taskHref(projectId: string | null, taskId: string): string {
+  return projectId
+    ? `/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}`
+    : `#task:${encodeURIComponent(taskId)}`;
+}
+
+function sourceRefHref(projectId: string | null, ref: string): { href: string; external: boolean } {
+  const taskRef = ref.match(/^task:(.+)$/);
+  if (taskRef?.[1]) return { href: taskHref(projectId, taskRef[1]), external: false };
+  if (/^https?:\/\//i.test(ref)) return { href: ref, external: true };
+  return { href: `#ref:${encodeURIComponent(ref)}`, external: false };
+}
+
+function MemorySourceAnchor({
+  children,
+  href,
+  external,
+}: {
+  children: string;
+  href: string;
+  external?: boolean;
+}) {
+  return (
+    <a
+      href={href}
+      target={external ? "_blank" : undefined}
+      rel={external ? "noreferrer" : undefined}
+      className="font-mono text-primary underline-offset-2 hover:underline"
+    >
+      {children}
+    </a>
+  );
+}
+
+function buildClaimSourceLinks(
+  source: MemoryClaimSource,
+  projectId: string | null,
+): ClaimSourceLink[] {
+  const links: ClaimSourceLink[] = [];
+  const addLocal = (label: string, prefix: string, value: string) => {
+    links.push({ label, href: `#${prefix}:${encodeURIComponent(value)}` });
+  };
+
+  if (source.taskId) {
+    links.push({ label: `task:${source.taskId}`, href: taskHref(projectId, source.taskId) });
+  }
+  if (source.artifactId) addLocal(`artifact:${source.artifactId}`, "artifact", source.artifactId);
+  if (source.evidenceId) addLocal(`evidence:${source.evidenceId}`, "evidence", source.evidenceId);
+  if (source.memoryId) addLocal(`memory:${source.memoryId}`, "memory", source.memoryId);
+  if (source.path) addLocal(`path:${source.path}`, "path", source.path);
+  if (source.ref) {
+    const refLink = sourceRefHref(projectId, source.ref);
+    if (!source.taskId && source.ref.match(/^task:(.+)$/)) {
+      links.push({ label: `ref:${source.ref}`, ...refLink });
+    } else if (refLink.external) {
+      links.push({ label: `ref:${source.ref}`, ...refLink });
+    } else {
+      addLocal(`ref:${source.ref}`, "ref", source.ref);
+    }
+  }
+
+  return links;
+}
+
+function MemoryClaimSourceLinks({
+  source,
+  projectId,
+}: {
+  source: MemoryClaimSource;
+  projectId: string | null;
+}) {
+  const links = buildClaimSourceLinks(source, projectId);
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span>{source.kind}</span>
+      {links.map((link) => (
+        <MemorySourceAnchor
+          key={`${link.label}:${link.href}`}
+          href={link.href}
+          external={link.external}
+        >
+          {link.label}
+        </MemorySourceAnchor>
+      ))}
+    </div>
+  );
+}
+
+function MemoryClaimList({
+  claims,
+  projectId,
+}: {
+  claims: MemoryClaim[];
+  projectId: string | null;
+}) {
+  if (claims.length === 0) {
+    return <div className="text-sm text-destructive">No source-backed claims.</div>;
+  }
+
+  return (
+    <div className="grid gap-2">
+      {claims.map((claim) => (
+        <div key={claim.claimId} className="border border-border bg-muted/20 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge size="xs" variant="outline">
+              {claim.type}
+            </Badge>
+            <Badge size="xs" variant={claim.status === "approved" ? "default" : "secondary"}>
+              {claim.status}
+            </Badge>
+            <span className="font-mono text-xs text-muted-foreground">{claim.claimId}</span>
+          </div>
+          <div className="mt-2 text-sm text-foreground">{claim.text}</div>
+          <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+            {claim.sources.map((source, index) => (
+              <MemoryClaimSourceLinks
+                key={`${claim.claimId}:${index}`}
+                source={source}
+                projectId={projectId}
+              />
+            ))}
+            {claim.supersedes.length > 0 && <div>Supersedes: {claim.supersedes.join(", ")}</div>}
+            {claim.contradicts.length > 0 && <div>Contradicts: {claim.contradicts.join(", ")}</div>}
+            <div>Validated: {claim.lastValidatedAt ?? "pending"}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MemoryListItem({
   item,
   selected,
@@ -77,6 +239,14 @@ function MemoryListItem({
         <Badge size="xs" variant="outline">
           {item.scope}
         </Badge>
+        <Badge size="xs" variant="outline">
+          {item.itemType}
+        </Badge>
+        {item.failureFamily && (
+          <Badge size="xs" variant="secondary">
+            {item.failureFamily}
+          </Badge>
+        )}
         {item.redactionStatus === "blocked" && (
           <Badge size="xs" variant="destructive">
             blocked
@@ -97,6 +267,7 @@ function MemoryEditor({ item, projectId }: { item: MemoryItem; projectId: string
   const [content, setContent] = useState(item.content);
   const [tags, setTags] = useState(item.tags.join(", "));
   const [reviewNote, setReviewNote] = useState(item.reviewNote ?? "");
+  const sourceBacked = hasOnlySourceBackedClaims(item);
 
   const busy =
     updateMutation.isPending ||
@@ -126,10 +297,13 @@ function MemoryEditor({ item, projectId }: { item: MemoryItem; projectId: string
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={statusVariant(item.status)}>{item.status}</Badge>
           <Badge variant="outline">{item.scope}</Badge>
+          <Badge variant="outline">{item.itemType}</Badge>
           {item.sourceTaskId && <Badge variant="secondary">task</Badge>}
+          {item.failureFamily && <Badge variant="secondary">{item.failureFamily}</Badge>}
           {item.redactionStatus === "blocked" && (
             <Badge variant="destructive">redaction blocked</Badge>
           )}
+          {!sourceBacked && <Badge variant="destructive">missing source</Badge>}
         </div>
         <div className="text-xs text-muted-foreground">{formatDate(item.expiresAt)}</div>
       </div>
@@ -140,7 +314,34 @@ function MemoryEditor({ item, projectId }: { item: MemoryItem; projectId: string
         </div>
       )}
 
+      {!sourceBacked && (
+        <div className="border-b border-destructive/30 bg-destructive/10 px-5 py-3 text-sm text-destructive">
+          Approval requires every claim to include a task, artifact, evidence, code, document,
+          commit, URL, or memory source.
+        </div>
+      )}
+
       <div className="grid flex-1 gap-4 overflow-y-auto px-5 py-4">
+        <div className="grid gap-2 text-xs text-muted-foreground">
+          {item.sourceTaskId && (
+            <div>
+              <MemorySourceAnchor href={taskHref(projectId, item.sourceTaskId)}>
+                {`Source task: ${item.sourceTaskId}`}
+              </MemorySourceAnchor>
+            </div>
+          )}
+          {item.sourceRef && (
+            <div>
+              <MemorySourceAnchor
+                href={sourceRefHref(projectId, item.sourceRef).href}
+                external={sourceRefHref(projectId, item.sourceRef).external}
+              >
+                {`Source ref: ${item.sourceRef}`}
+              </MemorySourceAnchor>
+            </div>
+          )}
+        </div>
+
         <label className="grid gap-1 text-xs font-medium uppercase text-muted-foreground">
           Title
           <input
@@ -185,6 +386,11 @@ function MemoryEditor({ item, projectId }: { item: MemoryItem; projectId: string
             className="min-h-[80px]"
           />
         </label>
+
+        <section className="grid gap-2">
+          <div className="text-xs font-medium uppercase text-muted-foreground">Claims</div>
+          <MemoryClaimList claims={item.claims} projectId={projectId} />
+        </section>
       </div>
 
       <div className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-3">
@@ -213,9 +419,14 @@ function MemoryEditor({ item, projectId }: { item: MemoryItem; projectId: string
         <Button
           size="sm"
           onClick={() => approveMutation.mutate({ id: item.id, note: reviewNote || null })}
-          disabled={busy || item.status === "approved" || item.redactionStatus === "blocked"}
+          disabled={
+            busy ||
+            item.status === "approved" ||
+            item.redactionStatus === "blocked" ||
+            !sourceBacked
+          }
         >
-          {item.redactionStatus === "blocked" ? (
+          {item.redactionStatus === "blocked" || !sourceBacked ? (
             <X className="mr-1.5 h-4 w-4" />
           ) : (
             <Check className="mr-1.5 h-4 w-4" />
