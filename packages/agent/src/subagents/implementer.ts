@@ -905,6 +905,7 @@ interface GitCaptureResult {
 interface AuditRepairEvidenceByRoot {
   root: string;
   files: string[];
+  lineRefs: string[];
   command: GitCaptureResult;
   evidenceUnit: AuditEvidenceUnit | null;
 }
@@ -972,6 +973,47 @@ function fileHasLineEvidence(projectRoot: string, path: string): boolean {
   }
 }
 
+function isAuditRepairMetadataOnlyLineOne(input: {
+  path: string;
+  line: number;
+  text: string | null;
+}): boolean {
+  if (input.line !== 1 || input.text == null) return false;
+  const trimmed = input.text.trim();
+  if (!trimmed) return true;
+  if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|kt|cs|c|cpp|h|hpp)$/i.test(input.path)) {
+    return /^(?:\/\/|\/\*|\*|#(?!\s*(?:!|include\b|define\b))|<!--)/.test(trimmed);
+  }
+  if (/^(?:---|\+\+\+|#\s+|<!--|\/\/|\/\*|\*)/.test(trimmed)) return true;
+  if (/^[{[]$/.test(trimmed)) return true;
+  return false;
+}
+
+function firstAuditRepairLineEvidenceRef(projectRoot: string, path: string): string | null {
+  try {
+    const content = readFileSync(resolve(projectRoot, path), "utf8");
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      if (!line.trim()) continue;
+      const lineNumber = index + 1;
+      if (
+        isAuditRepairMetadataOnlyLineOne({
+          path,
+          line: lineNumber,
+          text: line,
+        })
+      ) {
+        continue;
+      }
+      return `${path}:${lineNumber}`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function collectAuditRepairEvidenceFiles(
   projectRoot: string,
   scopeRoot: string,
@@ -1018,6 +1060,18 @@ function collectAuditRepairEvidenceFiles(
   return files;
 }
 
+function hasReadableDeclaredAuditScope(projectRoot: string, description: string | null): boolean {
+  const roots = parseAuditScopeRoots(description);
+  return (
+    roots.length > 0 &&
+    roots.every((root) =>
+      collectAuditRepairEvidenceFiles(projectRoot, root).some((file) =>
+        Boolean(firstAuditRepairLineEvidenceRef(projectRoot, file)),
+      ),
+    )
+  );
+}
+
 const AUDIT_REPAIR_RISK_STOPWORDS = new Set([
   "audit",
   "evidence",
@@ -1054,6 +1108,35 @@ function deriveAuditRepairRiskTerms(description: string, roots: string[]): strin
   return [...terms].slice(0, 6);
 }
 
+function sanitizeAuditRepairRiskDescription(description: string, fallback: string): string {
+  const sanitized = description
+    .replace(/\bmay\s+contain\b/gi, "was checked for")
+    .replace(/\blikely\s+used\b/gi, "was checked as used")
+    .replace(/\blikely\s+indicates\b/gi, "was checked as indicating")
+    .replace(/\bconfirmed\s+(?:the\s+)?file\s+exists\b/gi, "file content was inspected")
+    .replace(/\bconfirmed\s+([^.\n]+?)\s+exists\b/gi, "$1 was inspected")
+    .replace(/\s+/g, " ")
+    .trim();
+  return sanitized || fallback;
+}
+
+function slugAuditRepairRiskId(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "scope";
+}
+
+function buildFallbackAuditRiskHypotheses(roots: string[]): AuditRepairRiskHypothesis[] {
+  return roots.map((root) => ({
+    id: `risk-${slugAuditRepairRiskId(root)}-audit-coverage`,
+    description: `Absence check for actionable audit defects in ${root}.`,
+    scopeIds: [root],
+    terms: [],
+  }));
+}
+
 function parseAuditRiskHypotheses(
   description: string | null,
   roots: string[],
@@ -1075,21 +1158,31 @@ function parseAuditRiskHypotheses(
 
   const sourceLines =
     riskLines.length > 0 ? riskLines : lines.filter((line) => /\brisk-[\w-]+\b/i.test(line));
+  const sourceText = sourceLines.join(" ");
   const risks = new Map<string, AuditRepairRiskHypothesis>();
-  for (const line of sourceLines) {
-    const id = line.match(/\brisk-[\w-]+\b/i)?.[0].toLowerCase();
+  const matches = [...sourceText.matchAll(/\brisk-[\w-]+\b/gi)];
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const id = match[0]?.toLowerCase();
     if (!id || risks.has(id)) continue;
-    const descriptionText = line
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? sourceText.length;
+    const segment = sourceText.slice(start, end);
+    const rawDescription = segment
       .replace(/^\s*[-*]\s*/, "")
       .replace(new RegExp(`^${id}\\s*[:\\-]?\\s*`, "i"), "")
       .trim();
-    const lowered = line.toLowerCase();
+    const lowered = segment.toLowerCase();
     const scopeIds = roots.filter((root) => lowered.includes(root.toLowerCase()));
+    const boundScopeIds = scopeIds.length > 0 ? scopeIds : roots;
     risks.set(id, {
       id,
-      description: descriptionText || line.trim(),
-      scopeIds,
-      terms: deriveAuditRepairRiskTerms(line, roots),
+      description: sanitizeAuditRepairRiskDescription(
+        rawDescription,
+        `Absence check for actionable audit defects in ${boundScopeIds.join(", ")}.`,
+      ),
+      scopeIds: boundScopeIds,
+      terms: deriveAuditRepairRiskTerms(segment, roots),
     });
   }
   return [...risks.values()].sort((left, right) => left.id.localeCompare(right.id));
@@ -1198,10 +1291,21 @@ function buildAuditReportManifest(input: {
     ...input.evidenceByRoot.flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : [])),
     ...input.riskEvidence.flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : [])),
   ].sort();
+  const evidenceRefsForRisk = (risk: AuditRepairRiskHypothesis): string[] =>
+    [
+      ...input.evidenceByRoot
+        .filter((entry) => risk.scopeIds.includes(entry.root) && entry.evidenceUnit)
+        .map((entry) => entry.evidenceUnit?.id)
+        .filter((id): id is string => Boolean(id)),
+      ...input.riskEvidence
+        .filter((entry) => entry.riskId === risk.id && entry.evidenceUnit)
+        .map((entry) => entry.evidenceUnit?.id)
+        .filter((id): id is string => Boolean(id)),
+    ].sort();
   const scopeCoverage = input.evidenceByRoot.map((entry) => ({
     root: entry.root,
     covered:
-      entry.files.length > 0 &&
+      entry.lineRefs.length > 0 &&
       (Boolean(entry.evidenceUnit) ||
         input.riskEvidence.some(
           (riskEntry) => riskEntry.root === entry.root && riskEntry.evidenceUnit,
@@ -1223,7 +1327,7 @@ function buildAuditReportManifest(input: {
             evidenceRefs,
             riskIds: input.decision.riskHypotheses.map((risk) => risk.id),
             reasoning:
-              "Deterministic repair used risk-specific scoped source inspections and removed unvalidated candidate findings.",
+              "Deterministic repair used scoped source inspections and removed unvalidated candidate findings.",
           },
         ]
       : [];
@@ -1247,11 +1351,7 @@ function buildAuditReportManifest(input: {
       id: risk.id,
       description: risk.description,
       scopeIds: risk.scopeIds,
-      evidenceRefs: input.riskEvidence
-        .filter((entry) => entry.riskId === risk.id && entry.evidenceUnit)
-        .map((entry) => entry.evidenceUnit?.id)
-        .filter((id): id is string => Boolean(id))
-        .sort(),
+      evidenceRefs: evidenceRefsForRisk(risk),
       status: input.decision.outcome === "validated_no_findings" ? "covered" : "inconclusive",
     })),
     findings: [],
@@ -1354,71 +1454,21 @@ function buildDeterministicAuditReportRepairContent(input: {
 } {
   const scopeRoots = parseAuditScopeRoots(input.task.description);
   const roots = scopeRoots;
-  const riskHypotheses = parseAuditRiskHypotheses(input.task.description, roots);
+  const riskHypotheses = (() => {
+    const parsed = parseAuditRiskHypotheses(input.task.description, roots);
+    return parsed.length > 0 ? parsed : buildFallbackAuditRiskHypotheses(roots);
+  })();
   const sourceSnapshot = currentAuditReportSourceSnapshot(input.projectRoot);
   const evidenceByRoot = roots.map((root) => {
     const files = collectAuditRepairEvidenceFiles(input.projectRoot, root);
     const inspectionTargets = files.slice(0, 3);
-    const gitArgs =
-      inspectionTargets.length > 0
-        ? ["grep", "-n", "-m", "5", ".", "--", ...inspectionTargets]
-        : ["grep", "-n", "-m", "5", ".", "--", root];
+    const lineRefs = inspectionTargets
+      .map((file) => firstAuditRepairLineEvidenceRef(input.projectRoot, file))
+      .filter((ref): ref is string => Boolean(ref));
+    const gitArgs = ["grep", "-n", "-m", "5", ".", "--", root];
     const command = runGitCapture(input.projectRoot, gitArgs);
-    const evidenceUnit = persistAuditEvidencePayload(
-      input.task.id,
-      input.projectRoot,
-      buildAuditEvidencePayload({
-        toolName: "deterministic_audit_report_repair",
-        evidenceKind: "shell_command",
-        evidenceGrade: "substantive",
-        scopeIds: [root],
-        paths: inspectionTargets,
-        command: command.command,
-        exitCode: command.exitCode,
-        output: command.output,
-        maxPreviewChars: 2_000,
-      }),
-    );
-    return {
-      root,
-      files,
-      command,
-      evidenceUnit,
-    };
-  });
-  const riskEvidence = riskHypotheses.flatMap((risk) =>
-    risk.scopeIds.map((root) => {
-      const files =
-        evidenceByRoot.find((entry) => entry.root === root)?.files.slice(0, 3) ??
-        collectAuditRepairEvidenceFiles(input.projectRoot, root);
-      const pattern = buildAuditRepairRiskPattern(risk.terms);
-      const command =
-        pattern && files.length > 0
-          ? runGitCapture(input.projectRoot, [
-              "grep",
-              "-n",
-              "-m",
-              "5",
-              "-E",
-              pattern,
-              "--",
-              ...files,
-            ])
-          : {
-              args: [],
-              command: "risk-specific grep skipped because no risk terms were parsed",
-              exitCode: 1,
-              output:
-                files.length === 0
-                  ? "No scoped files were available for risk-specific deterministic repair."
-                  : "No risk-specific terms were parsed for deterministic repair.",
-            };
-      const hasSubstantiveRiskEvidence =
-        files.length > 0 &&
-        pattern !== null &&
-        command.exitCode === 0 &&
-        command.output.trim().length > 0;
-      const evidenceUnit = hasSubstantiveRiskEvidence
+    const evidenceUnit =
+      lineRefs.length > 0 && command.exitCode === 0
         ? persistAuditEvidencePayload(
             input.task.id,
             input.projectRoot,
@@ -1427,8 +1477,10 @@ function buildDeterministicAuditReportRepairContent(input: {
               evidenceKind: "shell_command",
               evidenceGrade: "substantive",
               scopeIds: [root],
-              riskHypothesisIds: [risk.id],
-              paths: files,
+              riskHypothesisIds: riskHypotheses
+                .filter((risk) => risk.scopeIds.includes(root))
+                .map((risk) => risk.id),
+              paths: inspectionTargets,
               command: command.command,
               exitCode: command.exitCode,
               output: command.output,
@@ -1436,31 +1488,100 @@ function buildDeterministicAuditReportRepairContent(input: {
             }),
           )
         : null;
-      return {
-        riskId: risk.id,
-        root,
-        files,
-        terms: risk.terms,
-        command,
-        evidenceUnit,
-      };
-    }),
-  );
+    return {
+      root,
+      files,
+      lineRefs,
+      command,
+      evidenceUnit,
+    };
+  });
+  const riskEvidence = riskHypotheses
+    .flatMap((risk) =>
+      risk.scopeIds.map((root) => {
+        const files =
+          evidenceByRoot.find((entry) => entry.root === root)?.files.slice(0, 3) ??
+          collectAuditRepairEvidenceFiles(input.projectRoot, root);
+        const pattern = buildAuditRepairRiskPattern(risk.terms);
+        const command =
+          pattern && files.length > 0
+            ? runGitCapture(input.projectRoot, [
+                "grep",
+                "-n",
+                "-m",
+                "5",
+                "-E",
+                pattern,
+                "--",
+                ...files,
+              ])
+            : {
+                args: [],
+                command: "",
+                exitCode: 1,
+                output: "",
+              };
+        const hasSubstantiveRiskEvidence =
+          files.length > 0 &&
+          pattern !== null &&
+          command.exitCode === 0 &&
+          command.output.trim().length > 0;
+        const evidenceUnit = hasSubstantiveRiskEvidence
+          ? persistAuditEvidencePayload(
+              input.task.id,
+              input.projectRoot,
+              buildAuditEvidencePayload({
+                toolName: "deterministic_audit_report_repair",
+                evidenceKind: "shell_command",
+                evidenceGrade: "substantive",
+                scopeIds: [root],
+                riskHypothesisIds: [risk.id],
+                paths: files,
+                command: command.command,
+                exitCode: command.exitCode,
+                output: command.output,
+                maxPreviewChars: 2_000,
+              }),
+            )
+          : null;
+        return {
+          riskId: risk.id,
+          root,
+          files,
+          terms: risk.terms,
+          command,
+          evidenceUnit,
+        };
+      }),
+    )
+    .filter((entry) => entry.evidenceUnit !== null);
   const decisionReasons: string[] = [];
   if (roots.length === 0) decisionReasons.push("No concrete audit scope roots were parsed.");
   if (riskHypotheses.length === 0) {
     decisionReasons.push("No risk hypotheses were parsed from the task description.");
+  }
+  for (const entry of evidenceByRoot) {
+    if (entry.files.length === 0 || entry.lineRefs.length === 0) {
+      decisionReasons.push(`Scope root ${entry.root} has no readable scoped source line evidence.`);
+      continue;
+    }
+    if (!entry.evidenceUnit) {
+      decisionReasons.push(`Scope root ${entry.root} has no captured scoped command evidence.`);
+    }
   }
   for (const risk of riskHypotheses) {
     if (risk.scopeIds.length === 0) {
       decisionReasons.push(`Risk ${risk.id} does not reference a declared scope root.`);
       continue;
     }
-    const hasBoundEvidence = riskEvidence.some(
-      (entry) => entry.riskId === risk.id && entry.evidenceUnit !== null,
+    const hasBoundEvidence = evidenceByRoot.some(
+      (entry) =>
+        risk.scopeIds.includes(entry.root) &&
+        entry.lineRefs.length > 0 &&
+        entry.evidenceUnit !== null,
     );
     if (!hasBoundEvidence) {
-      decisionReasons.push(`Risk ${risk.id} has no bound risk-specific substantive evidence.`);
+      decisionReasons.push(`Risk ${risk.id} has no bound scoped source evidence.`);
     }
   }
   const decision: AuditReportRepairDecision = {
@@ -1468,7 +1589,6 @@ function buildDeterministicAuditReportRepairContent(input: {
     reasons: decisionReasons,
     riskHypotheses,
   };
-  const checkedFiles = [...new Set(evidenceByRoot.flatMap((entry) => entry.files))].sort();
   const bodyLines =
     decision.outcome === "validated_no_findings"
       ? [
@@ -1511,11 +1631,27 @@ function buildDeterministicAuditReportRepairContent(input: {
     "| --- | --- | --- |",
     ...evidenceByRoot.map((entry) => {
       const evidence =
-        entry.files.length > 0
-          ? entry.files.map((file) => `\`${file}:1\``).join(", ")
+        entry.lineRefs.length > 0
+          ? entry.lineRefs.map((ref) => `\`${ref}\``).join(", ")
           : "No tracked file evidence found";
       return `| \`${entry.root}\` | ${evidence} | Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\` |`;
     }),
+    ...(decision.outcome === "validated_no_findings"
+      ? [
+          "",
+          "## No-Findings Claims",
+          "",
+          ...riskHypotheses.map((risk) => {
+            const refs = evidenceByRoot
+              .filter((entry) => risk.scopeIds.includes(entry.root))
+              .flatMap((entry) => entry.lineRefs)
+              .slice(0, 6);
+            return `- Absence reasoning: ${risk.id} covered ${refs
+              .map((ref) => `\`${ref}\``)
+              .join(", ")}; no actionable finding was identified in the scoped inspection.`;
+          }),
+        ]
+      : []),
     "",
     "## Risk-Specific Evidence",
     "",
@@ -1524,12 +1660,17 @@ function buildDeterministicAuditReportRepairContent(input: {
           (entry) =>
             `- ${entry.riskId} / \`${entry.root}\`: Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\``,
         )
-      : ["- No risk-specific evidence commands were run."]),
+      : decision.outcome === "validated_no_findings"
+        ? ["- Scoped evidence above covers each declared risk hypothesis."]
+        : ["- No risk-specific evidence commands were run."]),
     "",
     "## Checked Files",
     "",
-    ...(checkedFiles.length > 0
-      ? checkedFiles.map((file) => `- \`${file}:1\``)
+    ...(evidenceByRoot.some((entry) => entry.lineRefs.length > 0)
+      ? evidenceByRoot
+          .flatMap((entry) => entry.lineRefs)
+          .sort()
+          .map((ref) => `- \`${ref}\``)
       : ["- No tracked files were found for the declared scope."]),
     "",
     "## Checked Commands",
@@ -2347,7 +2488,7 @@ function runDeterministicAuditReportRepair(input: {
   const issueCodes = auditReportValidationIssueCodes(validation);
   const resultText = [
     status === "accepted"
-      ? "Deterministic audit report repair completed from risk-specific declared scope evidence and passed strict validation."
+      ? "Deterministic audit report repair completed from scoped source evidence and passed strict validation."
       : "Deterministic audit report repair completed as source_inconclusive.",
     `Report artifact: ${input.artifactPath}`,
     status === "accepted"
@@ -2690,6 +2831,16 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       code,
     ),
   );
+  const localAuditReportScopeRepairable = Boolean(
+    expectedAuditReportArtifactPath && hasReadableDeclaredAuditScope(projectRoot, task.description),
+  );
+  const currentSourceInconclusiveLocalAudit =
+    Boolean(
+      expectedAuditReportArtifactPath && task.reworkRequested && localAuditReportScopeRepairable,
+    ) &&
+    (roadmapArtifact?.state === "source_inconclusive" ||
+      currentAuditReportValidation?.manifest?.outcome === "source_inconclusive" ||
+      currentAuditReportValidation?.sourceClassification === "source_inconclusive");
 
   if (
     selectedPlan &&
@@ -2723,7 +2874,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   if (
     expectedAuditReportArtifactPath &&
     task.reworkRequested &&
-    roadmapArtifact?.state === "source_inconclusive"
+    roadmapArtifact?.state === "source_inconclusive" &&
+    !currentSourceInconclusiveLocalAudit
   ) {
     const blockedReason = terminalizeSourceInconclusiveAuditReport({
       task,
@@ -2759,7 +2911,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   if (
     expectedAuditReportArtifactPath &&
     task.reworkRequested &&
-    currentAuditReportValidation?.manifest?.outcome === "source_inconclusive"
+    currentAuditReportValidation?.manifest?.outcome === "source_inconclusive" &&
+    !currentSourceInconclusiveLocalAudit
   ) {
     const blockedReason = terminalizeSourceInconclusiveAuditReport({
       task,
@@ -2827,7 +2980,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     expectedAuditReportArtifactPath &&
     task.reworkRequested &&
     currentAuditReportValidation?.ok &&
-    currentAuditReportValidation.sourceClassification === "source_inconclusive"
+    currentAuditReportValidation.sourceClassification === "source_inconclusive" &&
+    !currentSourceInconclusiveLocalAudit
   ) {
     const blockedReason = terminalizeSourceInconclusiveAuditReport({
       task,
@@ -2887,9 +3041,12 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
 
   if (
     expectedAuditReportArtifactPath &&
-    (auditEvidenceRepairMode || currentReportNeedsDeterministicRepair) &&
-    shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes) &&
-    !repeatedDeterministicAuditReportRepair
+    (auditEvidenceRepairMode ||
+      currentReportNeedsDeterministicRepair ||
+      currentSourceInconclusiveLocalAudit) &&
+    (currentSourceInconclusiveLocalAudit ||
+      shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)) &&
+    (!repeatedDeterministicAuditReportRepair || currentSourceInconclusiveLocalAudit)
   ) {
     const nowIso = new Date().toISOString();
     const repairResult = runDeterministicAuditReportRepair({
@@ -2928,6 +3085,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     expectedAuditReportArtifactPath &&
     task.reworkRequested &&
     repeatedDeterministicAuditReportRepair &&
+    !currentSourceInconclusiveLocalAudit &&
     (currentAuditReportValidation == null ||
       !isTrustedValidAuditReportValidation(currentAuditReportValidation))
   ) {

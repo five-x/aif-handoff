@@ -1434,8 +1434,8 @@ describe("runImplementer rework behavior", () => {
     });
     mkdirSync(join(projectRoot, "src"), { recursive: true });
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
-    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
-    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\n", "utf8");
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes\n", "utf8");
+    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\nOwnership boundaries\n", "utf8");
     writeFileSync(join(projectRoot, "pyproject.toml"), '[project]\nname = "test"\n', "utf8");
     writeFileSync(join(projectRoot, "src", "config.py"), "VALUE = 1\n", "utf8");
     writeFileSync(
@@ -1517,41 +1517,36 @@ describe("runImplementer rework behavior", () => {
 
     expect(queryMock).not.toHaveBeenCalled();
     const repaired = readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8");
-    expect(repaired).toContain("Audit source inconclusive.");
-    expect(repaired).toContain("`README.md:1`");
-    expect(repaired).toContain("`AGENTS.md:1`");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("`README.md:2`");
+    expect(repaired).toContain("`AGENTS.md:2`");
     expect(repaired).toContain("`pyproject.toml:1`");
     expect(repaired).toContain("`src/config.py:1`");
     expect(repaired).not.toContain("Missing Ownership Clarity");
     expect(repaired).not.toContain("1234567");
     expect(repaired).toContain("```audit-report-manifest");
     const manifest = readAuditReportManifest(repaired);
-    expect(manifest.outcome).toBe("source_inconclusive");
-    expect(manifest.noFindingsClaims).toEqual([]);
+    expect(manifest.outcome).toBe("validated_no_findings");
+    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-readme-md-audit-coverage");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-deterministic-repair");
     if (!artifact) throw new Error("missing deterministic repair artifact");
-    expect(artifact.state).toBe("source_inconclusive");
-    expect(artifact.failureFamily).toBe("source_inconclusive");
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
     const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
     expect(attempts).toHaveLength(2);
     expect(attempts[0]?.state).toBe("invalid");
-    expect(attempts[1]?.state).toBe("source_inconclusive");
-    expect(attempts[1]?.classification).toBe("source_inconclusive");
-    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
+    expect(attempts[1]?.state).toBe("valid");
+    expect(attempts[1]?.classification).toBe("validated_no_findings");
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-deterministic-repair"))
       .get();
-    expect(updatedTask?.status).toBe("blocked_external");
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.manualReviewRequired).toBe(false);
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
-    expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
     expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed as source_inconclusive",
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
     );
-    expect(updatedTask?.implementationLog).toContain("terminal non-trusted");
   }, 60_000);
 
   it("deterministically rewrites structurally invalid audit validator reports", async () => {
@@ -1567,7 +1562,7 @@ describe("runImplementer rework behavior", () => {
     });
     mkdirSync(join(projectRoot, "src"), { recursive: true });
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
-    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nRuntime notes\n", "utf8");
     writeFileSync(join(projectRoot, "src", "alpha.ts"), "export const alpha = 1;\n", "utf8");
     writeFileSync(join(projectRoot, "src", "beta.ts"), "export const beta = 1;\n", "utf8");
     writeFileSync(join(projectRoot, "src", "gamma.ts"), "export const gamma = 1;\n", "utf8");
@@ -1637,8 +1632,8 @@ describe("runImplementer rework behavior", () => {
 
     expect(queryMock).not.toHaveBeenCalled();
     const repaired = readFileSync(join(projectRoot, "audit", "security.md"), "utf8");
-    expect(repaired).toContain("Audit source inconclusive.");
-    expect(repaired).toContain("`README.md:1`");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("`README.md:2`");
     expect(repaired).toContain("`src/alpha.ts:1`");
     expect(repaired).toContain("`src/beta.ts:1`");
     expect(repaired).toContain("`src/gamma.ts:1`");
@@ -1646,25 +1641,21 @@ describe("runImplementer rework behavior", () => {
     expect(repaired).not.toContain("would show");
     expect(repaired).toContain("```audit-report-manifest");
     const manifest = readAuditReportManifest(repaired);
-    expect(manifest.outcome).toBe("source_inconclusive");
-    expect(manifest.noFindingsClaims).toEqual([]);
+    expect(manifest.outcome).toBe("validated_no_findings");
+    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-src-audit-coverage");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-validator-repair");
     if (!artifact) throw new Error("missing repeated validator repair artifact");
-    expect(artifact.state).toBe("source_inconclusive");
-    expect(artifact.failureFamily).toBe("source_inconclusive");
-    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-validator-repair"))
       .get();
-    expect(updatedTask?.status).toBe("blocked_external");
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.manualReviewRequired).toBe(false);
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
-    expect(updatedTask?.blockedReason).toContain("audit/security.md");
     expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed as source_inconclusive",
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
     );
   }, 60_000);
 
@@ -2267,7 +2258,7 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
-  it("keeps explicit product scope with only generic evidence source_inconclusive", async () => {
+  it("repairs explicit readable product scope to validated no-findings with scoped evidence", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -2355,30 +2346,28 @@ describe("runImplementer rework behavior", () => {
     await runImplementer("task-audit-generic-evidence-repair", projectRoot);
 
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
-    expect(repaired).toContain("Audit source inconclusive.");
-    expect(repaired).toContain(
-      "Risk risk-timeout has no bound risk-specific substantive evidence.",
-    );
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("Absence reasoning: risk-timeout covered `src/app.ts:1`");
     expect(repaired).toContain("`src/app.ts:1`");
     const manifest = readAuditReportManifest(repaired);
-    expect(manifest.outcome).toBe("source_inconclusive");
-    expect(manifest.noFindingsClaims).toEqual([]);
+    expect(manifest.outcome).toBe("validated_no_findings");
+    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-timeout");
     expect(JSON.stringify(manifest.riskHypotheses)).toContain("risk-timeout");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-generic-evidence-repair");
     if (!artifact) throw new Error("missing generic evidence repair artifact");
-    expect(artifact.state).toBe("source_inconclusive");
-    expect(artifact.failureFamily).toBe("source_inconclusive");
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
     expect(listRoadmapBatchArtifactAttempts(artifact.id)[0]?.classification).toBe(
-      "source_inconclusive",
+      "validated_no_findings",
     );
-    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-generic-evidence-repair"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.implementationLog).toContain("terminal non-trusted");
+    expect(updatedTask?.implementationLog).toContain("passed strict validation");
   });
 
   it("keeps deterministic no-findings repair trusted when evidence is risk-specific", async () => {
