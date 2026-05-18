@@ -2164,7 +2164,10 @@ function collectSynthesisNoFindingsCommandEvidence(
 function isLowQualitySynthesisCommandEvidence(evidence: string): boolean {
   return (
     /\bgit\s+grep\s+-n\s+-m\s+1\s+\.\s+--\s+/i.test(evidence) ||
-    /\bgit\s+ls-files\s+--\s+/i.test(evidence)
+    /\bgit\s+ls-files\s+--\s+/i.test(evidence) ||
+    /\bgit\s+grep\s+-n\s+-m\s+1\s+-E\b[^`'\n"]*[`'"]?[^`'\n"]*(?:owner-area|defects|that|produce)[^`'\n"]*[`'"]?/i.test(
+      evidence,
+    )
   );
 }
 
