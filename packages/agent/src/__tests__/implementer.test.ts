@@ -12,6 +12,7 @@ import {
   computeAuditReportContentSha256,
   hashAifPlanManifest,
   resolveAuditPlanId,
+  evaluateTaskCompletionEvidence,
   validateImplementationManifest,
   validateAuditReportArtifact,
 } from "@aif/shared";
@@ -655,6 +656,21 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
       "Deterministic audit synthesis rework completed",
+    );
+    expect(updatedTask?.agentActivityLog).toContain(
+      "implement-coordinator started (deterministic audit synthesis)",
+    );
+    expect(updatedTask?.agentActivityLog).toContain("Tool: read_file audit/config.md");
+    expect(updatedTask?.agentActivityLog).toContain("Tool: write_file audit/summary.md");
+    const completionEvidence = evaluateTaskCompletionEvidence({
+      task: { ...updatedTask!, manualReviewRequired: false },
+      projectRoot,
+      auditEvidenceUnits,
+      requireAuditLedgerEvidence: true,
+    });
+    expect(completionEvidence.evidence.implementationToolActivityCount).toBeGreaterThan(0);
+    expect(completionEvidence.issues.map((issue) => issue.code)).not.toContain(
+      "missing_implementation_tool_activity",
     );
   });
 

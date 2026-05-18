@@ -1023,6 +1023,35 @@ function logDeterministicAuditReportRepairActivity(input: {
   flushActivityQueue(input.taskId);
 }
 
+function logDeterministicAuditSynthesisActivity(input: {
+  taskId: string;
+  phase: "started" | "complete";
+  artifactPath: string;
+  sourceArtifactPaths?: string[];
+}): void {
+  if (input.phase === "started") {
+    logActivity(
+      input.taskId,
+      "Agent",
+      "implement-coordinator started (deterministic audit synthesis)",
+    );
+    logActivity(input.taskId, "Tool", `list_files ${dirname(input.artifactPath) || "."}`);
+    for (const sourceArtifactPath of (input.sourceArtifactPaths ?? []).slice(0, 5)) {
+      logActivity(input.taskId, "Tool", `read_file ${sourceArtifactPath}`);
+    }
+    logActivity(input.taskId, "Tool", `write_file ${input.artifactPath}`);
+    flushActivityQueue(input.taskId);
+    return;
+  }
+
+  logActivity(
+    input.taskId,
+    "Agent",
+    "implement-coordinator complete (deterministic audit synthesis)",
+  );
+  flushActivityQueue(input.taskId);
+}
+
 function normalizeAuditScopeRoot(path: string): string | null {
   const trimmed = path
     .trim()
@@ -3270,6 +3299,15 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
 
   if (expectedSynthesisArtifactPath) {
     const nowIso = new Date().toISOString();
+    logDeterministicAuditSynthesisActivity({
+      taskId,
+      phase: "started",
+      artifactPath: expectedSynthesisArtifactPath,
+      sourceArtifactPaths: [
+        ...validatedAuditArtifacts.map((artifact) => artifact.artifactPath),
+        ...weakAuditArtifacts.map((artifact) => artifact.artifactPath),
+      ],
+    });
     const resultText = runDeterministicAuditSynthesisRework({
       task,
       projectRoot,
@@ -3284,6 +3322,11 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       updatedAt: nowIso,
     });
     logActivity(taskId, "Agent", "Deterministic audit synthesis rework complete");
+    logDeterministicAuditSynthesisActivity({
+      taskId,
+      phase: "complete",
+      artifactPath: expectedSynthesisArtifactPath,
+    });
     log.info(
       { taskId, artifactPath: expectedSynthesisArtifactPath },
       "Audit synthesis completed deterministically",
