@@ -840,6 +840,10 @@ describe("runImplementer rework behavior", () => {
         "```",
         "src/config.ts:1:export const timeoutMs = 1000;",
         "```",
+        "- Command `git grep -n -m 1 . -- src/config.ts` output:",
+        "```",
+        "src/config.ts:1:export const timeoutMs = 1000;",
+        "```",
         "",
       ].join("\n"),
       "utf8",
@@ -924,6 +928,8 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("`README.md:2`");
     expect(summary).toContain("`src/config.ts:1`");
     expect(summary).toContain('Command `rg -n "runtime evidence" README.md` output:');
+    expect(summary).not.toContain("git grep -n -m 1 . --");
+    expect(summary).not.toContain("git ls-files --");
     expect(summary).toContain("Audit outcome: Validated no-findings");
     expect(summary).not.toContain("Risk:");
     expect(summary).not.toContain("Proposed fix:");

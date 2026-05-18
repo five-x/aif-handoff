@@ -2152,21 +2152,50 @@ function collectSynthesisNoFindingsCommandEvidence(
     commandsByArtifact.set(
       artifact.artifactPath,
       extractAuditSynthesisCommandEvidence(artifact.content).filter(
-        (evidence) => !containsIgnoredSynthesisEvidencePath(evidence),
+        (evidence) =>
+          !containsIgnoredSynthesisEvidencePath(evidence) &&
+          !isLowQualitySynthesisCommandEvidence(evidence),
       ),
     );
   }
   return commandsByArtifact;
 }
 
+function isLowQualitySynthesisCommandEvidence(evidence: string): boolean {
+  return (
+    /\bgit\s+grep\s+-n\s+-m\s+1\s+\.\s+--\s+/i.test(evidence) ||
+    /\bgit\s+ls-files\s+--\s+/i.test(evidence)
+  );
+}
+
 function firstOutputLine(text: string): string {
   return text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "<empty>";
 }
 
-function formatSynthesisCheckedCommand(projectRoot: string, evidencePath: string): string[] {
-  const output = runGitText(projectRoot, ["ls-files", "--", evidencePath]);
+function lineNumberFromLineEvidenceRef(ref: string): number | null {
+  const match = ref.match(/:(\d+)(?::\d+)?$/);
+  if (!match) return null;
+  const line = Number.parseInt(match[1], 10);
+  return Number.isFinite(line) && line > 0 ? line : null;
+}
+
+function readLineEvidenceOutput(projectRoot: string, ref: string): string {
+  const evidencePath = pathFromLineEvidenceRef(ref);
+  const lineNumber = lineNumberFromLineEvidenceRef(ref);
+  if (!lineNumber) return "<missing line reference>";
+  const absolutePath = resolve(projectRoot, evidencePath);
+  if (!existsSync(absolutePath)) return "<missing file>";
+  const lines = readFileSync(absolutePath, "utf8").split(/\r?\n/);
+  const line = lines[lineNumber - 1];
+  return line === undefined ? "<missing line>" : line;
+}
+
+function formatSynthesisCheckedLineCommand(projectRoot: string, ref: string): string[] {
+  const evidencePath = pathFromLineEvidenceRef(ref);
+  const lineNumber = lineNumberFromLineEvidenceRef(ref);
+  const output = readLineEvidenceOutput(projectRoot, ref);
   return [
-    `- Command \`git ls-files -- ${evidencePath}\` output:`,
+    `- Command \`sed -n '${lineNumber ?? 1}p' -- ${evidencePath}\` output:`,
     "```",
     output || "<empty>",
     "```",
@@ -2364,7 +2393,6 @@ function buildDeterministicAuditSynthesisContent(
         [...refsByArtifact.values()].flatMap((refs) => refs).filter((ref) => ref.length > 0),
       ),
     ].sort();
-    const checkedPaths = [...new Set(checkedRefs.map(pathFromLineEvidenceRef))].slice(0, 12);
     const absenceClaimRef = checkedRefs[0] ?? null;
     const lines = [
       "# Audit Summary",
@@ -2416,8 +2444,8 @@ function buildDeterministicAuditSynthesisContent(
           commands.length > 0
             ? commands[0].replace(/\s+/g, " ")
             : firstEvidencePath
-              ? `Command \`git ls-files -- ${firstEvidencePath}\` output includes \`${firstOutputLine(
-                  runGitText(projectRoot, ["ls-files", "--", firstEvidencePath]),
+              ? `Command \`sed -n '${lineNumberFromLineEvidenceRef(refs[0]) ?? 1}p' -- ${firstEvidencePath}\` output includes \`${firstOutputLine(
+                  readLineEvidenceOutput(projectRoot, refs[0]),
                 )}\``
               : "Source report provided no concrete repository line evidence to carry forward.";
         return `| \`${summary.artifact.artifactPath}\` | ${evidence} | ${verification} |`;
@@ -2433,8 +2461,8 @@ function buildDeterministicAuditSynthesisContent(
       "",
       ...([...commandsByArtifact.values()].flat().length > 0
         ? [...commandsByArtifact.values()].flat()
-        : checkedPaths.length > 0
-          ? checkedPaths.flatMap((path) => formatSynthesisCheckedCommand(projectRoot, path))
+        : checkedRefs.length > 0
+          ? checkedRefs.flatMap((ref) => formatSynthesisCheckedLineCommand(projectRoot, ref))
           : ["- No repository command outputs were available from the validated source reports."]),
       "",
       "## Weak Or Invalid Reports",
