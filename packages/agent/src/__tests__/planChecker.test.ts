@@ -677,6 +677,93 @@ describe("runPlanChecker", () => {
     ).toBe(true);
   });
 
+  it("normalizes malformed aif plan manifest output for audit source-report tasks before replanning", async () => {
+    const description =
+      "Scope: .env.example, .ai-factory/config.yaml, src/bot_intevra/config.py, src/bot_intevra/secret_scan.py, src, docs/ops. Report artifact: audit/2026-05-15-audit-security-and-configuration-controls-audit.md.";
+    const malformedManifest = JSON.stringify(
+      {
+        version: 1,
+        taskId: "task:task-audit-source",
+        intent: "Audit (diagnostic-only) - verify security controls",
+        scope: [".env.example", ".ai-factory/config.yaml", "src", "docs/ops"],
+        allowedChanges: ["audit/2026-05-15-audit-security-and-configuration-controls-audit.md"],
+        forbiddenChanges: ["Any source code file", "Any config file", "Any test file"],
+        expectedArtifacts: ["audit report"],
+        acceptanceCriteria: ["Every finding includes Evidence, Risk, and Verification"],
+        verificationCommands: ["git status --short"],
+      },
+      null,
+      2,
+    );
+
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-audit-source",
+        projectId: "project-1",
+        title: "Audit: security and configuration controls",
+        taskIntent: "audit",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        description,
+        status: "plan_ready",
+        plan: [
+          "# Audit: Security and Configuration Controls",
+          "",
+          "## aif-plan-manifest",
+          "",
+          "```json",
+          malformedManifest,
+          "```",
+          "",
+          "Scope: `.env.example`, `.ai-factory/config.yaml`, `src`, `docs/ops`.",
+          "- [ ] Inspect the scoped files and write the audit report.",
+        ].join("\n"),
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-v16",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-source"],
+      artifacts: [
+        {
+          taskId: "task-audit-source",
+          role: "report",
+          artifactPath: "audit/2026-05-15-audit-security-and-configuration-controls-audit.md",
+        },
+      ],
+    });
+
+    await runPlanChecker("task-audit-source", "/tmp/plan-checker-test");
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const row = testDb.current.select().from(tasks).where(eq(tasks.id, "task-audit-source")).get();
+    expect(row?.plan).toContain("```aif-plan-manifest");
+    expect(row?.plan).toContain("## Diagnostic-only plan");
+    expect(row?.plan).toContain("Child audit reports: not required");
+    expect(row?.plan).toContain(
+      "audit/2026-05-15-audit-security-and-configuration-controls-audit.md",
+    );
+    expect(
+      evaluateTaskPlanQuality({
+        task: {
+          id: "task-audit-source",
+          title: "Audit: security and configuration controls",
+          taskIntent: "audit",
+          plannerMode: "full",
+          createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+          description,
+          auditArtifactRole: "report",
+          roadmapBatchId: "audit-v16",
+        },
+        plan: row?.plan,
+      }).ok,
+    ).toBe(true);
+  });
+
   it("does not replace report-only audit plans with deterministic fallback", async () => {
     const description =
       "Diagnostic only. Do not implement fixes. Report artifact: audit/report-only-audit.md.";

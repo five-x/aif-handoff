@@ -14,6 +14,7 @@ import {
   formatTaskIntentContractForPrompt,
   getEnv,
   getProjectConfig,
+  normalizeAifPlanManifestFence,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import {
@@ -390,7 +391,7 @@ ${taskContext}`;
   }
 
   const diskPlan = readPlanFromDisk(executionRoot, rawResult, !!task.isFix, planPath);
-  const resultText = diskPlan ?? normalizePlannerResult(rawResult);
+  const resultText = normalizeAifPlanManifestFence(diskPlan ?? normalizePlannerResult(rawResult));
 
   persistTaskPlanForTask({
     taskId,

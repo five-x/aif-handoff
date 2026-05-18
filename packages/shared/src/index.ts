@@ -559,6 +559,7 @@ export {
   evaluateTaskPlanQuality,
   findDeterministicDiagnosticReportPath,
   formatTaskPlanQualityBlockedReason,
+  normalizeAifPlanManifestFence,
   PLAN_MANIFEST_REQUIRED_CREATED_AT,
   type DeterministicDiagnosticPlanInput,
   type AifPlanManifest,

@@ -176,6 +176,75 @@ describe("runPlanner comment selection", () => {
     expect(call.prompt).toContain("must not convert audit, spike, docs, or tests tasks");
   });
 
+  it("normalizes json-fenced aif-plan-manifest output before persisting planner results", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-normalize-"));
+    const manifestJson = JSON.stringify(
+      {
+        version: 1,
+        taskId: "task-planner-normalize",
+        intent: "feature",
+        scope: ["packages/shared/src/planQuality.ts"],
+        allowedChanges: ["source", "tests"],
+        forbiddenChanges: ["report", "unrelated modules", "secrets"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-1",
+            description: "Planner normalizes manifest fences before saving.",
+            verification:
+              "npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planner.test.ts",
+          },
+        ],
+        verificationCommands: [
+          "npm.cmd test --workspace=@aif/agent -- --run src/__tests__/planner.test.ts",
+        ],
+      },
+      null,
+      2,
+    );
+    db.insert(projects)
+      .values({
+        id: "project-planner-normalize",
+        name: "Planner Normalize",
+        rootPath: projectRoot,
+      })
+      .run();
+    queryMock.mockReturnValue(
+      streamSuccess(
+        [
+          "## Plan",
+          "",
+          "## aif-plan-manifest",
+          "",
+          "```json",
+          manifestJson,
+          "```",
+          "",
+          "- [ ] Update packages/shared/src/planQuality.ts with manifest normalization.",
+        ].join("\n"),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-planner-normalize",
+        projectId: "project-planner-normalize",
+        title: "Normalize manifest",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        status: "planning",
+        useSubagents: true,
+      })
+      .run();
+
+    await runPlanner("task-planner-normalize", projectRoot);
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-planner-normalize")).get();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).not.toContain("```json");
+  });
+
   it("uses narrowed diagnostic-only prompt wording", async () => {
     const db = testDb.current;
     db.insert(tasks)

@@ -11,6 +11,7 @@ import {
   evaluateTaskPlanQuality,
   logger,
   looksLikeFullPlanUpdate,
+  normalizeAifPlanManifestFence,
   type TaskPlanQualityTask,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
@@ -121,8 +122,30 @@ function persistDeterministicDiagnosticPlanIfAvailable(
   return true;
 }
 
+function persistNormalizedPlanManifestFenceIfChanged(
+  task: PlanCheckerTask,
+  projectRoot: string,
+): PlanCheckerTask {
+  if (!task.plan) return task;
+  const normalizedPlan = normalizeAifPlanManifestFence(task.plan);
+  if (normalizedPlan === task.plan) return task;
+
+  const updatedAt = new Date().toISOString();
+  persistTaskPlanForTask({
+    taskId: task.id,
+    planText: normalizedPlan,
+    projectRoot,
+    isFix: task.isFix,
+    planPath: task.planPath ?? undefined,
+    updatedAt,
+  });
+
+  log.info({ taskId: task.id }, "Normalized aif-plan-manifest fence in task plan");
+  return { ...task, plan: normalizedPlan, updatedAt };
+}
+
 export async function runPlanChecker(taskId: string, projectRoot: string): Promise<void> {
-  const task = findTaskById(taskId);
+  let task = findTaskById(taskId);
 
   if (!task) {
     log.error({ taskId }, "Task not found for plan checklist verification");
@@ -139,6 +162,8 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
     });
     logActivity(taskId, "Agent", `Restored feature branch: ${task.branchName}`);
   }
+
+  task = persistNormalizedPlanManifestFenceIfChanged(task, projectRoot);
 
   if (persistDeterministicDiagnosticPlanIfAvailable(task, projectRoot)) {
     return;
@@ -160,7 +185,7 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
   // Try local conversion first — if only simple bullet→checkbox conversion is needed
   const convertible = countConvertibleBullets(task.plan);
   if (convertible > 0 && hasChecklistItems(task.plan)) {
-    const locallyConverted = convertBulletsToCheckboxes(task.plan);
+    const locallyConverted = normalizeAifPlanManifestFence(convertBulletsToCheckboxes(task.plan));
     if (isPlanAlreadyChecklist(locallyConverted)) {
       assertTaskPlanQuality(task, locallyConverted);
       log.info(
@@ -219,7 +244,7 @@ ${manifestRequirement}`;
     assertCurrentBranch(projectRoot, task.branchName);
   }
 
-  const normalizedPlan = normalizeMarkdownFence(resultText);
+  const normalizedPlan = normalizeAifPlanManifestFence(normalizeMarkdownFence(resultText));
   if (normalizedPlan.length === 0) {
     throw new Error("Plan checker returned empty content");
   }
@@ -241,7 +266,7 @@ ${manifestRequirement}`;
     );
 
     // Fallback: try local conversion of the ORIGINAL plan
-    const fallback = convertBulletsToCheckboxes(task.plan);
+    const fallback = normalizeAifPlanManifestFence(convertBulletsToCheckboxes(task.plan));
     if (hasChecklistItems(fallback)) {
       assertTaskPlanQuality(task, fallback);
       log.info({ taskId }, "Local fallback conversion succeeded — saving converted plan");

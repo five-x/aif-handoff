@@ -5,6 +5,7 @@ import {
   buildDeterministicDiagnosticPlan,
   evaluateTaskPlanQuality,
   formatTaskPlanQualityBlockedReason,
+  normalizeAifPlanManifestFence,
 } from "../planQuality.js";
 
 function planManifest(overrides: Record<string, unknown> = {}): string {
@@ -56,6 +57,60 @@ function fullPlanWithManifest(manifest = planManifest()): string {
 }
 
 describe("evaluateTaskPlanQuality", () => {
+  it("normalizes model-produced aif-plan-manifest sections fenced as json", () => {
+    const jsonManifest = JSON.stringify(
+      {
+        version: 1,
+        taskId: "task-full",
+        intent: "feature",
+        scope: ["packages/shared/src/planQuality.ts"],
+        allowedChanges: ["source", "tests"],
+        forbiddenChanges: ["report", "unrelated modules", "secrets"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-1",
+            description: "The plan quality manifest is normalized before validation.",
+            verification:
+              "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts",
+          },
+        ],
+        verificationCommands: [
+          "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts",
+        ],
+      },
+      null,
+      2,
+    );
+    const normalized = normalizeAifPlanManifestFence(
+      [
+        "## AIF plan manifest",
+        "",
+        "```json",
+        jsonManifest,
+        "```",
+        "",
+        "- [ ] Update packages/shared/src/planQuality.ts with manifest normalization.",
+        "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+      ].join("\n"),
+    );
+
+    expect(normalized).toContain("```aif-plan-manifest");
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Normalize plan manifest",
+        description: "Scope: packages/shared/src/planQuality.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: normalized,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("missing_plan_manifest");
+  });
+
   it("accepts a focused checklist plan for a simple task", () => {
     const result = evaluateTaskPlanQuality({
       task: { title: "Update navbar copy", description: "Use the existing component." },
@@ -724,6 +779,28 @@ describe("evaluateTaskPlanQuality", () => {
 
     expect(result.ok).toBe(false);
     expect(result.categories).toContain("missing_audit_decomposition");
+  });
+
+  it("builds deterministic source-report plans for persisted audit batch children", () => {
+    const task = {
+      id: "task-security-audit",
+      title: "Audit: security and configuration controls",
+      description:
+        "Scope: .env.example, .ai-factory/config.yaml, src/bot_intevra/config.py, src/bot_intevra/secret_scan.py, src, docs/ops. Report artifact: audit/2026-05-15-audit-security-and-configuration-controls-audit.md.",
+      taskIntent: "audit" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      auditArtifactRole: "report" as const,
+      roadmapBatchId: "batch-1",
+    };
+
+    const plan = buildDeterministicDiagnosticPlan({ task });
+
+    expect(plan).toContain("```aif-plan-manifest");
+    expect(plan).toContain("audit/2026-05-15-audit-security-and-configuration-controls-audit.md");
+    const result = evaluateTaskPlanQuality({ task, plan });
+    expect(result.ok).toBe(true);
+    expect(result.categories).toEqual([]);
   });
 
   it("does not require decomposition again for source report children in a persisted audit batch", () => {

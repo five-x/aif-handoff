@@ -305,6 +305,40 @@ function parseAifPlanManifest(rawJson: string): Partial<AifPlanManifest> | null 
   }
 }
 
+function looksLikeAifPlanManifest(value: Partial<AifPlanManifest> | null): boolean {
+  return (
+    value !== null &&
+    "version" in value &&
+    "taskId" in value &&
+    "scope" in value &&
+    "allowedChanges" in value &&
+    "forbiddenChanges" in value &&
+    "expectedArtifacts" in value &&
+    "acceptanceCriteria" in value &&
+    "verificationCommands" in value
+  );
+}
+
+export function normalizeAifPlanManifestFence(plan: string): string {
+  if (extractPlanManifestBlocks(plan).length > 0) return plan;
+
+  return plan.replace(
+    /(^[ \t]{0,3}#{1,6}[ \t]+aif[-_\s]*plan[-_\s]*manifest[^\r\n]*\r?\n(?:[^\S\r\n]*\r?\n)*)(```)(?:json|JSON)([^\r\n]*\r?\n)([\s\S]*?)(```)/gim,
+    (
+      match,
+      heading: string,
+      fence: string,
+      restOfOpeningLine: string,
+      rawJson: string,
+      closing: string,
+    ) => {
+      const manifest = parseAifPlanManifest(rawJson.trim());
+      if (!looksLikeAifPlanManifest(manifest)) return match;
+      return `${heading}${fence}aif-plan-manifest${restOfOpeningLine}${rawJson.trim()}\n${closing}`;
+    },
+  );
+}
+
 function normalizeChangeCategory(value: string): TaskIntentChangeCategory | null {
   const normalized = value.trim().toLowerCase().replaceAll("-", "_");
   return TASK_INTENT_CHANGE_CATEGORIES.includes(normalized as TaskIntentChangeCategory)
@@ -823,7 +857,13 @@ export function buildDeterministicDiagnosticPlan(
   const broadDecompositionReasons = decomposition.reasonCodes.filter(
     (reason) => reason !== "audit_without_concrete_boundaries",
   );
-  if (decomposition.requiresDecomposition && broadDecompositionReasons.length > 0) return null;
+  if (
+    decomposition.requiresDecomposition &&
+    broadDecompositionReasons.length > 0 &&
+    !isPersistedAuditSourceReportTask(input.task)
+  ) {
+    return null;
+  }
 
   const reportPath = findDeterministicDiagnosticReportPath(input);
   if (!reportPath) return null;
