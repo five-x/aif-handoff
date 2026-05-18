@@ -9,10 +9,12 @@ if [ "$(id -u)" = "0" ]; then
     chown node:node /home/node/.claude.json 2>/dev/null || true
   fi
   if command -v git >/dev/null 2>&1; then
-    projects_safe_dir="${PROJECTS_MOUNT:-/home/www}/*"
-    if ! gosu node git config --global --get-all safe.directory 2>/dev/null | grep -Fx "$projects_safe_dir" >/dev/null 2>&1; then
-      gosu node git config --global --add safe.directory "$projects_safe_dir" 2>/dev/null || true
-    fi
+    projects_mount="${PROJECTS_MOUNT:-/home/www}"
+    for projects_safe_dir in "$projects_mount/botIntevra" "$projects_mount/*"; do
+      if ! gosu node git config --global --get-all safe.directory 2>/dev/null | grep -Fx "$projects_safe_dir" >/dev/null 2>&1; then
+        gosu node git config --global --add safe.directory "$projects_safe_dir" 2>/dev/null || true
+      fi
+    done
   fi
   export HOME=/home/node
   exec gosu node "$@"
