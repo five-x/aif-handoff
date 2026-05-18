@@ -22,6 +22,7 @@ const DEFAULT_BASE_URL_ENV_VAR = "QWEN_BASE_URL";
 const DEFAULT_API_KEY_ENV_VAR = "QWEN_API_KEY";
 const DEFAULT_MODEL_ENV_VAR = "QWEN_MODEL";
 const DEFAULT_MAX_TOOL_TURNS = 12;
+const MAX_CONFIGURED_TOOL_TURNS = 400;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set(["git_commit"]);
@@ -195,7 +196,7 @@ function readMaxToolTurns(input) {
         ? options.maxToolTurns
         : DEFAULT_MAX_TOOL_TURNS;
   if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_MAX_TOOL_TURNS;
-  return Math.max(1, Math.min(Math.floor(raw), 40));
+  return Math.max(1, Math.min(Math.floor(raw), MAX_CONFIGURED_TOOL_TURNS));
 }
 function readRepeatedToolCallLimit(input) {
   const options = asRecord(input.options);

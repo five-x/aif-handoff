@@ -108,6 +108,46 @@ describe("qwen-local-agent adapter", () => {
     expect(body.tool_choice).toBe("auto");
     expect(body.tools).toEqual(QWEN_LOCAL_AGENT_TOOLS);
   });
+  it("respects configured maxToolTurns values above the legacy 40-turn cap", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-high-tool-turns-"));
+    let turn = 0;
+    fetchMock.mockImplementation(async () => {
+      turn += 1;
+      return jsonResponse({
+        id: "chat-high-tool-turns",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: `call-${turn}`,
+                  type: "function",
+                  function: {
+                    name: "unknown_test_tool",
+                    arguments: JSON.stringify({ turn }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      });
+    });
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            maxToolTurns: 41,
+          },
+        }),
+      ),
+    ).rejects.toThrow("qwen-local-agent exceeded max tool turns (41)");
+    expect(fetchMock).toHaveBeenCalledTimes(41);
+  });
   it("executes a tool-call loop and emits sanitized tool events", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-loop-"));
     const events = [];
