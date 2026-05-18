@@ -1,20 +1,24 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  findRoadmapBatchArtifactByTaskId,
   findProjectById,
   findTaskById,
+  listRoadmapReportArtifactsForSynthesis,
   listTaskComments,
   persistTaskPlanForTask,
   setTaskFields,
 } from "@aif/data";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import {
+  buildDeterministicDiagnosticPlan,
   logger,
   formatAttachmentsForPrompt,
   formatTaskIntentContractForPrompt,
   getEnv,
   getProjectConfig,
   normalizeAifPlanManifestFence,
+  type TaskPlanQualityTask,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import {
@@ -30,6 +34,31 @@ import { buildTaskMemoryContext } from "../memoryContext.js";
 const log = logger("planner");
 const AGENT_NAME = "plan-coordinator";
 const FIX_SKILL_NAME = "aif-fix";
+type PlannerTask = NonNullable<ReturnType<typeof findTaskById>>;
+
+function toAuditArtifactRole(role: string | null | undefined): "report" | "synthesis" | null {
+  return role === "report" || role === "synthesis" ? role : null;
+}
+
+function buildPlannerPlanQualityTaskContext(task: PlannerTask): PlannerTask & TaskPlanQualityTask {
+  const artifact = findRoadmapBatchArtifactByTaskId(task.id);
+  const sourceReportArtifacts =
+    artifact?.role === "synthesis"
+      ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => ({
+          taskId: entry.taskId,
+          artifactPath: entry.artifactPath,
+          state: entry.state,
+          failureFamily: entry.failureFamily,
+          trusted: entry.state === "valid",
+        }))
+      : null;
+  return {
+    ...task,
+    auditArtifactRole: toAuditArtifactRole(artifact?.role),
+    roadmapBatchId: artifact?.batchId ?? null,
+    sourceReportArtifacts,
+  };
+}
 
 function extractPlanPathFromResult(resultText: string): string | null {
   const patterns = [/plan written to\s+([^\n]+)/i, /saved to\s+([^\n]+)/i];
@@ -268,6 +297,28 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
       } else if (branchResult.reason) {
         log.debug({ taskId, reason: branchResult.reason }, "Branch creation skipped");
       }
+    }
+  }
+
+  if (!task.isFix) {
+    const qualityTask = buildPlannerPlanQualityTaskContext(task);
+    const deterministicPlan = buildDeterministicDiagnosticPlan({
+      task: qualityTask,
+      extraText: [task.plan, task.blockedReason],
+    });
+    if (deterministicPlan) {
+      const resultText = normalizeAifPlanManifestFence(deterministicPlan);
+      persistTaskPlanForTask({
+        taskId,
+        planText: resultText,
+        projectRoot: executionRoot,
+        isFix: false,
+        planPath,
+        updatedAt: new Date().toISOString(),
+      });
+      log.info({ taskId }, "Saved deterministic diagnostic planner fallback");
+      logActivity(taskId, "Agent", "Saved deterministic diagnostic plan without model planner");
+      return;
     }
   }
 

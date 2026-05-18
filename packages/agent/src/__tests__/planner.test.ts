@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { projects, resetEnvCache, taskComments, tasks } from "@aif/shared";
+import {
+  PLAN_MANIFEST_REQUIRED_CREATED_AT,
+  projects,
+  resetEnvCache,
+  taskComments,
+  tasks,
+} from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
@@ -25,6 +31,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 const { runPlanner } = await import("../subagents/planner.js");
+const { createRoadmapBatchContract } = await import("@aif/data");
 
 function streamSuccess(result: string): AsyncIterable<{
   type: "result";
@@ -243,6 +250,57 @@ describe("runPlanner comment selection", () => {
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-planner-normalize")).get();
     expect(updatedTask?.plan).toContain("```aif-plan-manifest");
     expect(updatedTask?.plan).not.toContain("```json");
+  });
+
+  it("uses deterministic diagnostic plans for persisted audit source-report tasks before querying planner runtime", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-deterministic-"));
+    db.insert(projects)
+      .values({
+        id: "project-planner-deterministic",
+        name: "Planner Deterministic",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-source",
+        projectId: "project-planner-deterministic",
+        title: "Audit: security and configuration controls",
+        description:
+          "Scope: .env.example, .ai-factory/config.yaml, src/bot_intevra/config.py, src/bot_intevra/secret_scan.py, src, docs/ops. Report artifact: audit/2026-05-15-audit-security-and-configuration-controls-audit.md.",
+        taskIntent: "audit",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        status: "planning",
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-planner-deterministic",
+      roadmapAlias: "audit-v16",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-source"],
+      artifacts: [
+        {
+          taskId: "task-audit-source",
+          role: "report",
+          artifactPath: "audit/2026-05-15-audit-security-and-configuration-controls-audit.md",
+        },
+      ],
+    });
+
+    await runPlanner("task-audit-source", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-audit-source")).get();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain("## Diagnostic-only plan");
+    expect(updatedTask?.plan).toContain("Child audit reports: not required");
+    expect(updatedTask?.plan).toContain(
+      "audit/2026-05-15-audit-security-and-configuration-controls-audit.md",
+    );
   });
 
   it("uses narrowed diagnostic-only prompt wording", async () => {
