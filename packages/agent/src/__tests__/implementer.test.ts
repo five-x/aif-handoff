@@ -774,8 +774,14 @@ describe("runImplementer rework behavior", () => {
       stdio: "ignore",
     });
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
     mkdirSync(join(projectRoot, "src"), { recursive: true });
     writeFileSync(join(projectRoot, "README.md"), "# Project\nruntime evidence\n", "utf8");
+    writeFileSync(
+      join(projectRoot, ".ai-factory", "config.yaml"),
+      "# AI Factory Configuration\n",
+      "utf8",
+    );
     writeFileSync(
       join(projectRoot, "src", "config.ts"),
       "export const timeoutMs = 1000;\n",
@@ -794,16 +800,22 @@ describe("runImplementer rework behavior", () => {
         "",
         "| Scope | Checked evidence | Verification |",
         "| --- | --- | --- |",
+        '| `.ai-factory/config.yaml` | `.ai-factory/config.yaml:1` | Command `git grep -n "AI Factory" -- .ai-factory/config.yaml` output includes `.ai-factory/config.yaml:1:# AI Factory Configuration` |',
         '| `README.md` | `README.md:2` | Command `rg -n "runtime evidence" README.md` output includes `README.md:2:runtime evidence` |',
         '| `src/config.ts` | `src/config.ts:1` | Command `rg -n "timeoutMs" src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |',
         "",
         "## Checked Files",
         "",
+        "- `.ai-factory/config.yaml:1`",
         "- `README.md:2`",
         "- `src/config.ts:1`",
         "",
         "## Checked Commands",
         "",
+        '- Command `git grep -n "AI Factory" -- .ai-factory/config.yaml` output:',
+        "```",
+        ".ai-factory/config.yaml:1:# AI Factory Configuration",
+        "```",
         '- Command `rg -n "runtime evidence" README.md` output:',
         "```",
         "README.md:2:runtime evidence",
@@ -816,10 +828,14 @@ describe("runImplementer rework behavior", () => {
       ].join("\n"),
       "utf8",
     );
-    execFileSync("git", ["add", "README.md", "src/config.ts", "audit/runtime.md"], {
-      cwd: projectRoot,
-      stdio: "ignore",
-    });
+    execFileSync(
+      "git",
+      ["add", "README.md", ".ai-factory/config.yaml", "src/config.ts", "audit/runtime.md"],
+      {
+        cwd: projectRoot,
+        stdio: "ignore",
+      },
+    );
     execFileSync("git", ["commit", "-m", "seed no findings report", "--no-verify"], {
       cwd: projectRoot,
       stdio: "ignore",
@@ -888,6 +904,7 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain("## Child Report Status");
     expect(summary).toContain("| `audit/runtime.md` | `task-report-no-findings-source` | passed |");
     expect(summary).toContain("## Checked Files");
+    expect(summary).not.toContain(".ai-factory/config.yaml");
     expect(summary).toContain("`README.md:2`");
     expect(summary).toContain("`src/config.ts:1`");
     expect(summary).toContain('Command `rg -n "runtime evidence" README.md` output:');

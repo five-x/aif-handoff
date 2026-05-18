@@ -824,7 +824,16 @@ const LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS: RegExp[] = [
 ];
 const SYNTHESIS_LINE_EVIDENCE_REF_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12}):(\d+)(?::\d+)?(?=$|[\s`'"\]),.;])/gi;
-const SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS = new Set(["__pycache__", "node_modules", ".git"]);
+const SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS = new Set([
+  "__pycache__",
+  "node_modules",
+  ".git",
+  ".agents",
+  ".ai-factory",
+  ".claude",
+  ".codex",
+  ".github",
+]);
 const SYNTHESIS_IGNORED_EVIDENCE_EXTENSIONS = new Set([
   ".gif",
   ".ico",
@@ -2022,10 +2031,7 @@ function normalizeSynthesisEvidenceRef(rawPath: string, rawLine: string): string
   ) {
     return null;
   }
-  const pathParts = normalizedPath.split("/");
-  if (pathParts.some((part) => SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS.has(part))) {
-    return null;
-  }
+  if (isIgnoredSynthesisEvidencePath(normalizedPath)) return null;
   const extensionMatch = normalizedPath.match(/(\.[A-Za-z0-9]+)$/);
   if (
     extensionMatch &&
@@ -2034,6 +2040,41 @@ function normalizeSynthesisEvidenceRef(rawPath: string, rawLine: string): string
     return null;
   }
   return `${normalizedPath}:${line}`;
+}
+
+function normalizeSynthesisEvidencePath(rawPath: string): string | null {
+  const normalizedPath = rawPath
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/[),.;\]]+$/g, "");
+  if (
+    !normalizedPath ||
+    normalizedPath.startsWith("../") ||
+    normalizedPath.includes("/../") ||
+    normalizedPath.includes("*")
+  ) {
+    return null;
+  }
+  return normalizedPath;
+}
+
+function isIgnoredSynthesisEvidencePath(path: string): boolean {
+  const normalizedPath = normalizeSynthesisEvidencePath(path);
+  if (!normalizedPath) return true;
+  return normalizedPath.split("/").some((part) => SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS.has(part));
+}
+
+function containsIgnoredSynthesisEvidencePath(text: string): boolean {
+  const normalizedText = text.replaceAll("\\", "/");
+  for (const part of SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS) {
+    if (!part.startsWith(".")) continue;
+    if (normalizedText.includes(`${part}/`) || normalizedText.includes(`${part}:`)) return true;
+  }
+  for (const match of text.matchAll(SYNTHESIS_LINE_EVIDENCE_REF_PATTERN)) {
+    if (isIgnoredSynthesisEvidencePath(match[1] ?? "")) return true;
+  }
+  return false;
 }
 
 function pathFromLineEvidenceRef(ref: string): string {
@@ -2081,7 +2122,9 @@ function collectSynthesisNoFindingsCommandEvidence(
   for (const artifact of artifacts) {
     commandsByArtifact.set(
       artifact.artifactPath,
-      extractAuditSynthesisCommandEvidence(artifact.content),
+      extractAuditSynthesisCommandEvidence(artifact.content).filter(
+        (evidence) => !containsIgnoredSynthesisEvidencePath(evidence),
+      ),
     );
   }
   return commandsByArtifact;
