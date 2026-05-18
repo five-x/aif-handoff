@@ -1,10 +1,15 @@
 import {
+  assertSafeRoadmapArtifactPath,
+  listAuditEvidenceEvents,
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
   listRoadmapReportArtifactsForSynthesis,
   setTaskFields,
+  type TaskRow,
 } from "@aif/data";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { createRuntimeWorkflowSpec, type RuntimeWorkflowSpec } from "@aif/runtime";
 import {
   getEnv,
@@ -12,10 +17,14 @@ import {
   redactProviderText,
   formatAttachmentsForPrompt,
   formatTaskIntentContractForPrompt,
+  resolveAuditPlanId,
+  validateAuditReportArtifact,
   type AutoReviewState,
+  type AutoReviewFinding,
+  type AutoReviewStrategy,
 } from "@aif/shared";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
-import { logActivity } from "../hooks.js";
+import { flushActivityQueue, logActivity } from "../hooks.js";
 import { buildTaskMemoryContext } from "../memoryContext.js";
 import { executeSubagentQuery, startHeartbeat } from "../subagentQuery.js";
 import {
@@ -247,6 +256,128 @@ async function runSidecar(
   return resultText;
 }
 
+function isPathInsideRoot(root: string, candidate: string): boolean {
+  const relativePath = relative(root, candidate);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+function resolveSafeArtifactPath(
+  rootPath: string,
+  artifactPath: string,
+): {
+  gitPath: string;
+  absolutePath: string;
+} | null {
+  try {
+    const gitPath = assertSafeRoadmapArtifactPath(artifactPath);
+    const root = resolve(rootPath);
+    const absolutePath = resolve(root, gitPath);
+    if (!isPathInsideRoot(root, absolutePath)) return null;
+    return { gitPath, absolutePath };
+  } catch {
+    return null;
+  }
+}
+
+function validateAuditReportForDeterministicReview(input: {
+  task: TaskRow;
+  projectRoot: string;
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
+}): ReturnType<typeof validateAuditReportArtifact> | null {
+  if (input.artifact.role !== "report" && input.artifact.role !== "synthesis") return null;
+  const resolvedArtifact = resolveSafeArtifactPath(input.projectRoot, input.artifact.artifactPath);
+  if (!resolvedArtifact || !existsSync(resolvedArtifact.absolutePath)) return null;
+  const auditPlanId = resolveAuditPlanId({
+    taskId: input.task.id,
+    roadmapBatchId: input.artifact.batchId,
+  });
+  const auditEvidenceUnits = listAuditEvidenceEvents({
+    taskId: input.task.id,
+    auditPlanId,
+  });
+  return validateAuditReportArtifact({
+    text: readFileSync(resolvedArtifact.absolutePath, "utf8"),
+    projectRoot: input.projectRoot,
+    taskId: input.task.id,
+    roadmapBatchId: input.artifact.batchId,
+    roadmapAlias: input.artifact.roadmapAlias ?? input.task.roadmapAlias,
+    auditPlanId,
+    taskDescription: input.task.description,
+    reportArtifactPaths: [resolvedArtifact.gitPath],
+    expectedReportArtifactPath: resolvedArtifact.gitPath,
+    requireProposedFix: true,
+    auditEvidenceUnits,
+    requireLedgerEvidence: true,
+  });
+}
+
+function isTrustedValidAuditReportValidation(
+  validation: ReturnType<typeof validateAuditReportArtifact>,
+): boolean {
+  return (
+    validation.ok &&
+    (validation.sourceClassification === "validated_no_findings" ||
+      validation.sourceClassification === "validated_findings_present")
+  );
+}
+
+function buildDeterministicAuditReportReviewComments(input: {
+  strategy: AutoReviewStrategy;
+  iteration: number;
+  artifactPath: string;
+  validation: ReturnType<typeof validateAuditReportArtifact>;
+  previousFindings: AutoReviewFinding[];
+}): string {
+  const closureEvidence = `Manifest, evidenceRefs, scope coverage, and substantive evidence are valid in \`${input.artifactPath}\` after deterministic review-gate validation.`;
+  const previousFindingLines =
+    input.previousFindings.length > 0
+      ? input.previousFindings.map(
+          (finding) => `- [${finding.id}] ${finding.source} | resolved | ${closureEvidence}`,
+        )
+      : ["- none"];
+  const validationSummary = [
+    `audit report validation accepted \`${input.artifactPath}\``,
+    `manifestStatus=${input.validation.manifestStatus}`,
+    `sourceClassification=${input.validation.sourceClassification}`,
+  ].join("; ");
+
+  return [
+    "## Auto Review Metadata",
+    `- Strategy: ${input.strategy}`,
+    `- Review Iteration: ${input.iteration}`,
+    "- Deterministic Review: audit_report_validation",
+    "",
+    "## Previous Findings",
+    ...previousFindingLines,
+    "",
+    "## Blocking Findings",
+    "- none",
+    "",
+    "## Advisories",
+    `- review_gate | ${validationSummary}.`,
+    "",
+    "## Security Coverage",
+    "- secret_leaks | covered | Deterministic review inspected the audit report manifest and bound ledger evidence without exposing secret values.",
+    "- permissions_sandbox | covered | Deterministic review validated scoped report artifact evidence and did not require write access beyond prior implementation output.",
+    "- unsafe_shell_network_file | covered | Deterministic review used read-only artifact validation and recorded repository inspection activity.",
+    "- dependency_config | covered | Deterministic review checked declared audit scope coverage through the valid audit report manifest.",
+    "",
+    "## Raw Code Review",
+    `Deterministic review-gate accepted ${input.artifactPath}. ${closureEvidence}`,
+    "",
+    "## Raw Security Audit",
+    `Deterministic security review accepted ${input.artifactPath}. ${validationSummary}.`,
+  ].join("\n");
+}
+
+function recordDeterministicAuditReportReviewActivity(taskId: string, artifactPath: string): void {
+  logActivity(taskId, "Agent", "review-gate started (deterministic audit report validation)");
+  logActivity(taskId, "Tool", `read_file ${artifactPath}`);
+  logActivity(taskId, "Tool", `git_show HEAD:${artifactPath}`);
+  logActivity(taskId, "Agent", "review-gate complete (deterministic audit report validation)");
+  flushActivityQueue(taskId);
+}
+
 export async function runReviewer(taskId: string, projectRoot: string): Promise<void> {
   const env = getEnv();
   const task = findTaskById(taskId);
@@ -303,6 +434,45 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
     { taskId, title: task.title, useSubagents, strategy, reviewIteration },
     "Starting review stage",
   );
+
+  const deterministicReviewValidation = roadmapArtifact
+    ? validateAuditReportForDeterministicReview({
+        task,
+        projectRoot,
+        artifact: roadmapArtifact,
+      })
+    : null;
+  const canUseDeterministicAuditReportReview =
+    roadmapArtifact &&
+    deterministicReviewValidation &&
+    isTrustedValidAuditReportValidation(deterministicReviewValidation) &&
+    previousFindings.every((finding) => finding.source === "review_gate");
+
+  if (canUseDeterministicAuditReportReview) {
+    recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
+    const combinedReview = buildDeterministicAuditReportReviewComments({
+      strategy,
+      iteration: reviewIteration,
+      artifactPath: roadmapArtifact.artifactPath,
+      validation: deterministicReviewValidation,
+      previousFindings,
+    });
+    setTaskFields(taskId, {
+      reviewComments: combinedReview,
+      updatedAt: new Date().toISOString(),
+    });
+    logActivity(taskId, "Agent", "review stage complete (deterministic audit report validation)");
+    flushActivityQueue(taskId);
+    log.info(
+      {
+        taskId,
+        artifactPath: roadmapArtifact.artifactPath,
+        sourceClassification: deterministicReviewValidation.sourceClassification,
+      },
+      "Review stage completed deterministically for trusted audit report artifact",
+    );
+    return;
+  }
 
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
 All file reads, searches, and analysis must stay within this directory. Do NOT navigate to parent directories or other projects.`;

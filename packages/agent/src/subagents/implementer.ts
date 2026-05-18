@@ -41,7 +41,7 @@ import {
   type AuditReportSourceSnapshot,
 } from "@aif/shared";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
-import { logActivity, persistAuditEvidencePayload } from "../hooks.js";
+import { flushActivityQueue, logActivity, persistAuditEvidencePayload } from "../hooks.js";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import { computePendingPlanLayers, computePlanLayers } from "../planLayers.js";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
@@ -984,6 +984,34 @@ function hasAttemptedDeterministicAuditReportRepair(
 ): boolean {
   const text = [task.implementationLog ?? "", task.agentActivityLog ?? ""].join("\n");
   return /\bDeterministic audit report repair (?:completed|complete)\b/i.test(text);
+}
+
+function logDeterministicAuditReportRepairActivity(input: {
+  taskId: string;
+  phase: "started" | "complete" | "terminal_source_inconclusive";
+  artifactPath: string;
+  issueCodes?: string[];
+}): void {
+  if (input.phase === "started") {
+    logActivity(
+      input.taskId,
+      "Agent",
+      "implement-coordinator started (deterministic audit report repair)",
+    );
+    logActivity(input.taskId, "Tool", `git_grep scoped audit evidence for ${input.artifactPath}`);
+    return;
+  }
+
+  logActivity(
+    input.taskId,
+    "Agent",
+    input.phase === "terminal_source_inconclusive"
+      ? `implement-coordinator complete (deterministic audit report repair terminalized source_inconclusive: ${
+          input.issueCodes?.join(", ") || "unknown"
+        })`
+      : "implement-coordinator complete (deterministic audit report repair)",
+  );
+  flushActivityQueue(input.taskId);
 }
 
 function normalizeAuditScopeRoot(path: string): string | null {
@@ -3023,7 +3051,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     parsedTaskCount > 0 &&
     pendingTaskCount === 0 &&
     !task.reworkRequested &&
-    !expectedSynthesisArtifactPath
+    !expectedSynthesisArtifactPath &&
+    !expectedAuditReportArtifactPath
   ) {
     const nowIso = new Date().toISOString();
     const noOpResult =
@@ -3219,6 +3248,61 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     return;
   }
 
+  if (expectedAuditReportArtifactPath && !task.reworkRequested && localAuditReportScopeRepairable) {
+    const nowIso = new Date().toISOString();
+    logDeterministicAuditReportRepairActivity({
+      taskId,
+      phase: "started",
+      artifactPath: expectedAuditReportArtifactPath,
+    });
+    const repairResult = runDeterministicAuditReportRepair({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+    });
+    const acceptedRepair = repairResult.status === "accepted";
+    setTaskFields(taskId, {
+      implementationLog: repairResult.resultText,
+      reworkRequested: false,
+      ...(acceptedRepair
+        ? {
+            blockedReason: null,
+            blockedFromStatus: null,
+            retryAfter: null,
+            manualReviewRequired: false,
+          }
+        : {}),
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      repairResult.status === "terminal_source_inconclusive"
+        ? `Deterministic audit report first-run generation terminalized as source_inconclusive: ${repairResult.issueCodes.join(", ") || "unknown"}`
+        : "Deterministic audit report first-run generation complete",
+    );
+    logDeterministicAuditReportRepairActivity({
+      taskId,
+      phase:
+        repairResult.status === "terminal_source_inconclusive"
+          ? "terminal_source_inconclusive"
+          : "complete",
+      artifactPath: expectedAuditReportArtifactPath,
+      issueCodes: repairResult.issueCodes,
+    });
+    log.info(
+      {
+        taskId,
+        artifactPath: expectedAuditReportArtifactPath,
+        issueCodes: repairResult.issueCodes,
+        status: repairResult.status,
+      },
+      "Audit report first run completed deterministically",
+    );
+    return;
+  }
+
   if (
     expectedAuditReportArtifactPath &&
     (auditEvidenceRepairMode ||
@@ -3229,6 +3313,11 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     (!repeatedDeterministicAuditReportRepair || currentSourceInconclusiveLocalAudit)
   ) {
     const nowIso = new Date().toISOString();
+    logDeterministicAuditReportRepairActivity({
+      taskId,
+      phase: "started",
+      artifactPath: expectedAuditReportArtifactPath,
+    });
     const repairResult = runDeterministicAuditReportRepair({
       task,
       projectRoot,
@@ -3257,6 +3346,15 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         ? `Deterministic audit report repair terminalized as source_inconclusive: ${repairResult.issueCodes.join(", ") || "unknown"}`
         : "Deterministic audit report repair complete",
     );
+    logDeterministicAuditReportRepairActivity({
+      taskId,
+      phase:
+        repairResult.status === "terminal_source_inconclusive"
+          ? "terminal_source_inconclusive"
+          : "complete",
+      artifactPath: expectedAuditReportArtifactPath,
+      issueCodes: repairResult.issueCodes,
+    });
     log.info(
       {
         taskId,

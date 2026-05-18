@@ -3355,7 +3355,7 @@ describe("coordinator", () => {
     vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
       status: "manual_review_required",
       currentIteration: 2,
-      handoffReason: "malformed_review_output_fallback",
+      handoffReason: "malformed_structured_review_contract",
       metrics: {
         strategy: "closure_first",
         iteration: 2,
@@ -3389,7 +3389,7 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("invalid_artifact_contract");
     expect(task!.blockedReason).toContain("invalid_report_manifest");
     expect(task!.blockedReason).toContain(
-      "manual_review_required: malformed_review_output_fallback",
+      "manual_review_required: malformed_structured_review_contract",
     );
     expect(task!.manualReviewRequired).toBe(false);
     expect(task!.reworkRequested).toBe(true);

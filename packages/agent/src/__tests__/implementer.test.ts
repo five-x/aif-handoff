@@ -9,7 +9,9 @@ import {
   roadmapBatchArtifacts,
   taskComments,
   tasks,
+  computeAuditReportContentSha256,
   hashAifPlanManifest,
+  resolveAuditPlanId,
   validateImplementationManifest,
   validateAuditReportArtifact,
 } from "@aif/shared";
@@ -1667,6 +1669,150 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain(
       "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
     );
+  }, 60_000);
+
+  it("generates deterministic audit report artifacts on first run instead of model-authored manifests", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+    mkdirSync(join(projectRoot, "src", "bot_intevra"), { recursive: true });
+    mkdirSync(join(projectRoot, "docs", "ops"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, ".env.example"), "SECRET_KEY=change-me\n", "utf8");
+    writeFileSync(join(projectRoot, ".ai-factory", "config.yaml"), "retryCount: 100\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "app.py"), "APP = 'bot'\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "settings.py"), "SAFE_DIRECTORY = True\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "worker.py"), "def run():\n    return True\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "src", "bot_intevra", "config.py"),
+      "TOKEN_ENV='BOT_TOKEN'\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "src", "bot_intevra", "secret_scan.py"),
+      "def scan(value):\n    return 'REDACTED' in value\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "docs", "ops", "runbook.md"),
+      "# Runbook\nRetry and deployment controls are documented here.\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "docs", "ops", "deploy.md"),
+      "# Deploy\nProduction rollout checks are documented here.\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", ".env.example", ".ai-factory/config.yaml", "src", "docs/ops"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed audit scope", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = [
+      "Audit security and configuration controls.",
+      "Scope: .env.example, .ai-factory/config.yaml, src/bot_intevra/config.py, src/bot_intevra/secret_scan.py, src, docs/ops",
+      "Report artifact: audit/security-controls.md",
+    ].join("\n");
+    db.insert(tasks)
+      .values({
+        id: "task-audit-first-run-report",
+        projectId: "project-1",
+        title: "Audit security and configuration controls",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Inspect scoped files and write the audit report.",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-first-run-report",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-first-run-report"],
+      artifacts: [
+        {
+          taskId: "task-audit-first-run-report",
+          role: "report",
+          artifactPath: "audit/security-controls.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-first-run-report", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const reportPath = join(projectRoot, "audit", "security-controls.md");
+    expect(existsSync(reportPath)).toBe(true);
+    const report = readFileSync(reportPath, "utf8");
+    expect(report).toContain("No validated findings.");
+    expect(report).toContain("```audit-report-manifest");
+    expect(report).not.toContain("<computed_sha256");
+    expect(report).not.toContain("<commit_hash");
+    expect(report).not.toContain("would show");
+    const manifest = readAuditReportManifest(report);
+    const body = report.split(/\n```audit-report-manifest\b/)[0]?.trimEnd() ?? "";
+    expect(manifest.outcome).toBe("validated_no_findings");
+    expect(manifest.contentSha256).toBe(computeAuditReportContentSha256(body));
+    expect(manifest.sourceSnapshot).toMatchObject({
+      dirty: false,
+    });
+    expect(JSON.stringify(manifest.scopeCoverage)).toContain("src/bot_intevra/secret_scan.py");
+
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-first-run-report");
+    if (!artifact) throw new Error("missing first-run report artifact");
+    const auditPlanId = resolveAuditPlanId({
+      taskId: "task-audit-first-run-report",
+      roadmapBatchId: artifact.batchId,
+    });
+    const validation = validateAuditReportArtifact({
+      text: report,
+      projectRoot,
+      taskId: "task-audit-first-run-report",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
+      auditPlanId,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/security-controls.md"],
+      expectedReportArtifactPath: "audit/security-controls.md",
+      requireProposedFix: true,
+      auditEvidenceUnits: listAuditEvidenceEvents({
+        taskId: "task-audit-first-run-report",
+        auditPlanId,
+      }),
+      requireLedgerEvidence: true,
+    });
+    expect(validation.ok).toBe(true);
+    expect(validation.sourceClassification).toBe("validated_no_findings");
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-first-run-report"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
+    );
+    expect(updatedTask?.agentActivityLog).toContain(
+      "Agent: implement-coordinator started (deterministic audit report repair)",
+    );
+    expect(updatedTask?.agentActivityLog).toContain("Tool: git_grep scoped audit evidence");
   }, 60_000);
 
   it("terminalizes repeated deterministic audit report repair before runtime rework", async () => {
