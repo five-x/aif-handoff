@@ -7,6 +7,7 @@ import {
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
   getLatestReworkComment,
+  listRoadmapBatchArtifactAttempts,
   listAuditEvidenceEvents,
   listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
@@ -1046,6 +1047,19 @@ function hasAttemptedDeterministicAuditReportRepair(
 ): boolean {
   const text = [task.implementationLog ?? "", task.agentActivityLog ?? ""].join("\n");
   return /\bDeterministic audit report repair (?:completed|complete)\b/i.test(text);
+}
+
+function isRetryingTerminalSourceInconclusiveAuditReport(input: {
+  task: Pick<TaskRow, "status" | "reworkRequested">;
+  artifact: RoadmapBatchArtifactRow | null | undefined;
+}): boolean {
+  if (!input.artifact || input.artifact.role !== "report") return false;
+  if (input.task.status !== "implementing" || input.task.reworkRequested) return false;
+  if (input.artifact.state !== "source_inconclusive") return false;
+  return listRoadmapBatchArtifactAttempts(input.artifact.id).some(
+    (attempt) =>
+      attempt.state === "source_inconclusive" && attempt.reworkStatus === "terminal_inconclusive",
+  );
 }
 
 function logDeterministicAuditReportRepairActivity(input: {
@@ -3300,6 +3314,12 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const localAuditReportScopeRepairable = Boolean(
     expectedAuditReportArtifactPath && auditScopeRepairability.repairable,
   );
+  const retryingTerminalSourceInconclusiveAuditReport =
+    expectedAuditReportArtifactPath &&
+    isRetryingTerminalSourceInconclusiveAuditReport({
+      task,
+      artifact: roadmapArtifact,
+    });
   const currentSourceInconclusiveLocalAudit =
     Boolean(
       expectedAuditReportArtifactPath && task.reworkRequested && localAuditReportScopeRepairable,
@@ -3527,7 +3547,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   if (
     expectedAuditReportArtifactPath &&
     !task.reworkRequested &&
-    !localAuditReportScopeRepairable
+    !localAuditReportScopeRepairable &&
+    !retryingTerminalSourceInconclusiveAuditReport
   ) {
     const nowIso = new Date().toISOString();
     const blockedReason = terminalizeSourceInconclusiveAuditReport({
@@ -3586,6 +3607,27 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       "Audit report card terminalized before runtime prompt construction because declared scope is non-repairable",
     );
     return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    !task.reworkRequested &&
+    !localAuditReportScopeRepairable &&
+    retryingTerminalSourceInconclusiveAuditReport
+  ) {
+    logActivity(
+      taskId,
+      "Agent",
+      "Audit report retry bypassed non-repairable declared-scope preflight and will run runtime implementation",
+    );
+    log.info(
+      {
+        taskId,
+        artifactPath: expectedAuditReportArtifactPath,
+        reasons: auditScopeRepairability.reasons,
+      },
+      "Audit report retry bypassed non-repairable declared-scope preflight",
+    );
   }
 
   if (expectedAuditReportArtifactPath && !task.reworkRequested && localAuditReportScopeRepairable) {
