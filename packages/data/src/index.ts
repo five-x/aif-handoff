@@ -4764,6 +4764,77 @@ function auditCardDecisionForArtifact(input: {
   );
 }
 
+function readAuditSynthesisOutcomeKind(value: unknown): string | null {
+  if (!isObjectRecord(value)) return null;
+  const direct = value.auditSynthesisOutcome;
+  if (isObjectRecord(direct) && typeof direct.kind === "string") return direct.kind;
+  const evidence = value.evidence;
+  if (isObjectRecord(evidence)) return readAuditSynthesisOutcomeKind(evidence);
+  return null;
+}
+
+function isAcceptedTerminalAuditInconclusiveArtifact(input: {
+  artifact: RoadmapBatchArtifactRow;
+  validationDetails: unknown;
+  trustedSynthesisInput: boolean;
+}): boolean {
+  if (!input.trustedSynthesisInput) return false;
+  if (input.artifact.role !== "synthesis" || input.artifact.state !== "valid") return false;
+  return readAuditCardDecision(input.validationDetails)?.finalStatus === "audit_inconclusive";
+}
+
+function acceptedTerminalAuditInconclusiveReasonCodes(validationDetails: unknown): string[] {
+  const outcomeKind = readAuditSynthesisOutcomeKind(validationDetails);
+  return [
+    ...new Set([
+      "accepted",
+      "audit_inconclusive",
+      outcomeKind === "inconclusive_batch_evidence" ? "inconclusive_batch_evidence" : null,
+      "source_inconclusive",
+      "valid",
+    ]),
+  ]
+    .filter((code): code is string => Boolean(code))
+    .sort();
+}
+
+function artifactDisplayFailureSignature(input: {
+  artifact: RoadmapBatchArtifactRow;
+  validationDetails: unknown;
+  trustedSynthesisInput: boolean;
+}): string | null {
+  if (isAcceptedTerminalAuditInconclusiveArtifact(input)) return null;
+  return input.artifact.failureSignature;
+}
+
+function isAcceptedTerminalAuditInconclusiveAttempt(input: {
+  attempt: RoadmapBatchArtifactAttemptRow;
+  validationDetails: unknown;
+}): boolean {
+  return (
+    input.attempt.role === "synthesis" &&
+    input.attempt.state === "valid" &&
+    input.attempt.reworkStatus === "accepted" &&
+    readAuditCardDecision(input.validationDetails)?.finalStatus === "audit_inconclusive"
+  );
+}
+
+function buildWorkflowAttemptReasonCodes(attempt: RoadmapBatchArtifactAttemptRow): string[] {
+  const validationDetails = parseValidationDetails(attempt.validationDetailsJson);
+  if (isAcceptedTerminalAuditInconclusiveAttempt({ attempt, validationDetails })) {
+    return acceptedTerminalAuditInconclusiveReasonCodes(validationDetails);
+  }
+  return [attempt.state, attempt.classification, attempt.failureFamily, attempt.reworkStatus]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .sort();
+}
+
+function attemptDisplayFailureSignature(attempt: RoadmapBatchArtifactAttemptRow): string | null {
+  const validationDetails = parseValidationDetails(attempt.validationDetailsJson);
+  if (isAcceptedTerminalAuditInconclusiveAttempt({ attempt, validationDetails })) return null;
+  return attempt.failureSignature;
+}
+
 function readAuditSourceClassification(value: unknown): string | null {
   if (!isObjectRecord(value)) return null;
   const direct = value.sourceClassification;
@@ -4942,12 +5013,21 @@ function buildArtifactTrustReasonCodes(input: {
   synthesisReady: boolean;
   trustedSynthesisInput: boolean;
 }): string[] {
+  const validationDetails = parseValidationDetails(input.artifact.validationDetailsJson);
+  if (
+    isAcceptedTerminalAuditInconclusiveArtifact({
+      artifact: input.artifact,
+      validationDetails,
+      trustedSynthesisInput: input.trustedSynthesisInput,
+    })
+  ) {
+    return acceptedTerminalAuditInconclusiveReasonCodes(validationDetails);
+  }
+
   const codes = new Set<string>();
   codes.add(input.artifact.state);
   if (input.artifact.failureFamily) codes.add(input.artifact.failureFamily);
-  for (const code of collectValidationReasonCodes(
-    parseValidationDetails(input.artifact.validationDetailsJson),
-  )) {
+  for (const code of collectValidationReasonCodes(validationDetails)) {
     codes.add(code);
   }
   if (!input.trustedSynthesisInput) codes.add("untrusted_artifact");
@@ -5687,6 +5767,11 @@ export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustR
     validationDetails,
     trustedSynthesisInput,
   });
+  const failureSignature = artifactDisplayFailureSignature({
+    artifact,
+    validationDetails,
+    trustedSynthesisInput,
+  });
   const nextAction = buildArtifactTrustNextAction({
     artifact,
     synthesisReady: summary.synthesisReady,
@@ -5717,7 +5802,7 @@ export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustR
     batchId: artifact.batchId,
     roadmapAlias: artifact.roadmapAlias,
     attemptNumber: artifact.attemptNumber,
-    failureSignature: artifact.failureSignature,
+    failureSignature,
     branchName: artifact.branchName,
     worktreePath: artifact.worktreePath,
     batchCounts: buildArtifactTrustBatchCounts(artifacts),
@@ -5942,32 +6027,45 @@ export function updateRoadmapBatchArtifactState(input: {
     input.validationDetails === undefined
       ? artifact.validationDetailsJson
       : serializeJson(input.validationDetails);
+  const validationDetails =
+    input.validationDetails === undefined
+      ? parseValidationDetails(artifact.validationDetailsJson)
+      : input.validationDetails;
   if (input.state === "manual_exception") {
-    const justification = isObjectRecord(input.validationDetails)
-      ? input.validationDetails.justification
-      : null;
+    const justification = isObjectRecord(validationDetails) ? validationDetails.justification : null;
     if (typeof justification !== "string" || justification.trim().length === 0) {
       throw new Error("manual_exception requires a non-empty justification");
     }
   }
+  const acceptedTerminalAuditInconclusive =
+    input.state === "valid" &&
+    artifact.role === "synthesis" &&
+    readAuditCardDecision(validationDetails)?.finalStatus === "audit_inconclusive";
   const classification =
-    input.classification ?? readAuditSourceClassification(input.validationDetails);
-  const failureFamily =
-    input.failureFamily !== undefined
+    input.classification ??
+    (acceptedTerminalAuditInconclusive
+      ? (readAuditSynthesisOutcomeKind(validationDetails) ?? "source_inconclusive")
+      : readAuditSourceClassification(validationDetails));
+  const failureFamily = acceptedTerminalAuditInconclusive
+    ? null
+    : input.failureFamily !== undefined
       ? input.failureFamily
       : selectAuditArtifactFailureFamily({
           sourceClassification: classification,
-          validationDetails: input.validationDetails,
+          validationDetails,
           fallback: null,
         });
   const failureSignature =
-    input.failureSignature ??
-    buildAuditFailureSignature({
-      role: artifact.role,
-      classification,
-      failureFamily,
-      validationDetails: input.validationDetails,
-    });
+    input.failureSignature !== undefined
+      ? input.failureSignature
+      : acceptedTerminalAuditInconclusive
+        ? null
+        : buildAuditFailureSignature({
+            role: artifact.role,
+            classification,
+            failureFamily,
+            validationDetails,
+          });
   const attemptBoundaryId = input.createAttemptBoundary
     ? (input.attemptBoundaryId ?? crypto.randomUUID())
     : (input.attemptBoundaryId ?? artifact.attemptBoundaryId);
@@ -6111,6 +6209,11 @@ function listRoadmapBatchArtifactsByTaskId(taskId: string): RoadmapBatchArtifact
 function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimelineArtifact {
   const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
   const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
+  const failureSignature = artifactDisplayFailureSignature({
+    artifact,
+    validationDetails,
+    trustedSynthesisInput,
+  });
   return {
     id: artifact.id,
     taskId: artifact.taskId,
@@ -6140,7 +6243,7 @@ function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimel
         synthesisReady: true,
         trustedSynthesisInput,
       }),
-      failureSignature: artifact.failureSignature,
+      failureSignature,
       attemptBoundaryId: artifact.attemptBoundaryId,
       contentSha: artifact.contentSha,
       validatedAt: artifact.validatedAt,
@@ -6171,10 +6274,8 @@ function buildWorkflowAttempt(attempt: RoadmapBatchArtifactAttemptRow): Workflow
       originalState: attempt.state,
       classification: attempt.classification,
       failureFamily: attempt.failureFamily,
-      reasonCodes: [attempt.state, attempt.classification, attempt.failureFamily, attempt.reworkStatus]
-        .filter((value): value is string => typeof value === "string" && value.length > 0)
-        .sort(),
-      failureSignature: attempt.failureSignature,
+      reasonCodes: buildWorkflowAttemptReasonCodes(attempt),
+      failureSignature: attemptDisplayFailureSignature(attempt),
       reworkStatus: attempt.reworkStatus,
       attemptBoundaryId: attempt.attemptBoundaryId,
       contentSha: attempt.contentSha,
@@ -6264,6 +6365,11 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
   const currentClaims = artifacts.map((artifact) => {
     const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
     const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
+    const failureSignature = artifactDisplayFailureSignature({
+      artifact,
+      validationDetails,
+      trustedSynthesisInput,
+    });
     return buildWorkflowClaim({
       id: `${artifact.id}:claim:current`,
       artifactId: artifact.id,
@@ -6290,7 +6396,7 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
           synthesisReady: true,
           trustedSynthesisInput,
         }),
-        failureSignature: artifact.failureSignature,
+        failureSignature,
       },
     });
   });
@@ -6310,10 +6416,8 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
         originalState: attempt.state,
         classification: attempt.classification,
         failureFamily: attempt.failureFamily,
-        reasonCodes: [attempt.state, attempt.classification, attempt.failureFamily, attempt.reworkStatus]
-          .filter((value): value is string => typeof value === "string" && value.length > 0)
-          .sort(),
-        failureSignature: attempt.failureSignature,
+        reasonCodes: buildWorkflowAttemptReasonCodes(attempt),
+        failureSignature: attemptDisplayFailureSignature(attempt),
         reworkStatus: attempt.reworkStatus,
       },
     }),

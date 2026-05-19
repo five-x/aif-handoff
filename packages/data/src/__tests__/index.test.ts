@@ -854,7 +854,7 @@ describe("data layer", () => {
         description: "Report artifact: audit/final.md",
         taskIntent: "audit",
       });
-      createRoadmapBatchContract({
+      const batch = createRoadmapBatchContract({
         projectId: "proj-1",
         roadmapAlias: "audit-trust-rollup",
         taskIntent: "audit",
@@ -923,6 +923,40 @@ describe("data layer", () => {
         reworkStatus: "manual_review_required",
         validationDetails: { issues: [{ code: "malformed_report_artifact" }] },
       });
+      updateTaskStatus(synthesisTask!.id, "done");
+      updateRoadmapBatchArtifactState({
+        taskId: synthesisTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          evidence: {
+            auditReportValidation: {
+              sourceClassification: "insufficient_substantive_evidence",
+              manifestStatus: "valid",
+              issues: [{ code: "missing_substantive_evidence" }],
+            },
+            auditSynthesisOutcome: {
+              kind: "inconclusive_batch_evidence",
+              reason: "Audit inconclusive: source reports were weak or terminal.",
+            },
+          },
+          auditCardDecision: {
+            otzRequirement: "Produce an accepted audit synthesis.",
+            acceptanceCriteria: ["Report artifact exists and is trusted valid."],
+            implementationEvidence: ["audit/final.md"],
+            verificationEvidence: ["completion evidence guard accepted audit artifact"],
+            requirementCompletion: "not_verifiable",
+            verificationStrength: "inaccessible",
+            auditFindingValidity: {
+              validFindings: 0,
+              weakFindings: 1,
+              discardedFindings: 0,
+            },
+            residualRisks: ["Audit inconclusive: source reports were weak or terminal."],
+            finalStatus: "audit_inconclusive",
+          },
+        },
+      });
 
       expect(buildTaskArtifactTrustRollup(validTask!.id)).toEqual(
         expect.objectContaining({
@@ -962,6 +996,45 @@ describe("data layer", () => {
           artifactTrustLevel: "untrusted",
           claimOutcome: "refuted",
           nextAction: "retry_source_rework",
+        }),
+      );
+      const synthesisRollup = buildTaskArtifactTrustRollup(synthesisTask!.id);
+      expect(synthesisRollup).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactState: "valid",
+          artifactTrustLevel: "trusted",
+          failureFamily: null,
+          failureSignature: null,
+          nextAction: "none",
+          auditCardDecision: expect.objectContaining({
+            finalStatus: "audit_inconclusive",
+            verificationStrength: "inaccessible",
+          }),
+        }),
+      );
+      expect(synthesisRollup?.reasonCodes).toEqual(
+        expect.arrayContaining([
+          "accepted",
+          "audit_inconclusive",
+          "inconclusive_batch_evidence",
+          "source_inconclusive",
+          "valid",
+        ]),
+      );
+      expect(synthesisRollup?.reasonCodes).not.toEqual(
+        expect.arrayContaining(["insufficient_substantive_evidence", "missing_substantive_evidence"]),
+      );
+      expect(
+        listRoadmapBatchArtifactAttempts(
+          listRoadmapBatchArtifacts(batch.batchId).find(
+            (artifact) => artifact.taskId === synthesisTask!.id,
+          )!.id,
+        ).at(-1),
+      ).toEqual(
+        expect.objectContaining({
+          failureSignature: null,
+          reworkStatus: "accepted",
         }),
       );
     });

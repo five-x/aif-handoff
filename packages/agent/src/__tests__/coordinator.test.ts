@@ -1080,6 +1080,27 @@ describe("coordinator", () => {
     };
     expect(validationDetails.auditCardDecision?.finalStatus).toBe("audit_inconclusive");
     expect(validationDetails.auditCardDecision?.verificationStrength).toBe("inaccessible");
+    const trust = buildTaskArtifactTrustRollup("task-inconclusive-synthesis");
+    expect(trust).toEqual(
+      expect.objectContaining({
+        taskStatus: "done",
+        artifactState: "valid",
+        artifactTrustLevel: "trusted",
+        failureFamily: null,
+        failureSignature: null,
+        nextAction: "none",
+        auditCardDecision: expect.objectContaining({
+          finalStatus: "audit_inconclusive",
+          verificationStrength: "inaccessible",
+        }),
+      }),
+    );
+    expect(trust?.reasonCodes).toEqual(
+      expect.arrayContaining(["accepted", "audit_inconclusive", "source_inconclusive", "valid"]),
+    );
+    expect(trust?.reasonCodes).not.toEqual(
+      expect.arrayContaining(["insufficient_substantive_evidence", "missing_substantive_evidence"]),
+    );
     const summary = summarizeRoadmapBatch(batch.batchId);
     expect(summary?.status).toBe("complete");
     expect(summary?.failureFamily).toBeNull();
