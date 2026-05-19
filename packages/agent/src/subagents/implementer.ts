@@ -313,13 +313,12 @@ function shouldRequestImplementationManifest(task: Pick<TaskRow, "taskIntent" | 
 }
 
 function formatImplementationManifestPrompt(
-  task: Pick<TaskRow, "taskIntent" | "isFix">,
+  task: Pick<TaskRow, "id" | "taskIntent" | "isFix">,
   planText: string | null | undefined,
 ): string {
   if (!shouldRequestImplementationManifest(task)) return "";
   const intent = task.isFix ? "fix" : task.taskIntent;
   const expectedPlanManifestHash = hashAifPlanManifest(planText);
-  const regressionField = intent === "fix" ? ", `regressionExplanation`" : "";
   const regressionInstruction =
     intent === "fix"
       ? "\n- Because this is a fix task, `regressionExplanation` is required and must explain the regression or failure mode that was fixed."
@@ -327,9 +326,27 @@ function formatImplementationManifestPrompt(
   const planHashInstruction = expectedPlanManifestHash
     ? `\n- The approved plan contains an \`aif-plan-manifest\`; set \`planManifestHash\` exactly to \`${expectedPlanManifestHash}\`.`
     : "\n- The approved plan has no `aif-plan-manifest`; set `planManifestHash` to null.";
-  return `- Your final result MUST include exactly one fenced \`aif-implementation-manifest\` JSON block.
-- The manifest must be a JSON object with: \`version\`, \`taskId\`, \`intent\`, \`planManifestHash\`, \`changedFiles\`, \`diffSummary\`, \`verificationEvidence\`, \`acceptanceCriteria\`, \`evidenceRefs\`, \`planChecklist\`, \`reviewClosure\`, \`commitEvidence\`${regressionField}, and \`knownLimitations\`.
-- Set \`intent\` to \`${intent}\`. Every passed \`verificationEvidence\` item must include \`command\`, \`status\`, \`outputSha256\`, \`outputPreview\`, and \`outputPreviewTruncated\`; \`acceptanceCriteria\` and \`reviewClosure\` evidence refs must point to concrete verification evidence or actual review comments. Keep file paths and evidence arrays deterministic; use an empty array only when there is no applicable evidence.${planHashInstruction}${regressionInstruction}
+  return `- Your final result MUST include exactly one fenced \`aif-implementation-manifest\` JSON block. Use the fence language exactly \`aif-implementation-manifest\`, not \`json\`, and do not put the manifest in a repository file.
+- The manifest must be a JSON object with this schema shape:
+\`\`\`aif-implementation-manifest
+{
+  "version": 1,
+  "taskId": "${task.id}",
+  "intent": "${intent}",
+  "planManifestHash": null,
+  "changedFiles": [{ "path": "src/example.ts", "status": "modified" }],
+  "diffSummary": { "summary": "What changed", "filesChanged": 1 },
+  "verificationEvidence": [{ "id": "ver-1", "command": "npm test", "status": "passed", "outputSha256": "64 lowercase hex chars", "outputPreview": "observed command output", "outputPreviewTruncated": false }],
+  "acceptanceCriteria": [{ "id": "AC-1", "status": "satisfied", "evidenceRefs": ["ver-1"] }],
+  "evidenceRefs": ["ver-1"],
+  "planChecklist": { "total": 1, "completed": 1, "pending": 0, "synced": true, "pendingItems": [] },
+  "reviewClosure": { "status": "pending", "evidenceRefs": [] },
+  "commitEvidence": { "status": "not_required", "evidenceRefs": [] },
+  "knownLimitations": []
+}
+\`\`\`
+- Set \`taskId\` exactly to \`${task.id}\` and \`intent\` to \`${intent}\`. Every passed \`verificationEvidence\` item must include \`command\`, \`status\`, \`outputSha256\`, \`outputPreview\`, and \`outputPreviewTruncated\`; \`acceptanceCriteria\` and \`reviewClosure\` evidence refs must point to concrete verification evidence or actual review comments. Never use placeholder hashes or invented command output; if a required verification cannot run, mark that criterion unsatisfied and explain the limitation.${planHashInstruction}${regressionInstruction}
+- Required field names include \`changedFiles\`, \`diffSummary\`, \`verificationEvidence\`, \`acceptanceCriteria\`, \`evidenceRefs\`, \`planChecklist\`, \`reviewClosure\`, \`commitEvidence\`, and \`knownLimitations\`.
 - Put the manifest in the final result text, not in a repository file.`;
 }
 

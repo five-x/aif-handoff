@@ -60,6 +60,7 @@ import {
   type AuditCardDecision,
   type AuditFailureFamily,
   type AutoReviewFinding,
+  type ImplementationManifestIssueCode,
   type TaskStatus,
   type RuntimeStage,
 } from "@aif/shared";
@@ -1188,6 +1189,83 @@ function auditArtifactRequiresLedgerEvidence(input: {
   );
 }
 
+const IMPLEMENTATION_EVIDENCE_REWORK_ISSUES = new Set<ImplementationManifestIssueCode>([
+  "missing_implementation_manifest",
+  "invalid_implementation_manifest",
+  "implementation_plan_manifest_hash_mismatch",
+  "implementation_changed_files_mismatch",
+  "implementation_scope_mismatch",
+  "missing_verification_evidence",
+  "missing_acceptance_evidence",
+  "plan_checklist_drift",
+  "unintended_uncommitted_changes",
+  "missing_review_closure_evidence",
+  "missing_fix_regression_explanation",
+]);
+
+function implementationEvidenceIssueCodes(
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>,
+): ImplementationManifestIssueCode[] {
+  return (
+    result.evidence.implementationManifestValidation?.issues
+      .map((entry) => entry.code)
+      .filter((code): code is ImplementationManifestIssueCode =>
+        IMPLEMENTATION_EVIDENCE_REWORK_ISSUES.has(code as ImplementationManifestIssueCode),
+      ) ?? []
+  );
+}
+
+function returnImplementationEvidenceToReworkIfPossible(input: {
+  task: TaskRow;
+  fromStatus: TaskStatus;
+  title: string;
+  phase?: "pre_implementation" | "review_handoff" | "completion";
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+}): boolean {
+  if (input.phase !== "review_handoff") return false;
+  const issueCodes = implementationEvidenceIssueCodes(input.result);
+  if (issueCodes.length === 0) return false;
+
+  const currentIteration = input.task.reviewIterationCount ?? 0;
+  const maxIterations = input.task.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const nextIteration = currentIteration + 1;
+  if (nextIteration > maxIterations) return false;
+
+  const nowIso = new Date().toISOString();
+  const feedback = formatTaskCompletionBlockedReason(input.result);
+  const blockedReason = `Implementation evidence guard rework ${nextIteration}/${maxIterations}: ${feedback}`;
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "implementing",
+    {
+      blockedReason,
+      blockedFromStatus: null,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      reworkRequested: true,
+      reviewIterationCount: nextIteration,
+      manualReviewRequired: false,
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] Implementation evidence guard returned task to rework: ${issueCodes.join(", ")}`,
+  );
+  log.warn(
+    {
+      taskId: input.task.id,
+      fromStatus: input.fromStatus,
+      issueCodes,
+      reviewIterationCount: nextIteration,
+      maxReviewIterations: maxIterations,
+    },
+    "Implementation evidence guard returned task to implementer rework",
+  );
+  return true;
+}
+
 function blockTaskForCompletionEvidenceIfNeeded(input: {
   task: TaskRow;
   projectRoot: string;
@@ -1250,6 +1328,18 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       });
     }
     return false;
+  }
+
+  if (
+    returnImplementationEvidenceToReworkIfPossible({
+      task: input.task,
+      fromStatus: input.fromStatus,
+      title: input.title,
+      phase: input.phase,
+      result,
+    })
+  ) {
+    return true;
   }
 
   const family = firstAuditFailureFamily(result);

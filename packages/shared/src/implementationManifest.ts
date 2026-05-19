@@ -145,6 +145,7 @@ interface AifPlanManifestSnapshot {
 
 const IMPLEMENTATION_MANIFEST_BLOCK_PATTERN =
   /```aif-implementation-manifest\b[^\r\n]*\r?\n([\s\S]*?)```/gi;
+const JSON_FENCE_BLOCK_PATTERN = /```json\b[^\r\n]*\r?\n([\s\S]*?)```/gi;
 
 const PLAN_MANIFEST_BLOCK_PATTERN = /```aif-plan-manifest\b[^\r\n]*\r?\n([\s\S]*?)```/gi;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
@@ -233,13 +234,108 @@ export function extractImplementationManifestBlock(text: string | null | undefin
   if (!text) return null;
   IMPLEMENTATION_MANIFEST_BLOCK_PATTERN.lastIndex = 0;
   const matches = [...text.matchAll(IMPLEMENTATION_MANIFEST_BLOCK_PATTERN)];
-  if (matches.length !== 1) return null;
-  return matches[0]?.[1]?.trim() ?? null;
+  if (matches.length === 1) return matches[0]?.[1]?.trim() ?? null;
+  if (matches.length > 1) return null;
+
+  JSON_FENCE_BLOCK_PATTERN.lastIndex = 0;
+  const jsonMatches = [...text.matchAll(JSON_FENCE_BLOCK_PATTERN)].filter((match) => {
+    const index = match.index ?? 0;
+    const nearbyPrefix = text.slice(Math.max(0, index - 240), index);
+    return /\baif-implementation-manifest\b/i.test(nearbyPrefix);
+  });
+  if (jsonMatches.length !== 1) return null;
+  return jsonMatches[0]?.[1]?.trim() ?? null;
 }
 
 export function normalizeImplementationManifestJson(rawJson: string): string | null {
   const parsed = parseJsonObject(rawJson);
-  return parsed ? stableStringify(parsed) : null;
+  return parsed ? stableStringify(normalizeImplementationManifestShape(parsed)) : null;
+}
+
+function normalizeImplementationManifestShape(
+  parsed: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...parsed,
+    changedFiles: normalizeChangedFilesShape(parsed.changedFiles),
+    diffSummary: normalizeDiffSummaryShape(parsed.diffSummary),
+    verificationEvidence: normalizeVerificationEvidenceShape(parsed.verificationEvidence),
+    acceptanceCriteria: normalizeAcceptanceCriteriaShape(parsed.acceptanceCriteria),
+    evidenceRefs: isStringArray(parsed.evidenceRefs) ? parsed.evidenceRefs : [],
+    planChecklist: normalizePlanChecklistShape(parsed.planChecklist),
+    reviewClosure: normalizeReviewClosureShape(parsed.reviewClosure),
+    commitEvidence: normalizeCommitEvidenceShape(parsed.commitEvidence),
+    knownLimitations: isStringArray(parsed.knownLimitations) ? parsed.knownLimitations : [],
+  };
+}
+
+function normalizeChangedFilesShape(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((entry) => {
+    if (typeof entry === "string") return { path: normalizePath(entry), status: "unknown" };
+    return entry;
+  });
+}
+
+function normalizeDiffSummaryShape(value: unknown): unknown {
+  if (typeof value === "string" && value.trim()) return { summary: value.trim() };
+  return value;
+}
+
+function normalizeVerificationEvidenceShape(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((entry, index) => {
+    if (!isObject(entry)) return entry;
+    return {
+      ...entry,
+      id: usefulString(entry.id) ? entry.id : `ver-${index + 1}`,
+    };
+  });
+}
+
+function normalizeAcceptanceCriteriaShape(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((entry, index) => {
+    if (typeof entry === "string") {
+      return {
+        id: `ac-${index + 1}`,
+        description: entry,
+        status: "unsatisfied",
+        evidenceRefs: [],
+      };
+    }
+    if (!isObject(entry)) return entry;
+    return {
+      ...entry,
+      id: usefulString(entry.id) ? entry.id : `ac-${index + 1}`,
+      evidenceRefs: isStringArray(entry.evidenceRefs) ? entry.evidenceRefs : [],
+    };
+  });
+}
+
+function normalizePlanChecklistShape(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return {
+      total: value.length,
+      completed: 0,
+      pending: value.length,
+      synced: false,
+      pendingItems: value.filter((entry): entry is string => typeof entry === "string"),
+    };
+  }
+  return value;
+}
+
+function normalizeReviewClosureShape(value: unknown): unknown {
+  if (Array.isArray(value)) return { status: "pending", evidenceRefs: value.filter(usefulString) };
+  return value;
+}
+
+function normalizeCommitEvidenceShape(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return { status: "not_committed", evidenceRefs: value.filter(usefulString) };
+  }
+  return value;
 }
 
 function expectedArtifactPathsFromManifest(parsed: Record<string, unknown> | null): string[] {
@@ -505,8 +601,8 @@ export function validateImplementationManifest(
     };
   }
 
-  const manifest = coerceManifest(input.manifestJson);
   const normalizedJson = normalizeImplementationManifestJson(input.manifestJson);
+  const manifest = normalizedJson ? coerceManifest(normalizedJson) : null;
   if (!manifest || !normalizedJson) {
     return {
       ok: false,

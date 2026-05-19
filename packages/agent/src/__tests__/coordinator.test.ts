@@ -466,6 +466,7 @@ describe("coordinator", () => {
         title: "Implement me",
         status: "plan_ready",
         autoMode: true,
+        tags: JSON.stringify(["intent:general"]),
       })
       .run();
 
@@ -936,7 +937,7 @@ describe("coordinator", () => {
     expect(synthesis?.blockedReason ?? "").not.toContain("synthesis_not_ready");
   }, 60_000);
 
-  it("closes audit synthesis as explicit inconclusive from persisted source outcome without substantive no-findings proof", async () => {
+  it("blocks audit synthesis as explicit inconclusive from persisted source outcome without substantive no-findings proof", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-audit-inconclusive-");
     execFileSync("git", ["checkout", "-b", "feature/audit-inconclusive"], {
@@ -1068,42 +1069,32 @@ describe("coordinator", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-inconclusive-synthesis"))
       .get();
-    expect(synthesis?.status).toBe("done");
-    expect(synthesis?.blockedReason).toBeNull();
+    expect(synthesis?.status).toBe("blocked_external");
+    expect(synthesis?.blockedReason ?? "").toContain("audit_inconclusive");
     const synthesisArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
       (artifact) => artifact.taskId === "task-inconclusive-synthesis",
     );
-    expect(synthesisArtifact?.state).toBe("valid");
-    expect(synthesisArtifact?.failureFamily).toBeNull();
+    expect(synthesisArtifact?.state).not.toBe("valid");
+    expect(synthesisArtifact?.failureFamily).toBe("inconclusive_batch_evidence");
     const validationDetails = JSON.parse(synthesisArtifact?.validationDetailsJson ?? "{}") as {
       auditCardDecision?: { finalStatus?: string; verificationStrength?: string };
     };
-    expect(validationDetails.auditCardDecision?.finalStatus).toBe("audit_inconclusive");
-    expect(validationDetails.auditCardDecision?.verificationStrength).toBe("inaccessible");
+    expect(validationDetails.auditCardDecision).toBeUndefined();
     const trust = buildTaskArtifactTrustRollup("task-inconclusive-synthesis");
     expect(trust).toEqual(
       expect.objectContaining({
-        taskStatus: "done",
-        artifactState: "valid",
-        artifactTrustLevel: "trusted",
-        failureFamily: null,
-        failureSignature: null,
-        nextAction: "none",
-        auditCardDecision: expect.objectContaining({
-          finalStatus: "audit_inconclusive",
-          verificationStrength: "inaccessible",
-        }),
+        taskStatus: "blocked_external",
+        artifactTrustLevel: "untrusted",
+        failureFamily: "inconclusive_batch_evidence",
+        nextAction: "inspect_untrusted_source",
       }),
     );
     expect(trust?.reasonCodes).toEqual(
-      expect.arrayContaining(["accepted", "audit_inconclusive", "source_inconclusive", "valid"]),
-    );
-    expect(trust?.reasonCodes).not.toEqual(
-      expect.arrayContaining(["insufficient_substantive_evidence", "missing_substantive_evidence"]),
+      expect.arrayContaining(["audit_inconclusive", "inconclusive_batch_evidence"]),
     );
     const summary = summarizeRoadmapBatch(batch.batchId);
-    expect(summary?.status).toBe("complete");
-    expect(summary?.failureFamily).toBeNull();
+    expect(summary?.status).not.toBe("complete");
+    expect(summary?.failureFamily).toBe("inconclusive_batch_evidence");
   });
 
   it("should pause synthesis when validated branch artifacts are unavailable during implementation", async () => {
@@ -1539,6 +1530,7 @@ describe("coordinator", () => {
         status: "review",
         autoMode: false,
         reviewComments: "Some review comments",
+        tags: JSON.stringify(["intent:general"]),
       })
       .run();
 
@@ -2959,7 +2951,7 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
-  it("should block development tasks before review when implementation manifest is missing", async () => {
+  it("should return development tasks to rework before review when implementation manifest is missing", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-dev-handoff-");
     db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
@@ -2978,10 +2970,14 @@ describe("coordinator", () => {
     expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-manifest", rootPath);
     expect(runReviewer).not.toHaveBeenCalled();
     const task = db.select().from(tasks).where(eq(tasks.id, "task-dev-handoff-manifest")).get();
-    expect(task!.status).toBe("blocked_external");
-    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.status).toBe("implementing");
+    expect(task!.blockedFromStatus).toBeNull();
     expect(task!.blockedReason).toContain("Completion evidence guard");
     expect(task!.blockedReason).toContain("missing_implementation_manifest");
+    expect(task!.blockedReason).toContain("Implementation evidence guard rework 1/");
+    expect(task!.reworkRequested).toBe(true);
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.reviewIterationCount).toBe(1);
   });
 
   it("should block skipReview audit tasks with generic plan and no evidence delta", async () => {
