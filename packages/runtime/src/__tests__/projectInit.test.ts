@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -183,6 +183,53 @@ describe("initProject (runtime)", () => {
 
     expect(result.ok).toBe(true);
     expect(execFileSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("commits generated AIF bootstrap artifacts after init", () => {
+    const registry = createMockRegistry();
+    execFileSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (args.includes("--version")) return "2.9.3";
+      if (cmd === process.execPath && args.includes("init")) {
+        mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+        mkdirSync(join(projectRoot, ".codex", "skills", "aif"), { recursive: true });
+        writeFileSync(join(projectRoot, ".ai-factory.json"), "{}\n");
+        writeFileSync(join(projectRoot, ".ai-factory", "config.yaml"), "language:\n  ui: en\n");
+        writeFileSync(join(projectRoot, ".codex", "skills", "aif", "SKILL.md"), "# AIF\n");
+        return undefined;
+      }
+      if (cmd === "git" && args.includes("rev-parse")) return "true\n";
+      if (cmd === "git" && args.includes("status")) {
+        return [
+          "?? .ai-factory.json",
+          "?? .ai-factory/config.yaml",
+          "?? .codex/skills/aif/SKILL.md",
+        ].join("\n");
+      }
+      if (cmd === "git" && args.includes("diff")) {
+        const err = new Error("staged changes") as Error & { status: number };
+        err.status = 1;
+        throw err;
+      }
+      if (cmd === "git") return "";
+      return undefined;
+    });
+
+    const result = initProject({ projectRoot, registry });
+
+    expect(result.ok).toBe(true);
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining([
+        "commit",
+        "-m",
+        "chore: initialize AI Factory project",
+        "--",
+        ".ai-factory.json",
+        ".ai-factory",
+        ".codex",
+      ]),
+      expect.objectContaining({ cwd: projectRoot }),
+    );
   });
 
   it("skips ai-factory init when no runtimes match", () => {

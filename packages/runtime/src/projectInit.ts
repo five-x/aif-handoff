@@ -11,6 +11,14 @@ const IS_WINDOWS = process.platform === "win32";
 
 /** Minimum ai-factory version that supports --config flag. */
 const CONFIG_FLAG_MIN_VERSION = [2, 9, 3] as const;
+const PROJECT_INIT_COMMIT_PATHS = [
+  ".ai-factory.json",
+  ".ai-factory",
+  ".claude",
+  ".codex",
+  ".opencode",
+  ".mcp.json",
+] as const;
 
 function parseVersion(raw: string): [number, number, number] | null {
   const match = raw.trim().match(/(\d+)\.(\d+)\.(\d+)/);
@@ -116,6 +124,62 @@ function resolveAiFactoryCommand(agentIds: string, useConfig: boolean): AiFactor
   }
 }
 
+function runInitGit(
+  projectRoot: string,
+  args: string[],
+  opts: { ignoreExit?: boolean; commitIdentity?: boolean } = {},
+): { stdout: string; stderr: string; status: number } {
+  const configArgs = ["-c", `safe.directory=${projectRoot}`];
+  if (opts.commitIdentity) {
+    configArgs.push("-c", "user.name=AIF Handoff", "-c", "user.email=aif-handoff@local");
+  }
+
+  try {
+    const stdout = execFileSync("git", [...configArgs, ...args], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { stdout: stdout.trim(), stderr: "", status: 0 };
+  } catch (err) {
+    const error = err as { stdout?: Buffer | string; stderr?: Buffer | string; status?: number };
+    const stdout = error.stdout ? error.stdout.toString().trim() : "";
+    const stderr = error.stderr ? error.stderr.toString().trim() : String(err);
+    const status = typeof error.status === "number" ? error.status : 1;
+    if (opts.ignoreExit) return { stdout, stderr, status };
+    throw err;
+  }
+}
+
+function commitProjectInitArtifacts(projectRoot: string): void {
+  const existingPaths = PROJECT_INIT_COMMIT_PATHS.filter((path) =>
+    existsSync(resolve(projectRoot, path)),
+  );
+  if (existingPaths.length === 0) return;
+
+  const repo = runInitGit(projectRoot, ["rev-parse", "--is-inside-work-tree"], {
+    ignoreExit: true,
+  });
+  if (repo.status !== 0 || repo.stdout.trim() !== "true") return;
+
+  const status = runInitGit(projectRoot, ["status", "--porcelain", "--", ...existingPaths], {
+    ignoreExit: true,
+  });
+  if (status.status !== 0 || status.stdout.length === 0) return;
+
+  runInitGit(projectRoot, ["add", "--", ...existingPaths], { ignoreExit: true });
+  const staged = runInitGit(projectRoot, ["diff", "--cached", "--quiet", "--", ...existingPaths], {
+    ignoreExit: true,
+  });
+  if (staged.status === 0) return;
+
+  runInitGit(
+    projectRoot,
+    ["commit", "-m", "chore: initialize AI Factory project", "--", ...existingPaths],
+    { commitIdentity: true },
+  );
+}
+
 /**
  * Initialize a project directory with all runtime-specific structures.
  *
@@ -171,6 +235,7 @@ export function initProject(options: InitProjectOptions): InitProjectResult {
       stdio: "ignore",
       timeout: 60_000,
     });
+    commitProjectInitArtifacts(projectRoot);
     log.info({ projectRoot, agents: agentIds }, "ai-factory init completed");
     return { ok: true };
   } catch (err) {
@@ -178,11 +243,11 @@ export function initProject(options: InitProjectOptions): InitProjectResult {
       err instanceof Error ? err.message : "ai-factory init failed with unknown error";
     log.error(
       { projectRoot, agents: agentIds, err },
-      "ai-factory init failed — project scaffold is incomplete",
+      "Project initialization failed — project scaffold is incomplete",
     );
     return {
       ok: false,
-      error: `Project initialization failed: could not run "ai-factory init". ${message}. Make sure ai-factory is available (npx ai-factory --version) and try again.`,
+      error: `Project initialization failed: could not run "ai-factory init" or commit generated bootstrap. ${message}. Make sure ai-factory and git are available, then try again.`,
     };
   }
 }
