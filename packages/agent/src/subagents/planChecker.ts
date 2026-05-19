@@ -11,7 +11,7 @@ import {
   evaluateTaskPlanQuality,
   logger,
   looksLikeFullPlanUpdate,
-  normalizeAifPlanManifestFence,
+  normalizeAifPlanManifestForTask,
   type TaskPlanQualityTask,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
@@ -127,7 +127,10 @@ function persistNormalizedPlanManifestFenceIfChanged(
   projectRoot: string,
 ): PlanCheckerTask {
   if (!task.plan) return task;
-  const normalizedPlan = normalizeAifPlanManifestFence(task.plan);
+  const normalizedPlan = normalizeAifPlanManifestForTask({
+    task: buildPlanQualityTaskContext(task),
+    plan: task.plan,
+  });
   if (normalizedPlan === task.plan) return task;
 
   const updatedAt = new Date().toISOString();
@@ -185,7 +188,10 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
   // Try local conversion first — if only simple bullet→checkbox conversion is needed
   const convertible = countConvertibleBullets(task.plan);
   if (convertible > 0 && hasChecklistItems(task.plan)) {
-    const locallyConverted = normalizeAifPlanManifestFence(convertBulletsToCheckboxes(task.plan));
+    const locallyConverted = normalizeAifPlanManifestForTask({
+      task: buildPlanQualityTaskContext(task),
+      plan: convertBulletsToCheckboxes(task.plan),
+    });
     if (isPlanAlreadyChecklist(locallyConverted)) {
       assertTaskPlanQuality(task, locallyConverted);
       log.info(
@@ -244,7 +250,10 @@ ${manifestRequirement}`;
     assertCurrentBranch(projectRoot, task.branchName);
   }
 
-  const normalizedPlan = normalizeAifPlanManifestFence(normalizeMarkdownFence(resultText));
+  const normalizedPlan = normalizeAifPlanManifestForTask({
+    task: buildPlanQualityTaskContext(task),
+    plan: normalizeMarkdownFence(resultText),
+  });
   if (normalizedPlan.length === 0) {
     throw new Error("Plan checker returned empty content");
   }
@@ -266,7 +275,10 @@ ${manifestRequirement}`;
     );
 
     // Fallback: try local conversion of the ORIGINAL plan
-    const fallback = normalizeAifPlanManifestFence(convertBulletsToCheckboxes(task.plan));
+    const fallback = normalizeAifPlanManifestForTask({
+      task: buildPlanQualityTaskContext(task),
+      plan: convertBulletsToCheckboxes(task.plan),
+    });
     if (hasChecklistItems(fallback)) {
       assertTaskPlanQuality(task, fallback);
       log.info({ taskId }, "Local fallback conversion succeeded — saving converted plan");

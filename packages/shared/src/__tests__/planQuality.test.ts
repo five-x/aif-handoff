@@ -5,6 +5,7 @@ import {
   buildDeterministicDiagnosticPlan,
   evaluateTaskPlanQuality,
   formatTaskPlanQualityBlockedReason,
+  normalizeAifPlanManifestForTask,
   normalizeAifPlanManifestFence,
 } from "../planQuality.js";
 
@@ -109,6 +110,66 @@ describe("evaluateTaskPlanQuality", () => {
     });
     expect(result.ok).toBe(true);
     expect(result.categories).not.toContain("missing_plan_manifest");
+  });
+
+  it("repairs model-produced descriptive full-mode manifests before validation", () => {
+    const malformedManifest = JSON.stringify(
+      {
+        version: 1,
+        taskId: "task-full-descriptive",
+        intent: "feature",
+        scope: ["package.json", "tsconfig.json", ".gitignore", "src/index.ts", "src/core/types.ts"],
+        allowedChanges: [
+          "Config: package.json, tsconfig.json, .gitignore",
+          "Source: src/ directory tree with core types and service layer",
+        ],
+        forbiddenChanges: [
+          "No diagnostic-only audit, security-review, or code-review artifacts",
+          "No database integrations or persistent storage",
+        ],
+        expectedArtifacts: [
+          "Valid dist/ build output from npm run build",
+          "Type definitions (.d.ts) for core types in dist/core/",
+        ],
+        acceptanceCriteria: [
+          "package.json and tsconfig.json exist and are valid",
+          "npm run build completes without TypeScript errors",
+        ],
+        verificationCommands: ["npm install", "npm run build", "node dist/index.js"],
+      },
+      null,
+      2,
+    );
+    const plan = [
+      "## Feature plan",
+      "",
+      "## aif-plan-manifest",
+      "",
+      "```json",
+      malformedManifest,
+      "```",
+      "",
+      "- [ ] Create package.json and tsconfig.json.",
+      "- [ ] Add src/index.ts and src/core/types.ts.",
+      "- [ ] Run npm install, npm run build, and node dist/index.js.",
+    ].join("\n");
+
+    const task = {
+      id: "task-full-descriptive",
+      title: "Setup Project Architecture and Core Engine Skeleton",
+      description: "Scope: package.json, tsconfig.json, src/index.ts, src/core/types.ts.",
+      taskIntent: "feature" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+    };
+    const normalized = normalizeAifPlanManifestForTask({ task, plan });
+    const result = evaluateTaskPlanQuality({ task, plan: normalized });
+
+    expect(normalized).toContain('"allowedChanges": [\n    "source",\n    "config"');
+    expect(normalized).toContain('"kind": "source_diff"');
+    expect(normalized).toContain('"kind": "config_update"');
+    expect(result.ok).toBe(true);
+    expect(result.categories).toEqual([]);
   });
 
   it("accepts a focused checklist plan for a simple task", () => {

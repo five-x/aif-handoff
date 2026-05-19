@@ -17,7 +17,7 @@ import {
   formatTaskIntentContractForPrompt,
   getEnv,
   getProjectConfig,
-  normalizeAifPlanManifestFence,
+  normalizeAifPlanManifestForTask,
   type TaskPlanQualityTask,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
@@ -307,7 +307,10 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
       extraText: [task.plan, task.blockedReason],
     });
     if (deterministicPlan) {
-      const resultText = normalizeAifPlanManifestFence(deterministicPlan);
+      const resultText = normalizeAifPlanManifestForTask({
+        task: qualityTask,
+        plan: deterministicPlan,
+      });
       persistTaskPlanForTask({
         taskId,
         planText: resultText,
@@ -442,7 +445,10 @@ ${taskContext}`;
   }
 
   const diskPlan = readPlanFromDisk(executionRoot, rawResult, !!task.isFix, planPath);
-  const resultText = normalizeAifPlanManifestFence(diskPlan ?? normalizePlannerResult(rawResult));
+  const resultText = normalizeAifPlanManifestForTask({
+    task: buildPlannerPlanQualityTaskContext(task),
+    plan: diskPlan ?? normalizePlannerResult(rawResult),
+  });
 
   persistTaskPlanForTask({
     taskId,

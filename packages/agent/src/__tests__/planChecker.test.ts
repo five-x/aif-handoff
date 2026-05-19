@@ -190,6 +190,81 @@ describe("runPlanChecker", () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 
+  it("repairs descriptive feature plan manifests before invoking the plan-checker model", async () => {
+    const malformedManifest = JSON.stringify(
+      {
+        version: 1,
+        taskId: "task-feature-descriptive-manifest",
+        intent: "feature",
+        scope: ["package.json", "tsconfig.json", "src/index.ts", "src/core/types.ts"],
+        allowedChanges: [
+          "Config: package.json and tsconfig.json",
+          "Source: src/index.ts and src/core/types.ts",
+        ],
+        forbiddenChanges: ["No diagnostic-only report work"],
+        expectedArtifacts: [
+          "Compiled TypeScript output",
+          "Core types are importable from src/core/types.ts",
+        ],
+        acceptanceCriteria: ["Project configuration exists", "Core types compile successfully"],
+        verificationCommands: ["npm install", "npm run build"],
+      },
+      null,
+      2,
+    );
+
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-feature-descriptive-manifest",
+        projectId: "project-1",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Scope: package.json, tsconfig.json, src/index.ts, src/core/types.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "",
+          "## aif-plan-manifest",
+          "",
+          "```json",
+          malformedManifest,
+          "```",
+          "",
+          "- [ ] Create package.json and tsconfig.json.",
+          "- [ ] Add src/index.ts and src/core/types.ts.",
+          "- [ ] Run npm install and npm run build.",
+        ].join("\n"),
+      })
+      .run();
+
+    await runPlanChecker("task-feature-descriptive-manifest", "/tmp/plan-checker-test");
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-descriptive-manifest"))
+      .get();
+    expect(row?.plan).toContain("```aif-plan-manifest");
+    expect(row?.plan).toContain('"allowedChanges": [\n    "source",\n    "config"');
+    expect(
+      evaluateTaskPlanQuality({
+        task: {
+          id: "task-feature-descriptive-manifest",
+          title: "Setup Project Architecture and Core Engine Skeleton",
+          description: "Scope: package.json, tsconfig.json, src/index.ts, src/core/types.ts.",
+          taskIntent: "feature",
+          plannerMode: "full",
+          createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        },
+        plan: row?.plan,
+      }).ok,
+    ).toBe(true);
+  });
+
   it("rejects new full-mode checklist plans that omit a plan manifest", async () => {
     testDb.current
       .insert(tasks)

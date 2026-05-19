@@ -126,6 +126,11 @@ export interface DeterministicDiagnosticPlanInput {
   extraText?: Array<string | null | undefined>;
 }
 
+export interface NormalizeAifPlanManifestForTaskInput {
+  task: TaskPlanQualityTask;
+  plan: string;
+}
+
 const CHECKLIST_PATTERN = /^\s*[-*]\s+\[(?: |x|X)\]\s+\S/m;
 const CHECKLIST_ITEM_PATTERN = /^\s*[-*]\s+\[(?: |x|X)\]\s+(.+)$/gm;
 const PLAN_MANIFEST_BLOCK_PATTERN = /```aif-plan-manifest\b[^\r\n]*\r?\n([\s\S]*?)```/gi;
@@ -426,6 +431,371 @@ function normalizeManifestChangeCategories(value: unknown): Set<TaskIntentChange
       .map(normalizeChangeCategory)
       .filter((entry): entry is TaskIntentChangeCategory => entry !== null),
   );
+}
+
+function inferManifestChangeCategory(value: unknown): TaskIntentChangeCategory | null {
+  if (typeof value !== "string") return null;
+  return normalizeChangeCategory(value) ?? classifyManifestArtifactText(value);
+}
+
+function orderedManifestCategories(
+  categories: Iterable<TaskIntentChangeCategory>,
+): TaskIntentChangeCategory[] {
+  const selected = new Set(categories);
+  return TASK_INTENT_CHANGE_CATEGORIES.filter((category) => selected.has(category));
+}
+
+function normalizeManifestScope(input: {
+  manifest: Partial<AifPlanManifest> | null;
+  plan: string;
+  taskPaths: string[];
+}): string[] {
+  const scope = new Set<string>();
+  if (Array.isArray(input.manifest?.scope)) {
+    for (const entry of input.manifest.scope) {
+      if (typeof entry !== "string") continue;
+      const normalized = normalizePath(entry.trim());
+      if (normalized) scope.add(normalized);
+    }
+  }
+  for (const path of input.taskPaths) scope.add(normalizePath(path));
+  if (scope.size === 0) {
+    for (const path of extractRepoPaths(input.plan)) scope.add(normalizePath(path));
+  }
+  return [...scope].filter(Boolean).sort();
+}
+
+function concreteVerificationCommandsFromText(text: string): string[] {
+  const commands = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const normalized = line
+      .trim()
+      .replace(/^[-*]\s+(?:\[[ xX]\]\s*)?/, "")
+      .replace(/^\d+[.)]\s+/, "")
+      .replace(/^#+\s+/, "")
+      .replace(/^`+|`+$/g, "")
+      .trim();
+    if (isConcreteVerificationCommand(normalized)) commands.add(normalized);
+  }
+  return [...commands];
+}
+
+function normalizeManifestVerificationCommands(input: {
+  manifest: Partial<AifPlanManifest> | null;
+  plan: string;
+}): string[] {
+  const commands = new Set<string>();
+  if (Array.isArray(input.manifest?.verificationCommands)) {
+    for (const entry of input.manifest.verificationCommands) {
+      if (isConcreteVerificationCommand(entry)) commands.add(entry.trim());
+    }
+  }
+  for (const command of concreteVerificationCommandsFromText(input.plan)) {
+    commands.add(command);
+  }
+  return [...commands];
+}
+
+function normalizeManifestAllowedChanges(input: {
+  manifest: Partial<AifPlanManifest> | null;
+  taskIntent: TaskIntent;
+  scope: string[];
+}): TaskIntentChangeCategory[] {
+  const policy = getTaskIntentPolicy(input.taskIntent);
+  const allowedByPolicy = new Set(policy.allowedChanges.categories);
+  const categories = new Set<TaskIntentChangeCategory>();
+
+  if (Array.isArray(input.manifest?.allowedChanges)) {
+    for (const entry of input.manifest.allowedChanges) {
+      const category = inferManifestChangeCategory(entry);
+      if (category && allowedByPolicy.has(category)) categories.add(category);
+    }
+  }
+
+  if (Array.isArray(input.manifest?.expectedArtifacts)) {
+    for (const artifact of input.manifest.expectedArtifacts) {
+      if (isExpectedArtifact(artifact)) {
+        for (const category of classifyExpectedArtifactCategories(artifact)) {
+          if (allowedByPolicy.has(category)) categories.add(category);
+        }
+      } else if (typeof artifact === "string") {
+        const category = inferManifestChangeCategory(artifact);
+        if (category && allowedByPolicy.has(category)) categories.add(category);
+      }
+    }
+  }
+
+  for (const path of input.scope) {
+    const category = classifyManifestArtifactText(path);
+    if (category && allowedByPolicy.has(category)) categories.add(category);
+  }
+
+  if (categories.size === 0) {
+    for (const category of policy.allowedChanges.categories) categories.add(category);
+  }
+
+  return orderedManifestCategories(categories);
+}
+
+function normalizeManifestForbiddenChanges(input: {
+  manifest: Partial<AifPlanManifest> | null;
+  taskIntent: TaskIntent;
+  allowedChanges: TaskIntentChangeCategory[];
+}): TaskIntentChangeCategory[] {
+  const policy = getTaskIntentPolicy(input.taskIntent);
+  const forbiddenByPolicy = new Set(policy.forbiddenChanges.categories);
+  const allowed = new Set(input.allowedChanges);
+  const categories = new Set<TaskIntentChangeCategory>(policy.forbiddenChanges.categories);
+
+  if (Array.isArray(input.manifest?.forbiddenChanges)) {
+    for (const entry of input.manifest.forbiddenChanges) {
+      const category = inferManifestChangeCategory(entry);
+      if (category && forbiddenByPolicy.has(category) && !allowed.has(category)) {
+        categories.add(category);
+      }
+    }
+  }
+
+  return orderedManifestCategories(categories);
+}
+
+function expectedArtifactKindForCategory(category: TaskIntentChangeCategory): string {
+  switch (category) {
+    case "source":
+      return "source_diff";
+    case "tests":
+      return "test_delta";
+    case "docs":
+      return "docs_update";
+    case "config":
+      return "config_update";
+    case "report":
+      return "audit_report";
+    case "research":
+      return "research_artifact";
+    case "fixtures":
+      return "fixture_delta";
+    case "metadata":
+      return "metadata_update";
+  }
+}
+
+function normalizeManifestExpectedArtifacts(input: {
+  manifest: Partial<AifPlanManifest> | null;
+  scope: string[];
+  allowedChanges: TaskIntentChangeCategory[];
+}): AifPlanManifestExpectedArtifact[] {
+  const allowed = new Set(input.allowedChanges);
+  const byCategory = new Map<TaskIntentChangeCategory, Set<string>>();
+  for (const path of input.scope) {
+    const category = classifyManifestArtifactText(path);
+    if (!category || !allowed.has(category)) continue;
+    const paths = byCategory.get(category) ?? new Set<string>();
+    paths.add(normalizePath(path));
+    byCategory.set(category, paths);
+  }
+
+  if (byCategory.size > 0) {
+    return orderedManifestCategories(byCategory.keys()).map((category) => ({
+      kind: expectedArtifactKindForCategory(category),
+      paths: [...(byCategory.get(category) ?? [])].sort(),
+    }));
+  }
+
+  if (Array.isArray(input.manifest?.expectedArtifacts)) {
+    const artifacts = input.manifest.expectedArtifacts
+      .filter(isExpectedArtifact)
+      .map((artifact) => ({
+        kind: artifact.kind.trim(),
+        paths: [...new Set(artifact.paths.map((path) => normalizePath(path)).filter(Boolean))],
+      }))
+      .filter((artifact) => artifact.paths.length > 0)
+      .filter((artifact) =>
+        classifyExpectedArtifactCategories(artifact).every((category) => allowed.has(category)),
+      );
+    if (artifacts.length > 0) return artifacts;
+  }
+
+  return [];
+}
+
+function normalizeManifestAcceptanceCriteria(input: {
+  manifest: Partial<AifPlanManifest> | null;
+  plan: string;
+  verificationCommands: string[];
+  task: TaskPlanQualityTask;
+}): AifPlanManifestAcceptanceCriterion[] {
+  const commandFor = (index: number): string | null =>
+    input.verificationCommands[index] ?? input.verificationCommands[0] ?? null;
+  const criteria: AifPlanManifestAcceptanceCriterion[] = [];
+
+  if (Array.isArray(input.manifest?.acceptanceCriteria)) {
+    input.manifest.acceptanceCriteria.forEach((entry, index) => {
+      const verification = isObject(entry)
+        ? isConcreteVerificationCommand(entry.verification)
+          ? entry.verification.trim()
+          : commandFor(index)
+        : commandFor(index);
+      const description = isObject(entry)
+        ? isUsefulManifestString(entry.description)
+          ? entry.description.trim()
+          : null
+        : isUsefulManifestString(entry)
+          ? entry.trim()
+          : null;
+      if (!description || !verification) return;
+      criteria.push({
+        id:
+          isObject(entry) && isUsefulManifestString(entry.id)
+            ? entry.id.trim()
+            : `ac-${criteria.length + 1}`,
+        description,
+        verification,
+      });
+    });
+  }
+
+  if (criteria.length > 0) return criteria;
+
+  const checklistItems = extractChecklistItemTexts(input.plan).slice(0, 6);
+  checklistItems.forEach((item, index) => {
+    const verification = commandFor(index);
+    if (!verification) return;
+    criteria.push({
+      id: `ac-${criteria.length + 1}`,
+      description: item,
+      verification,
+    });
+  });
+
+  if (criteria.length > 0) return criteria;
+
+  const verification = commandFor(0);
+  return verification
+    ? [
+        {
+          id: "ac-1",
+          description: `${input.task.title} satisfies the task acceptance criteria.`,
+          verification,
+        },
+      ]
+    : [];
+}
+
+function buildNormalizedAifPlanManifest(input: {
+  task: TaskPlanQualityTask;
+  manifest: Partial<AifPlanManifest> | null;
+  plan: string;
+}): AifPlanManifest | null {
+  const taskIntent = inferTaskIntent({
+    taskIntent: input.task.taskIntent,
+    title: input.task.title,
+    description: input.task.description,
+    roadmapAlias: input.task.roadmapAlias,
+    tags: input.task.tags,
+  });
+  const taskPaths = extractRepoPaths(combinedTaskText(input.task));
+  const scope = normalizeManifestScope({ manifest: input.manifest, plan: input.plan, taskPaths });
+  const verificationCommands = normalizeManifestVerificationCommands({
+    manifest: input.manifest,
+    plan: input.plan,
+  });
+  const allowedChanges = normalizeManifestAllowedChanges({
+    manifest: input.manifest,
+    taskIntent,
+    scope,
+  });
+  const forbiddenChanges = normalizeManifestForbiddenChanges({
+    manifest: input.manifest,
+    taskIntent,
+    allowedChanges,
+  });
+  const expectedArtifacts = normalizeManifestExpectedArtifacts({
+    manifest: input.manifest,
+    scope,
+    allowedChanges,
+  });
+  const acceptanceCriteria = normalizeManifestAcceptanceCriteria({
+    manifest: input.manifest,
+    plan: input.plan,
+    verificationCommands,
+    task: input.task,
+  });
+
+  if (
+    scope.length === 0 ||
+    allowedChanges.length === 0 ||
+    expectedArtifacts.length === 0 ||
+    acceptanceCriteria.length === 0 ||
+    verificationCommands.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    taskId: fallbackTaskId(input.task),
+    intent: taskIntent,
+    scope,
+    allowedChanges,
+    forbiddenChanges,
+    expectedArtifacts,
+    acceptanceCriteria,
+    verificationCommands,
+  };
+}
+
+export function normalizeAifPlanManifestForTask(
+  input: NormalizeAifPlanManifestForTaskInput,
+): string {
+  const plan = normalizeAifPlanManifestFence(input.plan);
+  const blocks = extractPlanManifestBlocks(plan);
+  if (blocks.length > 1) return plan;
+
+  if (blocks.length === 0) {
+    if (!isPlanManifestRequired(input.task)) return plan;
+    const manifest = buildNormalizedAifPlanManifest({
+      task: input.task,
+      manifest: null,
+      plan,
+    });
+    if (!manifest) return plan;
+    return [plan.trimEnd(), "", "## aif-plan-manifest", "", formatAifPlanManifestBlock(manifest)]
+      .join("\n")
+      .trim();
+  }
+
+  const parsed = parseAifPlanManifest(blocks[0] ?? "");
+  if (!parsed) return plan;
+  const taskIntent = inferTaskIntent({
+    taskIntent: input.task.taskIntent,
+    title: input.task.title,
+    description: input.task.description,
+    roadmapAlias: input.task.roadmapAlias,
+    tags: input.task.tags,
+  });
+  const currentValidation = validatePlanManifest({
+    task: input.task,
+    plan,
+    taskIntent,
+    taskPaths: extractRepoPaths(combinedTaskText(input.task)),
+  });
+  if (currentValidation.issues.length === 0) return plan;
+
+  const manifest = buildNormalizedAifPlanManifest({
+    task: input.task,
+    manifest: parsed,
+    plan,
+  });
+  if (!manifest) return plan;
+
+  let replaced = false;
+  PLAN_MANIFEST_BLOCK_PATTERN.lastIndex = 0;
+  return plan.replace(PLAN_MANIFEST_BLOCK_PATTERN, (match) => {
+    if (replaced) return match;
+    replaced = true;
+    return formatAifPlanManifestBlock(manifest);
+  });
 }
 
 function validatePlanManifest(input: {
