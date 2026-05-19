@@ -108,6 +108,25 @@ describe("qwen-local-agent adapter", () => {
     expect(body.tool_choice).toBe("auto");
     expect(body.tools).toEqual(QWEN_LOCAL_AGENT_TOOLS);
   });
+  it.each(["roadmap-generate", "roadmap-extract"])(
+    "omits repository tools for %s one-shot workflows",
+    async (workflowKind) => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-roadmap-toolless-"));
+      const body = buildQwenLocalAgentRequestBody(createRunInput(root, { workflowKind }));
+      expect(body.model).toBe("Qwen3-32B-Q4_K_M.gguf");
+      expect(body.stream).toBe(false);
+      expect(body.tool_choice).toBeUndefined();
+      expect(body.tools).toBeUndefined();
+    },
+  );
+  it("respects explicit toolsEnabled=false runtime option", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-toolless-option-"));
+    const body = buildQwenLocalAgentRequestBody(
+      createRunInput(root, { options: { baseUrl: "http://qwen.local/v1", toolsEnabled: false } }),
+    );
+    expect(body.tool_choice).toBeUndefined();
+    expect(body.tools).toBeUndefined();
+  });
   it("respects configured maxToolTurns values above the legacy 40-turn cap", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-high-tool-turns-"));
     let turn = 0;

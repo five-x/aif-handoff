@@ -26,6 +26,7 @@ const MAX_CONFIGURED_TOOL_TURNS = 400;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set(["git_commit"]);
+const TOOLLESS_WORKFLOWS = new Set(["roadmap-generate", "roadmap-extract"]);
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -175,10 +176,12 @@ export function buildQwenLocalAgentRequestBody(input, messages = buildMessages(i
   const body = {
     model: resolveModel(input),
     messages,
-    tools: QWEN_LOCAL_AGENT_TOOLS,
-    tool_choice: "auto",
     stream: false,
   };
+  if (options.toolsEnabled !== false && !TOOLLESS_WORKFLOWS.has(input.workflowKind)) {
+    body.tools = QWEN_LOCAL_AGENT_TOOLS;
+    body.tool_choice = "auto";
+  }
   const temperature = readNumber(options.temperature);
   const maxTokens = readNumber(options.maxTokens);
   const topP = readNumber(options.topP);
