@@ -2963,6 +2963,10 @@ function validateAuditReportArtifactWithTaskContext(input: {
     taskId: input.task.id,
     auditPlanId,
   });
+  const allowedEvidenceArtifactPaths =
+    artifact?.role === "synthesis"
+      ? listRoadmapReportArtifactsForSynthesis(artifact.batchId).map((entry) => entry.artifactPath)
+      : [];
   return validateAuditReportArtifact({
     text: readFileSync(artifactPath, "utf8"),
     projectRoot: input.projectRoot,
@@ -2973,6 +2977,7 @@ function validateAuditReportArtifactWithTaskContext(input: {
     taskDescription: input.task.description,
     reportArtifactPaths: [gitPath],
     expectedReportArtifactPath: gitPath,
+    allowedEvidenceArtifactPaths,
     requireProposedFix: true,
     auditEvidenceUnits,
     requireLedgerEvidence: input.requireLedgerEvidence ?? false,

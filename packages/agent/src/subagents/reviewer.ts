@@ -287,6 +287,12 @@ function validateAuditReportForDeterministicReview(input: {
   if (input.artifact.role !== "report" && input.artifact.role !== "synthesis") return null;
   const resolvedArtifact = resolveSafeArtifactPath(input.projectRoot, input.artifact.artifactPath);
   if (!resolvedArtifact || !existsSync(resolvedArtifact.absolutePath)) return null;
+  const allowedEvidenceArtifactPaths =
+    input.artifact.role === "synthesis"
+      ? listRoadmapReportArtifactsForSynthesis(input.artifact.batchId).map(
+          (artifact) => artifact.artifactPath,
+        )
+      : [];
   const auditPlanId = resolveAuditPlanId({
     taskId: input.task.id,
     roadmapBatchId: input.artifact.batchId,
@@ -305,6 +311,7 @@ function validateAuditReportForDeterministicReview(input: {
     taskDescription: input.task.description,
     reportArtifactPaths: [resolvedArtifact.gitPath],
     expectedReportArtifactPath: resolvedArtifact.gitPath,
+    allowedEvidenceArtifactPaths,
     requireProposedFix: true,
     auditEvidenceUnits,
     requireLedgerEvidence: true,

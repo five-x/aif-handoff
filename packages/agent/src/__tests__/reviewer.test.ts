@@ -34,7 +34,8 @@ vi.mock("../subagentQuery.js", () => ({
 }));
 
 const { runReviewer } = await import("../subagents/reviewer.js");
-const { appendAuditEvidenceEvent, createRoadmapBatchContract } = await import("@aif/data");
+const { appendAuditEvidenceEvent, createRoadmapBatchContract, updateRoadmapBatchArtifactState } =
+  await import("@aif/data");
 
 function sidecarOutput(previousFindingId: string): string {
   return [
@@ -320,5 +321,193 @@ describe("runReviewer", () => {
       "Agent: review-gate started (deterministic audit report validation)",
     );
     expect(storedTask?.agentActivityLog).toContain("Tool: read_file audit/runtime.md");
+  });
+
+  it("accepts synthesis references to validated source report artifacts outside the current checkout", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-synthesis-report-"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-synthesis-reviewer",
+        name: "Synthesis Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-source-report",
+          projectId: "project-synthesis-reviewer",
+          title: "Audit source",
+          description: "Scope: src/config.ts\nReport artifact: audit/source-audit.md",
+          taskIntent: "audit",
+          status: "done",
+          useSubagents: true,
+        },
+        {
+          id: "task-synthesis-reviewer",
+          projectId: "project-synthesis-reviewer",
+          title: "Synthesize audit findings",
+          description: "Scope: src/config.ts\nReport artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "review",
+          useSubagents: true,
+          implementationLog:
+            "Deterministic audit synthesis completed from validated report artifacts.",
+        },
+      ])
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "project-synthesis-reviewer",
+      roadmapAlias: "audit-synthesis-reviewer",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-report", "task-synthesis-reviewer"],
+      artifacts: [
+        { taskId: "task-source-report", role: "report", artifactPath: "audit/source-audit.md" },
+        { taskId: "task-synthesis-reviewer", role: "synthesis", artifactPath: "audit/summary.md" },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-report",
+      state: "valid",
+      failureFamily: null,
+      classification: "validated_no_findings",
+      validationDetails: {
+        auditReportValidation: {
+          manifestStatus: "valid",
+          sourceClassification: "validated_no_findings",
+        },
+      },
+    });
+
+    const auditPlanId = resolveAuditPlanId({
+      taskId: "task-synthesis-reviewer",
+      roadmapBatchId: batch.batchId,
+    });
+    const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+    appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId: "task-synthesis-reviewer",
+          auditPlanId,
+          sourceSnapshotId,
+          scopeIds: ["src/config.ts"],
+          riskHypothesisIds: ["risk-1"],
+        },
+        buildAuditEvidencePayload({
+          id: "ev-synthesis-1",
+          toolName: "rg",
+          evidenceKind: "search",
+          evidenceGrade: "substantive",
+          scopeIds: ["src/config.ts"],
+          riskHypothesisIds: ["risk-1"],
+          paths: ["src/config.ts"],
+          command: 'rg -n "timeoutMs" src/config.ts',
+          exitCode: 0,
+          output: "src/config.ts:1:export const timeoutMs = 1000;",
+        }),
+      ),
+    );
+
+    const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+    const sourceSnapshot = {
+      id: sourceSnapshotId,
+      commit: snapshotKind === "git" ? snapshotCommit : null,
+      tree: snapshotKind === "git" ? snapshotTree : null,
+      dirty: false,
+    };
+    const body = [
+      "# Audit Summary",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` was covered and is absent.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Scope | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      '| `src/config.ts` | `src/config.ts:1`, source report `audit/source-audit.md` | Command `rg -n "timeoutMs" src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |',
+      "",
+      "## Checked Files",
+      "",
+      "- `src/config.ts:1`",
+      "- Source report provenance: `audit/source-audit.md`",
+      "",
+      "## Checked Commands",
+      "",
+      '- Command `rg -n "timeoutMs" src/config.ts` output:',
+      "```",
+      "src/config.ts:1:export const timeoutMs = 1000;",
+      "```",
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId,
+      taskId: "task-synthesis-reviewer",
+      batchId: batch.batchId,
+      roadmapAlias: "audit-synthesis-reviewer",
+      artifactPath: "audit/summary.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot,
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-synthesis-1"] }],
+      riskHypotheses: [
+        {
+          id: "risk-1",
+          description: "Synthesis source report coverage",
+          scopeIds: ["src/config.ts"],
+          status: "covered",
+          evidenceRefs: ["ev-synthesis-1"],
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        {
+          id: "nf-1",
+          scopeIds: ["src/config.ts"],
+          riskIds: ["risk-1"],
+          evidenceRefs: ["ev-synthesis-1"],
+        },
+      ],
+      evidenceRefs: ["ev-synthesis-1"],
+    };
+    writeFileSync(
+      join(projectRoot, "audit", "summary.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    await runReviewer("task-synthesis-reviewer", projectRoot);
+
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    const storedTask = db.select().from(tasks).where(eq(tasks.id, "task-synthesis-reviewer")).get();
+    expect(storedTask?.reviewComments).toContain("## Blocking Findings");
+    expect(storedTask?.reviewComments).toContain("- none");
+    expect(storedTask?.reviewComments).toContain(
+      "review_gate | audit report validation accepted `audit/summary.md`",
+    );
   });
 });
