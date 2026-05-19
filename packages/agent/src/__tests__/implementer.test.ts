@@ -179,6 +179,125 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.plan).toContain("- [ ] Keep the run diagnostic-only");
   });
 
+  it("terminalizes imported audit report cards with non-repairable declared scope before runtime", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
+
+    db.insert(tasks)
+      .values({
+        id: "task-imported-broad-audit",
+        projectId: "project-1",
+        title: "Audit imported broad card",
+        description: [
+          "Scope: .",
+          "Audit mandate: Review the imported top-level audit card.",
+          "Risk hypotheses: risk-imported-1 . may contain broad findings.",
+          "Allowed changes: only create/update audit/imported.md.",
+          "Report artifact: audit/imported.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Produce imported audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-imported",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-imported-broad-audit"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-imported-broad-audit",
+          role: "report",
+          artifactPath: "audit/imported.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-imported-broad-audit", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-imported-broad-audit"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain(
+      "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
+    );
+    expect(updatedTask?.implementationLog).toContain("Declared scope roots: none");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+
+    const artifact = findRoadmapBatchArtifactByTaskId("task-imported-broad-audit");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
+  });
+
+  it("terminalizes generated audit cards with no tracked scope sentinel before runtime", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Untracked README\n");
+
+    db.insert(tasks)
+      .values({
+        id: "task-generated-no-tracked-scope",
+        projectId: "project-1",
+        title: "Audit generated empty repo card",
+        description: [
+          "Scope: no tracked audit scope",
+          "Audit mandate: Review generated fallback audit card.",
+          "Risk hypotheses: risk-empty-1 no tracked audit scope has no concrete tracked evidence.",
+          "Allowed changes: only create/update audit/generated-empty.md.",
+          "Report artifact: audit/generated-empty.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Produce generated fallback audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-generated",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-generated-no-tracked-scope"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-generated-no-tracked-scope",
+          role: "report",
+          artifactPath: "audit/generated-empty.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-generated-no-tracked-scope", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-generated-no-tracked-scope"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain(
+      "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
+    );
+    expect(updatedTask?.implementationLog).toContain("Declared scope roots: none");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+
+    const artifact = findRoadmapBatchArtifactByTaskId("task-generated-no-tracked-scope");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
+  });
+
   it("injects validated audit report artifacts into synthesis prompts", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });

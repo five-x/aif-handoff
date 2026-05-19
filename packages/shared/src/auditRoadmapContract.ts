@@ -2,6 +2,8 @@ export const AUDIT_ARTIFACT_ROLES = ["report", "synthesis"] as const;
 
 export type AuditArtifactRole = (typeof AUDIT_ARTIFACT_ROLES)[number];
 
+export const AUDIT_NO_TRACKED_SCOPE_SENTINEL = "no tracked audit scope";
+
 export const AUDIT_ARTIFACT_STATES = [
   "expected",
   "valid",
@@ -454,6 +456,7 @@ export function extractAuditRiskHypothesisIdsFromLine(line: string): string[] {
 
 function isNonConcreteAuditSourceScopeRoot(scope: string): boolean {
   const normalized = scope.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  if (normalized === AUDIT_NO_TRACKED_SCOPE_SENTINEL) return false;
   if (
     !normalized ||
     normalized === "." ||

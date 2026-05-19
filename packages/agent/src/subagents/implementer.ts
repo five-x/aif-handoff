@@ -1298,6 +1298,48 @@ function hasReadableDeclaredAuditScope(projectRoot: string, description: string 
   );
 }
 
+function diagnoseDeclaredAuditScopeRepairability(
+  projectRoot: string,
+  description: string | null,
+): {
+  repairable: boolean;
+  roots: string[];
+  reasons: string[];
+  issueCodes: string[];
+} {
+  const roots = parseAuditScopeRoots(description);
+  if (roots.length === 0) {
+    return {
+      repairable: false,
+      roots,
+      reasons: ["declared audit Scope does not contain concrete readable file or directory roots"],
+      issueCodes: ["non_repairable_declared_scope"],
+    };
+  }
+  if (hasReadableDeclaredAuditScope(projectRoot, description)) {
+    return { repairable: true, roots, reasons: [], issueCodes: [] };
+  }
+
+  const unreadableRoots = roots.filter(
+    (root) =>
+      !collectAuditRepairEvidenceFiles(projectRoot, root).some((file) =>
+        Boolean(firstAuditRepairLineEvidenceRef(projectRoot, file)),
+      ),
+  );
+  if (unreadableRoots.length === 0) {
+    return { repairable: true, roots, reasons: [], issueCodes: [] };
+  }
+
+  return {
+    repairable: false,
+    roots,
+    reasons: unreadableRoots.map(
+      (root) => `declared audit Scope root ${root} has no readable file evidence`,
+    ),
+    issueCodes: ["non_repairable_declared_scope"],
+  };
+}
+
 const AUDIT_REPAIR_RISK_STOPWORDS = new Set([
   "audit",
   "evidence",
@@ -3143,8 +3185,11 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       code,
     ),
   );
+  const auditScopeRepairability = expectedAuditReportArtifactPath
+    ? diagnoseDeclaredAuditScopeRepairability(projectRoot, task.description)
+    : { repairable: false, roots: [], reasons: [], issueCodes: [] };
   const localAuditReportScopeRepairable = Boolean(
-    expectedAuditReportArtifactPath && hasReadableDeclaredAuditScope(projectRoot, task.description),
+    expectedAuditReportArtifactPath && auditScopeRepairability.repairable,
   );
   const currentSourceInconclusiveLocalAudit =
     Boolean(
@@ -3366,6 +3411,70 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     log.info(
       { taskId, artifactPath: expectedSynthesisArtifactPath },
       "Audit synthesis completed deterministically",
+    );
+    return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
+    !task.reworkRequested &&
+    !localAuditReportScopeRepairable
+  ) {
+    const nowIso = new Date().toISOString();
+    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      reasons: auditScopeRepairability.reasons,
+      fallbackIssueCodes: auditScopeRepairability.issueCodes,
+      validationDetails: {
+        issues: auditScopeRepairability.issueCodes.map((code) => ({
+          code,
+          message: auditScopeRepairability.reasons.join("; "),
+        })),
+        evidence: {
+          auditReportValidation: {
+            ok: false,
+            issueCodes: auditScopeRepairability.issueCodes,
+            sourceClassification: "source_inconclusive",
+            manifestStatus: "not_applicable",
+          },
+        },
+        sourceInconclusiveTerminal: {
+          artifactPath: expectedAuditReportArtifactPath,
+          reasons: auditScopeRepairability.reasons,
+          issueCodes: auditScopeRepairability.issueCodes,
+          declaredScopeRoots: auditScopeRepairability.roots,
+        },
+      },
+    });
+    const resultText = [
+      "Audit report card has a non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction.",
+      `Report artifact: ${expectedAuditReportArtifactPath}`,
+      `Declared scope roots: ${auditScopeRepairability.roots.join(", ") || "none"}`,
+      `Diagnostics: ${auditScopeRepairability.reasons.join("; ")}`,
+      `Blocked reason: ${blockedReason}`,
+    ].join("\n");
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      blockedReason,
+      reworkRequested: false,
+      manualReviewRequired: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "Audit report card terminalized as source_inconclusive before runtime prompt construction: non-repairable declared scope",
+    );
+    log.info(
+      {
+        taskId,
+        artifactPath: expectedAuditReportArtifactPath,
+        reasons: auditScopeRepairability.reasons,
+      },
+      "Audit report card terminalized before runtime prompt construction because declared scope is non-repairable",
     );
     return;
   }

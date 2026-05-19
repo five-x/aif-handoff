@@ -4,6 +4,7 @@ import {
   AUDIT_ARTIFACT_REWORK_STATUSES,
   AUDIT_ARTIFACT_STATES,
   AUDIT_FAILURE_FAMILIES,
+  AUDIT_NO_TRACKED_SCOPE_SENTINEL,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
@@ -321,6 +322,20 @@ describe("auditRoadmapContract", () => {
     expect(missingScope.issueDetails.map((issue) => issue.code)).toContain(
       "missing_scope_risk_hypothesis",
     );
+  });
+
+  it("allows the no tracked scope sentinel for source cards", () => {
+    const result = validateGeneratedAuditCard({
+      title: "Audit: security configuration",
+      description: completeAuditDescription()
+        .replace("Scope: src/config.ts", `Scope: ${AUDIT_NO_TRACKED_SCOPE_SENTINEL}`)
+        .replace(
+          "Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults.",
+          `Risk hypotheses: risk-config-1 ${AUDIT_NO_TRACKED_SCOPE_SENTINEL} marks this card non-repairable before runtime.`,
+        ),
+    });
+
+    expect(result).toMatchObject({ ok: true });
   });
 
   it("exempts synthesis cards from product risk hypotheses but requires report batch scope", () => {

@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   TASK_INTENT_CONTRACTS,
   TASK_INTENTS,
+  AUDIT_NO_TRACKED_SCOPE_SENTINEL,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
@@ -741,11 +742,17 @@ function auditSlug(value: string): string {
 
 function formatAuditRiskHypotheses(title: string, scope: string): string {
   const riskPrefix = auditSlug(title).replace(/^audit-/, "risk-");
+  const titleTerms = auditSlug(title)
+    .replace(/^audit-/, "")
+    .split("-")
+    .filter((term) => term.length > 2)
+    .slice(0, 3)
+    .join(" ");
   return scope
     .split(/\s*,\s*/)
     .map((scopeRoot, index) => {
       const riskId = `${riskPrefix}-${index + 1}`;
-      return `${riskId} ${scopeRoot} may contain owner-area defects that produce actionable audit findings`;
+      return `${riskId} ${scopeRoot} should be searched for ${titleTerms || "audit"} evidence gaps, unsafe defaults, boundary drift, or missing verification tied to this file`;
     })
     .join("; ");
 }
@@ -786,15 +793,52 @@ function buildAuditRoadmapItem(
   ].join("\n");
 }
 
-function existingAuditScopePaths(projectRoot: string, candidates: string[], max = 6): string[] {
+function existingConcreteAuditScopeFiles(
+  projectRoot: string,
+  candidates: string[],
+  max = 6,
+): string[] {
   const seen = new Set<string>();
   const paths: string[] = [];
-  for (const candidate of candidates) {
-    const normalized = candidate.replaceAll("\\", "/").replace(/^\/+/, "").replace(/\/+$/, "");
-    if (!normalized || seen.has(normalized)) continue;
-    if (!existsSync(join(projectRoot, normalized))) continue;
+  const add = (path: string): void => {
+    const normalized = normalizeAuditScopePath(path);
+    if (paths.length >= max || seen.has(normalized)) return;
+    if (!isConcreteAuditScopeFile(projectRoot, normalized)) return;
     seen.add(normalized);
     paths.push(normalized);
+  };
+  const addFromDirectory = (directory: string): void => {
+    const dirPath = join(projectRoot, directory);
+    try {
+      for (const entry of readdirSync(dirPath, { withFileTypes: true }).sort((left, right) =>
+        left.name.localeCompare(right.name),
+      )) {
+        if (paths.length >= max) return;
+        const child = normalizeAuditScopePath(`${directory}/${entry.name}`);
+        if (entry.isDirectory()) {
+          const segment = entry.name;
+          if (!AUDIT_SCOPE_IGNORED_ROOT_ENTRIES.has(segment) && !segment.startsWith(".")) {
+            addFromDirectory(child);
+          }
+        } else if (entry.isFile()) {
+          add(child);
+        }
+      }
+    } catch {
+      // Candidate disappeared or is unreadable; skip it.
+    }
+  };
+
+  for (const candidate of candidates) {
+    const normalized = normalizeAuditScopePath(candidate);
+    if (!normalized || normalized.startsWith("../") || normalized.includes("*")) continue;
+    try {
+      const stat = statSync(join(projectRoot, normalized));
+      if (stat.isFile()) add(normalized);
+      if (stat.isDirectory()) addFromDirectory(normalized);
+    } catch {
+      continue;
+    }
     if (paths.length >= max) break;
   }
   return paths;
@@ -822,47 +866,144 @@ function listScopedChildren(projectRoot: string, root: string, max = 8): string[
 
 const AUDIT_SCOPE_IGNORED_ROOT_ENTRIES = new Set([
   ".git",
+  ".agents",
+  ".ai-factory",
+  ".claude",
+  ".codex",
+  ".github",
   ".venv",
   "node_modules",
   "__pycache__",
+  ".pytest_cache",
   "dist",
   "build",
   "coverage",
   "audit",
+  "data",
   "report",
   "reports",
   "aif-plan",
 ]);
+
+const AUDIT_SCOPE_IGNORED_FILE_EXTENSIONS = new Set([
+  ".bmp",
+  ".class",
+  ".dll",
+  ".exe",
+  ".gif",
+  ".ico",
+  ".jpg",
+  ".jpeg",
+  ".pdf",
+  ".png",
+  ".pyc",
+  ".so",
+  ".wasm",
+  ".webp",
+  ".zip",
+]);
+
+function normalizeAuditScopePath(path: string): string {
+  return path.replaceAll("\\", "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function isConcreteAuditScopeFile(projectRoot: string, path: string): boolean {
+  const normalized = normalizeAuditScopePath(path);
+  if (!normalized || normalized.startsWith("../") || normalized.includes("*")) return false;
+  const segments = normalized.split("/");
+  if (segments.some((segment) => AUDIT_SCOPE_IGNORED_ROOT_ENTRIES.has(segment))) return false;
+  if (segments.some((segment) => segment.startsWith(".") && segment !== ".env.example")) {
+    return false;
+  }
+  const lower = normalized.toLowerCase();
+  if ([...AUDIT_SCOPE_IGNORED_FILE_EXTENSIONS].some((extension) => lower.endsWith(extension))) {
+    return false;
+  }
+  try {
+    const stat = statSync(join(projectRoot, normalized));
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function listTrackedReadableAuditScopeFiles(projectRoot: string): string[] {
+  const result = runRoadmapGit(projectRoot, ["ls-files", "-z"], { ignoreExit: true });
+  if (result.status !== 0 || !result.stdout) return [];
+  return result.stdout
+    .split("\0")
+    .map(normalizeAuditScopePath)
+    .filter((path) => isConcreteAuditScopeFile(projectRoot, path))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function hasUsableGitIndex(projectRoot: string): boolean {
+  const result = runRoadmapGit(projectRoot, ["rev-parse", "--is-inside-work-tree"], {
+    ignoreExit: true,
+  });
+  return result.status === 0 && result.stdout.trim() === "true";
+}
+
+function selectAuditScopeFilesFromTracked(
+  projectRoot: string,
+  candidates: string[],
+  fallback: string[],
+  max = 6,
+): string[] {
+  const trackedFiles = listTrackedReadableAuditScopeFiles(projectRoot);
+  if (trackedFiles.length === 0) return [];
+  const selected: string[] = [];
+  const add = (path: string) => {
+    if (selected.length >= max || selected.includes(path)) return;
+    selected.push(path);
+  };
+  const addMatches = (candidate: string) => {
+    const normalized = normalizeAuditScopePath(candidate);
+    if (!normalized) return;
+    if (trackedFiles.includes(normalized)) {
+      add(normalized);
+      return;
+    }
+    for (const path of trackedFiles) {
+      if (path.startsWith(`${normalized}/`)) add(path);
+      if (selected.length >= max) return;
+    }
+  };
+
+  for (const candidate of candidates) addMatches(candidate);
+  for (const candidate of fallback) addMatches(candidate);
+  for (const path of trackedFiles) add(path);
+
+  return selected.slice(0, max);
+}
 
 function listConcreteRootScopeFallbackPaths(projectRoot: string, max = 4): string[] {
   try {
     const rootEntries = readdirSync(projectRoot, { withFileTypes: true })
       .filter((entry) => !AUDIT_SCOPE_IGNORED_ROOT_ENTRIES.has(entry.name))
       .filter((entry) => !entry.name.startsWith("."))
-      .filter((entry) => entry.isDirectory() || /\.[a-z0-9]+$/i.test(entry.name))
+      .filter((entry) => entry.isFile() && /\.[a-z0-9]+$/i.test(entry.name))
       .map((entry) => entry.name.replaceAll("\\", "/"))
+      .filter((path) => isConcreteAuditScopeFile(projectRoot, path))
       .slice(0, max);
     if (rootEntries.length > 0) return rootEntries;
   } catch {
     // Fall back to managed project context below.
   }
 
-  return existingAuditScopePaths(
-    projectRoot,
-    [".ai-factory/DESCRIPTION.md", ".ai-factory/config.yaml", "README.md", "package.json"],
-    max,
-  );
+  return existingConcreteAuditScopeFiles(projectRoot, ["README.md", "package.json"], max);
 }
 
 function scopeText(projectRoot: string, candidates: string[], fallback: string[]): string {
-  const paths = existingAuditScopePaths(projectRoot, candidates);
+  const trackedFiles = selectAuditScopeFilesFromTracked(projectRoot, candidates, fallback, 6);
+  if (trackedFiles.length > 0) return trackedFiles.join(", ");
+  if (hasUsableGitIndex(projectRoot)) return AUDIT_NO_TRACKED_SCOPE_SENTINEL;
+  const paths = existingConcreteAuditScopeFiles(projectRoot, candidates, 6);
   if (paths.length > 0) return paths.join(", ");
-  const fallbackPaths = existingAuditScopePaths(projectRoot, fallback, 4);
+  const fallbackPaths = existingConcreteAuditScopeFiles(projectRoot, fallback, 4);
   if (fallbackPaths.length > 0) return fallbackPaths.join(", ");
   const concreteRootFallbackPaths = listConcreteRootScopeFallbackPaths(projectRoot, 4);
-  return concreteRootFallbackPaths.length > 0
-    ? concreteRootFallbackPaths.join(", ")
-    : fallback.slice(0, 4).join(", ");
+  return concreteRootFallbackPaths.length > 0 ? concreteRootFallbackPaths.join(", ") : "README.md";
 }
 
 function buildAuditAreasForProject(projectRoot: string): AuditArea[] {

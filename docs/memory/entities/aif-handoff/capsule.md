@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260517-wire-audit-card-decision-output::entity-capsule
+memory_id: task::aif-handoff::work::work-20260519-audit-pipeline-top-level-fix::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260517-wire-audit-card-decision-output
-source_path: docs/rdpi/work/work-20260517-wire-audit-card-decision-output
+task_id: work-20260519-audit-pipeline-top-level-fix
+source_path: docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-05-17
+updated_at: 2026-05-19
 supersedes:
 expires_at:
 tags:
@@ -25,18 +25,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260517-wire-audit-card-decision-output/research.md
-- docs/rdpi/work/work-20260517-wire-audit-card-decision-output/design.md
-- docs/rdpi/work/work-20260517-wire-audit-card-decision-output/plan.md
-- docs/rdpi/work/work-20260517-wire-audit-card-decision-output/result.md
-  created_at: 2026-05-17
-  last_verified_at: 2026-05-17
+- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/research.md
+- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/design.md
+- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/plan.md
+- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/result.md
+  created_at: 2026-05-19
+  last_verified_at: 2026-05-19
 
 ---
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260517-wire-audit-card-decision-output.
+Current capsule for entity aif-handoff, refreshed by task work-20260519-audit-pipeline-top-level-fix.
 
 # Why it matters
 
@@ -49,14 +49,3 @@ Reuse before editing the same component or domain.
 # When not to reuse
 
 Do not reuse if the entity boundary or ownership changed.
-
-## Active decisions
-
-- Reusable decision: audit-card final status is derived from OTZ acceptance and verification via `classifyAuditCardDecision()`, not directly from weak/discarded source finding quality.
-- Reusable decision: weak/discarded findings are diagnostic evidence quality metadata; they must remain visible but cannot by themselves trigger rework, external blocking, `source_inconclusive`, `weak_sources`, or manual review.
-- Treat `classifyAuditCardDecision()` as the final audit-card decision layer, while keeping strict evidence validation as the gate that decides whether an artifact is acceptable.
-- Add a small shared derivation path that converts accepted audit completion evidence and report text into an `AuditCardDecision`:
-- OTZ acceptance is satisfied only when `evaluateTaskCompletionEvidence()` is ok for the audit artifact.
-- Verification strength is `verified` for accepted committed evidence, `missing` for missing verification, `inaccessible` for access/external/manual exception conditions, and `missing_production` only when an explicit production-validation residual risk is recorded.
-- Valid findings and weak/discarded findings remain separate counters in `auditFindingValidity`.
-- Weak/discarded sections do not change `finalStatus`; only OTZ acceptance, verification/access, and residual production risk do.

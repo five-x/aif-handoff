@@ -94,6 +94,11 @@ function runGit(cwd: string, args: string[]) {
   }).trim();
 }
 
+function trackFiles(cwd: string, paths: string[]) {
+  runGit(cwd, ["init"]);
+  runGit(cwd, ["add", "--", ...paths]);
+}
+
 function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
   const synthesis = /\b(?:summary|synthesis)\b/i.test(reportName);
   return [
@@ -434,6 +439,12 @@ describe("roadmapGeneration", () => {
       writeFileSync(join(tmpDir, "pyproject.toml"), '[project]\nname = "my-app"\n');
       mkdirSync(join(tmpDir, "src", "my_app"), { recursive: true });
       writeFileSync(join(tmpDir, "src", "my_app", "config.py"), "DEBUG = False\n");
+      mkdirSync(join(tmpDir, ".codex"), { recursive: true });
+      writeFileSync(join(tmpDir, ".codex", "local.md"), "generated\n");
+      mkdirSync(join(tmpDir, "data"), { recursive: true });
+      writeFileSync(join(tmpDir, "data", "cache.json"), "{}\n");
+      writeFileSync(join(tmpDir, "scratch.py"), "print('untracked')\n");
+      trackFiles(tmpDir, ["README.md", "pyproject.toml", "src/my_app/config.py"]);
 
       mockRunApiRuntimeOneShot.mockResolvedValue({
         result: {
@@ -472,10 +483,19 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain(AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT);
       expect(result.content).toContain(AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT);
       expect(result.content).toContain("Child report status:");
-      expect(result.content).toContain("Scope: README.md, pyproject.toml");
+      expect(result.content).toContain("Scope: README.md, pyproject.toml, src/my_app/config.py");
       expect(result.content).toContain("Risk hypotheses: risk-");
-      expect(result.content).toContain("src/my_app");
+      expect(result.content).toContain("src/my_app/config.py");
       expect(result.content).not.toContain("Scope: .");
+      expect(result.content).not.toMatch(/^\s+- Scope: src\s*$/m);
+      expect(result.content).not.toMatch(/^\s+- Scope: tests\s*$/m);
+      expect(result.content).not.toContain(".codex");
+      expect(result.content).not.toMatch(/^\s+- Scope: data\s*$/m);
+      expect(result.content).not.toMatch(/^\s+- Scope: .*data\/cache\.json/m);
+      expect(result.content).not.toContain("scratch.py");
+      expect(result.content).not.toContain(
+        "owner-area defects that produce actionable audit findings",
+      );
       expect(result.content).not.toContain("packages/api/src");
       expect(result.content).toContain("Synthesize audit findings");
       expect(result.content).toContain("Scope: all audit/");
@@ -490,6 +510,11 @@ describe("roadmapGeneration", () => {
       writeFileSync(join(tmpDir, "src", "bot_intevra", "config.py"), "TOKEN = None\n");
       writeFileSync(join(tmpDir, "src", "bot_intevra", "secret_scan.py"), "def scan(): pass\n");
       writeFileSync(join(tmpDir, "src", "bot_intevra", "service.py"), "def run(): pass\n");
+      trackFiles(tmpDir, [
+        "src/bot_intevra/config.py",
+        "src/bot_intevra/secret_scan.py",
+        "src/bot_intevra/service.py",
+      ]);
 
       mockRunApiRuntimeOneShot.mockResolvedValue({
         result: {
@@ -511,6 +536,47 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain("src/bot_intevra/service.py");
       expect(result.content).toContain("Risk hypotheses: risk-");
       expect(result.content).not.toContain("Scope: .");
+      expect(result.content).not.toMatch(/^\s+- Scope: src\s*$/m);
+    });
+
+    it("handles deterministic audit fallback when no usable tracked scope files exist", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# Empty\nNo tracked code yet");
+      runGit(tmpDir, ["init"]);
+      writeFileSync(join(tmpDir, "README.md"), "# Untracked README\n");
+      mkdirSync(join(tmpDir, "src"), { recursive: true });
+      writeFileSync(join(tmpDir, "src", "app.ts"), "export const app = true;\n");
+      mkdirSync(join(tmpDir, ".codex"), { recursive: true });
+      writeFileSync(join(tmpDir, ".codex", "local.md"), "generated\n");
+      mkdirSync(join(tmpDir, "data"), { recursive: true });
+      writeFileSync(join(tmpDir, "data", "cache.json"), "{}\n");
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: "- [ ] **Initial Audit & Inventory** - Review everything.",
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+        },
+        context: {},
+      });
+
+      const result = await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        vision: "Audit empty repository",
+      });
+
+      expect(result.content).toContain("Audit: architecture and ownership boundaries");
+      expect(result.content).toContain("Scope: no tracked audit scope");
+      expect(result.content).not.toMatch(/^\s+- Scope: \.\s*$/m);
+      expect(result.content).not.toMatch(/^\s+- Scope: .*README\.md/m);
+      expect(result.content).not.toMatch(/^\s+- Scope: src\s*$/m);
+      expect(result.content).not.toContain("src/app.ts");
+      expect(result.content).not.toContain(".ai-factory/DESCRIPTION.md");
+      expect(result.content).not.toContain(".codex");
+      expect(result.content).not.toContain("data/cache.json");
+      expect(result.content).not.toContain(
+        "owner-area defects that produce actionable audit findings",
+      );
     });
 
     it("should preserve v8-like prior inconclusive context in generated audit task descriptions", async () => {
