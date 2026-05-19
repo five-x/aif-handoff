@@ -108,6 +108,23 @@ describe("qwen-local-agent adapter", () => {
     expect(body.tool_choice).toBe("auto");
     expect(body.tools).toEqual(QWEN_LOCAL_AGENT_TOOLS);
   });
+  it("limits planner workflows to read-only repository tools", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-readonly-"));
+    const body = buildQwenLocalAgentRequestBody(createRunInput(root, { workflowKind: "planner" }));
+    const toolNames = body.tools?.map((tool) => tool.function.name);
+
+    expect(body.tool_choice).toBe("auto");
+    expect(toolNames).toEqual([
+      "list_files",
+      "read_file",
+      "search_files",
+      "run_shell",
+      "git_status",
+    ]);
+    expect(toolNames).not.toContain("write_file");
+    expect(toolNames).not.toContain("apply_patch");
+    expect(toolNames).not.toContain("git_commit");
+  });
   it.each(["roadmap-generate", "roadmap-extract"])(
     "omits repository tools for %s one-shot workflows",
     async (workflowKind) => {
@@ -225,6 +242,48 @@ describe("qwen-local-agent adapter", () => {
     expect(JSON.stringify(events)).not.toContain("sk-SECRET");
     const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1].body));
     expect(secondBody.messages.some((message) => message.role === "tool")).toBe(true);
+  });
+  it("rejects rogue write tool calls during planner workflows", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-rogue-write-"));
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-planner-1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-write",
+                    type: "function",
+                    function: {
+                      name: "write_file",
+                      arguments: JSON.stringify({
+                        path: "package.json",
+                        content: '{"scripts":{"build":"tsc"}}\n',
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-planner-2",
+          choices: [{ message: { role: "assistant", content: "# Plan\n" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(createRunInput(root, { workflowKind: "planner" }));
+
+    expect(result.outputText).toBe("# Plan\n");
+    await expect(readFile(path.join(root, "package.json"), "utf8")).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
   it("emits bounded audit evidence events for read search and shell tools", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-evidence-"));

@@ -27,6 +27,21 @@ const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set(["git_commit"]);
 const TOOLLESS_WORKFLOWS = new Set(["roadmap-generate", "roadmap-extract"]);
+const READ_ONLY_TOOL_NAMES = new Set([
+  "list_files",
+  "read_file",
+  "search_files",
+  "run_shell",
+  "git_status",
+]);
+const READ_ONLY_WORKFLOWS = new Set([
+  "planner",
+  "plan-checker",
+  "reviewer",
+  "review-gate",
+  "review-security",
+  "security_review",
+]);
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -178,8 +193,9 @@ export function buildQwenLocalAgentRequestBody(input, messages = buildMessages(i
     messages,
     stream: false,
   };
-  if (options.toolsEnabled !== false && !TOOLLESS_WORKFLOWS.has(input.workflowKind)) {
-    body.tools = QWEN_LOCAL_AGENT_TOOLS;
+  const tools = resolveQwenToolsForWorkflow(input.workflowKind);
+  if (options.toolsEnabled !== false && tools.length > 0) {
+    body.tools = tools;
     body.tool_choice = "auto";
   }
   const temperature = readNumber(options.temperature);
@@ -189,6 +205,16 @@ export function buildQwenLocalAgentRequestBody(input, messages = buildMessages(i
   if (maxTokens != null) body.max_tokens = maxTokens;
   if (topP != null) body.top_p = topP;
   return body;
+}
+function resolveQwenToolsForWorkflow(workflowKind) {
+  if (TOOLLESS_WORKFLOWS.has(workflowKind)) return [];
+  if (READ_ONLY_WORKFLOWS.has(workflowKind)) {
+    return QWEN_LOCAL_AGENT_TOOLS.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool.function.name));
+  }
+  return QWEN_LOCAL_AGENT_TOOLS;
+}
+function isQwenToolAllowedForWorkflow(workflowKind, toolName) {
+  return resolveQwenToolsForWorkflow(workflowKind).some((tool) => tool.function.name === toolName);
 }
 function readMaxToolTurns(input) {
   const options = asRecord(input.options);
@@ -482,13 +508,25 @@ export async function runQwenLocalAgentApi(input, logger) {
           signatureCount > repeatedToolCallLimit;
         const shouldSuppressRepeatedCall =
           repeatedToolCallCount > repeatedToolCallLimit || repeatedNonconsecutiveLoop;
+        const toolAllowed = isQwenToolAllowedForWorkflow(
+          input.workflowKind,
+          toolCall.function.name,
+        );
         const result = shouldSuppressRepeatedCall
           ? repeatedToolCallResult(
               toolCall.function.name,
               Math.max(repeatedToolCallCount, signatureCount),
               repeatedToolCallLimit,
             )
-          : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+          : !toolAllowed
+            ? {
+                ok: false,
+                output: "",
+                error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
+                exitCode: null,
+                touchedFiles: [],
+              }
+            : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
         if (shouldSuppressRepeatedCall) {
           repeatedToolCallSuppressions += repeatedNonconsecutiveLoop
             ? REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS
