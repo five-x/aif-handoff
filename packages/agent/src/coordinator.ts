@@ -1758,6 +1758,22 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       return false;
     }
 
+    if (
+      stage.label === "implementer" &&
+      latestTask.status === "done" &&
+      findRoadmapBatchArtifactByTaskId(task.id)?.state === "source_inconclusive"
+    ) {
+      log.info(
+        {
+          taskId: task.id,
+          from: stage.inProgress,
+          to: latestTask.status,
+        },
+        "Implementer completed terminal source_inconclusive audit report before review handoff",
+      );
+      return true;
+    }
+
     if (stage.label === "implementer" && latestTask.skipReview) {
       if (
         blockTaskForCompletionEvidenceIfNeeded({

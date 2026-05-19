@@ -2870,7 +2870,7 @@ function runDeterministicAuditSynthesisRework(input: {
 type DeterministicAuditReportRepairResult = {
   status: "accepted" | "terminal_source_inconclusive";
   resultText: string;
-  blockedReason: string | null;
+  terminalReason: string | null;
   issueCodes: string[];
 };
 
@@ -2902,7 +2902,7 @@ function runDeterministicAuditReportRepair(input: {
     throw new Error(`deterministic audit report repair could not read ${input.artifactPath}`);
   }
   let status: DeterministicAuditReportRepairResult["status"];
-  let blockedReason: string | null = null;
+  let terminalReason: string | null = null;
   if (isTrustedValidAuditReportValidation(validation)) {
     const roadmapArtifact = findRoadmapBatchArtifactByTaskId(input.task.id);
     updateRoadmapBatchArtifactState({
@@ -2940,7 +2940,7 @@ function runDeterministicAuditReportRepair(input: {
         sourceClassification: "source_inconclusive",
       },
     };
-    blockedReason = terminalizeSourceInconclusiveAuditReport({
+    terminalReason = terminalizeSourceInconclusiveAuditReport({
       task: input.task,
       projectRoot: input.projectRoot,
       artifactPath: input.artifactPath,
@@ -2967,7 +2967,7 @@ function runDeterministicAuditReportRepair(input: {
         validatorSourceClassification: validation.sourceClassification,
       },
     };
-    blockedReason = terminalizeSourceInconclusiveAuditReport({
+    terminalReason = terminalizeSourceInconclusiveAuditReport({
       task: input.task,
       projectRoot: input.projectRoot,
       artifactPath: input.artifactPath,
@@ -2990,7 +2990,7 @@ function runDeterministicAuditReportRepair(input: {
     ...(status === "terminal_source_inconclusive"
       ? [
           `Unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}`,
-          ...(blockedReason ? [`Blocked reason: ${blockedReason}`] : []),
+          ...(terminalReason ? [`Terminal reason: ${terminalReason}`] : []),
         ]
       : []),
     ...(repair.decision.reasons.length > 0
@@ -2999,7 +2999,7 @@ function runDeterministicAuditReportRepair(input: {
     "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
     gitLog,
   ].join("\n");
-  return { status, resultText, blockedReason, issueCodes };
+  return { status, resultText, terminalReason, issueCodes };
 }
 
 function auditReportValidationIssueCodes(
@@ -3062,7 +3062,7 @@ function terminalizeSourceInconclusiveAuditReport(input: {
     ...(input.reasons ?? []).map((reason) => reason.trim()).filter(Boolean),
     ...(issueCodes.length > 0 ? [`validator issue codes: ${issueCodes.join(", ")}`] : []),
   ];
-  const blockedReason = `source_inconclusive: audit report ${input.artifactPath} is terminal non-trusted${
+  const terminalReason = `source_inconclusive: audit report ${input.artifactPath} is terminal non-trusted${
     details.length > 0 ? `: ${details.join("; ")}` : "."
   }`;
   const validationDetails =
@@ -3120,15 +3120,17 @@ function terminalizeSourceInconclusiveAuditReport(input: {
   });
   const nowIso = new Date().toISOString();
   setTaskFields(input.task.id, {
-    status: "blocked_external",
+    status: "done",
     reworkRequested: false,
     manualReviewRequired: false,
-    blockedReason,
-    blockedFromStatus: input.task.status,
+    blockedReason: null,
+    blockedFromStatus: null,
+    retryAfter: null,
+    retryCount: 0,
     lastHeartbeatAt: nowIso,
     updatedAt: nowIso,
   });
-  return blockedReason;
+  return terminalReason;
 }
 
 function validateAuditReportArtifactWithTaskContext(input: {
@@ -3379,7 +3381,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     roadmapArtifact?.state === "source_inconclusive" &&
     !currentSourceInconclusiveLocalAudit
   ) {
-    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+    const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,
       projectRoot,
       artifactPath: expectedAuditReportArtifactPath,
@@ -3390,7 +3392,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     const resultText = [
       "Audit report artifact is already source_inconclusive before rework implementation; terminalized before review handoff.",
       `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Blocked reason: ${blockedReason}`,
+      `Terminal reason: ${terminalReason}`,
     ].join("\n");
     setTaskFields(taskId, {
       implementationLog: resultText,
@@ -3404,7 +3406,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       "Audit report artifact already source_inconclusive before rework implementation",
     );
     log.info(
-      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      { taskId, artifactPath: expectedAuditReportArtifactPath, terminalReason },
       "Audit report rework terminalized because artifact state is source_inconclusive",
     );
     return;
@@ -3416,7 +3418,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     currentAuditReportValidation?.manifest?.outcome === "source_inconclusive" &&
     !currentSourceInconclusiveLocalAudit
   ) {
-    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+    const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,
       projectRoot,
       artifactPath: expectedAuditReportArtifactPath,
@@ -3427,7 +3429,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     const resultText = [
       "Audit report manifest already declares source_inconclusive before rework implementation; terminalized before review handoff.",
       `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Blocked reason: ${blockedReason}`,
+      `Terminal reason: ${terminalReason}`,
     ].join("\n");
     setTaskFields(taskId, {
       implementationLog: resultText,
@@ -3441,7 +3443,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       "Audit report manifest already source_inconclusive before rework implementation",
     );
     log.info(
-      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      { taskId, artifactPath: expectedAuditReportArtifactPath, terminalReason },
       "Audit report rework terminalized because existing manifest is source_inconclusive",
     );
     return;
@@ -3489,7 +3491,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     currentAuditReportValidation.sourceClassification === "source_inconclusive" &&
     !currentSourceInconclusiveLocalAudit
   ) {
-    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+    const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,
       projectRoot,
       artifactPath: expectedAuditReportArtifactPath,
@@ -3500,7 +3502,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     const resultText = [
       "Audit report evidence is already source_inconclusive before rework implementation; terminalized before review handoff.",
       `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Blocked reason: ${blockedReason}`,
+      `Terminal reason: ${terminalReason}`,
     ].join("\n");
     setTaskFields(taskId, {
       implementationLog: resultText,
@@ -3514,7 +3516,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       "Audit report evidence already source_inconclusive before rework implementation",
     );
     log.info(
-      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      { taskId, artifactPath: expectedAuditReportArtifactPath, terminalReason },
       "Audit report rework terminalized because existing artifact is source_inconclusive",
     );
     return;
@@ -3565,7 +3567,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     !localAuditReportScopeRepairable
   ) {
     const nowIso = new Date().toISOString();
-    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+    const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,
       projectRoot,
       artifactPath: expectedAuditReportArtifactPath,
@@ -3597,11 +3599,10 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       `Report artifact: ${expectedAuditReportArtifactPath}`,
       `Declared scope roots: ${auditScopeRepairability.roots.join(", ") || "none"}`,
       `Diagnostics: ${auditScopeRepairability.reasons.join("; ")}`,
-      `Blocked reason: ${blockedReason}`,
+      `Terminal reason: ${terminalReason}`,
     ].join("\n");
     setTaskFields(taskId, {
       implementationLog: resultText,
-      blockedReason,
       reworkRequested: false,
       manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
@@ -3762,7 +3763,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
                 : ["missing_report_file_references"],
             ),
           ].sort();
-    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+    const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,
       projectRoot,
       artifactPath: expectedAuditReportArtifactPath,
@@ -3774,11 +3775,10 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
       `Report artifact: ${expectedAuditReportArtifactPath}`,
       `Unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}`,
-      `Blocked reason: ${blockedReason}`,
+      `Terminal reason: ${terminalReason}`,
     ].join("\n");
     setTaskFields(taskId, {
       implementationLog: resultText,
-      blockedReason,
       reworkRequested: false,
       manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
@@ -3802,7 +3802,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
 
   if (expectedAuditReportArtifactPath) {
     const nowIso = new Date().toISOString();
-    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+    const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,
       projectRoot,
       artifactPath: expectedAuditReportArtifactPath,
@@ -3841,11 +3841,10 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     const resultText = [
       "Audit report card reached the final deterministic guard; terminalized as source_inconclusive before runtime prompt construction.",
       `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Blocked reason: ${blockedReason}`,
+      `Terminal reason: ${terminalReason}`,
     ].join("\n");
     setTaskFields(taskId, {
       implementationLog: resultText,
-      blockedReason,
       reworkRequested: false,
       manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
@@ -3857,7 +3856,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       "Audit report card terminalized by final deterministic guard before runtime prompt construction",
     );
     log.info(
-      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      { taskId, artifactPath: expectedAuditReportArtifactPath, terminalReason },
       "Audit report card final guard prevented runtime implementation fallback",
     );
     return;
