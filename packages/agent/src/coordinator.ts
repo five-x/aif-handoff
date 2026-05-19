@@ -503,6 +503,11 @@ function acceptedAuditCardDecision(input: {
   projectRoot: string;
 }): AuditCardDecision {
   const validation = input.result.evidence.auditReportValidation;
+  const auditSynthesisOutcome = input.result.evidence.auditSynthesisOutcome;
+  const terminalAuditInconclusive =
+    validation.sourceClassification === "source_inconclusive" ||
+    auditSynthesisOutcome?.kind === "source_inconclusive" ||
+    auditSynthesisOutcome?.kind === "inconclusive_batch_evidence";
   const reportText = readAuditArtifactText(input.projectRoot, input.artifact) ?? "";
   const implementationEvidence =
     input.result.evidence.reportArtifactFiles.length > 0
@@ -515,6 +520,7 @@ function acceptedAuditCardDecision(input: {
     validation.sourceClassification
       ? `source classification: ${validation.sourceClassification}`
       : null,
+    auditSynthesisOutcome ? `synthesis outcome: ${auditSynthesisOutcome.kind}` : null,
   ].filter((entry): entry is string => Boolean(entry));
 
   return buildAuditCardDecisionFromReport({
@@ -526,10 +532,16 @@ function acceptedAuditCardDecision(input: {
       "Report artifact exists and is trusted valid.",
       "Accepted findings meet the evidence contract or no-findings evidence is substantive.",
     ],
-    otzAcceptanceSatisfied: true,
+    otzAcceptanceSatisfied: !terminalAuditInconclusive,
     implementationEvidence,
     verificationEvidence,
-    verificationStrength: "verified",
+    verificationStrength: terminalAuditInconclusive ? "inaccessible" : "verified",
+    residualRisks: terminalAuditInconclusive
+      ? [
+          auditSynthesisOutcome?.reason ??
+            "Audit evidence is terminally inconclusive and cannot support a trusted finding or no-findings result.",
+        ]
+      : [],
     reportText,
   });
 }

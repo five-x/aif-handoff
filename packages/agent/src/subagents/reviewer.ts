@@ -15,6 +15,7 @@ import {
   getEnv,
   logger,
   redactProviderText,
+  classifyAuditSynthesisOutput,
   formatAttachmentsForPrompt,
   formatTaskIntentContractForPrompt,
   resolveAuditPlanId,
@@ -377,6 +378,50 @@ function buildDeterministicAuditReportReviewComments(input: {
   ].join("\n");
 }
 
+function buildDeterministicAuditSynthesisInconclusiveReviewComments(input: {
+  strategy: AutoReviewStrategy;
+  iteration: number;
+  artifactPath: string;
+  outcomeReason: string;
+  previousFindings: AutoReviewFinding[];
+}): string {
+  const closureEvidence = `Deterministic review-gate accepted \`${input.artifactPath}\` as an explicit terminal audit inconclusive synthesis; weak or untrusted source reports were not promoted to validated findings.`;
+  const previousFindingLines =
+    input.previousFindings.length > 0
+      ? input.previousFindings.map(
+          (finding) => `- [${finding.id}] ${finding.source} | resolved | ${closureEvidence}`,
+        )
+      : ["- none"];
+
+  return [
+    "## Auto Review Metadata",
+    `- Strategy: ${input.strategy}`,
+    `- Review Iteration: ${input.iteration}`,
+    "- Deterministic Review: audit_synthesis_inconclusive",
+    "",
+    "## Previous Findings",
+    ...previousFindingLines,
+    "",
+    "## Blocking Findings",
+    "- none",
+    "",
+    "## Advisories",
+    `- review_gate | ${closureEvidence} Reason: ${input.outcomeReason}`,
+    "",
+    "## Security Coverage",
+    "- secret_leaks | covered | Deterministic review inspected only the audit synthesis artifact and did not expose secret values.",
+    "- permissions_sandbox | covered | Deterministic review used read-only artifact validation and did not require additional write access.",
+    "- unsafe_shell_network_file | covered | Deterministic review did not execute shell, network, or file mutation operations beyond reading the synthesis artifact.",
+    "- dependency_config | not_applicable | No dependency or runtime configuration change is introduced by a terminal audit synthesis artifact.",
+    "",
+    "## Raw Code Review",
+    `Deterministic review-gate accepted ${input.artifactPath} as terminal audit inconclusive. ${input.outcomeReason}`,
+    "",
+    "## Raw Security Audit",
+    `Deterministic security review accepted ${input.artifactPath} as read-only terminal audit synthesis output.`,
+  ].join("\n");
+}
+
 function recordDeterministicAuditReportReviewActivity(taskId: string, artifactPath: string): void {
   logActivity(taskId, "Agent", "review-gate started (deterministic audit report validation)");
   logActivity(taskId, "Tool", `read_file ${artifactPath}`);
@@ -455,6 +500,26 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
     isTrustedValidAuditReportValidation(deterministicReviewValidation) &&
     previousFindings.every((finding) => finding.source === "review_gate");
 
+  const deterministicSynthesisOutcome =
+    roadmapArtifact?.role === "synthesis"
+      ? (() => {
+          const resolvedArtifact = resolveSafeArtifactPath(
+            projectRoot,
+            roadmapArtifact.artifactPath,
+          );
+          if (!resolvedArtifact || !existsSync(resolvedArtifact.absolutePath)) return null;
+          return classifyAuditSynthesisOutput({
+            text: readFileSync(resolvedArtifact.absolutePath, "utf8"),
+            projectRoot,
+          });
+        })()
+      : null;
+  const canUseDeterministicAuditSynthesisInconclusiveReview =
+    roadmapArtifact?.role === "synthesis" &&
+    deterministicSynthesisOutcome &&
+    (deterministicSynthesisOutcome.kind === "source_inconclusive" ||
+      deterministicSynthesisOutcome.kind === "inconclusive_batch_evidence");
+
   if (canUseDeterministicAuditReportReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
     const combinedReview = buildDeterministicAuditReportReviewComments({
@@ -477,6 +542,36 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
         sourceClassification: deterministicReviewValidation.sourceClassification,
       },
       "Review stage completed deterministically for trusted audit report artifact",
+    );
+    return;
+  }
+
+  if (canUseDeterministicAuditSynthesisInconclusiveReview) {
+    recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
+    const combinedReview = buildDeterministicAuditSynthesisInconclusiveReviewComments({
+      strategy,
+      iteration: reviewIteration,
+      artifactPath: roadmapArtifact.artifactPath,
+      outcomeReason: deterministicSynthesisOutcome.reason,
+      previousFindings,
+    });
+    setTaskFields(taskId, {
+      reviewComments: combinedReview,
+      updatedAt: new Date().toISOString(),
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "review stage complete (deterministic audit synthesis inconclusive)",
+    );
+    flushActivityQueue(taskId);
+    log.info(
+      {
+        taskId,
+        artifactPath: roadmapArtifact.artifactPath,
+        synthesisOutcome: deterministicSynthesisOutcome.kind,
+      },
+      "Review stage completed deterministically for terminal audit synthesis outcome",
     );
     return;
   }

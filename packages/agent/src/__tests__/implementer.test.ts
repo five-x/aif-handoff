@@ -298,6 +298,72 @@ describe("runImplementer rework behavior", () => {
     expect(artifact?.failureFamily).toBe("source_inconclusive");
   });
 
+  it("terminalizes legacy generated audit cards with generic owner-area risk before runtime", async () => {
+    const db = testDb.current;
+    mkdirSync(join(projectRoot, "src", "bot_intevra"), { recursive: true });
+    mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
+    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\n");
+    writeFileSync(join(projectRoot, "pyproject.toml"), '[project]\nname = "test"\n');
+    writeFileSync(join(projectRoot, ".ai-factory", "config.yaml"), "name: test\n");
+    writeFileSync(join(projectRoot, "src", "bot_intevra", "app.py"), "print('ok')\n");
+
+    db.insert(tasks)
+      .values({
+        id: "task-legacy-generated-audit",
+        projectId: "project-1",
+        title: "Audit: architecture and ownership boundaries",
+        description: [
+          "Scope: README.md, AGENTS.md, pyproject.toml, .ai-factory/config.yaml, src, src/bot_intevra",
+          "Audit mandate: Review architecture and ownership boundaries.",
+          "Risk hypotheses: risk-arch-1 scoped files may contain owner-area defects that produce actionable audit findings.",
+          "Allowed changes: only create/update audit/legacy.md.",
+          "Report artifact: audit/legacy.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Produce legacy generated audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-v17",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-legacy-generated-audit"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-legacy-generated-audit",
+          role: "report",
+          artifactPath: "audit/legacy.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-legacy-generated-audit", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-legacy-generated-audit"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain(
+      "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
+    );
+    expect(updatedTask?.implementationLog).toContain("legacy generated audit card");
+    expect(updatedTask?.blockedReason).toContain("legacy_weak_audit_card_contract");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+
+    const artifact = findRoadmapBatchArtifactByTaskId("task-legacy-generated-audit");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
+  });
+
   it("injects validated audit report artifacts into synthesis prompts", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });

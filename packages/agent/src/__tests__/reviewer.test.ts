@@ -9,6 +9,7 @@ import {
   buildAuditEvidenceUnit,
   computeAuditReportContentSha256,
   deriveAuditSourceSnapshotId,
+  formatAuditSynthesisOutcomeForArtifact,
   projects,
   resolveAuditPlanId,
   tasks,
@@ -509,5 +510,139 @@ describe("runReviewer", () => {
     expect(storedTask?.reviewComments).toContain(
       "review_gate | audit report validation accepted `audit/summary.md`",
     );
+  });
+
+  it("accepts terminal inconclusive synthesis deterministically without sidecars", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-inconclusive-synthesis-"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# test\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-inconclusive-synthesis-reviewer",
+        name: "Inconclusive Synthesis Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-source-inconclusive",
+          projectId: "project-inconclusive-synthesis-reviewer",
+          title: "Audit source inconclusive",
+          description: "Report artifact: audit/source.md",
+          taskIntent: "audit",
+          status: "done",
+          useSubagents: true,
+        },
+        {
+          id: "task-synthesis-inconclusive-reviewer",
+          projectId: "project-inconclusive-synthesis-reviewer",
+          title: "Synthesize audit findings",
+          description: "Report artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "review",
+          useSubagents: true,
+          implementationLog:
+            "Deterministic audit synthesis completed as terminal source_inconclusive.",
+          autoReviewStateJson: JSON.stringify({
+            strategy: "full_re_review",
+            iteration: 2,
+            findings: [
+              {
+                id: "review-1",
+                source: "code_review",
+                text: "Prior model review claimed the synthesis needed source validation.",
+              },
+            ],
+          }),
+        },
+      ])
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "project-inconclusive-synthesis-reviewer",
+      roadmapAlias: "audit-inconclusive-reviewer",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-inconclusive", "task-synthesis-inconclusive-reviewer"],
+      artifacts: [
+        { taskId: "task-source-inconclusive", role: "report", artifactPath: "audit/source.md" },
+        {
+          taskId: "task-synthesis-inconclusive-reviewer",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-inconclusive",
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      classification: "source_inconclusive",
+      validationDetails: {
+        sourceClassification: "source_inconclusive",
+      },
+    });
+
+    writeFileSync(
+      join(projectRoot, "audit", "summary.md"),
+      [
+        "# Audit Inconclusive",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "source_inconclusive",
+          reason: "Audit inconclusive: source reports are terminal non-trusted.",
+          sourceReportCount: 1,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 0,
+          weakReportCount: 1,
+        }),
+        "",
+        "Audit outcome: Audit inconclusive",
+        "",
+        "## Child Report Status",
+        "",
+        "| Source report | Task | Status | Notes |",
+        "| --- | --- | --- | --- |",
+        "| `audit/source.md` | `task-source-inconclusive` | source_inconclusive | terminal non-trusted |",
+        "",
+        "## Checked Files",
+        "- `README.md:1`",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await runReviewer("task-synthesis-inconclusive-reviewer", projectRoot);
+
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-synthesis-inconclusive-reviewer"))
+      .get();
+    expect(storedTask?.reviewComments).toContain(
+      "- Deterministic Review: audit_synthesis_inconclusive",
+    );
+    expect(storedTask?.reviewComments).toContain("## Blocking Findings");
+    expect(storedTask?.reviewComments).toContain("- none");
+    expect(storedTask?.reviewComments).toContain("[review-1] code_review | resolved");
+    expect(storedTask?.reviewComments).toContain("terminal audit inconclusive");
+    expect(batch.batchId).toBeTruthy();
   });
 });

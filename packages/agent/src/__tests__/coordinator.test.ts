@@ -1081,6 +1081,11 @@ describe("coordinator", () => {
     );
     expect(synthesisArtifact?.state).toBe("valid");
     expect(synthesisArtifact?.failureFamily).toBeNull();
+    const validationDetails = JSON.parse(synthesisArtifact?.validationDetailsJson ?? "{}") as {
+      auditCardDecision?: { finalStatus?: string; verificationStrength?: string };
+    };
+    expect(validationDetails.auditCardDecision?.finalStatus).toBe("audit_inconclusive");
+    expect(validationDetails.auditCardDecision?.verificationStrength).toBe("inaccessible");
     const summary = summarizeRoadmapBatch(batch.batchId);
     expect(summary?.status).toBe("complete");
     expect(summary?.failureFamily).toBeNull();

@@ -1089,6 +1089,52 @@ function parseAuditScopeRoots(description: string | null): string[] {
   return [...roots].sort();
 }
 
+const LEGACY_GENERATED_AUDIT_RISK_PATTERN =
+  /\bowner-area defects that produce actionable audit findings\b/i;
+const LEGACY_BROAD_AUDIT_SCOPE_ROOTS = new Set([
+  "app",
+  "apps",
+  "bot",
+  "docs",
+  "lib",
+  "package",
+  "packages",
+  "scripts",
+  "server",
+  "src",
+  "test",
+  "tests",
+]);
+
+function legacyGeneratedAuditContractReasons(
+  description: string | null,
+  roots: string[],
+): string[] {
+  if (!description || !LEGACY_GENERATED_AUDIT_RISK_PATTERN.test(description)) return [];
+
+  const broadRoots = roots.filter((root) =>
+    LEGACY_BROAD_AUDIT_SCOPE_ROOTS.has(auditRepairPathSegments(root)[0]?.toLowerCase() ?? ""),
+  );
+  const hiddenToolingRoots = roots.filter(isExplicitHiddenAuditScopeRoot);
+  const reasons = [
+    "legacy generated audit card uses generic owner-area risk hypotheses instead of concrete OTZ acceptance criteria",
+  ];
+  if (broadRoots.length > 0) {
+    reasons.push(
+      `legacy generated audit card declares broad source roots: ${broadRoots.join(", ")}`,
+    );
+  }
+  if (hiddenToolingRoots.length > 0) {
+    reasons.push(
+      `legacy generated audit card includes hidden/tooling roots: ${hiddenToolingRoots.join(", ")}`,
+    );
+  }
+  if (roots.length > 4) {
+    reasons.push(`legacy generated audit card declares too many mixed roots: ${roots.join(", ")}`);
+  }
+  return reasons;
+}
+
 const AUDIT_REPAIR_IGNORED_DIRS = new Set([
   ".git",
   ".agents",
@@ -1314,6 +1360,15 @@ function diagnoseDeclaredAuditScopeRepairability(
       roots,
       reasons: ["declared audit Scope does not contain concrete readable file or directory roots"],
       issueCodes: ["non_repairable_declared_scope"],
+    };
+  }
+  const legacyContractReasons = legacyGeneratedAuditContractReasons(description, roots);
+  if (legacyContractReasons.length > 0) {
+    return {
+      repairable: false,
+      roots,
+      reasons: legacyContractReasons,
+      issueCodes: ["legacy_weak_audit_card_contract", "non_repairable_declared_scope"],
     };
   }
   if (hasReadableDeclaredAuditScope(projectRoot, description)) {
