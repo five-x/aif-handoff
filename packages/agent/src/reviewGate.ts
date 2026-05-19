@@ -837,6 +837,13 @@ function requiresSubstantiveReviewEvidence(input: ReviewGateInput): boolean {
       auditEvidenceUnits,
     }),
   });
+  if (
+    artifact?.role === "synthesis" &&
+    (taskEvidence.evidence.auditSynthesisOutcome?.kind === "source_inconclusive" ||
+      taskEvidence.evidence.auditSynthesisOutcome?.kind === "inconclusive_batch_evidence")
+  ) {
+    return false;
+  }
   return !(
     taskEvidence.evidence.reportArtifactFiles.length > 0 &&
     taskEvidence.evidence.uncommittedReportArtifactFiles.length === 0 &&

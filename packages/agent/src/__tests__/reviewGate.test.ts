@@ -1783,6 +1783,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         description: "Report artifact: reports/audit.md",
         taskIntent: "audit",
         auditArtifactRole: "synthesis",
+        allowedEvidenceArtifactPaths: ["audit/source-a.md"],
         agentActivityLog: agentActivityLog(),
       },
     });
@@ -1791,6 +1792,82 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(result.blockingFindings.map((finding) => finding.text).join("\n")).toContain(
       "(audit_inconclusive)",
     );
+  });
+
+  it("accepts explicit terminal audit inconclusive synthesis without forcing substantive no-findings evidence", async () => {
+    const root = initReportRepoWithReport(
+      [
+        "# Audit Inconclusive",
+        "",
+        formatAuditSynthesisOutcomeForArtifact({
+          kind: "inconclusive_batch_evidence",
+          reason: "Audit inconclusive: source reports were weak or terminal.",
+          sourceReportCount: 6,
+          validatedFindingCount: 0,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 2,
+          weakReportCount: 4,
+        }),
+        "",
+        "Audit outcome: Audit inconclusive.",
+        "",
+        "## Child Report Status",
+        "",
+        "| Source report | Task | Status | Notes |",
+        "| --- | --- | --- | --- |",
+        "| `audit/source-a.md` | `task-source-a` | inconclusive | terminal non-trusted |",
+        "",
+        "## Weak/discarded findings",
+        "",
+        "No weak or discarded findings were promoted to validated findings.",
+      ].join("\n"),
+    );
+    findRoadmapBatchArtifactByTaskIdMock.mockReturnValue({
+      id: "artifact-synthesis",
+      batchId: "batch-synthesis",
+      taskId: "audit-synthesis-task",
+      artifactPath: "reports/audit.md",
+      role: "synthesis",
+      state: "expected",
+    });
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      taskId: "audit-synthesis-task",
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "- Deterministic Review: audit_synthesis_inconclusive",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- review_gate | Deterministic review accepted terminal audit inconclusive output.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Deterministic review inspected only the synthesis artifact.",
+        "- permissions_sandbox | covered | Deterministic review used read-only artifact validation.",
+        "- unsafe_shell_network_file | covered | No shell/network/file mutation was required.",
+        "- dependency_config | not_applicable | No dependency or runtime configuration changed.",
+      ].join("\n"),
+      task: {
+        id: "audit-synthesis-task",
+        title: "Synthesize audit findings",
+        description: "Report artifact: reports/audit.md",
+        taskIntent: "audit",
+        auditArtifactRole: "synthesis",
+        allowedEvidenceArtifactPaths: ["audit/source-a.md"],
+        agentActivityLog: agentActivityLog(),
+      },
+    });
+
+    expect(result.status).toBe("success");
   });
 
   it("allows risky structured success when the committed report artifact is substantive", async () => {

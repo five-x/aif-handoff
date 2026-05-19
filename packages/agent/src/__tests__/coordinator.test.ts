@@ -936,7 +936,7 @@ describe("coordinator", () => {
     expect(synthesis?.blockedReason ?? "").not.toContain("synthesis_not_ready");
   }, 60_000);
 
-  it("closes audit synthesis as explicit inconclusive from persisted source outcome", async () => {
+  it("closes audit synthesis as explicit inconclusive from persisted source outcome without substantive no-findings proof", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-audit-inconclusive-");
     execFileSync("git", ["checkout", "-b", "feature/audit-inconclusive"], {
@@ -971,12 +971,6 @@ describe("coordinator", () => {
           const number = index + 1;
           return `| task-inconclusive-report-${number} | \`audit/source-${number}.md\` | source_inconclusive | untrusted | Excluded from validated no-findings. |`;
         }),
-        "",
-        "## Checked Files",
-        "- `README.md:1`",
-        "",
-        "## Checked Commands",
-        '- Command `rg -n "audit" README.md` output: `README.md:1:# audit fixture`',
         "",
       ].join("\n"),
       "utf8",

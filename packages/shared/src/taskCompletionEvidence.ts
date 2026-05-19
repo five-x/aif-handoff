@@ -1356,6 +1356,15 @@ export function evaluateTaskCompletionEvidence(
     riskyTask && auditSynthesisTask && reportText.trim()
       ? classifyAuditSynthesisOutput({ text: reportText, projectRoot })
       : null;
+  const terminalAuditInconclusiveSynthesis =
+    auditSynthesisTask &&
+    (auditSynthesisOutcome?.kind === "source_inconclusive" ||
+      auditSynthesisOutcome?.kind === "inconclusive_batch_evidence") &&
+    hasExplicitAuditInconclusiveSynthesisConclusion({
+      text: reportText,
+      projectRoot,
+      auditReportValidation,
+    });
   const ledgerOrManifestBlockingIssues = auditReportValidation.issues.filter((entry) =>
     isLedgerOrManifestValidationIssue(entry.code),
   );
@@ -1368,6 +1377,7 @@ export function evaluateTaskCompletionEvidence(
         "missing_scope_coverage",
       ].includes(entry.code) ||
       (entry.code === "missing_substantive_evidence" &&
+        !terminalAuditInconclusiveSynthesis &&
         (auditReportValidation.scopeRoots.length > 0 ||
           auditReportValidation.sourceClassification === "inventory_only_invalid")) ||
       ledgerOrManifestBlockingIssues.some((issue) => issue.code === entry.code),
@@ -1512,6 +1522,7 @@ export function evaluateTaskCompletionEvidence(
       reportArtifactFiles.length > 0 &&
       reportMissing.length === 0 &&
       reportReferencedPaths.length > 0 &&
+      !terminalAuditInconclusiveSynthesis &&
       !substantiveReportEvidence
     ) {
       const scopeCoverageDetails = auditReportValidation.issues
