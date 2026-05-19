@@ -426,6 +426,98 @@ describe("handleAutoReviewGate", () => {
     expect(message).toContain("## Stalled Findings");
   });
 
+  it("keeps deterministic inconclusive synthesis in rework instead of stale stall manual review", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-auto-review-synthesis-rework-"));
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "audit", "summary.md"), "# Audit Inconclusive\n", "utf8");
+    mockFindRoadmapBatchArtifactByTaskId.mockReturnValue({
+      taskId: "task-1",
+      role: "synthesis",
+      artifactPath: "audit/summary.md",
+      contentSha: null,
+    });
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Deterministic Review: audit_synthesis_inconclusive",
+        "",
+        "## Blocking Findings",
+        "- none",
+      ].join("\n"),
+      reviewIterationCount: 6,
+      maxReviewIterations: 100,
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 6,
+        findings: [
+          {
+            id: "review-gate-1",
+            source: "review_gate",
+            text: "Prior audit validator blocker should go back through deterministic synthesis rework.",
+            firstSeenIteration: 1,
+            lastSeenIteration: 6,
+            streak: 6,
+          },
+        ],
+      },
+    });
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "request_changes",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 7,
+        previousBlockingCount: 1,
+        stillBlockingCount: 1,
+        newBlockingCount: 0,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      blockingFindings: [
+        {
+          id: "review-gate-1",
+          source: "review_gate",
+          text: "Audit synthesis artifact still needs deterministic rewrite.",
+          firstSeenIteration: 1,
+          lastSeenIteration: 7,
+          streak: 7,
+        },
+      ],
+      fixesMarkdown:
+        "- [review-gate-1] review_gate | Audit synthesis artifact still needs deterministic rewrite.",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 7,
+        findings: [
+          {
+            id: "review-gate-1",
+            source: "review_gate",
+            text: "Audit synthesis artifact still needs deterministic rewrite.",
+            firstSeenIteration: 1,
+            lastSeenIteration: 7,
+            streak: 7,
+          },
+        ],
+      },
+    });
+
+    const result = await handleAutoReviewGate({ taskId: "task-1", projectRoot });
+
+    expect(result).toEqual({
+      status: "rework_requested",
+      currentIteration: 7,
+      metrics: expect.objectContaining({ totalBlockingCount: 1 }),
+      autoReviewState: expect.objectContaining({
+        iteration: 7,
+        reworkSnapshot: expect.objectContaining({ artifactPath: "audit/summary.md" }),
+      }),
+    });
+    const message = mockCreateTaskComment.mock.calls[0][0].message;
+    expect(message).toContain("Outcome: request_changes");
+    expect(message).not.toContain("Handoff reason: stalled_rework_loop");
+  });
+
   it("converts unresolved request_changes at max iterations into manual_review_required", async () => {
     mockFindTaskById.mockReturnValue({
       id: "task-1",

@@ -252,6 +252,18 @@ function stalledFindings(
   );
 }
 
+function isDeterministicAuditSynthesisInconclusiveReview(input: {
+  task: NonNullable<ReturnType<typeof findTaskById>>;
+}): boolean {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  return (
+    artifact?.role === "synthesis" &&
+    /\bDeterministic Review:\s*audit_synthesis_inconclusive\b/i.test(
+      input.task.reviewComments ?? "",
+    )
+  );
+}
+
 export async function handleAutoReviewGate(
   input: AutoReviewInput,
 ): Promise<ReviewGateOutcome | null> {
@@ -316,7 +328,10 @@ export async function handleAutoReviewGate(
 
   if (reviewGate.status === "request_changes") {
     const stalled = stalledFindings(reviewGate.autoReviewState, stallThreshold);
-    if (stalled.length > 0) {
+    const deterministicSynthesisRework = isDeterministicAuditSynthesisInconclusiveReview({
+      task: refreshedTask,
+    });
+    if (stalled.length > 0 && !deterministicSynthesisRework) {
       createTaskComment({
         taskId: input.taskId,
         author: "agent",
