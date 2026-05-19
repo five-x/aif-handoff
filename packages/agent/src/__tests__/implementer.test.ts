@@ -298,15 +298,33 @@ describe("runImplementer rework behavior", () => {
     expect(artifact?.failureFamily).toBe("source_inconclusive");
   });
 
-  it("terminalizes legacy generated audit cards with generic owner-area risk before runtime", async () => {
+  it("normalizes readable legacy generated audit cards deterministically before runtime", async () => {
     const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
     mkdirSync(join(projectRoot, "src", "bot_intevra"), { recursive: true });
     mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
-    writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
-    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\n");
+    writeFileSync(join(projectRoot, "README.md"), "# Test project\nRuntime handoff app.\n");
+    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\nReview gates are documented here.\n");
     writeFileSync(join(projectRoot, "pyproject.toml"), '[project]\nname = "test"\n');
     writeFileSync(join(projectRoot, ".ai-factory", "config.yaml"), "name: test\n");
     writeFileSync(join(projectRoot, "src", "bot_intevra", "app.py"), "print('ok')\n");
+    execFileSync(
+      "git",
+      ["add", "README.md", "AGENTS.md", "pyproject.toml", ".ai-factory/config.yaml", "src"],
+      { cwd: projectRoot, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "seed readable legacy scope", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
 
     db.insert(tasks)
       .values({
@@ -353,26 +371,44 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-legacy-generated-audit"))
       .get();
     expect(updatedTask?.implementationLog).toContain(
-      "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
     );
-    expect(updatedTask?.implementationLog).toContain("legacy generated audit card");
-    expect(updatedTask?.blockedReason).toContain("legacy_weak_audit_card_contract");
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.blockedReason).toBeNull();
     expect(updatedTask?.manualReviewRequired).toBe(false);
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-legacy-generated-audit");
-    expect(artifact?.state).toBe("source_inconclusive");
-    expect(artifact?.failureFamily).toBe("source_inconclusive");
+    expect(artifact?.state).toBe("valid");
+    expect(artifact?.failureFamily).toBeNull();
   });
 
-  it("lets retried terminal source-inconclusive legacy audit cards reach runtime", async () => {
+  it("does not let retried terminal source-inconclusive legacy audit cards reach runtime", async () => {
     const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
     mkdirSync(join(projectRoot, "src", "bot_intevra"), { recursive: true });
     mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
-    writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
-    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\n");
+    writeFileSync(join(projectRoot, "README.md"), "# Test project\nRuntime handoff app.\n");
+    writeFileSync(join(projectRoot, "AGENTS.md"), "# Agents\nReview gates are documented here.\n");
     writeFileSync(join(projectRoot, "pyproject.toml"), '[project]\nname = "test"\n');
     writeFileSync(join(projectRoot, ".ai-factory", "config.yaml"), "name: test\n");
     writeFileSync(join(projectRoot, "src", "bot_intevra", "app.py"), "print('ok')\n");
+    execFileSync(
+      "git",
+      ["add", "README.md", "AGENTS.md", "pyproject.toml", ".ai-factory/config.yaml", "src"],
+      { cwd: projectRoot, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "seed readable legacy retry scope", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
 
     db.insert(tasks)
       .values({
@@ -448,23 +484,94 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-legacy-generated-audit-retry", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(queryMock).not.toHaveBeenCalled();
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-legacy-generated-audit-retry"))
       .get();
-    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
+    );
     expect(updatedTask?.implementationLog).not.toContain(
       "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
     );
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
     expect(updatedTask?.blockedReason).toBeNull();
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-legacy-generated-audit-retry");
-    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.state).toBe("valid");
     const attempts = listRoadmapBatchArtifactAttempts(initialArtifact!.id);
-    expect(attempts).toHaveLength(1);
+    expect(attempts).toHaveLength(2);
     expect(attempts[0]?.reworkStatus).toBe("terminal_inconclusive");
+    expect(attempts[1]?.reworkStatus).toBe("accepted");
+  });
+
+  it("uses the final deterministic guard instead of runtime for unmatched audit report rework", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-final-runtime-guard",
+        projectId: "project-1",
+        title: "Audit final guard",
+        description: [
+          "Scope: README.md",
+          "Audit mandate: Review final guard behavior.",
+          "Risk hypotheses: risk-final-guard-1 README.md documents the project behavior.",
+          "Allowed changes: only create/update audit/final-guard.md.",
+          "Report artifact: audit/final-guard.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        blockedReason: "unmatched upstream audit rework marker",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-final-runtime-guard",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-final-runtime-guard"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-final-runtime-guard",
+          role: "report",
+          artifactPath: "audit/final-guard.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-final-runtime-guard", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-final-runtime-guard"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Audit report card reached the final deterministic guard",
+    );
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("audit/final-guard.md");
+
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-final-runtime-guard");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact!.id);
+    expect(attempts.at(-1)?.reworkStatus).toBe("terminal_inconclusive");
   });
 
   it("injects validated audit report artifacts into synthesis prompts", async () => {
@@ -1598,7 +1705,7 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("Implement the task using the provided plan.");
   });
 
-  it("adds a focused audit evidence repair contract for repeated evidence guard failures", async () => {
+  it("terminalizes audit evidence repair requests without declared scope before runtime", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -1633,21 +1740,23 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repair", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
-    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
-    expect(call.prompt).toContain("Audit evidence repair mode:");
-    expect(call.prompt).toContain(
-      "Edit only the expected audit report artifact: audit/security.md",
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-audit-repair")).get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Audit report card reached the final deterministic guard",
     );
-    expect(call.prompt).toContain("Evidence Register");
-    expect(call.prompt).toContain("ID | Claim | Evidence | Verification");
-    expect(call.prompt).toContain("Do not edit source, config, test, dependency, or runtime files");
-    expect(call.prompt).toContain("exactly one bounded report-only git transaction");
-    expect(call.prompt).toContain("Do not create repeated empty commits");
-    expect(call.prompt).toContain("stage only audit/security.md");
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("audit/security.md");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repair");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
   });
 
-  it("enables audit evidence repair prompt mode from auto-review findings even without blockedReason", async () => {
+  it("terminalizes auto-review audit evidence repair findings without declared scope before runtime", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -1693,13 +1802,24 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-review-finding-repair", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(1);
-    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
-    expect(call.prompt).toContain("Audit evidence repair mode:");
-    expect(call.prompt).toContain("Do not preserve review-rejected findings");
-    expect(call.prompt).toContain("Never type an example git hash into the report");
-    expect(call.prompt).toContain("audit/architecture.md");
-    expect(call.prompt).toContain("finding-insufficient-evidence");
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-review-finding-repair"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Audit report card reached the final deterministic guard",
+    );
+    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("audit/architecture.md");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-review-finding-repair");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
   });
 
   it("rejects unsafe report artifact paths before deterministic repair can write outside the project root", async () => {

@@ -98,6 +98,8 @@ export const AUDIT_GENERATED_CARD_ISSUE_CODES = [
   "invalid_source_scope",
   "missing_risk_hypotheses",
   "missing_scope_risk_hypothesis",
+  "generic_risk_hypotheses",
+  "weak_source_scope",
   "invalid_synthesis_scope",
   "implementation_shaped_title",
   "implementation_shaped_description",
@@ -488,6 +490,62 @@ function isNonConcreteAuditSourceScopeRoot(scope: string): boolean {
   return !pathLike;
 }
 
+const WEAK_AUDIT_SOURCE_SCOPE_ROOTS = new Set([
+  "readme.md",
+  "agents.md",
+  "pyproject.toml",
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "tsconfig.json",
+  ".ai-factory/config.yaml",
+]);
+
+const BARE_AUDIT_SOURCE_ROOTS = new Set([
+  "app",
+  "apps",
+  "config",
+  "data",
+  "docs",
+  "lib",
+  "migrations",
+  "packages",
+  "scripts",
+  "server",
+  "src",
+  "test",
+  "tests",
+]);
+
+function isWeakAuditSourceScopeRoot(scope: string): boolean {
+  const normalized = scope.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  if (normalized === AUDIT_NO_TRACKED_SCOPE_SENTINEL) return false;
+  return WEAK_AUDIT_SOURCE_SCOPE_ROOTS.has(normalized) || BARE_AUDIT_SOURCE_ROOTS.has(normalized);
+}
+
+function isConcreteProductAuditScopeRoot(scope: string): boolean {
+  const normalized = scope.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  if (!normalized || normalized === AUDIT_NO_TRACKED_SCOPE_SENTINEL) return false;
+  if (WEAK_AUDIT_SOURCE_SCOPE_ROOTS.has(normalized)) return false;
+  if (BARE_AUDIT_SOURCE_ROOTS.has(normalized)) return false;
+  if (normalized.startsWith(".ai-factory/") || normalized.includes("/.ai-factory/")) return false;
+  if (
+    /^(?:src|app|apps|lib|server|packages\/[^/]+\/(?:src|lib|app|server)|tests?|config)\//i.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  return /\.[a-z0-9]+$/i.test(normalized) && !WEAK_AUDIT_SOURCE_SCOPE_ROOTS.has(normalized);
+}
+
+function hasGenericAuditRiskHypotheses(riskLine: string): boolean {
+  return /\b(?:owner-area|evidence gaps?|extraction gaps?|validation gaps?|boundary drift|missing verification|scoped files may contain|scoped directories may contain)\b/i.test(
+    riskLine,
+  );
+}
+
 function hasSynthesisReportBatchScope(description: string): boolean {
   const scopes = parseAuditScopeRoots(description);
   if (scopes.length !== 1) return false;
@@ -524,6 +582,15 @@ function validateAuditScopeAndRiskHypotheses(
       },
     ];
   }
+  if (scopes.some(isWeakAuditSourceScopeRoot) && !scopes.some(isConcreteProductAuditScopeRoot)) {
+    return [
+      {
+        code: "weak_source_scope",
+        message:
+          "audit source task scope must include concrete product source/config/test files, not only metadata or broad top-level roots",
+      },
+    ];
+  }
 
   const riskLine = findAuditRiskHypothesesLine(description);
   if (!riskLine || extractAuditRiskHypothesisIdsFromLine(riskLine).length === 0) {
@@ -531,6 +598,14 @@ function validateAuditScopeAndRiskHypotheses(
       {
         code: "missing_risk_hypotheses",
         message: "audit source task must include parseable Risk hypotheses with risk-* ids",
+      },
+    ];
+  }
+  if (hasGenericAuditRiskHypotheses(riskLine)) {
+    return [
+      {
+        code: "generic_risk_hypotheses",
+        message: "audit source task Risk hypotheses must be specific and falsifiable",
       },
     ];
   }

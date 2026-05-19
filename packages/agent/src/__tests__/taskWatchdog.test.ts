@@ -106,7 +106,7 @@ describe("releaseDueBlockedTasks", () => {
     insertProject(testDb.current);
   });
 
-  it("releases blocked task when retryAfter has passed", () => {
+  it("releases blocked task when retryAfter has passed and preserves retryCount", () => {
     const db = testDb.current;
     const pastTime = new Date(Date.now() - 60_000).toISOString();
     const id = insertTask(db, {
@@ -131,7 +131,7 @@ describe("releaseDueBlockedTasks", () => {
     const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
     expect(task?.status).toBe("planning");
     expect(task?.blockedReason).toBeNull();
-    expect(task?.retryCount).toBe(0);
+    expect(task?.retryCount).toBe(1);
     expect(task?.runtimeLimitSnapshotJson).toBeNull();
   });
 

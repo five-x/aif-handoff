@@ -7,7 +7,6 @@ import {
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
   getLatestReworkComment,
-  listRoadmapBatchArtifactAttempts,
   listAuditEvidenceEvents,
   listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
@@ -1049,19 +1048,6 @@ function hasAttemptedDeterministicAuditReportRepair(
   return /\bDeterministic audit report repair (?:completed|complete)\b/i.test(text);
 }
 
-function isRetryingTerminalSourceInconclusiveAuditReport(input: {
-  task: Pick<TaskRow, "status" | "reworkRequested">;
-  artifact: RoadmapBatchArtifactRow | null | undefined;
-}): boolean {
-  if (!input.artifact || input.artifact.role !== "report") return false;
-  if (input.task.status !== "implementing" || input.task.reworkRequested) return false;
-  if (input.artifact.state !== "source_inconclusive") return false;
-  return listRoadmapBatchArtifactAttempts(input.artifact.id).some(
-    (attempt) =>
-      attempt.state === "source_inconclusive" && attempt.reworkStatus === "terminal_inconclusive",
-  );
-}
-
 function logDeterministicAuditReportRepairActivity(input: {
   taskId: string;
   phase: "started" | "complete" | "terminal_source_inconclusive";
@@ -1411,6 +1397,24 @@ function hasReadableDeclaredAuditScope(projectRoot: string, description: string 
   );
 }
 
+function isUnboundedAuditRepairScopeRoot(scopeRoot: string): boolean {
+  const normalized = scopeRoot.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  return (
+    !normalized ||
+    normalized === "." ||
+    normalized === "./" ||
+    normalized === "*" ||
+    normalized === "**" ||
+    normalized === "/*" ||
+    normalized === "repo" ||
+    normalized === "repository" ||
+    normalized === "root" ||
+    normalized === "project" ||
+    normalized === "codebase" ||
+    /[?*[\]{}]/.test(normalized)
+  );
+}
+
 function diagnoseDeclaredAuditScopeRepairability(
   projectRoot: string,
   description: string | null,
@@ -1429,7 +1433,27 @@ function diagnoseDeclaredAuditScopeRepairability(
       issueCodes: ["non_repairable_declared_scope"],
     };
   }
+  const unboundedRoots = roots.filter(isUnboundedAuditRepairScopeRoot);
+  if (unboundedRoots.length > 0) {
+    return {
+      repairable: false,
+      roots,
+      reasons: unboundedRoots.map(
+        (root) =>
+          `declared audit Scope root ${root} is unbounded and cannot be repaired deterministically`,
+      ),
+      issueCodes: ["non_repairable_declared_scope"],
+    };
+  }
   const legacyContractReasons = legacyGeneratedAuditContractReasons(description, roots);
+  if (hasReadableDeclaredAuditScope(projectRoot, description)) {
+    return {
+      repairable: true,
+      roots,
+      reasons: legacyContractReasons,
+      issueCodes: legacyContractReasons.length > 0 ? ["legacy_weak_audit_card_contract"] : [],
+    };
+  }
   if (legacyContractReasons.length > 0) {
     return {
       repairable: false,
@@ -1437,9 +1461,6 @@ function diagnoseDeclaredAuditScopeRepairability(
       reasons: legacyContractReasons,
       issueCodes: ["legacy_weak_audit_card_contract", "non_repairable_declared_scope"],
     };
-  }
-  if (hasReadableDeclaredAuditScope(projectRoot, description)) {
-    return { repairable: true, roots, reasons: [], issueCodes: [] };
   }
 
   const unreadableRoots = roots.filter(
@@ -3314,12 +3335,6 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const localAuditReportScopeRepairable = Boolean(
     expectedAuditReportArtifactPath && auditScopeRepairability.repairable,
   );
-  const retryingTerminalSourceInconclusiveAuditReport =
-    expectedAuditReportArtifactPath &&
-    isRetryingTerminalSourceInconclusiveAuditReport({
-      task,
-      artifact: roadmapArtifact,
-    });
   const currentSourceInconclusiveLocalAudit =
     Boolean(
       expectedAuditReportArtifactPath && task.reworkRequested && localAuditReportScopeRepairable,
@@ -3547,8 +3562,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   if (
     expectedAuditReportArtifactPath &&
     !task.reworkRequested &&
-    !localAuditReportScopeRepairable &&
-    !retryingTerminalSourceInconclusiveAuditReport
+    !localAuditReportScopeRepairable
   ) {
     const nowIso = new Date().toISOString();
     const blockedReason = terminalizeSourceInconclusiveAuditReport({
@@ -3607,27 +3621,6 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       "Audit report card terminalized before runtime prompt construction because declared scope is non-repairable",
     );
     return;
-  }
-
-  if (
-    expectedAuditReportArtifactPath &&
-    !task.reworkRequested &&
-    !localAuditReportScopeRepairable &&
-    retryingTerminalSourceInconclusiveAuditReport
-  ) {
-    logActivity(
-      taskId,
-      "Agent",
-      "Audit report retry bypassed non-repairable declared-scope preflight and will run runtime implementation",
-    );
-    log.info(
-      {
-        taskId,
-        artifactPath: expectedAuditReportArtifactPath,
-        reasons: auditScopeRepairability.reasons,
-      },
-      "Audit report retry bypassed non-repairable declared-scope preflight",
-    );
   }
 
   if (expectedAuditReportArtifactPath && !task.reworkRequested && localAuditReportScopeRepairable) {
@@ -3803,6 +3796,69 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         issueCodes,
       },
       "Repeated deterministic audit report repair terminalized before runtime implementation rework",
+    );
+    return;
+  }
+
+  if (expectedAuditReportArtifactPath) {
+    const nowIso = new Date().toISOString();
+    const blockedReason = terminalizeSourceInconclusiveAuditReport({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      reasons: [
+        "audit report card reached the final deterministic guard before runtime prompt construction",
+      ],
+      fallbackIssueCodes: ["missing_report_file_references"],
+      validation: currentAuditReportValidation,
+      validationDetails: currentAuditReportValidation
+        ? undefined
+        : {
+            issues: [
+              {
+                code: "missing_report_file_references",
+                message:
+                  "Roadmap audit report cards are handled deterministically and cannot use generic runtime fallback.",
+              },
+            ],
+            evidence: {
+              auditReportValidation: {
+                ok: false,
+                issueCodes: ["missing_report_file_references"],
+                sourceClassification: "source_inconclusive",
+                manifestStatus: "not_applicable",
+              },
+            },
+            sourceInconclusiveTerminal: {
+              artifactPath: expectedAuditReportArtifactPath,
+              reasons: [
+                "audit report card reached the final deterministic guard before runtime prompt construction",
+              ],
+              issueCodes: ["missing_report_file_references"],
+            },
+          },
+    });
+    const resultText = [
+      "Audit report card reached the final deterministic guard; terminalized as source_inconclusive before runtime prompt construction.",
+      `Report artifact: ${expectedAuditReportArtifactPath}`,
+      `Blocked reason: ${blockedReason}`,
+    ].join("\n");
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      blockedReason,
+      reworkRequested: false,
+      manualReviewRequired: false,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "Audit report card terminalized by final deterministic guard before runtime prompt construction",
+    );
+    log.info(
+      { taskId, artifactPath: expectedAuditReportArtifactPath, blockedReason },
+      "Audit report card final guard prevented runtime implementation fallback",
     );
     return;
   }

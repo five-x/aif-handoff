@@ -12,6 +12,7 @@ import {
   getEnv,
   classifyAuditDecompositionRequest,
   findSecretLikeKeys,
+  isManualReviewBlockedTask,
   summarizeTaskRuntimeOverride,
 } from "@aif/shared";
 import {
@@ -180,6 +181,22 @@ function taskOperatorPayload(task: TaskRow, type?: string) {
   return payload;
 }
 
+function isManualHandoffTask(task: TaskRow): boolean {
+  if (isManualReviewBlockedTask(task)) return true;
+  const reason = task.blockedReason?.toLowerCase() ?? "";
+  return Boolean(
+    reason.startsWith("operator_input_required:") ||
+    reason.includes("branch isolation failure") ||
+    reason.includes("config_governance_blocked") ||
+    reason.includes("manual action required before retry") ||
+    reason.includes("runtime capability check failed") ||
+    reason.includes("runtime authentication failed") ||
+    reason.includes("runtime permissions blocked") ||
+    reason.includes("missing access") ||
+    reason.includes("required production validation"),
+  );
+}
+
 function broadcastTaskOperatorEvents(task: TaskRow, reasonTypes: string[]) {
   for (const type of reasonTypes) {
     if (!TASK_OPERATOR_BROADCAST_TYPES.has(type)) continue;
@@ -232,7 +249,12 @@ tasksRouter.post(
     const task = findTaskById(id);
     if (!task) return c.json({ error: "Task not found" }, 404);
 
-    if (TASK_OPERATOR_BROADCAST_TYPES.has(type)) {
+    if (type === "task:manual_handoff_required" && !isManualHandoffTask(task)) {
+      log.debug(
+        { taskId: id, type },
+        "Skipped manual handoff broadcast for non-manual blocked task",
+      );
+    } else if (TASK_OPERATOR_BROADCAST_TYPES.has(type)) {
       broadcast({ type, payload: taskOperatorPayload(task, type) });
     } else {
       broadcast({ type, payload: toTaskBroadcastPayload(task) });
@@ -240,9 +262,7 @@ tasksRouter.post(
         broadcastTaskOperatorEvents(task, [
           "task:timeline_updated",
           "task:trust_updated",
-          ...(task.manualReviewRequired || task.status === "blocked_external"
-            ? ["task:manual_handoff_required"]
-            : []),
+          ...(isManualHandoffTask(task) ? ["task:manual_handoff_required"] : []),
         ]);
       }
       if (type === "task:created" || type === "task:moved") {
@@ -1007,9 +1027,7 @@ tasksRouter.post("/:id/events", jsonValidator(taskEventSchema), async (c) => {
     broadcastTaskOperatorEvents(handled.task, [
       "task:timeline_updated",
       "task:trust_updated",
-      ...(event === "manual_exception" ||
-      handled.task.manualReviewRequired ||
-      handled.task.status === "blocked_external"
+      ...(event === "manual_exception" || isManualHandoffTask(handled.task)
         ? ["task:manual_handoff_required"]
         : []),
     ]);

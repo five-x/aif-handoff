@@ -380,7 +380,12 @@ export {
   type RuntimeStage,
   type RuntimeStageOrProfileMode,
 } from "./constants.js";
-export { applyHumanTaskEvent, HUMAN_ACTIONS_BY_STATUS, CLEAN_STATE_RESET } from "./stateMachine.js";
+export {
+  applyHumanTaskEvent,
+  HUMAN_ACTIONS_BY_STATUS,
+  CLEAN_STATE_RESET,
+  isManualReviewBlockedTask,
+} from "./stateMachine.js";
 
 // Logger
 export { logger, rootLogger } from "./logger.js";

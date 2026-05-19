@@ -1479,7 +1479,7 @@ describe("tasks API", () => {
       );
     });
 
-    it("builds bounded internal task broadcast payloads", async () => {
+    it("builds bounded internal manual task broadcast payloads", async () => {
       const db = testDb.current;
       insertTestProject(db);
       db.insert(tasks)
@@ -1488,7 +1488,7 @@ describe("tasks API", () => {
           projectId: "test-project",
           title: "Broadcast task",
           status: "blocked_external",
-          blockedReason: `manual input: ${"x".repeat(800)}`,
+          blockedReason: `operator_input_required: ${"x".repeat(800)}`,
         })
         .run();
 
@@ -1533,6 +1533,131 @@ describe("tasks API", () => {
         type: "project:queue_updated",
         payload: { projectId: "test-project", taskId: "broadcast-task" },
       });
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:manual_handoff_required",
+        payload: expect.objectContaining({ id: "broadcast-task", projectId: "test-project" }),
+      });
+    });
+
+    it("does not emit explicit manual handoff broadcasts for non-manual blocked tasks", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "broadcast-explicit-runtime-backoff",
+          projectId: "test-project",
+          title: "Explicit runtime backoff",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "Runtime request timed out. Task will retry automatically.",
+          retryAfter: new Date(Date.now() + 60_000).toISOString(),
+        })
+        .run();
+
+      const res = await app.request("/tasks/broadcast-explicit-runtime-backoff/broadcast", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "task:manual_handoff_required" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockBroadcast).not.toHaveBeenCalledWith({
+        type: "task:manual_handoff_required",
+        payload: expect.anything(),
+      });
+    });
+
+    it("does not broadcast manual handoff for runtime backoff blocked task moves", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "broadcast-runtime-backoff",
+          projectId: "test-project",
+          title: "Runtime backoff",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "Watchdog: task stale in implementing for 90m; auto-recover scheduled",
+          retryAfter: new Date(Date.now() + 60_000).toISOString(),
+        })
+        .run();
+
+      const res = await app.request("/tasks/broadcast-runtime-backoff/broadcast", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "task:moved" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockBroadcast).not.toHaveBeenCalledWith({
+        type: "task:manual_handoff_required",
+        payload: expect.anything(),
+      });
+    });
+
+    it("broadcasts manual handoff for operator and manual task moves", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values([
+          {
+            id: "broadcast-operator-hold",
+            projectId: "test-project",
+            title: "Operator hold",
+            status: "blocked_external",
+            blockedReason: "operator_input_required: provide fixture access",
+          },
+          {
+            id: "broadcast-manual-review",
+            projectId: "test-project",
+            title: "Manual review",
+            status: "blocked_external",
+            blockedReason: "manual-review: inspect rejected evidence",
+          },
+          {
+            id: "broadcast-manual-exception",
+            projectId: "test-project",
+            title: "Manual exception",
+            status: "blocked_external",
+            blockedReason: "manual_exception: accepted by operator",
+          },
+          {
+            id: "broadcast-branch-isolation",
+            projectId: "test-project",
+            title: "Branch isolation",
+            status: "blocked_external",
+            blockedReason: "Branch isolation failure (branch_missing): persisted branch is missing",
+          },
+          {
+            id: "broadcast-runtime-auth",
+            projectId: "test-project",
+            title: "Runtime auth",
+            status: "blocked_external",
+            blockedReason: "Runtime authentication failed. Check the configured runtime profile.",
+          },
+        ])
+        .run();
+
+      for (const taskId of [
+        "broadcast-operator-hold",
+        "broadcast-manual-review",
+        "broadcast-manual-exception",
+        "broadcast-branch-isolation",
+        "broadcast-runtime-auth",
+      ]) {
+        vi.mocked(mockBroadcast).mockClear();
+        const res = await app.request(`/tasks/${taskId}/broadcast`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "task:moved" }),
+        });
+
+        expect(res.status).toBe(200);
+        expect(mockBroadcast).toHaveBeenCalledWith({
+          type: "task:manual_handoff_required",
+          payload: expect.objectContaining({ id: taskId, projectId: "test-project" }),
+        });
+      }
     });
   });
 
@@ -3714,6 +3839,34 @@ describe("tasks API", () => {
       expect(body.blockedFromStatus).toBeNull();
       expect(body.blockedReason).toBeNull();
       expect(body.retryAfter).toBeNull();
+    });
+
+    it("should reject retry_from_blocked for manual review required blocks", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-manual-review-retry",
+          projectId: "test-project",
+          title: "Manual review blocked task",
+          status: "blocked_external",
+          blockedFromStatus: "review",
+          blockedReason: "manual_review_required: unresolved audit finding",
+          manualReviewRequired: true,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-manual-review-retry/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("manual review");
+      const persisted = db.select().from(tasks).where(eq(tasks.id, "ev-manual-review-retry")).get();
+      expect(persisted?.status).toBe("blocked_external");
+      expect(persisted?.manualReviewRequired).toBe(true);
     });
 
     it("should reject operator input retry when the only human comment is stale", async () => {

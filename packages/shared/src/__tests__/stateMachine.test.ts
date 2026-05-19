@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Task } from "../types.js";
-import { applyHumanTaskEvent } from "../stateMachine.js";
+import { applyHumanTaskEvent, isManualReviewBlockedTask } from "../stateMachine.js";
 
 function makeTask(status: Task["status"]): Task {
   return {
@@ -155,6 +155,75 @@ describe("task state machine", () => {
       expect(result.patch.status).toBe("implementing");
       expect(result.patch.reworkRequested).toBe(true);
     }
+  });
+
+  it("rejects retry_from_blocked for manualReviewRequired blocks", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "review" as const,
+      blockedReason: "manual review required",
+      manualReviewRequired: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("manual review");
+    }
+  });
+
+  it("rejects retry_from_blocked for manual-review blocked reasons", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "review" as const,
+      blockedReason: "manual-review: inspect reviewer finding",
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects retry_from_blocked for manual_exception blocked reasons", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "review" as const,
+      blockedReason: "manual_exception: accepted by operator",
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects retry_from_blocked for manual-exception blocked reasons", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "review" as const,
+      blockedReason: "manual-exception: accepted by operator",
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(false);
+  });
+
+  it("detects manual review blocked reasons with stable spellings", () => {
+    expect(
+      isManualReviewBlockedTask({
+        ...makeTask("blocked_external"),
+        blockedReason: "manual_review_required: unresolved audit finding",
+      }),
+    ).toBe(true);
+    expect(
+      isManualReviewBlockedTask({
+        ...makeTask("blocked_external"),
+        blockedReason: "manual review required: unresolved audit finding",
+      }),
+    ).toBe(true);
+    expect(
+      isManualReviewBlockedTask({
+        ...makeTask("blocked_external"),
+        blockedReason: "Runtime request timed out. Task will retry automatically.",
+      }),
+    ).toBe(false);
   });
 
   it("allows start_implementation from plan_ready when autoMode=false", () => {

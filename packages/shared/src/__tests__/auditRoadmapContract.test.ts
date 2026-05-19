@@ -324,6 +324,36 @@ describe("auditRoadmapContract", () => {
     );
   });
 
+  it("rejects metadata-only or broad generated audit source scopes", () => {
+    const invalid = validateGeneratedAuditCard({
+      title: "Audit: architecture and ownership boundaries",
+      description: completeAuditDescription()
+        .replace("Scope: src/config.ts", "Scope: README.md, AGENTS.md, pyproject.toml, src")
+        .replace(
+          "Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults.",
+          "Risk hypotheses: risk-arch-1 README.md, AGENTS.md, pyproject.toml, src describe architecture ownership risks.",
+        ),
+    });
+
+    expect(invalid.ok).toBe(false);
+    expect(invalid.issueDetails.map((issue) => issue.code)).toContain("weak_source_scope");
+  });
+
+  it("rejects generic owner-area generated audit source hypotheses", () => {
+    const invalid = validateGeneratedAuditCard({
+      title: "Audit: architecture and ownership boundaries",
+      description: completeAuditDescription()
+        .replace("Scope: src/config.ts", "Scope: src/bot_intevra/app.py")
+        .replace(
+          "Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults.",
+          "Risk hypotheses: risk-arch-1 src/bot_intevra/app.py scoped files may contain owner-area defects that produce actionable audit findings.",
+        ),
+    });
+
+    expect(invalid.ok).toBe(false);
+    expect(invalid.issueDetails.map((issue) => issue.code)).toContain("generic_risk_hypotheses");
+  });
+
   it("allows the no tracked scope sentinel for source cards", () => {
     const result = validateGeneratedAuditCard({
       title: "Audit: security configuration",

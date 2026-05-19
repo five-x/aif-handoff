@@ -28,8 +28,30 @@ export const CLEAN_STATE_RESET = {
   scheduledAt: null,
 } as const satisfies Omit<TransitionPatch, "status">;
 
+export function isManualReviewBlockedTask(
+  task: Pick<Task, "blockedReason" | "manualReviewRequired">,
+): boolean {
+  const reason = task.blockedReason?.toLowerCase() ?? "";
+  return (
+    task.manualReviewRequired ||
+    reason.includes("manual-review") ||
+    reason.includes("manual_review_required") ||
+    reason.includes("manual review required") ||
+    reason.includes("manual_exception") ||
+    reason.includes("manual-exception")
+  );
+}
+
 export function applyHumanTaskEvent(
-  task: Pick<Task, "status" | "autoMode" | "blockedFromStatus" | "reworkRequested">,
+  task: Pick<
+    Task,
+    | "status"
+    | "autoMode"
+    | "blockedReason"
+    | "blockedFromStatus"
+    | "reworkRequested"
+    | "manualReviewRequired"
+  >,
   event: TaskEvent,
 ): TransitionResult {
   switch (event) {
@@ -93,6 +115,12 @@ export function applyHumanTaskEvent(
       }
       if (!task.blockedFromStatus) {
         return { ok: false, error: "blockedFromStatus is missing for retry_from_blocked" };
+      }
+      if (isManualReviewBlockedTask(task)) {
+        return {
+          ok: false,
+          error: "retry_from_blocked is not allowed for manual review blocks",
+        };
       }
       return {
         ok: true,
