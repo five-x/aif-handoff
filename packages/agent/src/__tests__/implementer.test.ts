@@ -931,7 +931,27 @@ describe("runImplementer rework behavior", () => {
       failureFamily: "source_inconclusive",
       classification: "source_inconclusive",
       reworkStatus: "terminal_inconclusive",
-      validationDetails: { reason: "inventory-only source report" },
+      validationDetails: {
+        sourceClassification: "source_inconclusive",
+        issues: [
+          {
+            code: "missing_report_file_references",
+            paths: [".ai-factory/DESCRIPTION.md", "data/bot-intevra/notes.sqlite3"],
+          },
+          {
+            code: "irrelevant_audit_evidence",
+            paths: [".ai-factory/DESCRIPTION.md"],
+          },
+        ],
+        evidence: {
+          auditReportValidation: {
+            sourceClassification: "source_inconclusive",
+            manifestStatus: "valid",
+          },
+        },
+        deterministicRepair: { outcome: "source_inconclusive" },
+        terminalizationReason: "inventory-only source report",
+      },
     });
     updateRoadmapBatchArtifactState({
       taskId: "task-first-run-source-b",
@@ -947,11 +967,55 @@ describe("runImplementer rework behavior", () => {
     const synthesis = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
     expect(synthesis).toContain("# Audit Inconclusive");
     expect(synthesis).toContain("## Child Report Status");
+    expect(synthesis).toContain("## Source Report Carry Forward");
+    expect(synthesis).not.toContain("## Findings By Source Report");
     expect(synthesis).toContain(
       "| `audit/source-a.md` | `task-first-run-source-a` | inconclusive |",
     );
     expect(synthesis).toContain("| `audit/source-b.md` | `task-first-run-source-b` | failed |");
+    expect(synthesis).toContain(
+      "Validation summary: issue codes: irrelevant_audit_evidence, missing_report_file_references",
+    );
+    expect(synthesis).toContain("deterministic repair outcome: source_inconclusive");
+    expect(synthesis).not.toContain("Validation details:");
+    expect(synthesis).not.toContain(".ai-factory/DESCRIPTION.md");
+    expect(synthesis).not.toContain("data/bot-intevra/notes.sqlite3");
+    const sourceADecisionRow = synthesis
+      .split("\n")
+      .find(
+        (line) =>
+          line.startsWith("| `audit/source-a.md` | `task-first-run-source-a` |") &&
+          line.includes("Produce a terminal audit source report"),
+      );
+    expect(sourceADecisionRow).toBeDefined();
+    expect(sourceADecisionRow ?? "").toContain("| `not_verifiable` |");
+    expect(sourceADecisionRow ?? "").toContain("| `inaccessible` |");
+    expect(sourceADecisionRow ?? "").toContain("| `audit_inconclusive` |");
+    expect(sourceADecisionRow ?? "").not.toContain("rework_required");
     expect(readAuditReportManifest(synthesis).outcome).not.toBe("validated_no_findings");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-first-run-synthesis");
+    if (!artifact) throw new Error("missing first-run synthesis artifact");
+    const auditEvidenceUnits = listAuditEvidenceEvents({
+      taskId: "task-first-run-synthesis",
+      auditPlanId: `batch:${artifact.batchId}:task:task-first-run-synthesis`,
+    });
+    const validation = validateAuditReportArtifact({
+      text: synthesis,
+      projectRoot,
+      taskId: "task-first-run-synthesis",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
+      taskDescription: "Report artifact: audit/summary.md",
+      reportArtifactPaths: ["audit/summary.md"],
+      allowedEvidenceArtifactPaths: ["audit/source-a.md", "audit/source-b.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits,
+      requireLedgerEvidence: true,
+    });
+    const validationIssueCodes = validation.issues.map((issue) => issue.code);
+    expect(validationIssueCodes).not.toContain("contradictory_findings_and_no_findings");
+    expect(validation.missingReferencedPaths).not.toContain(".ai-factory/DESCRIPTION.md");
+    expect(validation.missingReferencedPaths).not.toContain("data/bot-intevra/notes.sqlite3");
     const updatedTask = db
       .select()
       .from(tasks)

@@ -651,7 +651,10 @@ function buildAuditChildReportStatusSection(
 function weakAuditArtifactVerificationStrength(
   artifact: WeakAuditArtifactSummary,
 ): AuditCardVerificationStrength {
-  return artifact.state === "external_blocked" || artifact.state === "manual_exception"
+  return artifact.state === "source_inconclusive" ||
+    artifact.state === "terminal_inconclusive" ||
+    artifact.state === "external_blocked" ||
+    artifact.state === "manual_exception"
     ? "inaccessible"
     : "missing";
 }
@@ -662,6 +665,55 @@ function weakAuditArtifactAcceptanceSatisfied(artifact: WeakAuditArtifactSummary
 
 function formatAuditCardList(values: string[]): string {
   return values.length > 0 ? values.join("<br>") : "none";
+}
+
+function summarizeWeakArtifactValidationDetails(details: string | null): string[] {
+  if (!details) return [];
+  try {
+    const parsed = JSON.parse(details) as {
+      issues?: Array<{ code?: unknown }>;
+      sourceClassification?: unknown;
+      terminalizationReason?: unknown;
+      deterministicRepair?: { outcome?: unknown; terminalHandling?: unknown };
+      evidence?: {
+        auditReportValidation?: {
+          sourceClassification?: unknown;
+          validatorSourceClassification?: unknown;
+          manifestStatus?: unknown;
+        };
+      };
+    };
+    const issueCodes = [
+      ...new Set(
+        (parsed.issues ?? []).flatMap((issue) =>
+          typeof issue.code === "string" ? [issue.code] : [],
+        ),
+      ),
+    ].sort();
+    const auditValidation = parsed.evidence?.auditReportValidation;
+    return [
+      issueCodes.length > 0 ? `issue codes: ${issueCodes.join(", ")}` : null,
+      typeof parsed.sourceClassification === "string"
+        ? `source classification: ${parsed.sourceClassification}`
+        : null,
+      typeof auditValidation?.sourceClassification === "string"
+        ? `validator classification: ${auditValidation.sourceClassification}`
+        : null,
+      typeof auditValidation?.manifestStatus === "string"
+        ? `manifest status: ${auditValidation.manifestStatus}`
+        : null,
+      typeof parsed.deterministicRepair?.outcome === "string"
+        ? `deterministic repair outcome: ${parsed.deterministicRepair.outcome}`
+        : null,
+      typeof parsed.terminalizationReason === "string"
+        ? `terminalization reason: ${parsed.terminalizationReason}`
+        : null,
+    ].filter((entry): entry is string => Boolean(entry));
+  } catch {
+    return [
+      "validation details were present but not embedded because they are not structured JSON",
+    ];
+  }
 }
 
 function formatAuditCardDecisionRow(input: {
@@ -790,8 +842,9 @@ function buildWeakOrDiscardedFindingsSection(
       `Decision: discarded from synthesis findings because the source report state is \`${artifact.state}\`.`,
     );
     lines.push(`Failure family: ${artifact.failureFamily ?? "none"}`);
-    if (artifact.validationDetails) {
-      lines.push(`Validation details: ${artifact.validationDetails.replace(/\n/g, "\n")}`);
+    const validationSummary = summarizeWeakArtifactValidationDetails(artifact.validationDetails);
+    if (validationSummary.length > 0) {
+      lines.push(`Validation summary: ${validationSummary.join("; ")}`);
     }
     lines.push("");
   });
@@ -2426,7 +2479,7 @@ function buildDeterministicAuditSynthesisContent(
             .join("\n")
         : "- No validated source reports were available.",
       "",
-      "## Findings By Source Report",
+      "## Source Report Carry Forward",
       "",
       ...(totalIncluded > 0
         ? sourceSummaries.flatMap((summary, sourceIndex) => {
@@ -2463,10 +2516,11 @@ function buildDeterministicAuditSynthesisContent(
         lines.push(`- ${artifact.artifactPath} (task ${artifact.taskId})`);
         lines.push(`  - State: ${artifact.state}`);
         lines.push(`  - Failure family: ${artifact.failureFamily ?? "none"}`);
-        if (artifact.validationDetails) {
-          lines.push(
-            `  - Validation details: ${artifact.validationDetails.replace(/\n/g, "\n    ")}`,
-          );
+        const validationSummary = summarizeWeakArtifactValidationDetails(
+          artifact.validationDetails,
+        );
+        if (validationSummary.length > 0) {
+          lines.push(`  - Validation summary: ${validationSummary.join("; ")}`);
         }
       });
     }
@@ -2576,10 +2630,11 @@ function buildDeterministicAuditSynthesisContent(
         lines.push(`- ${artifact.artifactPath} (task ${artifact.taskId})`);
         lines.push(`  - State: ${artifact.state}`);
         lines.push(`  - Failure family: ${artifact.failureFamily ?? "none"}`);
-        if (artifact.validationDetails) {
-          lines.push(
-            `  - Validation details: ${artifact.validationDetails.replace(/\n/g, "\n    ")}`,
-          );
+        const validationSummary = summarizeWeakArtifactValidationDetails(
+          artifact.validationDetails,
+        );
+        if (validationSummary.length > 0) {
+          lines.push(`  - Validation summary: ${validationSummary.join("; ")}`);
         }
       });
     }
@@ -2665,10 +2720,9 @@ function buildDeterministicAuditSynthesisContent(
       lines.push(`- ${artifact.artifactPath} (task ${artifact.taskId})`);
       lines.push(`  - State: ${artifact.state}`);
       lines.push(`  - Failure family: ${artifact.failureFamily ?? "none"}`);
-      if (artifact.validationDetails) {
-        lines.push(
-          `  - Validation details: ${artifact.validationDetails.replace(/\n/g, "\n    ")}`,
-        );
+      const validationSummary = summarizeWeakArtifactValidationDetails(artifact.validationDetails);
+      if (validationSummary.length > 0) {
+        lines.push(`  - Validation summary: ${validationSummary.join("; ")}`);
       }
     });
   }
