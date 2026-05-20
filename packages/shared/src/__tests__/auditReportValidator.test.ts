@@ -255,6 +255,73 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).not.toContain("invalid_line_reference");
   });
 
+  it("does not treat source fixture tokens in grep output as placeholder hashes or missing root files", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(
+      join(root, "tests", "test_attachments.py"),
+      [
+        "from __future__ import annotations",
+        "",
+        "def test_attachment_fixture():",
+        '    file_unique_id = "abc123"',
+        "    assert file_unique_id",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "tests", "test_company_profile.py"),
+      [
+        "from pathlib import Path",
+        "",
+        'PROFILE_PATH = Path("docs") / "memory" / "entities" / "Intevra" / "company-profile.md"',
+        'Path("source").joinpath("note.txt").write_text("hello", encoding="utf-8")',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const text = [
+      "# Test Readiness Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-tests for `tests/test_attachments.py` and `tests/test_company_profile.py` fixture coverage was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `tests/test_attachments.py:4`",
+      "- `tests/test_company_profile.py:3`",
+      "- `tests/test_company_profile.py:4`",
+      "",
+      "Checked commands:",
+      "- Command `git grep -n . -- tests/test_attachments.py` output:",
+      "```",
+      'tests/test_attachments.py:4:    file_unique_id = "abc123"',
+      "```",
+      "- Command `git grep -n . -- tests/test_company_profile.py` output:",
+      "```",
+      'tests/test_company_profile.py:3:PROFILE_PATH = Path("docs") / "memory" / "entities" / "Intevra" / "company-profile.md"',
+      'tests/test_company_profile.py:4:Path("source").joinpath("note.txt").write_text("hello", encoding="utf-8")',
+      "```",
+      "",
+      "Absence reasoning: risk-tests covered `tests/test_attachments.py:4`, `tests/test_company_profile.py:3`, `tests/test_company_profile.py:4`; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["tests/test_attachments.py", "tests/test_company_profile.py"],
+      reportArtifactPaths: ["audit/test-readiness-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(issueCodes(result)).not.toContain("fake_or_placeholder_command_output");
+    expect(issueCodes(result)).not.toContain("missing_report_file_references");
+    expect(result.missingReferencedPaths).toEqual([]);
+  });
+
   it("accepts empty-file no-findings only with command output that proves emptiness", () => {
     const root = initRepo();
     mkdirSync(join(root, "tests"), { recursive: true });

@@ -885,7 +885,7 @@ const AUDIT_EVIDENCE_REPAIR_SIGNAL_PATTERNS: RegExp[] = [
 ];
 
 const LOW_QUALITY_SYNTHESIS_FINDING_PATTERNS: RegExp[] = [
-  /\b(?:123abc|abc123|1234567890abcdef)\b/i,
+  /(?:\b(?:123abc|abc123|1234567890abcdef)\b[^\n]{0,80}\b(?:placeholder|fake|commit|hash)\b|\b(?:commit|hash|sha|git\s+(?:log|show|rev-parse))\b[^\n]{0,80}\b(?:123abc|abc123|1234567890abcdef)\b|^\s*(?:123abc|abc123|1234567890abcdef)(?:\s+\(|\s+[A-Z])[^\n]*)/im,
   /\b(?:Author:\s+Your Name|your\.email@example\.com)\b/i,
   /\b(?:root-commit|Date:\s+Mon May 10 12:34:56 2026|Author:\s+qwen-local-agent\s+<>|Signed-off-by:\s+qwen-local-agent\s+<>|commit\s+[0-9a-f]*0c0c[0-9a-f]*\b)/i,
   /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|bytes\s*>\s*\d+\s*byte limit|could not (?:read|inspect|access)|not visible|would show|should show|expected to show)\b/i,

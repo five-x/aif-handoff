@@ -75,7 +75,7 @@ function normalizeLineReferenceEnd(input: {
 }
 
 const LOW_QUALITY_SYNTHESIS_PATTERNS = [
-  /\b(?:123abc|abc123|1234567890abcdef|deadbeef|cafebabe)\b/i,
+  /(?:\b(?:123abc|abc123|1234567890abcdef|deadbeef|cafebabe)\b[^\n]{0,80}\b(?:placeholder|fake|commit|hash)\b|\b(?:commit|hash|sha|git\s+(?:log|show|rev-parse))\b[^\n]{0,80}\b(?:123abc|abc123|1234567890abcdef|deadbeef|cafebabe)\b|^\s*(?:123abc|abc123|1234567890abcdef|deadbeef|cafebabe)(?:\s+\(|\s+[A-Z])[^\n]*)/im,
   /\b(?:root-commit|Date:\s+Mon May 10 12:34:56 2026|Author:\s+qwen-local-agent\s+<>|Signed-off-by:\s+qwen-local-agent\s+<>|commit\s+[0-9a-f]*0c0c[0-9a-f]*\b)/i,
   /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|could not (?:read|inspect|access)|would show|should show|expected to show)\b/i,
   /\b(?:may contain|likely used|likely indicates|confirmed (?:the )?file exists|confirmed .* exists)\b/i,

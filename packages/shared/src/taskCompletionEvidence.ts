@@ -150,7 +150,8 @@ const DETERMINISTIC_FALLBACK_REPORT_PATTERN =
 
 const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
   {
-    pattern: /\b(?:123abc|abc123|1234567890abcdef[0-9a-f]*)\b/i,
+    pattern:
+      /(?:\b(?:123abc|abc123|1234567890abcdef[0-9a-f]*)\b[^\n]{0,80}\b(?:placeholder|fake|commit|hash)\b|\b(?:commit|hash|sha|git\s+(?:log|show|rev-parse))\b[^\n]{0,80}\b(?:123abc|abc123|1234567890abcdef[0-9a-f]*)\b|^\s*(?:123abc|abc123|1234567890abcdef[0-9a-f]*)(?:\s+\(|\s+[A-Z])[^\n]*)/im,
     message: "Report artifact contains placeholder commit hashes instead of real command output.",
   },
   {

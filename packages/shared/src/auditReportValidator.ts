@@ -144,7 +144,7 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "fake_or_placeholder_command_output",
     pattern:
-      /\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b/i,
+      /(?:\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b[^\n]{0,80}\b(?:placeholder|fake|commit|hash)\b|\b(?:commit|hash|sha|git\s+(?:log|show|rev-parse))\b[^\n]{0,80}\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b|^\s*(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)(?:\s+\(|\s+[A-Z])[^\n]*)/im,
     message: "Report artifact contains placeholder commit hashes instead of real command output.",
   },
   {
@@ -909,21 +909,20 @@ function addReferencedPath(
   return normalized;
 }
 
-function isDelimitedReference(text: string, match: RegExpMatchArray, rawPath: string): boolean {
-  const matchStart = match.index ?? 0;
-  const rawStart = text.indexOf(rawPath, matchStart);
-  if (rawStart <= 0) return false;
-  return /[`'"\[(]/.test(text[rawStart - 1] ?? "");
-}
-
 function isInReferenceSentence(text: string, match: RegExpMatchArray): boolean {
   const index = match.index ?? 0;
   const sentenceStart = Math.max(0, text.lastIndexOf("\n", index) + 1, index - 120);
   const nextNewline = text.indexOf("\n", index);
   const sentenceEnd = nextNewline >= 0 ? nextNewline : Math.min(text.length, index + 120);
-  return /\b(cite|cites|cited|reference|references|referenced|path|paths|file|files|see|inspect|finding|findings|checked)\b/i.test(
+  return /\b(cite|cites|cited|reference|references|referenced|path|paths|file|files|see|inspect|evidence|scope|artifact|report|finding|findings|checked)\b/i.test(
     text.slice(sentenceStart, sentenceEnd),
   );
+}
+
+function isInsideMarkdownFence(text: string, index: number): boolean {
+  const before = text.slice(0, index);
+  const fenceCount = (before.match(/(?:^|\n)```/g) ?? []).length;
+  return fenceCount % 2 === 1;
 }
 
 function extractReferencedPaths(
@@ -941,8 +940,7 @@ function extractReferencedPaths(
     const normalized = normalizeRelativePath(raw.replace(/[),.;\]]+$/g, ""));
     if (
       !sourceReader.pathExists(normalized) &&
-      !isDelimitedReference(text, match, raw) &&
-      !isInReferenceSentence(text, match)
+      (isInsideMarkdownFence(text, match.index ?? 0) || !isInReferenceSentence(text, match))
     ) {
       continue;
     }
