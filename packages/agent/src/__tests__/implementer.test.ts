@@ -2379,6 +2379,11 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain(
       "A first-run source audit must make a source-specific decision.",
     );
+    expect(implementCall.prompt).toContain("Source audit scope discipline:");
+    expect(implementCall.prompt).toContain(
+      "Treat the task's `Scope:` line as the authoritative audit boundary.",
+    );
+    expect(implementCall.prompt).toContain("do not expand into a repository-wide dependency map");
     expect(implementCall.prompt).toContain("explain why each declared risk hypothesis is absent");
     expect(implementCall.prompt).toContain("Report artifact: audit/security-controls.md");
     const reportPath = join(projectRoot, "audit", "security-controls.md");
@@ -2399,6 +2404,69 @@ describe("runImplementer rework behavior", () => {
       "Agent: implement-coordinator started (deterministic audit report repair)",
     );
   }, 60_000);
+
+  it("adds bounded source-audit instructions after runtime recovery", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-runtime-recovery",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: [
+          "Scope: README.md",
+          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Allowed changes: only create/update audit/architecture.md.",
+          "Report artifact: audit/architecture.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Inspect scoped files and write the audit report.",
+        retryCount: 2,
+        blockedReason:
+          "Runtime audit report timeout recovery: implementer timed out while producing audit/architecture.md; retrying immediately with bounded source-audit scope and evidence budget.",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-runtime-recovery",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-runtime-recovery"],
+      artifacts: [
+        {
+          taskId: "task-audit-runtime-recovery",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-runtime-recovery", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain("Runtime recovery source-audit budget:");
+    expect(implementCall.prompt).toContain("Use no more than 12 additional");
+    expect(implementCall.prompt).toContain("Write audit/architecture.md");
+    expect(implementCall.prompt).toContain("Source audit scope discipline:");
+  });
 
   it("terminalizes repeated deterministic audit report repair before runtime rework", async () => {
     const db = testDb.current;

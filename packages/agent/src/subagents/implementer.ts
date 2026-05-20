@@ -4099,6 +4099,28 @@ Rework handling protocol:
 - Do not create repeated empty commits. If there are no report changes to commit, record \`git status --short -- ${expectedAuditReportArtifactPath}\` and \`git log -1 --name-only --oneline -- ${expectedAuditReportArtifactPath}\`, then stop.
 `
     : "";
+  const sourceAuditScopeDisciplineBlock = expectedAuditReportArtifactPath
+    ? `Source audit scope discipline:
+- Treat the task's \`Scope:\` line as the authoritative audit boundary. Inspect those scoped files/directories and do not expand into a repository-wide dependency map.
+- Use targeted repository tools to decide each declared risk hypothesis from the scoped evidence. For large scoped files, prefer line-specific searches or snippets over full-file rereads.
+- Do not recursively search every import, symbol, or dependency. Use at most one supporting out-of-scope lookup only when it is needed to prove a concrete candidate finding, then return to the scoped files.
+- Stop collecting evidence once every declared risk hypothesis has either a validated finding or a source-specific no-findings rationale. Write ${expectedAuditReportArtifactPath}, commit only that artifact, verify it, and return.
+`
+    : "";
+  const sourceAuditRuntimeRecoveryBlock =
+    expectedAuditReportArtifactPath &&
+    !task.reworkRequested &&
+    ((task.retryCount ?? 0) > 0 ||
+      /\bRuntime (?:audit report timeout recovery|context limit recovery|transient .* recovery|request timed out)\b/i.test(
+        task.blockedReason ?? "",
+      ))
+      ? `Runtime recovery source-audit budget:
+- This audit report run is retrying after runtime context/timeout recovery. Complete a bounded report; do not keep exploring for perfect coverage.
+- Use no more than 12 additional repository-inspection tool calls before writing ${expectedAuditReportArtifactPath}. Prefer \`rg -n\`, \`git grep -n\`, and focused line snippets over broad repeated reads.
+- If the scoped evidence is sufficient for no validated findings, write a substantive no-findings report with an Evidence Register and risk-by-risk absence reasoning. If a real finding is supported, keep it with exact path:line evidence.
+- If some scoped area cannot be fully inspected within this bounded retry, record that as an explicit audit limitation or coverage gap in the report; do not leave the task blocked only because more exploratory search is possible.
+`
+      : "";
 
   const rawPrompt = `${topReworkHeader}${useSubagents ? "Implement the task using the provided plan." : implementSlashCommand}
 
@@ -4137,6 +4159,8 @@ ${planSection}
 ${isRework ? "Rework mode: true (requested from done/request_changes)." : "Rework mode: false."}
 
 ${auditEvidenceRepairBlock}
+${sourceAuditScopeDisciplineBlock}
+${sourceAuditRuntimeRecoveryBlock}
 
 Execution rules:
 - Respect task dependencies and checklist state from the plan file.

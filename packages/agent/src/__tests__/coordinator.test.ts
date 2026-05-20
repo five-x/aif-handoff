@@ -2616,6 +2616,95 @@ describe("coordinator", () => {
     expect(done!.runtimeOptionsJson).toContain("profile-fast-transport");
   });
 
+  it("retries audit report timeouts immediately with a bounded source-audit recovery", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-audit-timeout",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-audit-timeout",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-audit-timeout",
+        defaultReviewRuntimeProfileId: "profile-heavy-audit-timeout",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-timeout-bounded",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 1,
+        runtimeOptionsJson: JSON.stringify({
+          __aifRuntimeRecovery: {
+            contextFallback: {
+              stage: "implementer",
+              profileId: "profile-heavy-audit-timeout",
+              previousProfileId: "profile-fast-audit-timeout",
+              reason: "context_length",
+              attempt: 1,
+              createdAt: "2026-05-20T00:00:00.000Z",
+            },
+            failedContextProfileIds: {
+              implementer: ["profile-fast-audit-timeout"],
+            },
+          },
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-timeout-bounded",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-timeout-bounded"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-timeout-bounded",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: "/tmp/test",
+        },
+      ],
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("Runtime request timed out", undefined, "timeout"),
+    );
+
+    await pollAndProcess();
+
+    const retrying = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-timeout-bounded"))
+      .get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.blockedReason).toContain("Runtime audit report timeout recovery");
+    expect(retrying!.blockedReason).toContain("audit/architecture.md");
+    expect(retrying!.blockedFromStatus).toBeNull();
+    expect(retrying!.retryAfter).toBeNull();
+    expect(retrying!.retryCount).toBe(2);
+    expect(retrying!.manualReviewRequired).toBe(false);
+    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-audit-timeout");
+    expect(retrying!.agentActivityLog).toContain(
+      "Audit report timeout scheduled immediate bounded retry",
+    );
+  });
+
   it.each([
     {
       name: "other-project",

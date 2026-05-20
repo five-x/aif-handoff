@@ -590,6 +590,7 @@ function handleContextLengthRecovery(input: {
 }
 
 const TRANSIENT_RUNTIME_FALLBACK_CATEGORIES = new Set(["transport", "stream", "timeout"]);
+const AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES = 3;
 
 function handleTransientRuntimeFallbackRecovery(input: {
   task: TaskRow;
@@ -678,6 +679,115 @@ function handleTransientRuntimeFallbackRecovery(input: {
       retryCount,
     },
     "Scheduled immediate one-shot runtime fallback after transient runtime failure",
+  );
+  return true;
+}
+
+function selectAuditReportTimeoutRecoveryProfile(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  activeFallback: ReturnType<typeof readContextFallbackRuntimeOption>;
+}): RuntimeProfile | null {
+  if (input.activeFallback) {
+    return getRuntimeProfileResponseById(input.activeFallback.profileId) ?? null;
+  }
+
+  const resolvedSelection = resolveEffectiveRuntimeProfile({
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    mode: input.stage,
+    systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
+  });
+  const fallback = selectContextFallbackProfile({
+    task: input.task,
+    stage: input.stage,
+    currentProfile: resolvedSelection.profile,
+    failedProfileIds: new Set(
+      readFailedContextProfileIds(input.task.runtimeOptionsJson, input.stage),
+    ),
+  });
+  return fallback ?? resolvedSelection.profile ?? null;
+}
+
+function handleAuditReportTimeoutRecovery(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  stageLabel: CoordinatorStage;
+  stageInProgress: TaskStatus;
+  title: string;
+  err: unknown;
+}): boolean {
+  const runtimeError = findRuntimeExecutionError(input.err);
+  if (runtimeError?.category !== "timeout") return false;
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  if (artifact?.role !== "report") return false;
+
+  const nowIso = new Date().toISOString();
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const retryCount = (latestTask.retryCount ?? 0) + 1;
+  if (retryCount > AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES) return false;
+
+  const activeFallback = readContextFallbackRuntimeOption(
+    latestTask.runtimeOptionsJson,
+    input.stage,
+  );
+  const recoveryProfile = selectAuditReportTimeoutRecoveryProfile({
+    task: latestTask,
+    stage: input.stage,
+    activeFallback,
+  });
+  const resolvedSelection = resolveEffectiveRuntimeProfile({
+    taskId: latestTask.id,
+    projectId: latestTask.projectId,
+    mode: input.stage,
+    systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
+  });
+  const runtimeOptionsJson =
+    recoveryProfile && recoveryProfile.id !== resolvedSelection.profile?.id
+      ? setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
+          stage: input.stage,
+          profileId: recoveryProfile.id,
+          previousProfileId:
+            activeFallback?.previousProfileId ?? resolvedSelection.profile?.id ?? null,
+          failedProfileId: null,
+          reason: "transient_runtime_error",
+          attempt: retryCount,
+          createdAt: nowIso,
+        })
+      : latestTask.runtimeOptionsJson;
+  const boundedReason =
+    `Runtime audit report timeout recovery: ${input.stageLabel} timed out while producing ` +
+    `${artifact.artifactPath}; retrying immediately with bounded source-audit scope and evidence budget.`;
+
+  clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
+  updateTaskStatus(
+    latestTask.id,
+    input.stageInProgress,
+    {
+      blockedReason: boundedReason,
+      blockedFromStatus: null,
+      retryAfter: null,
+      retryCount,
+      paused: false,
+      reworkRequested: false,
+      manualReviewRequired: false,
+      runtimeOptionsJson,
+    },
+    { title: input.title, fromStatus: input.stageInProgress },
+  );
+  appendTaskActivityLog(
+    latestTask.id,
+    `[${nowIso}] Audit report timeout scheduled immediate bounded retry: artifact=${artifact.artifactPath} selectedProfile=${recoveryProfile?.id ?? "current"} retry=${retryCount}/${AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES}`,
+  );
+  log.warn(
+    {
+      taskId: latestTask.id,
+      stage: input.stageLabel,
+      artifactPath: artifact.artifactPath,
+      selectedProfileId: recoveryProfile?.id ?? null,
+      retryCount,
+    },
+    "Scheduled bounded source-audit retry after runtime timeout",
   );
   return true;
 }
@@ -2585,6 +2695,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     }
     if (
       handleTransientRuntimeFallbackRecovery({
+        task,
+        stage: runtimeStage,
+        stageLabel: stage.label,
+        stageInProgress: stage.inProgress,
+        title: taskTitle,
+        err,
+      })
+    ) {
+      flushActivityQueue(task.id);
+      return false;
+    }
+    if (
+      handleAuditReportTimeoutRecovery({
         task,
         stage: runtimeStage,
         stageLabel: stage.label,
