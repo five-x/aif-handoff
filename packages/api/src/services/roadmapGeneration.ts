@@ -20,6 +20,7 @@ import {
   extractAuditPathTokens,
   isAuditReportArtifactPath,
   isAuditSynthesisTitle,
+  parseAuditScopeRoots,
   parseExpectedAuditReportArtifactPath,
   projectSupportsTaskWorktrees,
   projectUsesSharedBranchIsolation,
@@ -639,7 +640,26 @@ function applyPriorAuditContextToRoadmapContent(
   return output.join("\n");
 }
 
-function validateAuditRoadmapSource(roadmapContent: string): void {
+function validateAuditRoadmapReadableScopeRoots(
+  roadmapContent: string,
+  projectRoot: string | null | undefined,
+  issues: string[],
+): void {
+  if (!projectRoot) return;
+  for (const item of extractAuditRoadmapItems(roadmapContent)) {
+    if (isAuditSynthesisTitle(item.title)) continue;
+    const label = `item "${item.title}"`;
+    const roots = parseAuditScopeRoots(auditDescriptionFromItem(item));
+    for (const root of roots) {
+      if (root === AUDIT_NO_TRACKED_SCOPE_SENTINEL) continue;
+      if (existingConcreteAuditScopeFiles(projectRoot, [root], 1).length === 0) {
+        issues.push(`${label} Scope root ${root} has no readable project evidence`);
+      }
+    }
+  }
+}
+
+function validateAuditRoadmapSource(roadmapContent: string, projectRoot?: string | null): void {
   const items = extractAuditRoadmapItems(roadmapContent);
   const issues: string[] = [];
 
@@ -693,6 +713,7 @@ function validateAuditRoadmapSource(roadmapContent: string): void {
     }
     validateAuditAllowedChangesText(item.text, issues, label);
   }
+  validateAuditRoadmapReadableScopeRoots(roadmapContent, projectRoot, issues);
 
   if (issues.length > 0) {
     throw new RoadmapGenerationError(
@@ -940,7 +961,9 @@ function isConcreteAuditScopeFile(projectRoot: string, path: string): boolean {
   }
   try {
     const stat = statSync(join(projectRoot, normalized));
-    return stat.isFile() && stat.size > 0;
+    if (!stat.isFile() || stat.size === 0) return false;
+    const content = readFileSync(join(projectRoot, normalized), "utf8");
+    return content.split(/\r?\n/).some((line) => line.trim().length > 0);
   } catch {
     return false;
   }
@@ -1229,7 +1252,7 @@ function ensureGeneratedAuditRoadmapContent(
   });
   const contentWithContext = applyPriorAuditContextToRoadmapContent(content, priorContext);
   try {
-    validateAuditRoadmapSource(contentWithContext);
+    validateAuditRoadmapSource(contentWithContext, ctx.projectRoot);
     return contentWithContext;
   } catch (err) {
     log.warn(
@@ -1240,7 +1263,7 @@ function ensureGeneratedAuditRoadmapContent(
       "Generated audit roadmap failed validation; using deterministic diagnostic fallback",
     );
     const fallback = buildDeterministicAuditRoadmapContent(ctx);
-    validateAuditRoadmapSource(fallback);
+    validateAuditRoadmapSource(fallback, ctx.projectRoot);
     return fallback;
   }
 }

@@ -387,7 +387,11 @@ describe("roadmapGeneration", () => {
     });
 
     it("should generate a diagnostic audit roadmap when audit intent is requested", async () => {
-      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+      const { projectId, tmpDir } = createProjectWithDescription("# My App\nA service to audit");
+      mkdirSync(join(tmpDir, "src"), { recursive: true });
+      writeFileSync(join(tmpDir, "src", "config.ts"), "export const debug = false;\n");
+      writeFileSync(join(tmpDir, "src", "index.ts"), "export const app = true;\n");
+      trackFiles(tmpDir, ["src/config.ts", "src/index.ts"]);
 
       mockRunApiRuntimeOneShot.mockResolvedValue({
         result: {
@@ -508,13 +512,18 @@ describe("roadmapGeneration", () => {
     it("should build deterministic audit scopes for botIntevra-like projects", async () => {
       const { projectId, tmpDir } = createProjectWithDescription("# botIntevra\nTelegram bot");
       mkdirSync(join(tmpDir, "src", "bot_intevra"), { recursive: true });
+      mkdirSync(join(tmpDir, "tests"), { recursive: true });
       writeFileSync(join(tmpDir, "src", "bot_intevra", "config.py"), "TOKEN = None\n");
       writeFileSync(join(tmpDir, "src", "bot_intevra", "secret_scan.py"), "def scan(): pass\n");
       writeFileSync(join(tmpDir, "src", "bot_intevra", "service.py"), "def run(): pass\n");
+      writeFileSync(join(tmpDir, "tests", "__init__.py"), "\n");
+      writeFileSync(join(tmpDir, "tests", "test_bot.py"), "def test_bot():\n    assert True\n");
       trackFiles(tmpDir, [
         "src/bot_intevra/config.py",
         "src/bot_intevra/secret_scan.py",
         "src/bot_intevra/service.py",
+        "tests/__init__.py",
+        "tests/test_bot.py",
       ]);
 
       mockRunApiRuntimeOneShot.mockResolvedValue({
@@ -535,9 +544,41 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain("src/bot_intevra/config.py");
       expect(result.content).toContain("src/bot_intevra/secret_scan.py");
       expect(result.content).toContain("src/bot_intevra/service.py");
+      expect(result.content).toContain("tests/test_bot.py");
       expect(result.content).toContain("Risk hypotheses: risk-");
       expect(result.content).not.toContain("Scope: .");
       expect(result.content).not.toMatch(/^\s+- Scope: src\s*$/m);
+      expect(result.content).not.toContain("tests/__init__.py");
+    });
+
+    it("should reject generated audit roadmap scope roots without readable evidence", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# botIntevra\nTelegram bot");
+      mkdirSync(join(tmpDir, "tests"), { recursive: true });
+      writeFileSync(join(tmpDir, "tests", "__init__.py"), "\n");
+      writeFileSync(join(tmpDir, "tests", "test_bot.py"), "def test_bot():\n    assert True\n");
+      trackFiles(tmpDir, ["tests/__init__.py", "tests/test_bot.py"]);
+
+      const generated = validAuditRoadmapContent().replace(
+        "Scope: src/config.ts, src/index.ts",
+        "Scope: tests/__init__.py, tests/test_bot.py",
+      );
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: generated,
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+        },
+        context: {},
+      });
+
+      const result = await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        vision: "Audit botIntevra tests",
+      });
+
+      expect(result.content).toContain("tests/test_bot.py");
+      expect(result.content).not.toContain("tests/__init__.py");
     });
 
     it("handles deterministic audit fallback when no usable tracked scope files exist", async () => {
@@ -581,7 +622,11 @@ describe("roadmapGeneration", () => {
     });
 
     it("should preserve v8-like prior inconclusive context in generated audit task descriptions", async () => {
-      const { projectId } = createProjectWithDescription("# My App\nA service to audit");
+      const { projectId, tmpDir } = createProjectWithDescription("# My App\nA service to audit");
+      mkdirSync(join(tmpDir, "src"), { recursive: true });
+      writeFileSync(join(tmpDir, "src", "config.ts"), "export const debug = false;\n");
+      writeFileSync(join(tmpDir, "src", "index.ts"), "export const app = true;\n");
+      trackFiles(tmpDir, ["src/config.ts", "src/index.ts"]);
 
       mockRunApiRuntimeOneShot.mockResolvedValue({
         result: {
