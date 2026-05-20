@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation completed; independent TEST and REVIEW gates are being rerun after an evidence-pack remediation.
+Implementation completed; independent TEST and REVIEW gates passed after evidence-pack remediation.
 
 ## Project
 
@@ -114,9 +114,11 @@ Quality checks:
   - First gate verdict: `TEST FAIL`.
   - Reason: the local evidence pack and `result.md` were still untracked when the tester ran; the tester also used SSH without the explicit deployment key, so server SHA and direct DB counts were not independently verified from that gate context.
   - Remediation: commit the RDPI evidence pack and rerun with explicit retained evidence for run 1 and the SSH command using `C:\Users\apron\.ssh\codex_linux_key_5`.
-  - Rerun verdict: pending.
+  - Rerun verdict: `TEST PASS`.
+  - Test evidence: local evidence files present, 14 G/H artifact mappings, run G/H summaries contain `validated_no_findings`, `sourceReportCount: 6`, `weakReportCount: 0`, run H DB snapshot shows 7 done tasks with no manual/rework/blocked state, 1 complete batch, 6 valid report artifacts, 1 valid synthesis artifact, 13 accepted `validated_no_findings` attempts, server app SHA `26ab1df9`, API health ok.
 - REVIEW gate:
   - First gate verdict: `REVIEW FAIL`.
   - Reason: reviewer could not access the live server-only audit artifacts or DB rows from local context.
   - Remediation: exported both accepted runs' source/synthesis artifacts, branch mapping, and current run-2 DB snapshot into `evidence/`.
-  - Rerun verdict: pending.
+  - Rerun verdict: `REVIEW PASS`.
+  - Review evidence: no blocking or non-blocking issues; exported evidence supports both accepted post-deploy runs, run H DB state, trusted no-findings synthesis, and regression coverage.
