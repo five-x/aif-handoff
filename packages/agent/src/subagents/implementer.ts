@@ -3113,6 +3113,7 @@ function terminalizeSourceInconclusiveAuditReport(input: {
   sourceSnapshotId?: string | null;
   validationDetails?: Record<string, unknown>;
   operatorInputRequired?: boolean;
+  operatorInputReason?: string;
 }): string {
   const issueCodes = input.validation
     ? auditReportValidationIssueCodes(input.validation)
@@ -3127,8 +3128,11 @@ function terminalizeSourceInconclusiveAuditReport(input: {
     ...(input.reasons ?? []).map((reason) => reason.trim()).filter(Boolean),
     ...(issueCodes.length > 0 ? [`validator issue codes: ${issueCodes.join(", ")}`] : []),
   ];
+  const operatorInputReason =
+    input.operatorInputReason ??
+    `Audit report ${input.artifactPath} cannot be produced until a concrete readable audit scope is provided`;
   const terminalReason = input.operatorInputRequired
-    ? `operator_input_required: Audit report ${input.artifactPath} cannot be produced until a concrete readable audit scope is provided${
+    ? `operator_input_required: ${operatorInputReason}${
         details.length > 0 ? `: ${details.join("; ")}` : "."
       }`
     : `source_inconclusive: audit report ${input.artifactPath} is terminal non-trusted${
@@ -3840,6 +3844,9 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       validation: currentAuditReportValidation,
       fallbackIssueCodes: currentAuditReportIssueCodes,
       reasons: ["repeated deterministic audit report repair still failed strict validation"],
+      operatorInputRequired: true,
+      operatorInputReason:
+        "Generated audit report repair exhausted deterministic validation; provide narrower scope, missing evidence, or an explicit operator decision before retrying",
     });
     const resultText = [
       "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
@@ -3850,7 +3857,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
-      manualReviewRequired: true,
+      manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
@@ -3881,6 +3888,9 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       ],
       fallbackIssueCodes: ["missing_report_file_references"],
       validation: currentAuditReportValidation,
+      operatorInputRequired: true,
+      operatorInputReason:
+        "Generated audit report card reached the final deterministic guard; provide report evidence, scope correction, or an explicit operator decision before retrying",
       validationDetails: currentAuditReportValidation
         ? undefined
         : {
@@ -3916,7 +3926,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
-      manualReviewRequired: true,
+      manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });

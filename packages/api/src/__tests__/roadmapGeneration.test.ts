@@ -5,6 +5,7 @@ import {
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
   generatePlanPath,
   projects,
+  roadmapBatches,
 } from "@aif/shared";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@aif/shared/server";
@@ -1263,6 +1264,48 @@ describe("roadmapGeneration", () => {
           taskIntent: "feature",
         }),
       ).toBeNull();
+    });
+
+    it("should reject reused audit aliases when stale batch metadata exists without tasks", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      testDb.current
+        .insert(roadmapBatches)
+        .values({
+          id: "stale-audit-batch",
+          projectId,
+          roadmapAlias: "audit-stale",
+          taskIntent: "audit",
+          status: "expected",
+          executionPolicy: "serialized_shared_checkout",
+          createdTaskIdsJson: "[]",
+        })
+        .run();
+      const generation = {
+        alias: "audit-stale",
+        taskIntent: "audit" as const,
+        tasks: [
+          {
+            title: "Audit: configuration",
+            description: auditTaskDescription(),
+            phase: 1,
+            phaseName: "Audit",
+            sequence: 1,
+          },
+          {
+            title: "Synthesize audit findings",
+            description: auditTaskDescription("audit/2026-05-09-summary.md"),
+            phase: 2,
+            phaseName: "Synthesis",
+            sequence: 1,
+          },
+        ],
+      };
+
+      expect(() => importGeneratedTasks(projectId, generation)).toThrow(RoadmapGenerationError);
+      expect(() => importGeneratedTasks(projectId, generation)).toThrow(/batch metadata/);
+      expect(
+        rejectReusedRoadmapAlias({ projectId, roadmapAlias: "audit-stale", taskIntent: "audit" }),
+      ).toMatch(/batch metadata/);
     });
 
     it("should ignore per-task typed intent when import batch intent is omitted", () => {

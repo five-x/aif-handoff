@@ -1441,8 +1441,72 @@ export function clearTaskRuntimeLimitSnapshot(
 
 export function deleteTask(id: string): void {
   const db = getDb();
-  db.delete(tasks).where(eq(tasks.id, id)).run();
-  db.delete(taskComments).where(eq(taskComments.taskId, id)).run();
+  const batchesToRefresh = new Set<string>();
+
+  db.transaction((tx) => {
+    const taskArtifacts = tx
+      .select()
+      .from(roadmapBatchArtifacts)
+      .where(eq(roadmapBatchArtifacts.taskId, id))
+      .all();
+    const metadataLinkedBatches = tx
+      .select()
+      .from(roadmapBatches)
+      .all()
+      .filter((batch) => batch.synthesisTaskId === id || parseJsonStringArray(batch.createdTaskIdsJson).includes(id));
+    const batchIds = [
+      ...new Set([
+        ...taskArtifacts.map((artifact) => artifact.batchId),
+        ...metadataLinkedBatches.map((batch) => batch.id),
+      ]),
+    ];
+
+    tx.delete(tasks).where(eq(tasks.id, id)).run();
+    tx.delete(taskComments).where(eq(taskComments.taskId, id)).run();
+
+    tx.delete(roadmapBatchArtifactAttempts)
+      .where(eq(roadmapBatchArtifactAttempts.taskId, id))
+      .run();
+    tx.delete(roadmapBatchArtifacts).where(eq(roadmapBatchArtifacts.taskId, id)).run();
+
+    if (batchIds.length === 0) return;
+
+    const nowIso = new Date().toISOString();
+    for (const batchId of batchIds) {
+      const remainingArtifactCount =
+        tx
+          .select({ count: count() })
+          .from(roadmapBatchArtifacts)
+          .where(eq(roadmapBatchArtifacts.batchId, batchId))
+          .get()?.count ?? 0;
+
+      const batch = tx.select().from(roadmapBatches).where(eq(roadmapBatches.id, batchId)).get();
+      if (!batch) continue;
+
+      const remainingTaskIds = parseJsonStringArray(batch.createdTaskIdsJson).filter(
+        (taskId) => taskId !== id,
+      );
+
+      if (remainingArtifactCount === 0 && remainingTaskIds.length === 0) {
+        tx.delete(roadmapBatches).where(eq(roadmapBatches.id, batchId)).run();
+        continue;
+      }
+
+      tx.update(roadmapBatches)
+        .set({
+          createdTaskIdsJson: serializeJson(remainingTaskIds),
+          synthesisTaskId: batch.synthesisTaskId === id ? null : batch.synthesisTaskId,
+          updatedAt: nowIso,
+        })
+        .where(eq(roadmapBatches.id, batchId))
+        .run();
+      batchesToRefresh.add(batchId);
+    }
+  });
+
+  for (const batchId of batchesToRefresh) {
+    refreshRoadmapBatchSummary(batchId);
+  }
 }
 
 export function listTaskComments(taskId: string): CommentRow[] {

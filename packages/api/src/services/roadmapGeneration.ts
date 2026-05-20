@@ -32,6 +32,7 @@ import {
 } from "@aif/shared";
 import {
   createTask,
+  findRoadmapBatchByProjectAlias,
   findProjectById,
   findTasksByRoadmapAlias,
   getMinBacklogPosition,
@@ -1313,7 +1314,11 @@ const auditRoadmapHooks: RoadmapWorkflowHooks = Object.freeze({
   },
   rejectReusedAlias(input) {
     const existingCount = findTasksByRoadmapAlias(input.projectId, input.roadmapAlias).length;
-    if (existingCount === 0) return null;
+    const existingBatch = findRoadmapBatchByProjectAlias(input.projectId, input.roadmapAlias);
+    if (existingCount === 0 && !existingBatch) return null;
+    if (existingCount === 0 && existingBatch) {
+      return `Audit roadmap alias "${input.roadmapAlias}" already has roadmap batch metadata (${existingBatch.id}). Delete the existing audit batch tasks before reusing the alias, or use a new roadmap alias for a fresh audit run.`;
+    }
     return `Audit roadmap alias "${input.roadmapAlias}" already has ${existingCount} task(s). Use a new roadmap alias for a fresh audit run.`;
   },
   classifyGenerationRequest(ctx) {

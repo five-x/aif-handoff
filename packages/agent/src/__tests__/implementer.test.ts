@@ -659,13 +659,13 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-audit-final-runtime-guard"))
       .get();
     expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
       "Audit report card reached the final deterministic guard",
     );
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-final-runtime-guard");
     expect(artifact?.state).toBe("source_inconclusive");
@@ -1843,13 +1843,13 @@ describe("runImplementer rework behavior", () => {
     expect(queryMock).not.toHaveBeenCalled();
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-audit-repair")).get();
     expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
       "Audit report card reached the final deterministic guard",
     );
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repair");
     expect(artifact?.state).toBe("source_inconclusive");
     expect(artifact?.failureFamily).toBe("source_inconclusive");
@@ -1908,13 +1908,13 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-audit-review-finding-repair"))
       .get();
     expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
       "Audit report card reached the final deterministic guard",
     );
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-review-finding-repair");
     expect(artifact?.state).toBe("source_inconclusive");
     expect(artifact?.failureFamily).toBe("source_inconclusive");
@@ -2502,7 +2502,7 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-audit-repeated-deterministic-loop"))
       .get();
     expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
       "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
@@ -2510,7 +2510,7 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
     expect(updatedTask?.implementationLog).not.toContain("Implementation done");
     expect(updatedTask?.implementationLog).toContain("missing_report_file_references");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
     expect(updatedTask?.agentActivityLog).toContain(
       "Repeated deterministic audit report repair terminalized as source_inconclusive",
     );
@@ -2571,13 +2571,13 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-audit-repeated-deterministic-activity-log"))
       .get();
     expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
       "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
     );
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
     expect(updatedTask?.agentActivityLog).toContain(
       "Repeated deterministic audit report repair terminalized as source_inconclusive",
     );
@@ -2686,13 +2686,13 @@ describe("runImplementer rework behavior", () => {
       .get();
     expect(updatedTask?.status).toBe("blocked_external");
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.implementationLog).toContain(
       "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
     );
     expect(updatedTask?.implementationLog).toContain("placeholder_author_metadata");
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
     expect(updatedTask?.agentActivityLog).toContain(
       "Repeated deterministic audit report repair terminalized as source_inconclusive",
     );

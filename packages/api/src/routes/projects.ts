@@ -72,6 +72,30 @@ const log = logger("projects-route");
 
 export const projectsRouter = new Hono();
 
+const roadmapAliasJobs = new Set<string>();
+
+function roadmapAliasJobKey(projectId: string, roadmapAlias: string): string {
+  return `${projectId}\u0000${roadmapAlias.trim().toLowerCase()}`;
+}
+
+function claimRoadmapAliasJob(projectId: string, roadmapAlias: string): boolean {
+  const key = roadmapAliasJobKey(projectId, roadmapAlias);
+  if (roadmapAliasJobs.has(key)) return false;
+  roadmapAliasJobs.add(key);
+  return true;
+}
+
+function releaseRoadmapAliasJob(projectId: string, roadmapAlias: string): void {
+  roadmapAliasJobs.delete(roadmapAliasJobKey(projectId, roadmapAlias));
+}
+
+function roadmapAliasInProgressResponse(roadmapAlias: string) {
+  return {
+    error: `Roadmap alias "${roadmapAlias}" is already being generated or imported. Wait for the current job to finish before retrying.`,
+    code: "ROADMAP_ALIAS_IN_PROGRESS",
+  };
+}
+
 const WARMUP_PROMPT =
   "Study the current project context, including its structure, architecture layers, package boundaries, conventions, and relevant documentation, so this session can be forked for future tasks. Do not edit files. Do not summarize the context; if a final response is required, reply only that warmup is complete.";
 
@@ -463,6 +487,9 @@ projectsRouter.post("/:id/roadmap/generate", jsonValidator(roadmapGenerateSchema
   }
   const configBlocker = projectConfigGovernanceBlocker(id);
   if (configBlocker) return c.json(configBlocker, 409);
+  if (!claimRoadmapAliasJob(id, roadmapAlias)) {
+    return c.json(roadmapAliasInProgressResponse(roadmapAlias), 409);
+  }
 
   log.info(
     { projectId: id, roadmapAlias, taskIntent: taskIntent ?? "general", hasVision: !!vision },
@@ -470,9 +497,13 @@ projectsRouter.post("/:id/roadmap/generate", jsonValidator(roadmapGenerateSchema
   );
 
   // Fire-and-forget: run generation in background, broadcast result via WS
-  runRoadmapGenerationJob(id, roadmapAlias, taskIntent, vision).catch((err) => {
-    log.error({ projectId: id, roadmapAlias, err }, "Background roadmap generation crashed");
-  });
+  runRoadmapGenerationJob(id, roadmapAlias, taskIntent, vision)
+    .catch((err) => {
+      log.error({ projectId: id, roadmapAlias, err }, "Background roadmap generation crashed");
+    })
+    .finally(() => {
+      releaseRoadmapAliasJob(id, roadmapAlias);
+    });
 
   return c.json({ status: "started", projectId: id, roadmapAlias, taskIntent }, 202);
 });
@@ -497,6 +528,9 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
   const aliasError = rejectReusedRoadmapAlias({ projectId: id, roadmapAlias, taskIntent });
   if (aliasError) {
     return c.json({ error: aliasError, code: "ROADMAP_ALIAS_EXISTS" }, 409);
+  }
+  if (!claimRoadmapAliasJob(id, roadmapAlias)) {
+    return c.json(roadmapAliasInProgressResponse(roadmapAlias), 409);
   }
 
   log.info(
@@ -560,6 +594,8 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
     }
     log.error({ projectId: id, roadmapAlias, err }, "Roadmap import unexpected error");
     return c.json({ error: "Internal server error" }, 500);
+  } finally {
+    releaseRoadmapAliasJob(id, roadmapAlias);
   }
 });
 

@@ -42,6 +42,7 @@ export function RoadmapDialog({
   const [result, setResult] = useState<RoadmapImportResult | null>(null);
   const [exists, setExists] = useState<boolean | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+  const requestInFlightRef = useRef(false);
   const selectedIntentContract = TASK_INTENT_CONTRACTS[taskIntent];
   const selectedIntentConstraints = formatTaskIntentPrimaryConstraints(taskIntent);
 
@@ -55,6 +56,7 @@ export function RoadmapDialog({
     setResult(null);
     setExists(null);
     setImportLoading(false);
+    requestInFlightRef.current = false;
     api.checkRoadmapStatus(projectId).then(
       ({ exists: e }) => setExists(e),
       () => setExists(false),
@@ -90,6 +92,7 @@ export function RoadmapDialog({
       if (project && detail.projectId === project.id) {
         setResult(detail);
         setLoading(false);
+        requestInFlightRef.current = false;
         onImportComplete?.(detail);
       }
     };
@@ -98,6 +101,7 @@ export function RoadmapDialog({
       if (project && detail.projectId === project.id) {
         setError(detail.error);
         setLoading(false);
+        requestInFlightRef.current = false;
       }
     };
 
@@ -110,7 +114,8 @@ export function RoadmapDialog({
   }, [project, onImportComplete]);
 
   const handleGenerate = useCallback(async () => {
-    if (!project || !alias.trim()) return;
+    if (!project || !alias.trim() || requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -119,11 +124,13 @@ export function RoadmapDialog({
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
+      requestInFlightRef.current = false;
     }
   }, [project, alias, taskIntent, vision]);
 
   const handleImport = useCallback(async () => {
-    if (!project || !alias.trim()) return;
+    if (!project || !alias.trim() || requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
     setImportLoading(true);
     setError(null);
     setResult(null);
@@ -131,10 +138,12 @@ export function RoadmapDialog({
       const res = await api.importRoadmap(project.id, alias.trim(), taskIntent);
       setResult(res);
       setImportLoading(false);
+      requestInFlightRef.current = false;
       onImportComplete?.(res);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setImportLoading(false);
+      requestInFlightRef.current = false;
     }
   }, [project, alias, taskIntent, onImportComplete]);
 

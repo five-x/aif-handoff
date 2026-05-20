@@ -48,6 +48,7 @@ const {
   findTasksByRoadmapAlias,
   buildTaskArtifactTrustRollup,
   createRoadmapBatchContract,
+  findRoadmapBatchByProjectAlias,
   listRoadmapBatchArtifacts,
   listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
@@ -828,6 +829,77 @@ describe("data layer", () => {
           ],
         }),
       ).toThrow(/unsafe roadmap artifact path/);
+    });
+
+    it("deletes roadmap artifact state with task cleanup and removes empty batches", () => {
+      const reportTask = createTask({
+        projectId: "proj-1",
+        title: "Audit report",
+        description: "Report artifact: audit/report.md",
+        taskIntent: "audit",
+      });
+      const synthesisTask = createTask({
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        description: "Report artifact: audit/summary.md",
+        taskIntent: "audit",
+      });
+      const batch = createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-delete-cleanup",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [reportTask!.id, synthesisTask!.id],
+        synthesisTaskId: synthesisTask!.id,
+        artifacts: [
+          { taskId: reportTask!.id, role: "report", artifactPath: "audit/report.md" },
+          { taskId: synthesisTask!.id, role: "synthesis", artifactPath: "audit/summary.md" },
+        ],
+      });
+
+      updateRoadmapBatchArtifactState({
+        taskId: reportTask!.id,
+        state: "source_inconclusive",
+        failureFamily: "source_inconclusive",
+        classification: "source_inconclusive",
+        reworkStatus: "terminal_inconclusive",
+      });
+      expect(listRoadmapBatchArtifacts(batch.batchId)).toHaveLength(2);
+      expect(
+        listRoadmapBatchArtifactAttempts(listRoadmapBatchArtifacts(batch.batchId)[0]!.id).length,
+      ).toBeGreaterThan(0);
+
+      deleteTask(reportTask!.id);
+
+      const remainingBatch = findRoadmapBatchByProjectAlias("proj-1", "audit-delete-cleanup");
+      expect(remainingBatch).toBeDefined();
+      const remainingArtifacts = listRoadmapBatchArtifacts(batch.batchId);
+      expect(remainingArtifacts.map((artifact) => artifact.taskId)).toEqual([synthesisTask!.id]);
+      expect(remainingArtifacts[0]?.role).toBe("synthesis");
+
+      deleteTask(synthesisTask!.id);
+
+      expect(findRoadmapBatchByProjectAlias("proj-1", "audit-delete-cleanup")).toBeUndefined();
+      expect(listRoadmapBatchArtifacts(batch.batchId)).toEqual([]);
+
+      const metadataOnlyTask = createTask({
+        projectId: "proj-1",
+        title: "Audit metadata-only task",
+        description: "Report artifact: audit/metadata-only.md",
+        taskIntent: "audit",
+      });
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-delete-metadata-only",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [metadataOnlyTask!.id],
+        artifacts: [],
+      });
+
+      deleteTask(metadataOnlyTask!.id);
+
+      expect(findRoadmapBatchByProjectAlias("proj-1", "audit-delete-metadata-only")).toBeUndefined();
     });
 
     it("builds task artifact trust rollups for trusted and terminal source artifacts", () => {

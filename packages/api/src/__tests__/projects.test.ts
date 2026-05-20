@@ -50,6 +50,11 @@ vi.mock("@aif/shared/server", async (importOriginal) => {
 });
 
 vi.mock("@aif/runtime", () => ({
+  UsageSource: {
+    ROADMAP_GENERATE: "roadmap-generate",
+    ROADMAP_EXTRACT: "roadmap-extract",
+    WARMUP: "warmup",
+  },
   initProject: vi.fn(() => ({ ok: true })),
   bootstrapRuntimeRegistry: vi.fn(() =>
     Promise.resolve({
@@ -631,6 +636,106 @@ describe("projects API", () => {
       expect(body.error).toContain("config_governance_blocked");
       expect(body.reasonCodes).toContain("PROJECT_CONFIG_INVALID_BOOLEAN");
       expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("rejects duplicate in-flight roadmap generation and releases the alias after failure", async () => {
+      createRoadmapProject("roadmap-duplicate-generate");
+      const runtimeRejects: Array<(reason?: unknown) => void> = [];
+      mockRunApiRuntimeOneShot.mockImplementation(
+        () =>
+          new Promise<never>((_resolve, reject) => {
+            runtimeRejects.push(reject);
+          }),
+      );
+
+      const first = await app.request("/projects/roadmap-duplicate-generate/roadmap/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roadmapAlias: "audit-duplicate",
+          taskIntent: "audit",
+          vision: "Run diagnostic audit",
+        }),
+      });
+      expect(first.status).toBe(202);
+      await vi.waitFor(
+        () => {
+          expect(
+            mockRunApiRuntimeOneShot.mock.calls.some(
+              ([input]) =>
+                (input as { projectId?: string }).projectId === "roadmap-duplicate-generate",
+            ),
+          ).toBe(true);
+        },
+        { timeout: 5_000 },
+      );
+
+      const duplicate = await app.request("/projects/roadmap-duplicate-generate/roadmap/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roadmapAlias: "audit-duplicate",
+          taskIntent: "audit",
+          vision: "Run diagnostic audit",
+        }),
+      });
+      expect(duplicate.status).toBe(409);
+      expect(await duplicate.json()).toMatchObject({ code: "ROADMAP_ALIAS_IN_PROGRESS" });
+
+      for (const reject of runtimeRejects.splice(0)) {
+        reject(new Error("runtime unavailable"));
+      }
+      await vi.waitFor(
+        () => {
+          expect(mockBroadcast).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: "roadmap:error",
+              payload: expect.objectContaining({ roadmapAlias: "audit-duplicate" }),
+            }),
+          );
+        },
+        { timeout: 5_000 },
+      );
+
+      const priorProjectCalls = mockRunApiRuntimeOneShot.mock.calls.filter(
+        ([input]) => (input as { projectId?: string }).projectId === "roadmap-duplicate-generate",
+      ).length;
+      const retryAfterRelease = await app.request(
+        "/projects/roadmap-duplicate-generate/roadmap/generate",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            roadmapAlias: "audit-duplicate",
+            taskIntent: "audit",
+            vision: "Run diagnostic audit",
+          }),
+        },
+      );
+      expect(retryAfterRelease.status).toBe(202);
+      await vi.waitFor(
+        () => {
+          const projectCalls = mockRunApiRuntimeOneShot.mock.calls.filter(
+            ([input]) =>
+              (input as { projectId?: string }).projectId === "roadmap-duplicate-generate",
+          ).length;
+          expect(projectCalls).toBeGreaterThan(priorProjectCalls);
+        },
+        { timeout: 5_000 },
+      );
+
+      for (const reject of runtimeRejects.splice(0)) {
+        reject(new Error("runtime still unavailable"));
+      }
+      await vi.waitFor(
+        () => {
+          const errors = mockBroadcast.mock.calls.filter(
+            ([event]) => (event as { type?: string }).type === "roadmap:error",
+          );
+          expect(errors.length).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 5_000 },
+      );
     });
   });
 
