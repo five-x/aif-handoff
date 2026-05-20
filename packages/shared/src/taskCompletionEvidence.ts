@@ -146,7 +146,7 @@ const COMMITTED_REPORT_PATTERN =
   /\bcommitted\s+(?:report|artifact)\b|\b(?:report|report artifact|artifact)\b[^\n.]{0,120}\bcommitted\b/i;
 
 const DETERMINISTIC_FALLBACK_REPORT_PATTERN =
-  /\bDeterministic diagnostic report generated\b|\bDiagnostic-only repository inventory report\b|\bNo blocking issue found by deterministic inventory check\b|\bThis report records evidence only\b/i;
+  /\bDeterministic diagnostic report generated\b|\bDiagnostic-only repository inventory report\b|\bNo blocking issue found by deterministic inventory check\b|\bThis report records evidence only\b|\bprevious candidate findings did not meet the audit finding contract\b/i;
 
 const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
   {
@@ -190,6 +190,11 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> =
       /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|branch naming convention and ownership policy)\b/i,
     message:
       "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
+  },
+  {
+    pattern: /\bprevious candidate findings did not meet the audit finding contract\b/i,
+    message:
+      "Report artifact contains a template no-findings conclusion from deterministic repair instead of a source-specific audit decision.",
   },
 ];
 
@@ -981,6 +986,7 @@ function hasValidatedNoFindingsEvidence(
   excludedPaths: Set<string>,
 ): boolean {
   if (!/\bNo validated findings\b/i.test(text)) return false;
+  if (DETERMINISTIC_FALLBACK_REPORT_PATTERN.test(text)) return false;
   if (
     !/\b(?:Checked files|Checked commands|Inspection matrix|Commands run|Files inspected)\b/i.test(
       text,

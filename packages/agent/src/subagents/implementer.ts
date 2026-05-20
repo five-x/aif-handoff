@@ -1518,6 +1518,19 @@ function diagnoseDeclaredAuditScopeRepairability(
   };
 }
 
+function shouldUseDeterministicAuditReportFirstRun(
+  projectRoot: string,
+  scopeRoots: string[],
+): boolean {
+  const scopedFiles = scopeRoots.flatMap((root) =>
+    collectAuditRepairEvidenceFiles(projectRoot, root),
+  );
+  return (
+    scopedFiles.length > 0 &&
+    scopedFiles.every((file) => isEmptyAuditRepairEvidenceFile(projectRoot, file))
+  );
+}
+
 const AUDIT_REPAIR_RISK_STOPWORDS = new Set([
   "audit",
   "evidence",
@@ -2104,13 +2117,7 @@ function buildDeterministicAuditReportRepairContent(input: {
   };
   const bodyLines =
     decision.outcome === "validated_no_findings"
-      ? [
-          `# ${input.task.title}`,
-          "",
-          "No validated findings.",
-          "",
-          "The previous candidate findings did not meet the audit finding contract for concrete technical defects. They were removed instead of being rephrased.",
-        ]
+      ? [`# ${input.task.title}`, "", "No validated findings."]
       : [
           `# ${input.task.title}`,
           "",
@@ -3744,7 +3751,12 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     return;
   }
 
-  if (expectedAuditReportArtifactPath && !task.reworkRequested && localAuditReportScopeRepairable) {
+  if (
+    expectedAuditReportArtifactPath &&
+    !task.reworkRequested &&
+    localAuditReportScopeRepairable &&
+    shouldUseDeterministicAuditReportFirstRun(projectRoot, auditScopeRepairability.roots)
+  ) {
     const nowIso = new Date().toISOString();
     logDeterministicAuditReportRepairActivity({
       taskId,
@@ -3775,8 +3787,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       taskId,
       "Agent",
       repairResult.status === "terminal_source_inconclusive"
-        ? `Deterministic audit report first-run generation terminalized as source_inconclusive: ${repairResult.issueCodes.join(", ") || "unknown"}`
-        : "Deterministic audit report first-run generation complete",
+        ? `Deterministic audit report empty-scope normalization terminalized as source_inconclusive: ${repairResult.issueCodes.join(", ") || "unknown"}`
+        : "Deterministic audit report empty-scope normalization complete",
     );
     logDeterministicAuditReportRepairActivity({
       taskId,
@@ -3794,7 +3806,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         issueCodes: repairResult.issueCodes,
         status: repairResult.status,
       },
-      "Audit report first run completed deterministically",
+      "Audit report first run normalized deterministically because all scoped files are empty",
     );
     return;
   }
@@ -3923,7 +3935,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     return;
   }
 
-  if (expectedAuditReportArtifactPath) {
+  if (expectedAuditReportArtifactPath && task.reworkRequested) {
     const nowIso = new Date().toISOString();
     const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,
@@ -4133,6 +4145,8 @@ Execution rules:
 - For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete existing file \`path:line\` evidence, \`Risk:\`, \`Proposed fix:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
 - Audit findings must be actionable technical-quality defects, regressions, unsafe operational assumptions, or clearly owned remediation items. Do not count inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, or speculative may/might/could claims as findings.
 - If no actionable finding is found, write "No validated findings" and include checked files and commands with observed outputs instead of inventing weak findings.
+- A first-run source audit must make a source-specific decision. Do not use a generic/template sentence such as "previous candidate findings did not meet the audit finding contract" as the basis for no-findings.
+- A no-findings report must explain why each declared risk hypothesis is absent using observed code/config/test facts. A bare statement that no actionable finding was identified is not sufficient when cited evidence contains risk signals such as hardcoded endpoints, auth/config defaults, persistence writes, retry loops, or external-service contracts.
 - Audit report verification must be observed, not invented. Paste only command output or tool results you actually obtained. Never use placeholders such as \`123abc\`, \`1234567890abcdef\`, \`Your Name <your.email@example.com>\`, synthetic commit metadata, or generic text like \`All tests passed\` unless that exact output came from a tool.
 - If a scoped file is large, inspect it with targeted tools such as \`rg -n\`, \`nl -ba | sed -n\`, \`head\`, or \`tail\`; do not write "too large to read", "would show", "likely", or "may contain" as evidence. If you cannot inspect an area, record it as an explicit audit limitation, not as a finding.
 - If you claim a file or directory is missing, verify it with a real command first and include the exact output. Do not claim missing paths when \`git ls-files\`, \`ls\`, or \`test -e\` shows they exist.

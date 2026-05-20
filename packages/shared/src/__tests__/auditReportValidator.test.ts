@@ -214,6 +214,48 @@ describe("auditReportValidator", () => {
     expect(result.existingReferencedPaths).toContain("src/config.ts");
   });
 
+  it("rejects template deterministic no-findings reports as weak audit evidence", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "The previous candidate findings did not meet the audit finding contract for concrete technical defects. They were removed instead of being rephrased.",
+      "",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Scope | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      "| `src/config.ts` | `src/config.ts:1` | Command `git grep -n . -- src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |",
+      "",
+      "Checked commands:",
+      "- Command `git grep -n . -- src/config.ts` output:",
+      "```",
+      "src/config.ts:1:export const timeoutMs = 1000;",
+      "```",
+      "",
+      "Absence reasoning: risk-1 covered `src/config.ts:1`; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.substantiveEvidence).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toContain("deterministic_fallback_report");
+    expect(issueCodes(result)).toContain("missing_substantive_evidence");
+  });
+
   it("rejects no-findings reports backed only by import and bootstrap line citations", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot"), { recursive: true });

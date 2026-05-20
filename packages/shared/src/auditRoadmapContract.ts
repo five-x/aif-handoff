@@ -173,7 +173,7 @@ export const AUDIT_NO_FINDINGS_PROOF_GUARDRAIL =
   "No-findings proof guardrail: git ls-files, git status, directory listings, file-existence checks, and broad inventory-only observations are not sufficient proof for a no-findings conclusion.";
 
 export const AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT =
-  "Substantive no-findings requirement: support any no-findings conclusion with scoped code/config/test inspection, commands run, observed outputs, and a short explanation of why the scoped risks are absent.";
+  "Substantive no-findings requirement: support any no-findings conclusion with scoped code/config/test inspection, commands run, observed outputs, and a source-specific explanation of why each declared risk is absent; generic/template no-findings text is not sufficient.";
 
 export const AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT =
   "Synthesis outcome requirement: classify the final audit as exactly one of validated findings present, validated no-findings with substantive evidence, or audit inconclusive when source reports are weak, missing, or inventory-only.";
@@ -761,14 +761,18 @@ function hasNoFindingsProofGuardrail(text: string): boolean {
 }
 
 function hasSubstantiveNoFindingsRequirement(text: string): boolean {
-  return hasAll(text, [
+  const baseMarkersPresent = hasAll(text, [
     "substantive no-findings",
     "scoped",
     "inspection",
     "commands run",
     "observed outputs",
-    "scoped risks are absent",
   ]);
+  return (
+    baseMarkersPresent &&
+    (text.includes("scoped risks are absent") ||
+      hasAll(text, ["source-specific", "each declared risk is absent", "generic/template"]))
+  );
 }
 
 function hasSynthesisOutcomeRequirement(text: string): boolean {

@@ -81,6 +81,10 @@ const LOW_QUALITY_SYNTHESIS_PATTERNS = [
   /\b(?:may contain|likely used|likely indicates|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
 ];
 
+const TEMPLATE_NO_FINDINGS_PATTERNS = [
+  /\bprevious candidate findings did not meet the audit finding contract\b/i,
+];
+
 const INVENTORY_COMMAND_PATTERNS = [
   /^\s*git\s+ls-files\b/i,
   /^\s*git\s+status\b/i,
@@ -449,11 +453,15 @@ export function classifyAuditSourceEvidence(input: {
   if (validatedFindingCount > 0) {
     classification = "validated_findings_present";
   } else if (/\bNo validated findings\b/i.test(input.text)) {
+    const hasTemplateNoFindingsClaim = TEMPLATE_NO_FINDINGS_PATTERNS.some((pattern) =>
+      pattern.test(input.text),
+    );
     const hasNoFindingsRegister =
       /\b(?:Checked files|Checked commands|Inspection matrix|Commands run|Files inspected|Evidence Register)\b/i.test(
         input.text,
       );
     if (
+      !hasTemplateNoFindingsClaim &&
       hasNoFindingsRegister &&
       hasScopedNoFindingsRiskClaim(input.text) &&
       (substantiveLineEvidenceRefs.length > 0 || emptyFileEvidenceRefs.length > 0) &&

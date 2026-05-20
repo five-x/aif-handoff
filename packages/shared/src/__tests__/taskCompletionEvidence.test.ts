@@ -3378,6 +3378,62 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("deterministic_fallback_report");
   });
 
+  it("blocks template deterministic no-findings reports even when they cite scoped lines", () => {
+    const root = initRepo();
+    execFileSync("git", ["checkout", "-b", "feature/template-no-findings"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime.md"),
+      [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "",
+        "The previous candidate findings did not meet the audit finding contract for concrete technical defects. They were removed instead of being rephrased.",
+        "",
+        "Risk hypotheses: risk-runtime for `src/config.ts` timeout drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        "- Command `git grep -n . -- src/config.ts` output:",
+        "```",
+        "src/config.ts:1:export const timeoutMs = 1000;",
+        "```",
+        "",
+        "Absence reasoning: risk-runtime covered `src/config.ts:1`; no actionable finding was identified in the scoped inspection.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add template audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-template-no-findings",
+        title: "Audit runtime",
+        taskIntent: "audit",
+        description: "Scope: src/config.ts\nReport artifact: audit/runtime.md",
+        plan: "## Plan\n- Validate src/config.ts\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.deterministicFallbackReport).toBe(true);
+    expect(codes(result)).toContain("deterministic_fallback_report");
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
   it("flags missing root-level repo path references in report artifacts", () => {
     const root = initRepo();
     mkdirSync(join(root, "reports"), { recursive: true });

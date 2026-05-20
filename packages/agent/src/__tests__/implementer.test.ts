@@ -9,9 +9,7 @@ import {
   roadmapBatchArtifacts,
   taskComments,
   tasks,
-  computeAuditReportContentSha256,
   hashAifPlanManifest,
-  resolveAuditPlanId,
   evaluateTaskCompletionEvidence,
   validateImplementationManifest,
   validateAuditReportArtifact,
@@ -399,7 +397,7 @@ describe("runImplementer rework behavior", () => {
     expect(validation.ok).toBe(true);
   });
 
-  it("normalizes readable legacy generated audit cards deterministically before runtime", async () => {
+  it("routes readable generated audit report cards through runtime on first run", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -465,25 +463,28 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-legacy-generated-audit", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(queryMock).toHaveBeenCalled();
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain(
+      "A first-run source audit must make a source-specific decision.",
+    );
+    expect(implementCall.prompt).toContain("Allowed changes: only create/update audit/legacy.md.");
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-legacy-generated-audit"))
       .get();
-    expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
-    );
-    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
     expect(updatedTask?.blockedReason).toBeNull();
     expect(updatedTask?.manualReviewRequired).toBe(false);
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-legacy-generated-audit");
-    expect(artifact?.state).toBe("valid");
+    expect(artifact?.state).toBe("expected");
     expect(artifact?.failureFamily).toBeNull();
   });
 
-  it("does not let retried terminal source-inconclusive legacy audit cards reach runtime", async () => {
+  it("routes retried readable source-inconclusive legacy audit cards through runtime", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -585,27 +586,24 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-legacy-generated-audit-retry", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-legacy-generated-audit-retry"))
       .get();
-    expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
-    );
+    expect(queryMock).toHaveBeenCalled();
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
     expect(updatedTask?.implementationLog).not.toContain(
       "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
     );
-    expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
     expect(updatedTask?.blockedReason).toBeNull();
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-legacy-generated-audit-retry");
-    expect(artifact?.state).toBe("valid");
+    expect(artifact?.state).toBe("source_inconclusive");
     const attempts = listRoadmapBatchArtifactAttempts(initialArtifact!.id);
-    expect(attempts).toHaveLength(2);
+    expect(attempts).toHaveLength(1);
     expect(attempts[0]?.reworkStatus).toBe("terminal_inconclusive");
-    expect(attempts[1]?.reworkStatus).toBe("accepted");
   });
 
   it("uses the final deterministic guard instead of runtime for unmatched audit report rework", async () => {
@@ -2290,7 +2288,7 @@ describe("runImplementer rework behavior", () => {
     );
   }, 60_000);
 
-  it("generates deterministic audit report artifacts on first run instead of model-authored manifests", async () => {
+  it("routes first-run readable audit report artifacts to runtime source audit", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -2375,63 +2373,31 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-first-run-report", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(queryMock).toHaveBeenCalled();
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain("Audit security and configuration controls");
+    expect(implementCall.prompt).toContain(
+      "A first-run source audit must make a source-specific decision.",
+    );
+    expect(implementCall.prompt).toContain("explain why each declared risk hypothesis is absent");
+    expect(implementCall.prompt).toContain("Report artifact: audit/security-controls.md");
     const reportPath = join(projectRoot, "audit", "security-controls.md");
-    expect(existsSync(reportPath)).toBe(true);
-    const report = readFileSync(reportPath, "utf8");
-    expect(report).toContain("No validated findings.");
-    expect(report).toContain("```audit-report-manifest");
-    expect(report).not.toContain("<computed_sha256");
-    expect(report).not.toContain("<commit_hash");
-    expect(report).not.toContain("would show");
-    const manifest = readAuditReportManifest(report);
-    const body = report.split(/\n```audit-report-manifest\b/)[0]?.trimEnd() ?? "";
-    expect(manifest.outcome).toBe("validated_no_findings");
-    expect(manifest.contentSha256).toBe(computeAuditReportContentSha256(body));
-    expect(manifest.sourceSnapshot).toMatchObject({
-      dirty: false,
-    });
-    expect(JSON.stringify(manifest.scopeCoverage)).toContain("src/bot_intevra/secret_scan.py");
+    expect(existsSync(reportPath)).toBe(false);
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-first-run-report");
     if (!artifact) throw new Error("missing first-run report artifact");
-    const auditPlanId = resolveAuditPlanId({
-      taskId: "task-audit-first-run-report",
-      roadmapBatchId: artifact.batchId,
-    });
-    const validation = validateAuditReportArtifact({
-      text: report,
-      projectRoot,
-      taskId: "task-audit-first-run-report",
-      roadmapBatchId: artifact.batchId,
-      roadmapAlias: artifact.roadmapAlias,
-      auditPlanId,
-      taskDescription: description,
-      reportArtifactPaths: ["audit/security-controls.md"],
-      expectedReportArtifactPath: "audit/security-controls.md",
-      requireProposedFix: true,
-      auditEvidenceUnits: listAuditEvidenceEvents({
-        taskId: "task-audit-first-run-report",
-        auditPlanId,
-      }),
-      requireLedgerEvidence: true,
-    });
-    expect(validation.ok).toBe(true);
-    expect(validation.sourceClassification).toBe("validated_no_findings");
-    expect(artifact.state).toBe("valid");
+    expect(artifact.state).toBe("expected");
     expect(artifact.failureFamily).toBeNull();
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-first-run-report"))
       .get();
-    expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
-    );
-    expect(updatedTask?.agentActivityLog).toContain(
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
+    expect(updatedTask?.agentActivityLog).not.toContain(
       "Agent: implement-coordinator started (deterministic audit report repair)",
     );
-    expect(updatedTask?.agentActivityLog).toContain("Tool: git_grep scoped audit evidence");
   }, 60_000);
 
   it("terminalizes repeated deterministic audit report repair before runtime rework", async () => {

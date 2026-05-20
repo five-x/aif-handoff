@@ -26,6 +26,7 @@ export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "malformed_report_artifact",
   "contradictory_findings_and_no_findings",
   "fake_or_placeholder_command_output",
+  "deterministic_fallback_report",
   "false_missing_path_claim",
   "invalid_line_reference",
   "missing_report_file_references",
@@ -190,6 +191,12 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
       /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|missing ownership clarity|incomplete ownership clarity|does not explicitly define ownership|does not explicitly define boundaries|missing dependency documentation|branch naming convention and ownership policy)\b/i,
     message:
       "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
+  },
+  {
+    code: "deterministic_fallback_report",
+    pattern: /\bprevious candidate findings did not meet the audit finding contract\b/i,
+    message:
+      "Report artifact contains a template no-findings conclusion from deterministic repair instead of a source-specific audit decision.",
   },
 ];
 
