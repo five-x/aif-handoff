@@ -96,6 +96,7 @@ describe("qwen-local-agent adapter", () => {
         "git_status",
         "compute_audit_report_hash",
         "finalize_audit_report_manifest",
+        "validate_audit_report",
         "git_commit",
       ]),
     );
@@ -989,6 +990,89 @@ describe("qwen-local-agent adapter", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("contentSha256 is not finalized");
     expect(result.error).toContain("finalize_audit_report_manifest");
+  });
+  it("blocks git_commit when strict scoped audit report validation fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-strict-guard-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src", "bot_intevra"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "readme line\n", "utf8");
+    await writeFile(path.join(root, "src", "bot_intevra", "bot.py"), "one\ntwo\n", "utf8");
+    const manifest = {
+      version: 1,
+      auditPlanId: "task:task-1",
+      taskId: "task-1",
+      artifactPath: "audit/report.md",
+      contentSha256: "PLACEHOLDER",
+      sourceSnapshot: { id: "git:abc:tree", commit: "abc", tree: "tree", dirty: false },
+      outcome: "validated_findings_present",
+      scopeCoverage: [],
+      riskHypotheses: ["risk-1"],
+      findings: [
+        {
+          id: "finding-1",
+          title: "bare bot path",
+          classification: "blocking",
+          evidence: "bot.py:1-99",
+          riskHypothesis: "risk-1",
+        },
+      ],
+      noFindingsClaims: [],
+      evidenceRefs: ["ev_1"],
+    };
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      [
+        "# Audit",
+        "",
+        "### Finding 1",
+        "Evidence: bot.py:1-99",
+        "Risk: the report cites a bare path and an impossible range.",
+        "Proposed fix: cite the exact scoped file path and real line range.",
+        "Verification: Command grep -n bot.py audit/report.md output bot.py:1-99",
+        "",
+        "```audit-report-manifest",
+        JSON.stringify(manifest),
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: {
+        allowedWritePaths: ["audit/report.md"],
+        auditReportArtifactPath: "audit/report.md",
+        auditReportTaskDescription: [
+          "Scope: README.md, src/bot_intevra/bot.py",
+          "Risk hypotheses: risk-1 bot.py may hide ownership boundary failures",
+        ].join("\n"),
+        auditReportTaskId: "task-1",
+        auditReportAuditPlanId: "task:task-1",
+      },
+    });
+    await executeQwenLocalTool(
+      "finalize_audit_report_manifest",
+      { path: "audit/report.md" },
+      context,
+    );
+
+    const validation = await executeQwenLocalTool(
+      "validate_audit_report",
+      { path: "audit/report.md" },
+      context,
+    );
+    const commit = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["audit/report.md"], message: "commit report" },
+      context,
+    );
+
+    expect(validation.ok).toBe(false);
+    expect(validation.output).toContain("missing_report_file_references");
+    expect(validation.output).toContain("missing_declared_scope_root");
+    expect(commit.ok).toBe(false);
+    expect(commit.error).toContain("audit report validation failed before git_commit");
+    expect(commit.error).toContain("validate_audit_report");
   });
   it("applies context search caps and skips binary/cache paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-search-cap-"));

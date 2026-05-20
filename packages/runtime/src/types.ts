@@ -233,6 +233,14 @@ export interface RuntimeExecutionIntent {
   permissionPolicy?: PermissionExecutionPolicy;
   /** Relative repository paths write-capable runtime tools may modify when the workflow is write-scoped. */
   allowedWritePaths?: string[];
+  /** Expected audit report artifact path for repository-tool audit validation. */
+  auditReportArtifactPath?: string | null;
+  /** Audit task context passed to repository-tool validators. */
+  auditReportTaskDescription?: string | null;
+  auditReportTaskId?: string | null;
+  auditReportRoadmapBatchId?: string | null;
+  auditReportRoadmapAlias?: string | null;
+  auditReportAuditPlanId?: string | null;
   /** JSON Schema for structured output — adapter passes it to the provider if supported. */
   outputSchema?: Record<string, unknown>;
   /** Opaque adapter-specific hooks — passed through to the adapter without interpretation. */

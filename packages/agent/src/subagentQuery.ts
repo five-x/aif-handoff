@@ -3,6 +3,7 @@ import {
   createDbUsageSink,
   expireStaleRuntimeWarmupSessions,
   findActiveReadyRuntimeWarmupSession,
+  findRoadmapBatchArtifactByTaskId,
   findTaskById,
   getAppDefaultRuntimeProfileId,
   getRuntimeProfileResponseById,
@@ -786,6 +787,18 @@ function buildExecutionIntent(
     : null;
   const bypassPermissions = bypassRequested && bypassDecision?.allowed === true;
   const allowedWritePaths = readAllowedWritePathsFromWorkflowMetadata(workflowMetadata);
+  const auditReportArtifactPath = readAuditReportArtifactPathFromWorkflowMetadata(
+    workflowMetadata,
+    allowedWritePaths,
+  );
+  const auditArtifact =
+    task && auditReportArtifactPath ? findRoadmapBatchArtifactByTaskId(task.id) : undefined;
+  const auditReportAuditPlanId =
+    task && auditReportArtifactPath
+      ? auditArtifact?.batchId
+        ? `batch:${auditArtifact.batchId}:task:${task.id}`
+        : `task:${task.id}`
+      : null;
   if (bypassPermissions && !task?.agentActivityLog?.includes("[permission-policy:bypass]")) {
     logActivity(
       options.taskId,
@@ -824,6 +837,16 @@ function buildExecutionIntent(
     bypassPermissions,
     permissionPolicy,
     ...(allowedWritePaths.length > 0 ? { allowedWritePaths } : {}),
+    ...(task && auditReportArtifactPath
+      ? {
+          auditReportArtifactPath,
+          auditReportTaskDescription: task.description ?? null,
+          auditReportTaskId: task.id,
+          auditReportRoadmapBatchId: auditArtifact?.batchId ?? null,
+          auditReportRoadmapAlias: auditArtifact?.roadmapAlias ?? task.roadmapAlias ?? null,
+          auditReportAuditPlanId,
+        }
+      : {}),
     environment: {
       HANDOFF_MODE: "1",
       HANDOFF_TASK_ID: options.taskId,
@@ -867,6 +890,24 @@ function readAllowedWritePathsFromWorkflowMetadata(
     }
   }
   return allowed;
+}
+
+function normalizeWorkflowRelativePath(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replaceAll("\\", "/");
+  if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) return null;
+  if (normalized.split("/").includes("..")) return null;
+  return normalized;
+}
+
+function readAuditReportArtifactPathFromWorkflowMetadata(
+  metadata: Record<string, unknown> | undefined,
+  allowedWritePaths: string[],
+): string | null {
+  const normalized = normalizeWorkflowRelativePath(metadata?.auditReportArtifactPath);
+  if (!normalized) return null;
+  if (allowedWritePaths.length > 0 && !allowedWritePaths.includes(normalized)) return null;
+  return normalized;
 }
 
 /**

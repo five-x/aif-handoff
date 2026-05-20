@@ -1022,6 +1022,8 @@ function formatAuditReportManifestContractForPrompt(input: {
     "- `contentSha256` is the SHA-256 of the report body after removing all audit-report-manifest blocks. After writing the report body and manifest, compute the hash and update `contentSha256` to the exact 64-hex output:",
     `  - In qwen-local-agent, call tool \`finalize_audit_report_manifest\` with path \`${input.artifactPath}\` after every write or patch of the report. This tool updates \`contentSha256\` in the file. Do not call \`git_commit\` until this finalize tool succeeds.`,
     `  - Use \`compute_audit_report_hash\` only as a read-only check when needed; the finalize tool is required before committing.`,
+    `  - In qwen-local-agent, call tool \`validate_audit_report\` with path \`${input.artifactPath}\` after finalizing and before \`git_commit\`. Fix every reported issue, then finalize again, validate again, and only then commit.`,
+    "  - `git_commit` is fail-closed for audit reports: it rejects invalid line references, bare/nonexistent paths, missing scope coverage, manifest outcome mismatches, and weak source evidence before staging.",
     "  - In shell-capable runtimes, use this one-line command:",
     `  - ${contentHashCommand}`,
     "- Never use PLACEHOLDER, COMPUTE_ME, TODO, TBD, <computed_sha256>, all-zero hashes, shortened hashes, or any non-64-hex value. If the hash cannot be finalized, do not claim the report is complete.",

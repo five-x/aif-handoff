@@ -55,6 +55,7 @@ const getRuntimeProfileResponseByIdMock = vi.fn<
       }
     | undefined
 >(() => undefined);
+const findRoadmapBatchArtifactByTaskIdMock = vi.fn<(taskId: string) => unknown>(() => undefined);
 const runtimeAdapterOverride = vi.hoisted(() => ({
   current: null as null | { runtimeId: string; adapter: RuntimeAdapter },
 }));
@@ -67,6 +68,8 @@ interface MockTaskRow {
   branchName?: string | null;
   taskIntent?: string | null;
   agentActivityLog?: string | null;
+  description?: string | null;
+  roadmapAlias?: string | null;
 }
 
 interface MockEffectiveRuntimeProfile {
@@ -147,6 +150,7 @@ vi.mock("@aif/data", async (importOriginal) => {
     findActiveReadyRuntimeWarmupSession: findActiveReadyRuntimeWarmupSessionMock,
     getAppDefaultRuntimeProfileId: getAppDefaultRuntimeProfileIdMock,
     getRuntimeProfileResponseById: getRuntimeProfileResponseByIdMock,
+    findRoadmapBatchArtifactByTaskId: findRoadmapBatchArtifactByTaskIdMock,
     findTaskById: findTaskByIdMock,
     resolveEffectiveRuntimeProfile: resolveEffectiveRuntimeProfileMock,
   };
@@ -327,6 +331,8 @@ beforeEach(() => {
   findActiveReadyRuntimeWarmupSessionMock.mockReturnValue(undefined);
   getRuntimeProfileResponseByIdMock.mockReset();
   getRuntimeProfileResponseByIdMock.mockReturnValue(undefined);
+  findRoadmapBatchArtifactByTaskIdMock.mockReset();
+  findRoadmapBatchArtifactByTaskIdMock.mockReturnValue(undefined);
 });
 
 function makeDelayedSuccess(delayMs: number, result: string) {
@@ -512,7 +518,7 @@ describe("executeSubagentQuery attribution", () => {
     );
   });
 
-  it("passes workflow allowed write paths to runtime adapters", async () => {
+  it("passes workflow allowed write paths and audit report validation context to runtime adapters", async () => {
     const capabilities = auditRuntimeCapabilities();
     const adapter: RuntimeAdapter = {
       descriptor: {
@@ -540,6 +546,33 @@ describe("executeSubagentQuery attribution", () => {
       projectRuntimeProfileId: null,
       systemRuntimeProfileId: null,
     });
+    findTaskByIdMock.mockReturnValue({
+      id: "task-audit-report",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+      description: "Scope: README.md, src/app.ts",
+      roadmapAlias: "audit-aa",
+    });
+    findRoadmapBatchArtifactByTaskIdMock.mockReturnValue({
+      id: "artifact-1",
+      projectId: "project-1",
+      batchId: "batch-1",
+      taskId: "task-audit-report",
+      roadmapAlias: "audit-aa",
+      role: "report",
+      artifactPath: "audit/report.md",
+      state: "expected",
+      summary: null,
+      validationDetailsJson: null,
+      branchName: null,
+      worktreePath: null,
+      attemptNumber: 0,
+      attemptBoundaryId: null,
+      failureSignature: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
 
     await executeSubagentQuery({
       taskId: "task-audit-report",
@@ -554,6 +587,7 @@ describe("executeSubagentQuery attribution", () => {
         sessionReusePolicy: "never",
         metadata: {
           allowedWritePaths: ["audit/report.md", "audit\\report.md", "../escape", "/abs/path"],
+          auditReportArtifactPath: "audit/report.md",
         },
       },
     });
@@ -562,6 +596,12 @@ describe("executeSubagentQuery attribution", () => {
       expect.objectContaining({
         execution: expect.objectContaining({
           allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+          auditReportTaskId: "task-audit-report",
+          auditReportTaskDescription: "Scope: README.md, src/app.ts",
+          auditReportRoadmapBatchId: "batch-1",
+          auditReportRoadmapAlias: "audit-aa",
+          auditReportAuditPlanId: "batch:batch-1:task:task-audit-report",
         }),
       }),
     );

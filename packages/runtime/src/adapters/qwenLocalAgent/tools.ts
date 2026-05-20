@@ -9,6 +9,7 @@ import {
   decideShellPermission,
   getPermissionExecutionPolicy,
   redactProviderText,
+  validateAuditReportArtifact,
 } from "@aif/shared";
 import { RuntimeExecutionError } from "../../errors.js";
 const DEFAULT_MAX_FILE_BYTES = 16_000;
@@ -243,6 +244,20 @@ export const QWEN_LOCAL_AGENT_TOOLS = [
       name: "finalize_audit_report_manifest",
       description:
         "Update the contentSha256 field in an existing audit-report-manifest block to the exact hash for the current report body.",
+      parameters: objectSchema(
+        {
+          path: { type: "string", description: "Relative audit report file path." },
+        },
+        ["path"],
+      ),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "validate_audit_report",
+      description:
+        "Run the strict audit report validator against the scoped audit report artifact before committing it.",
       parameters: objectSchema(
         {
           path: { type: "string", description: "Relative audit report file path." },
@@ -513,6 +528,7 @@ const TOOL_ARGUMENT_KEYS = {
   git_status: new Set(),
   compute_audit_report_hash: new Set(["path"]),
   finalize_audit_report_manifest: new Set(["path"]),
+  validate_audit_report: new Set(["path"]),
   git_commit: new Set(["paths", "message"]),
 };
 function sanitizeToolArgumentValue(value, depth = 0) {
@@ -570,6 +586,7 @@ function summarizeToolUse(toolName, args) {
       return " git status";
     case "compute_audit_report_hash":
     case "finalize_audit_report_manifest":
+    case "validate_audit_report":
       return readString(args.path) ? ` ${redactProviderText(readString(args.path) ?? "")}` : "";
     case "apply_patch":
       return " unified diff";
@@ -645,6 +662,30 @@ function readAllowedWritePaths(input, projectRoot) {
     }
   }
   return allowed;
+}
+function readOptionalString(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+function readOptionalProjectPath(value, projectRoot, label) {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const resolved = resolveInsideProjectRoot(projectRoot, value, label);
+  return normalizePathForPolicy(resolved.relativePath);
+}
+function readAuditReportValidationContext(input, projectRoot) {
+  const execution = input.execution ?? {};
+  const expectedReportArtifactPath = readOptionalProjectPath(
+    execution.auditReportArtifactPath,
+    projectRoot,
+    "audit report artifact path",
+  );
+  return {
+    expectedReportArtifactPath,
+    taskDescription: readOptionalString(execution.auditReportTaskDescription),
+    taskId: readOptionalString(execution.auditReportTaskId),
+    roadmapBatchId: readOptionalString(execution.auditReportRoadmapBatchId),
+    roadmapAlias: readOptionalString(execution.auditReportRoadmapAlias),
+    auditPlanId: readOptionalString(execution.auditReportAuditPlanId),
+  };
 }
 function assertWritePathAllowed(context, relativePath, label) {
   const allowed = context.allowedWritePaths ?? [];
@@ -1277,6 +1318,68 @@ async function finalizeAuditReportManifestTool(args, context) {
     touchedFiles: [target.relativePath],
   };
 }
+function formatAuditReportValidationResult(validation) {
+  const issueCodes = [...new Set(validation.issues.map((entry) => entry.code))].sort();
+  const issueLines = validation.issues
+    .slice(0, 12)
+    .map((entry) => {
+      const paths = entry.paths?.length ? ` paths=${entry.paths.slice(0, 5).join(",")}` : "";
+      return `- ${entry.code}: ${entry.message}${paths}`;
+    })
+    .join("\n");
+  const suffix =
+    validation.issues.length > 12
+      ? `\n- ... ${validation.issues.length - 12} more issue(s) omitted`
+      : "";
+  return [
+    `sourceClassification=${validation.sourceClassification}`,
+    `manifestStatus=${validation.manifestStatus}`,
+    `issueCodes=${issueCodes.length > 0 ? issueCodes.join(",") : "none"}`,
+    `referencedPaths=${validation.referencedPaths.length}`,
+    `missingReferencedPaths=${validation.missingReferencedPaths.length}`,
+    issueLines ? `issues:\n${issueLines}${suffix}` : "issues: none",
+  ].join("\n");
+}
+function runAuditReportValidationForTarget(context, target, content) {
+  const auditContext = context.auditReportValidation ?? {};
+  return validateAuditReportArtifact({
+    text: content,
+    projectRoot: context.projectRoot,
+    taskId: auditContext.taskId ?? null,
+    roadmapBatchId: auditContext.roadmapBatchId ?? null,
+    roadmapAlias: auditContext.roadmapAlias ?? null,
+    auditPlanId: auditContext.auditPlanId ?? null,
+    taskDescription: auditContext.taskDescription ?? null,
+    reportArtifactPaths: [target.relativePath],
+    expectedReportArtifactPath: auditContext.expectedReportArtifactPath ?? target.relativePath,
+    requireProposedFix: true,
+  });
+}
+async function validateAuditReportTool(args, context) {
+  assertNotAborted(context.signal, "validate_audit_report");
+  const target = await resolveExistingPathInsideProjectRoot(
+    context.projectRoot,
+    readString(args.path),
+    "audit report validation path",
+  );
+  assertWritePathAllowed(context, target.relativePath, "audit report validation path");
+  if (!target.info.isFile()) {
+    throw new RuntimeExecutionError(
+      "audit report validation path is not a file",
+      undefined,
+      "permission",
+    );
+  }
+  const content = await readFile(target.absolutePath, "utf8");
+  const validation = runAuditReportValidationForTarget(context, target, content);
+  return {
+    ok: validation.ok,
+    output: `audit report validation ${validation.ok ? "passed" : "failed"} ${target.relativePath.replaceAll("\\", "/")}\n${formatAuditReportValidationResult(validation)}`,
+    ...(validation.ok ? {} : { error: "audit report validation failed" }),
+    exitCode: validation.ok ? 0 : 1,
+    touchedFiles: [],
+  };
+}
 async function assertAuditReportReadyForCommitIfApplicable(context, relativePath) {
   if (!isAllowedPathForContext(context, relativePath)) return;
   const normalized = normalizePathForPolicy(relativePath);
@@ -1312,6 +1415,14 @@ async function assertAuditReportReadyForCommitIfApplicable(context, relativePath
   if (manifest.contentSha256 !== expected) {
     throw new RuntimeExecutionError(
       "audit report contentSha256 is not finalized before git_commit; call finalize_audit_report_manifest with the report path and then retry git_commit",
+      undefined,
+      "permission",
+    );
+  }
+  const validation = runAuditReportValidationForTarget(context, target, content);
+  if (!validation.ok) {
+    throw new RuntimeExecutionError(
+      `audit report validation failed before git_commit; call validate_audit_report, fix the report, finalize the manifest, and retry git_commit.\n${formatAuditReportValidationResult(validation)}`,
       undefined,
       "permission",
     );
@@ -1408,6 +1519,8 @@ export async function executeQwenLocalTool(toolName, rawArgs, context) {
         return await computeAuditReportHashTool(args, context);
       case "finalize_audit_report_manifest":
         return await finalizeAuditReportManifestTool(args, context);
+      case "validate_audit_report":
+        return await validateAuditReportTool(args, context);
       case "git_commit":
         return await gitCommitTool(args, context);
       default:
@@ -1516,6 +1629,7 @@ export function createDefaultQwenToolContext(input) {
     toolTimeoutMs: readPositiveInt(options.toolTimeoutMs, DEFAULT_TOOL_TIMEOUT_MS),
     permissionPolicy: input.execution?.permissionPolicy ?? getPermissionExecutionPolicy("general"),
     allowedWritePaths: readAllowedWritePaths(input, projectRootPath),
+    auditReportValidation: readAuditReportValidationContext(input, projectRootPath),
   };
 }
 export function createTempPathForTests(name) {
