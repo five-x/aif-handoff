@@ -402,8 +402,13 @@ describe("runReviewer", () => {
 
     expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
     for (const call of executeSubagentQueryMock.mock.calls) {
-      const input = call[0] as { prompt: string; maxTurns?: number };
+      const input = call[0] as {
+        prompt: string;
+        maxTurns?: number;
+        repositoryInspectionToolBudget?: number;
+      };
       expect(input.maxTurns).toBe(20);
+      expect(input.repositoryInspectionToolBudget).toBe(8);
       expect(input.prompt).toContain("Audit artifact review scope:");
       expect(input.prompt).toContain("Expected artifact: audit/runtime.md");
       expect(input.prompt).toContain("missing_report_manifest");

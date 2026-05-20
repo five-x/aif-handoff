@@ -36,6 +36,7 @@ import {
 
 const log = logger("reviewer");
 const AUDIT_ARTIFACT_REVIEW_MAX_TURNS = 20;
+const AUDIT_ARTIFACT_REVIEW_INSPECTION_TOOL_BUDGET = 8;
 
 const STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT =
   "Structured review contract not satisfied: review output must include complete unique Security Coverage rows for secret_leaks, permissions_sandbox, unsafe_shell_network_file, and dependency_config.";
@@ -243,6 +244,7 @@ async function runSidecar(
   workflowSpec: RuntimeWorkflowSpec,
   fallbackSlashCommand?: string,
   maxTurns?: number,
+  repositoryInspectionToolBudget?: number,
 ): Promise<string> {
   const { resultText } = await executeSubagentQuery({
     taskId,
@@ -256,6 +258,7 @@ async function runSidecar(
     workflowKind: workflowSpec.workflowKind,
     fallbackSlashCommand,
     maxTurns,
+    repositoryInspectionToolBudget,
   });
   return resultText;
 }
@@ -567,6 +570,9 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
   const auditArtifactReviewMaxTurns = auditArtifactReviewScopeBlock
     ? AUDIT_ARTIFACT_REVIEW_MAX_TURNS
     : undefined;
+  const auditArtifactReviewInspectionToolBudget = auditArtifactReviewScopeBlock
+    ? AUDIT_ARTIFACT_REVIEW_INSPECTION_TOOL_BUDGET
+    : undefined;
 
   if (canUseDeterministicAuditReportReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
@@ -802,6 +808,7 @@ ${reviewOutputContract}`;
             reviewWorkflow,
             "/aif-review",
             auditArtifactReviewMaxTurns,
+            auditArtifactReviewInspectionToolBudget,
           ),
           runSidecar(
             securityPrompt,
@@ -813,6 +820,7 @@ ${reviewOutputContract}`;
             securityWorkflow,
             "/aif-security-checklist",
             auditArtifactReviewMaxTurns,
+            auditArtifactReviewInspectionToolBudget,
           ),
         ]);
       } else {
@@ -826,6 +834,7 @@ ${reviewOutputContract}`;
           reviewWorkflow,
           "/aif-review",
           auditArtifactReviewMaxTurns,
+          auditArtifactReviewInspectionToolBudget,
         );
         securityResult = await runSidecar(
           securityPrompt,
@@ -837,6 +846,7 @@ ${reviewOutputContract}`;
           securityWorkflow,
           "/aif-security-checklist",
           auditArtifactReviewMaxTurns,
+          auditArtifactReviewInspectionToolBudget,
         );
       }
     } finally {
