@@ -1,0 +1,34 @@
+{
+  "alias": "audit-e2e-20260520-144306-h",
+  "exportedAt": "2026-05-20T14:57:17.6184511+03:00",
+  "artifacts": [
+    {
+      "file": "security.md",
+      "gitSpec": "feature/audit-security-and-configuration-control-77b3d7:audit/2026-05-20-audit-security-and-configuration-controls-audit.md"
+    },
+    {
+      "file": "integration.md",
+      "gitSpec": "feature/audit-integration-and-orchestration-boun-e42198:audit/2026-05-20-audit-integration-and-orchestration-boundaries-audit.md"
+    },
+    {
+      "file": "architecture.md",
+      "gitSpec": "feature/audit-architecture-and-ownership-boundar-34ceaa:audit/2026-05-20-audit-architecture-and-ownership-boundaries-audit.md"
+    },
+    {
+      "file": "performance.md",
+      "gitSpec": "feature/audit-performance-and-runtime-behavior-da5ade:audit/2026-05-20-audit-performance-and-runtime-behavior-audit.md"
+    },
+    {
+      "file": "summary.md",
+      "gitSpec": "feature/synthesize-audit-findings-78ec22:audit/2026-05-20-summary.md"
+    },
+    {
+      "file": "persistence.md",
+      "gitSpec": "feature/audit-persistence-and-data-safety-3dc681:audit/2026-05-20-audit-persistence-and-data-safety-audit.md"
+    },
+    {
+      "file": "test-operations.md",
+      "gitSpec": "feature/audit-test-and-operations-readiness-d32ad3:audit/2026-05-20-audit-test-and-operations-readiness-audit.md"
+    }
+  ]
+}
