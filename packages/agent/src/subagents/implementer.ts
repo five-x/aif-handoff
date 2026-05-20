@@ -932,6 +932,57 @@ function formatArtifactValidationDetails(raw: string | null): string | null {
   }
 }
 
+function formatAuditEvidenceCommandForPrompt(command: AuditEvidenceUnit["command"]): string {
+  if (!command) return "none";
+  const commandText = command.command?.trim();
+  if (commandText) return commandText;
+  if (command.args.length > 0) return command.args.join(" ");
+  return "none";
+}
+
+function formatAuditEvidenceLedgerForPrompt(input: {
+  taskId: string;
+  auditPlanId: string | null;
+}): string {
+  const units = listAuditEvidenceEvents({
+    taskId: input.taskId,
+    auditPlanId: input.auditPlanId ?? undefined,
+    limit: 30,
+  })
+    .filter((unit) => unit.evidenceGrade === "substantive")
+    .reverse();
+  if (units.length === 0) {
+    return "No runtime-captured substantive audit evidence IDs are available yet. If review requests evidence repair, run focused inspections first and cite only observed evidence.";
+  }
+  const lines = [
+    "Runtime-captured audit evidence IDs available to cite in `audit-report-manifest.evidenceRefs`:",
+    "Use only these exact `ev_*` IDs when the report relies on the listed evidence. Do not invent evidence IDs.",
+  ];
+  for (const unit of units) {
+    const preview = (unit.outputPreview ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(" / ");
+    lines.push(
+      [
+        `- ${unit.id}`,
+        `kind=${unit.evidenceKind}/${unit.evidenceGrade}`,
+        `tool=${unit.toolName}`,
+        `snapshot=${unit.sourceSnapshotId}`,
+        `scope=${unit.scopeIds.join(", ") || "none"}`,
+        `risks=${unit.riskHypothesisIds.join(", ") || "none"}`,
+        `command=${formatAuditEvidenceCommandForPrompt(unit.command)}`,
+        preview ? `preview=${preview}` : null,
+      ]
+        .filter(Boolean)
+        .join(" | "),
+    );
+  }
+  return lines.join("\n");
+}
+
 function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSynthesisInputs {
   const synthesisArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   if (!synthesisArtifact || synthesisArtifact.role !== "synthesis") {
@@ -3435,6 +3486,15 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     validatedAuditArtifacts,
     weakAuditArtifacts,
   );
+  const auditEvidenceLedgerForPrompt = expectedAuditReportArtifactPath
+    ? formatAuditEvidenceLedgerForPrompt({
+        taskId,
+        auditPlanId: resolveAuditPlanId({
+          taskId,
+          roadmapBatchId: roadmapArtifact?.batchId ?? null,
+        }),
+      })
+    : "No audit report artifact is expected for this task.";
   const currentAuditReportValidation =
     expectedAuditReportArtifactPath && task.reworkRequested
       ? validateAuditReportArtifactWithTaskContext({
@@ -3805,6 +3865,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
 
   if (
     expectedAuditReportArtifactPath &&
+    !localAuditReportScopeRepairable &&
     (auditEvidenceRepairMode ||
       currentReportNeedsDeterministicRepair ||
       currentSourceInconclusiveLocalAudit) &&
@@ -3872,6 +3933,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     expectedAuditReportArtifactPath &&
     task.reworkRequested &&
     repeatedDeterministicAuditReportRepair &&
+    !localAuditReportScopeRepairable &&
     !currentSourceInconclusiveLocalAudit &&
     (currentAuditReportValidation == null ||
       !isTrustedValidAuditReportValidation(currentAuditReportValidation))
@@ -4081,6 +4143,8 @@ Rework handling protocol:
 - Edit only the expected audit report artifact: ${expectedAuditReportArtifactPath}. Do not edit source, config, test, dependency, or runtime files.
 - Rebuild the report from observed evidence. Remove speculative claims, placeholder command output, "could not read", "would show", "likely", "may contain", and any fake commit hashes or synthetic tool output.
 - Add an "Evidence Register" section near the top with a markdown table: ID | Claim | Evidence | Verification. Each row must tie one claim to concrete existing repository file references such as \`path/to/file.ext:line\` and/or exact command output you actually observed.
+- Use AUDIT_EVIDENCE_LEDGER as the source of truth for manifest evidence IDs. If it lists \`ev_*\` IDs for evidence you use, cite those exact IDs in \`audit-report-manifest.evidenceRefs\`, \`scopeCoverage[].evidenceRefs\`, and each finding/noFindingsClaims entry. Do not invent evidence IDs.
+- In \`audit-report-manifest.sourceSnapshot\`, use the source snapshot associated with the cited ledger evidence. This is the audited source snapshot, not necessarily the later report-artifact commit.
 - Every finding kept in the report must include these labels: Evidence:, Risk:, Proposed fix:, Verification:. Evidence must include concrete existing file:line references. Verification must name the exact command or tool used and paste the observed output or a concise exact excerpt.
 - Do not preserve review-rejected findings. If FULL_REVIEW_COMMENTS or BLOCKING_FINDINGS_SNAPSHOT says a finding is governance/documentation-only, non-actionable, speculative, or based on fake git output, delete that finding entirely instead of rephrasing it.
 - If all existing findings are rejected by that filter, rewrite the report as "No validated findings" with an Evidence Register that lists the scoped files and exact commands checked. This is better than inventing weak findings.
@@ -4095,6 +4159,7 @@ Rework handling protocol:
     ? `Source audit scope discipline:
 - Treat the task's \`Scope:\` line as the authoritative audit boundary. Inspect those scoped files/directories and do not expand into a repository-wide dependency map.
 - Use targeted repository tools to decide each declared risk hypothesis from the scoped evidence. For large scoped files, prefer line-specific searches or snippets over full-file rereads.
+- When AUDIT_EVIDENCE_LEDGER lists substantive \`ev_*\` evidence IDs, build the report manifest from those actual IDs instead of placeholders. Every trusted finding or no-findings claim must cite ledger IDs whose scope/risk fields cover the claim.
 - Do not recursively search every import, symbol, or dependency. Use at most one supporting out-of-scope lookup only when it is needed to prove a concrete candidate finding, then return to the scoped files.
 - Stop collecting evidence once every declared risk hypothesis has either a validated finding or a source-specific no-findings rationale. Write ${expectedAuditReportArtifactPath}, commit only that artifact, verify it, and return.
 `
@@ -4143,6 +4208,11 @@ Validated audit batch inputs:
 <<<VALIDATED_AUDIT_BATCH_INPUTS
 ${validatedAuditSynthesisInput}
 VALIDATED_AUDIT_BATCH_INPUTS
+
+Audit evidence ledger:
+<<<AUDIT_EVIDENCE_LEDGER
+${auditEvidenceLedgerForPrompt}
+AUDIT_EVIDENCE_LEDGER
 
 ${
   expectedSynthesisArtifactPath
