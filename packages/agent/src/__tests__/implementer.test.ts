@@ -2473,7 +2473,7 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain("Use no more than 12 additional");
     expect(implementCall.prompt).toContain("Write audit/architecture.md");
     expect(implementCall.prompt).toContain("Source audit scope discipline:");
-    expect(implementCall.options.maxTurns).toBe(16);
+    expect(implementCall.options.maxTurns).toBe(32);
     expect(implementCall.options.resume).toBeUndefined();
   });
 

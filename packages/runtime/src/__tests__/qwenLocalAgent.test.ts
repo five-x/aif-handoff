@@ -366,6 +366,109 @@ describe("qwen-local-agent adapter", () => {
     expect(JSON.stringify(auditEvents)).toContain("[REDACTED]");
     expect(JSON.stringify(auditEvents)).not.toContain("sk-SECRETSECRETSECRETSECRET");
   });
+  it("denies repository inspection after the configured budget and still allows report finalization", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    const events = [];
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-1",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-2",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "AGENTS.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-write-report",
+                    type: "function",
+                    function: {
+                      name: "write_file",
+                      arguments: JSON.stringify({
+                        path: "audit/architecture.md",
+                        content: "# Audit\n\nNo validated findings.\n",
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        execution: {
+          repositoryInspectionToolBudget: 1,
+          onEvent: (event) => events.push(event),
+        },
+      }),
+    );
+
+    expect(result.outputText).toBe("done");
+    expect(await readFile(path.join(root, "audit", "architecture.md"), "utf8")).toContain(
+      "No validated findings",
+    );
+    expect(JSON.stringify(result.events)).toContain("Repository inspection budget exhausted");
+    const auditEvents = events.filter((event) => event.type === "audit:evidence");
+    expect(auditEvents).toHaveLength(1);
+    expect(JSON.stringify(auditEvents)).not.toContain("AGENTS.md");
+  });
   it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));
     const repeatedToolCall = {

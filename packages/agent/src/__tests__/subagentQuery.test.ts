@@ -463,6 +463,55 @@ describe("executeSubagentQuery attribution", () => {
     );
   });
 
+  it("passes repository inspection budgets to runtime adapters", async () => {
+    const capabilities = auditRuntimeCapabilities();
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-runtime",
+        providerId: "test",
+        displayName: "Test Runtime",
+        defaultTransport: RuntimeTransport.SDK,
+        supportedTransports: [RuntimeTransport.SDK],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      run: vi.fn(async () => ({ outputText: "done", usage: null })),
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-runtime", adapter };
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test-runtime",
+        runtimeId: "test-runtime",
+        providerId: "test",
+        transport: RuntimeTransport.SDK,
+        defaultModel: null,
+      } as never,
+      taskRuntimeProfileId: "profile-test-runtime",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-budget",
+      projectRoot: "/tmp/project",
+      agentName: "implement-coordinator",
+      prompt: "run",
+      workflowKind: "implementer",
+      maxTurns: 32,
+      repositoryInspectionToolBudget: 12,
+    });
+
+    expect(adapter.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          maxTurns: 32,
+          repositoryInspectionToolBudget: 12,
+        }),
+      }),
+    );
+  });
+
   it("passes task-intent permission policy to runtime adapters", async () => {
     mockEnvOverrides.AGENT_BYPASS_PERMISSIONS = false;
     const capabilities = {

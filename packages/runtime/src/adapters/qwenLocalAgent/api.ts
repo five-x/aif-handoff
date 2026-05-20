@@ -34,6 +34,13 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "run_shell",
   "git_status",
 ]);
+const REPOSITORY_INSPECTION_TOOL_NAMES = new Set([
+  "list_files",
+  "read_file",
+  "search_files",
+  "run_shell",
+]);
+const MAX_REPOSITORY_INSPECTION_TOOL_BUDGET = 200;
 const READ_ONLY_WORKFLOWS = new Set([
   "planner",
   "plan-checker",
@@ -227,6 +234,18 @@ function readMaxToolTurns(input) {
   if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_MAX_TOOL_TURNS;
   return Math.max(1, Math.min(Math.floor(raw), MAX_CONFIGURED_TOOL_TURNS));
 }
+function readRepositoryInspectionToolBudget(input) {
+  const options = asRecord(input.options);
+  const raw =
+    typeof input.execution?.repositoryInspectionToolBudget === "number"
+      ? input.execution.repositoryInspectionToolBudget
+      : typeof options.repositoryInspectionToolBudget === "number"
+        ? options.repositoryInspectionToolBudget
+        : null;
+  if (raw == null) return null;
+  if (!Number.isFinite(raw) || raw < 0) return null;
+  return Math.max(0, Math.min(Math.floor(raw), MAX_REPOSITORY_INSPECTION_TOOL_BUDGET));
+}
 function readRepeatedToolCallLimit(input) {
   const options = asRecord(input.options);
   const raw =
@@ -316,6 +335,7 @@ function emitToolResult(input, events, toolCall, result) {
   });
 }
 function emitAuditEvidenceResult(input, events, toolCall, args, result) {
+  if (result.repositoryInspectionBudgetExhausted === true) return;
   const toolName = sanitizeQwenToolNameForLog(toolCall.function.name);
   let evidenceKind = null;
   let evidenceGrade = undefined;
@@ -385,6 +405,23 @@ function repeatedToolCallResult(toolName, repeatedCount, repeatedToolCallLimit) 
     touchedFiles: [],
   };
 }
+function repositoryInspectionBudgetExhaustedResult(toolName, budget) {
+  const safeToolName = sanitizeQwenToolNameForLog(toolName);
+  return {
+    ok: false,
+    output: "",
+    error: [
+      `Repository inspection budget exhausted after ${budget} inspection tool call(s).`,
+      `Do not call ${safeToolName} or other repository-inspection tools again in this run.`,
+      "Use the evidence already collected to write the required artifact with write_file or apply_patch,",
+      "then use git_status/git_commit if needed, or finish with explicit limitations.",
+      `repositoryInspectionToolBudget=${budget}`,
+    ].join(" "),
+    exitCode: null,
+    touchedFiles: [],
+    repositoryInspectionBudgetExhausted: true,
+  };
+}
 async function postChatCompletions(input, messages, signal) {
   const baseUrl = resolveBaseUrl(input);
   return fetch(`${baseUrl}/chat/completions`, {
@@ -400,6 +437,7 @@ export async function runQwenLocalAgentApi(input, logger) {
   const messages = buildMessages(input);
   const events = [];
   const maxTurns = readMaxToolTurns(input);
+  const repositoryInspectionToolBudget = readRepositoryInspectionToolBudget(input);
   const repeatedToolCallLimit = readRepeatedToolCallLimit(input);
   const toolContext = createDefaultQwenToolContext({
     projectRoot: input.projectRoot,
@@ -415,6 +453,8 @@ export async function runQwenLocalAgentApi(input, logger) {
   let lastToolCallSignature = null;
   let repeatedToolCallCount = 0;
   let repeatedToolCallSuppressions = 0;
+  let repositoryInspectionToolCalls = 0;
+  let repositoryInspectionBudgetWarnings = 0;
   const toolCallSignatureCounts = new Map();
   logger?.info?.(
     {
@@ -422,6 +462,7 @@ export async function runQwenLocalAgentApi(input, logger) {
       profileId: input.profileId ?? null,
       model: input.model ?? null,
       maxTurns,
+      repositoryInspectionToolBudget,
     },
     "Starting qwen-local-agent run",
   );
@@ -512,25 +553,62 @@ export async function runQwenLocalAgentApi(input, logger) {
           input.workflowKind,
           toolCall.function.name,
         );
+        const isRepositoryInspectionTool = REPOSITORY_INSPECTION_TOOL_NAMES.has(
+          toolCall.function.name,
+        );
+        const shouldDenyRepositoryInspection =
+          toolAllowed &&
+          !shouldSuppressRepeatedCall &&
+          repositoryInspectionToolBudget != null &&
+          isRepositoryInspectionTool &&
+          repositoryInspectionToolCalls >= repositoryInspectionToolBudget;
         const result = shouldSuppressRepeatedCall
           ? repeatedToolCallResult(
               toolCall.function.name,
               Math.max(repeatedToolCallCount, signatureCount),
               repeatedToolCallLimit,
             )
-          : !toolAllowed
-            ? {
-                ok: false,
-                output: "",
-                error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
-                exitCode: null,
-                touchedFiles: [],
-              }
-            : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+          : shouldDenyRepositoryInspection
+            ? repositoryInspectionBudgetExhaustedResult(
+                toolCall.function.name,
+                repositoryInspectionToolBudget,
+              )
+            : !toolAllowed
+              ? {
+                  ok: false,
+                  output: "",
+                  error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
+                  exitCode: null,
+                  touchedFiles: [],
+                }
+              : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+        if (
+          toolAllowed &&
+          !shouldSuppressRepeatedCall &&
+          repositoryInspectionToolBudget != null &&
+          isRepositoryInspectionTool &&
+          !shouldDenyRepositoryInspection
+        ) {
+          repositoryInspectionToolCalls += 1;
+        }
         if (shouldSuppressRepeatedCall) {
           repeatedToolCallSuppressions += repeatedNonconsecutiveLoop
             ? REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS
             : 1;
+        }
+        if (shouldDenyRepositoryInspection) {
+          repositoryInspectionBudgetWarnings += 1;
+          if (repositoryInspectionBudgetWarnings === 1) {
+            logger?.warn?.(
+              {
+                runtimeId: input.runtimeId,
+                profileId: input.profileId ?? null,
+                repositoryInspectionToolBudget,
+                deniedToolName: sanitizeQwenToolNameForLog(toolCall.function.name),
+              },
+              "Denied qwen-local-agent repository inspection after budget exhaustion",
+            );
+          }
         }
         emitToolResult(input, events, toolCall, result);
         emitAuditEvidenceResult(input, events, toolCall, args, result);

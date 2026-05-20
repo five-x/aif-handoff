@@ -442,6 +442,8 @@ export interface SubagentQueryOptions {
   includePartialMessages?: boolean;
   /** Optional max turns for runtime adapters that support it. */
   maxTurns?: number;
+  /** Optional repository-inspection tool-call budget for runtime adapters that support it. */
+  repositoryInspectionToolBudget?: number;
 }
 
 export interface SubagentQueryResult {
@@ -810,6 +812,7 @@ function buildExecutionIntent(
   return {
     maxBudgetUsd: options.maxBudgetUsd ?? null,
     maxTurns: options.maxTurns,
+    repositoryInspectionToolBudget: options.repositoryInspectionToolBudget,
     startTimeoutMs: options.queryStartTimeoutMs ?? env.AGENT_QUERY_START_TIMEOUT_MS,
     startRetryDelayMs: options.queryStartRetryDelayMs ?? env.AGENT_QUERY_START_RETRY_DELAY_MS,
     runTimeoutMs: env.AGENT_STAGE_RUN_TIMEOUT_MS,

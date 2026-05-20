@@ -59,7 +59,9 @@ const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
 const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesis-no-findings";
 const DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS = new Set(["feature", "fix", "docs", "tests"]);
 const SOURCE_AUDIT_FIRST_RUN_MAX_TURNS = 48;
-const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_TURNS = 16;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_TURNS = 32;
+const SOURCE_AUDIT_FIRST_RUN_INSPECTION_TOOL_BUDGET = 28;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_INSPECTION_TOOL_BUDGET = 12;
 const PROMPT_SECTION_LIMITS = {
   reworkComment: 8_000,
   reworkCommentMessage: 5_000,
@@ -4122,6 +4124,11 @@ Rework handling protocol:
       ? SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_TURNS
       : SOURCE_AUDIT_FIRST_RUN_MAX_TURNS
     : undefined;
+  const sourceAuditInspectionToolBudget = expectedAuditReportArtifactPath
+    ? sourceAuditRuntimeRecoveryMode
+      ? SOURCE_AUDIT_RUNTIME_RECOVERY_INSPECTION_TOOL_BUDGET
+      : SOURCE_AUDIT_FIRST_RUN_INSPECTION_TOOL_BUDGET
+    : undefined;
   const sourceAuditRuntimeRecoveryBlock = sourceAuditRuntimeRecoveryMode
     ? `Runtime recovery source-audit budget:
 - This audit report run is retrying after runtime context/timeout recovery. Complete a bounded report; do not keep exploring for perfect coverage.
@@ -4236,6 +4243,7 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     workflowKind: "implementer",
     fallbackSlashCommand: implementSlashCommand,
     maxTurns: sourceAuditMaxTurns,
+    repositoryInspectionToolBudget: sourceAuditInspectionToolBudget,
   });
 
   // Post-run drift check: if the subagent switched branches during execution

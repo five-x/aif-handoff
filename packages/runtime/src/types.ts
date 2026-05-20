@@ -206,6 +206,8 @@ export type RuntimeSubagentStartCallback = (name: string, id: string) => void;
 export interface RuntimeExecutionIntent {
   maxBudgetUsd?: number | null;
   maxTurns?: number;
+  /** Optional cap for repository-inspection tool calls before write/finalization tools should be used. */
+  repositoryInspectionToolBudget?: number;
   /** Timeout waiting for the first output from the runtime stream (ms). */
   startTimeoutMs?: number;
   /** Delay before one automatic retry after a start timeout (ms). */
