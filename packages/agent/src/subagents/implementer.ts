@@ -1021,6 +1021,7 @@ function formatAuditReportManifestContractForPrompt(input: {
     "- The manifest must include: version, auditPlanId, taskId, batchId when listed above, roadmapAlias when listed above, artifactPath, contentSha256, sourceSnapshot, outcome, scopeCoverage, riskHypotheses, findings, noFindingsClaims, and evidenceRefs.",
     "- `contentSha256` is the SHA-256 of the report body after removing all audit-report-manifest blocks. After writing the report body and manifest, run this command and update `contentSha256` to the exact 64-hex output:",
     `  - ${contentHashCommand}`,
+    "- Do not create temporary helper files, scratch scripts, or root-level `tmp_*` files to compute the hash. Use the one-line command above and write only the expected audit report artifact.",
     "- Use `outcome: validated_findings_present` only when the report body contains at least one accepted technical finding with concrete Evidence, Risk, Proposed fix, and Verification. Otherwise use `validated_no_findings` with substantive noFindingsClaims, or `source_inconclusive` for explicit coverage gaps.",
     "- When a repository tool result JSON contains `auditEvidence.id`, cite that exact ID in manifest `evidenceRefs`, matching `scopeCoverage[].evidenceRefs`, and each finding or noFindingsClaims entry that relies on it. Do not invent `ev_*` IDs.",
     "- Each `scopeCoverage[].root` must be one of the declared scope roots and must be covered in the report body by an existing exact `path:line` or `path:start-end` citation. Verify ranges do not exceed file length.",
@@ -4344,6 +4345,12 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     metadata: {
       reworkRequested: task.reworkRequested,
       skipReview: task.skipReview ?? false,
+      ...(expectedAuditReportArtifactPath
+        ? {
+            allowedWritePaths: [expectedAuditReportArtifactPath],
+            auditReportArtifactPath: expectedAuditReportArtifactPath,
+          }
+        : {}),
     },
   });
 

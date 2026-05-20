@@ -2366,6 +2366,7 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain("taskId: task-audit-first-run-report");
     expect(implementCall.prompt).toContain("artifactPath: audit/security-controls.md");
     expect(implementCall.prompt).toContain("contentSha256");
+    expect(implementCall.prompt).toContain("Do not create temporary helper files");
     expect(implementCall.prompt).toContain("auditEvidence.id");
     expect(implementCall.prompt).toContain(
       "Treat the task's `Scope:` line as the authoritative audit boundary.",

@@ -243,6 +243,58 @@ describe("qwen-local-agent adapter", () => {
     const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1].body));
     expect(secondBody.messages.some((message) => message.role === "tool")).toBe(true);
   });
+  it("enforces execution allowed write paths during api tool calls", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-allowed-write-api-"));
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-allowed-write-1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-write",
+                    type: "function",
+                    function: {
+                      name: "write_file",
+                      arguments: JSON.stringify({
+                        path: "tmp_body.txt",
+                        content: "helper file\n",
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-allowed-write-2",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+        },
+      }),
+    );
+
+    expect(result.outputText).toBe("done");
+    await expect(readFile(path.join(root, "tmp_body.txt"), "utf8")).rejects.toThrow();
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1].body));
+    const toolMessage = secondBody.messages.find((message) => message.role === "tool");
+    const toolResult = JSON.parse(toolMessage.content);
+    expect(toolResult.ok).toBe(false);
+    expect(toolResult.error).toContain("allowed write paths (audit/report.md)");
+  });
   it("rejects rogue write tool calls during planner workflows", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-rogue-write-"));
     fetchMock
@@ -795,6 +847,55 @@ describe("qwen-local-agent adapter", () => {
     expect(context.maxDirectoryEntries).toBe(120);
     expect(context.maxSearchMatches).toBe(30);
     expect(context.maxOutputChars).toBe(6_000);
+  });
+  it("allows only scoped report artifact writes when execution allowedWritePaths is set", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-allowed-write-tools-"));
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: { allowedWritePaths: ["audit/report.md"] },
+    });
+
+    const allowed = await executeQwenLocalTool(
+      "write_file",
+      { path: "audit/report.md", content: "report\n" },
+      context,
+    );
+    const deniedWrite = await executeQwenLocalTool(
+      "write_file",
+      { path: "tmp_hash.py", content: "print('hash')\n" },
+      context,
+    );
+    const deniedPatch = await executeQwenLocalTool(
+      "apply_patch",
+      {
+        patch: [
+          "diff --git a/tmp_body.txt b/tmp_body.txt",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/tmp_body.txt",
+          "@@ -0,0 +1 @@",
+          "+helper",
+          "",
+        ].join("\n"),
+      },
+      context,
+    );
+    const deniedCommit = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["tmp_hash.py"], message: "commit helper" },
+      context,
+    );
+
+    expect(allowed.ok).toBe(true);
+    expect(await readFile(path.join(root, "audit", "report.md"), "utf8")).toBe("report\n");
+    expect(deniedWrite.ok).toBe(false);
+    expect(deniedPatch.ok).toBe(false);
+    expect(deniedCommit.ok).toBe(false);
+    expect(`${deniedWrite.error} ${deniedPatch.error} ${deniedCommit.error}`).toContain(
+      "allowed write paths (audit/report.md)",
+    );
+    await expect(readFile(path.join(root, "tmp_hash.py"), "utf8")).rejects.toThrow();
+    await expect(readFile(path.join(root, "tmp_body.txt"), "utf8")).rejects.toThrow();
   });
   it("applies context search caps and skips binary/cache paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-search-cap-"));

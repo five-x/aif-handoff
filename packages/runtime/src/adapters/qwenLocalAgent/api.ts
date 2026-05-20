@@ -449,6 +449,7 @@ export async function runQwenLocalAgentApi(input, logger) {
     signal,
     options: asRecord(input.options),
     environment: input.execution?.environment,
+    execution: input.execution,
   });
   let usage = null;
   let sessionId = null;

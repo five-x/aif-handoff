@@ -512,6 +512,61 @@ describe("executeSubagentQuery attribution", () => {
     );
   });
 
+  it("passes workflow allowed write paths to runtime adapters", async () => {
+    const capabilities = auditRuntimeCapabilities();
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-runtime",
+        providerId: "test",
+        displayName: "Test Runtime",
+        defaultTransport: RuntimeTransport.SDK,
+        supportedTransports: [RuntimeTransport.SDK],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      run: vi.fn(async () => ({ outputText: "done", usage: null })),
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-runtime", adapter };
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test-runtime",
+        runtimeId: "test-runtime",
+        providerId: "test",
+        transport: RuntimeTransport.SDK,
+        defaultModel: null,
+      } as never,
+      taskRuntimeProfileId: "profile-test-runtime",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-audit-report",
+      projectRoot: "/tmp/project",
+      agentName: "implement-coordinator",
+      prompt: "run",
+      workflowSpec: {
+        workflowKind: "implementer",
+        promptInput: { prompt: "run" },
+        requiredCapabilities: ["supportsRepositoryTools"],
+        fallbackStrategy: "none",
+        sessionReusePolicy: "never",
+        metadata: {
+          allowedWritePaths: ["audit/report.md", "audit\\report.md", "../escape", "/abs/path"],
+        },
+      },
+    });
+
+    expect(adapter.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          allowedWritePaths: ["audit/report.md"],
+        }),
+      }),
+    );
+  });
+
   it("passes task-intent permission policy to runtime adapters", async () => {
     mockEnvOverrides.AGENT_BYPASS_PERMISSIONS = false;
     const capabilities = {

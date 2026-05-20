@@ -594,6 +594,33 @@ function readOptionalPositiveInt(value, max = Number.MAX_SAFE_INTEGER) {
 function isPlannerLikeWorkflow(workflowKind) {
   return workflowKind === "planner" || workflowKind === "plan-checker";
 }
+function readAllowedWritePaths(input, projectRoot) {
+  const raw = input.execution?.allowedWritePaths;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const allowed = [];
+  const seen = new Set();
+  for (const value of raw) {
+    if (typeof value !== "string" || value.trim().length === 0) continue;
+    const resolved = resolveInsideProjectRoot(projectRoot, value, "allowed write path");
+    const normalized = normalizePathForPolicy(resolved.relativePath);
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      allowed.push(normalized);
+    }
+  }
+  return allowed;
+}
+function assertWritePathAllowed(context, relativePath, label) {
+  const allowed = context.allowedWritePaths ?? [];
+  if (allowed.length === 0) return;
+  const normalized = normalizePathForPolicy(relativePath);
+  if (allowed.includes(normalized)) return;
+  throw new RuntimeExecutionError(
+    `${label} is outside this workflow's allowed write paths (${allowed.join(", ")})`,
+    undefined,
+    "permission",
+  );
+}
 function shouldSkipSearchPath(relativePath) {
   const normalized = normalizePathForPolicy(relativePath);
   const segments = normalized.split("/").filter(Boolean);
@@ -938,9 +965,12 @@ async function writeFileTool(args, context) {
   if (content == null) {
     throw new RuntimeExecutionError("write_file requires string content", undefined, "permission");
   }
+  const requestedPath = readString(args.path);
+  const targetPath = resolveInsideProjectRoot(context.projectRoot, requestedPath, "write path");
+  assertWritePathAllowed(context, targetPath.relativePath, "write path");
   const target = await resolveWritablePathInsideProjectRoot(
     context.projectRoot,
-    readString(args.path),
+    targetPath.relativePath,
     "write path",
   );
   assertNotAborted(context.signal, "write_file");
@@ -1008,7 +1038,13 @@ async function applyPatchTool(args, context) {
     );
   }
   for (const patchPath of touchedFiles) {
-    await resolveWritablePathInsideProjectRoot(context.projectRoot, patchPath, "patch path");
+    const candidate = resolveInsideProjectRoot(context.projectRoot, patchPath, "patch path");
+    assertWritePathAllowed(context, candidate.relativePath, "patch path");
+    await resolveWritablePathInsideProjectRoot(
+      context.projectRoot,
+      candidate.relativePath,
+      "patch path",
+    );
   }
   assertNotAborted(context.signal, "apply_patch");
   const result = await spawnProcess({
@@ -1131,6 +1167,9 @@ async function gitCommitTool(args, context) {
   const relativePaths = paths.map(
     (entry) => resolveInsideProjectRoot(context.projectRoot, entry, "git commit path").relativePath,
   );
+  for (const entry of relativePaths) {
+    assertWritePathAllowed(context, entry, "git commit path");
+  }
   for (const entry of relativePaths) {
     const target = await resolveExistingPathInsideProjectRoot(
       context.projectRoot,
@@ -1274,8 +1313,9 @@ export function createDefaultQwenToolContext(input) {
   const maxSearchMatchesLimit = plannerLike ? PLANNER_MAX_SEARCH_MATCHES : Number.MAX_SAFE_INTEGER;
   const maxOutputCharsLimit = plannerLike ? PLANNER_MAX_OUTPUT_CHARS : Number.MAX_SAFE_INTEGER;
   const env = { ...process.env, ...(input.environment ?? {}) };
+  const projectRootPath = resolveProjectRoot(projectRoot);
   return {
-    projectRoot: resolveProjectRoot(projectRoot),
+    projectRoot: projectRootPath,
     signal: input.signal,
     env,
     maxFileBytes: readPositiveInt(options.maxFileBytes, defaultMaxFileBytes, maxFileBytesLimit),
@@ -1297,6 +1337,7 @@ export function createDefaultQwenToolContext(input) {
     ),
     toolTimeoutMs: readPositiveInt(options.toolTimeoutMs, DEFAULT_TOOL_TIMEOUT_MS),
     permissionPolicy: input.execution?.permissionPolicy ?? getPermissionExecutionPolicy("general"),
+    allowedWritePaths: readAllowedWritePaths(input, projectRootPath),
   };
 }
 export function createTempPathForTests(name) {

@@ -231,6 +231,8 @@ export interface RuntimeExecutionIntent {
   bypassPermissions?: boolean;
   /** Provider-neutral permission policy selected from the task intent. */
   permissionPolicy?: PermissionExecutionPolicy;
+  /** Relative repository paths write-capable runtime tools may modify when the workflow is write-scoped. */
+  allowedWritePaths?: string[];
   /** JSON Schema for structured output — adapter passes it to the provider if supported. */
   outputSchema?: Record<string, unknown>;
   /** Opaque adapter-specific hooks — passed through to the adapter without interpretation. */

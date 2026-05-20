@@ -765,6 +765,7 @@ function buildExecutionIntent(
   options: SubagentQueryOptions,
   systemPromptAppend: string,
   agentDefinitionName: string | undefined,
+  workflowMetadata: Record<string, unknown> | undefined,
   stderr: (chunk: string) => void,
 ): import("@aif/runtime").RuntimeExecutionIntent {
   const env = getEnv();
@@ -784,6 +785,7 @@ function buildExecutionIntent(
       })
     : null;
   const bypassPermissions = bypassRequested && bypassDecision?.allowed === true;
+  const allowedWritePaths = readAllowedWritePathsFromWorkflowMetadata(workflowMetadata);
   if (bypassPermissions && !task?.agentActivityLog?.includes("[permission-policy:bypass]")) {
     logActivity(
       options.taskId,
@@ -821,6 +823,7 @@ function buildExecutionIntent(
     systemPromptAppend,
     bypassPermissions,
     permissionPolicy,
+    ...(allowedWritePaths.length > 0 ? { allowedWritePaths } : {}),
     environment: {
       HANDOFF_MODE: "1",
       HANDOFF_TASK_ID: options.taskId,
@@ -844,6 +847,26 @@ function buildExecutionIntent(
       postToolUseHooks: [createAuditEvidenceLogger(options.taskId, options.projectRoot)],
     },
   };
+}
+
+function readAllowedWritePathsFromWorkflowMetadata(
+  metadata: Record<string, unknown> | undefined,
+): string[] {
+  const raw = metadata?.allowedWritePaths;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const allowed: string[] = [];
+  for (const value of raw) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim().replaceAll("\\", "/");
+    if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) continue;
+    if (normalized.split("/").includes("..")) continue;
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      allowed.push(normalized);
+    }
+  }
+  return allowed;
 }
 
 /**
@@ -1030,6 +1053,7 @@ export async function executeSubagentQuery(
         options,
         context.systemPromptAppend,
         context.agentDefinitionName,
+        context.workflow.metadata,
         stderrCollector.onStderr,
       );
       // Override the abort controller with our per-attempt one
