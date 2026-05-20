@@ -589,6 +589,99 @@ function handleContextLengthRecovery(input: {
   return true;
 }
 
+const TRANSIENT_RUNTIME_FALLBACK_CATEGORIES = new Set(["transport", "stream", "timeout"]);
+
+function handleTransientRuntimeFallbackRecovery(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  stageLabel: CoordinatorStage;
+  stageInProgress: TaskStatus;
+  title: string;
+  err: unknown;
+}): boolean {
+  const runtimeError = findRuntimeExecutionError(input.err);
+  if (!runtimeError || !TRANSIENT_RUNTIME_FALLBACK_CATEGORIES.has(runtimeError.category)) {
+    return false;
+  }
+  if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
+
+  const nowIso = new Date().toISOString();
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const activeFallback = readContextFallbackRuntimeOption(
+    latestTask.runtimeOptionsJson,
+    input.stage,
+  );
+  const resolvedSelection = resolveEffectiveRuntimeProfile({
+    taskId: latestTask.id,
+    projectId: latestTask.projectId,
+    mode: input.stage,
+    systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
+  });
+  const failedProfile =
+    (activeFallback ? getRuntimeProfileResponseById(activeFallback.profileId) : null) ??
+    resolvedSelection.profile ??
+    null;
+  const failedProfileId = failedProfile?.id ?? activeFallback?.profileId ?? null;
+  const failedProfileIds = new Set([
+    ...readFailedContextProfileIds(latestTask.runtimeOptionsJson, input.stage),
+    ...(failedProfileId ? [failedProfileId] : []),
+  ]);
+  const fallback = selectContextFallbackProfile({
+    task: latestTask,
+    stage: input.stage,
+    currentProfile: failedProfile,
+    failedProfileIds,
+  });
+  if (!fallback) return false;
+
+  const retryCount = (latestTask.retryCount ?? 0) + 1;
+  const runtimeOptionsJson = setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
+    stage: input.stage,
+    profileId: fallback.id,
+    previousProfileId: failedProfileId,
+    failedProfileId,
+    reason: "transient_runtime_error",
+    attempt: retryCount,
+    createdAt: nowIso,
+  });
+  const blockedReason =
+    `Runtime transient ${runtimeError.category} recovery: ${input.stageLabel} failed on the selected runtime profile; ` +
+    `retrying immediately with fallback runtime profile ${fallback.name} (${fallback.id}).`;
+
+  clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
+  updateTaskStatus(
+    latestTask.id,
+    input.stageInProgress,
+    {
+      blockedReason,
+      blockedFromStatus: null,
+      retryAfter: null,
+      retryCount,
+      paused: false,
+      reworkRequested: false,
+      manualReviewRequired: false,
+      runtimeOptionsJson,
+    },
+    { title: input.title, fromStatus: input.stageInProgress },
+  );
+  appendTaskActivityLog(
+    latestTask.id,
+    `[${nowIso}] Transient runtime failure scheduled immediate one-shot fallback: category=${runtimeError.category} failedProfile=${failedProfileId ?? "none"} selectedProfile=${fallback.id}`,
+  );
+  log.warn(
+    {
+      taskId: latestTask.id,
+      stage: input.stageLabel,
+      runtimeCategory: runtimeError.category,
+      failedProfileId,
+      fallbackProfileId: fallback.id,
+      retryCount,
+    },
+    "Scheduled immediate one-shot runtime fallback after transient runtime failure",
+  );
+  return true;
+}
+
 function appendRuntimeBudgetActivity(task: TaskRow, stage: RuntimeStage): boolean {
   const decision = evaluateRuntimeBudgetGate({ taskId: task.id, projectId: task.projectId, stage });
   if (decision.status === "allow") return false;
@@ -2479,6 +2572,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     const runtimeStage = runtimeStageForCoordinatorStage(stage.label);
     if (
       handleContextLengthRecovery({
+        task,
+        stage: runtimeStage,
+        stageLabel: stage.label,
+        stageInProgress: stage.inProgress,
+        title: taskTitle,
+        err,
+      })
+    ) {
+      flushActivityQueue(task.id);
+      return false;
+    }
+    if (
+      handleTransientRuntimeFallbackRecovery({
         task,
         stage: runtimeStage,
         stageLabel: stage.label,

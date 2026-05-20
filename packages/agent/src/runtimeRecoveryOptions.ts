@@ -6,7 +6,7 @@ export interface ContextFallbackRuntimeOption {
   stage: RuntimeStage;
   profileId: string;
   previousProfileId: string | null;
-  reason: "context_length";
+  reason: "context_length" | "transient_runtime_error";
   attempt: number;
   createdAt: string;
 }
@@ -59,7 +59,10 @@ function readRecoveryState(options: Record<string, unknown>): RuntimeRecoveryOpt
             typeof fallbackRaw.previousProfileId === "string"
               ? fallbackRaw.previousProfileId
               : null,
-          reason: "context_length" as const,
+          reason:
+            fallbackRaw.reason === "transient_runtime_error"
+              ? ("transient_runtime_error" as const)
+              : ("context_length" as const),
           attempt:
             typeof fallbackRaw.attempt === "number" && Number.isFinite(fallbackRaw.attempt)
               ? Math.max(1, Math.trunc(fallbackRaw.attempt))
@@ -135,6 +138,7 @@ export function setContextFallbackRuntimeOption(
     profileId: string;
     previousProfileId: string | null;
     failedProfileId: string | null;
+    reason?: ContextFallbackRuntimeOption["reason"];
     attempt: number;
     createdAt: string;
   },
@@ -152,7 +156,7 @@ export function setContextFallbackRuntimeOption(
         stage: input.stage,
         profileId: input.profileId,
         previousProfileId: input.previousProfileId,
-        reason: "context_length",
+        reason: input.reason ?? "context_length",
         attempt: input.attempt,
         createdAt: input.createdAt,
       },

@@ -2553,6 +2553,69 @@ describe("coordinator", () => {
     expect(done!.runtimeOptionsJson).toContain("profile-fast-32k");
   });
 
+  it("retries in progress with a durable one-shot fallback after transient implementer transport failure", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-transport",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: {},
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-transport",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: {},
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-transport",
+        defaultReviewRuntimeProfileId: "profile-heavy-transport",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-transport-fallback",
+        projectId: "test-project",
+        title: "Transport fallback",
+        status: "implementing",
+      })
+      .run();
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("fetch failed", undefined, "transport"),
+    );
+
+    await pollAndProcess();
+
+    const retrying = db.select().from(tasks).where(eq(tasks.id, "task-transport-fallback")).get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.blockedReason).toContain("Runtime transient transport recovery");
+    expect(retrying!.blockedReason).toContain("profile-heavy-transport");
+    expect(retrying!.blockedFromStatus).toBeNull();
+    expect(retrying!.retryAfter).toBeNull();
+    expect(retrying!.retryCount).toBe(1);
+    expect(retrying!.manualReviewRequired).toBe(false);
+    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-transport");
+    expect(retrying!.runtimeOptionsJson).toContain("profile-fast-transport");
+    expect(retrying!.runtimeOptionsJson).toContain("transient_runtime_error");
+    expect(retrying!.agentActivityLog).toContain(
+      "Transient runtime failure scheduled immediate one-shot fallback",
+    );
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledTimes(2);
+    const done = db.select().from(tasks).where(eq(tasks.id, "task-transport-fallback")).get();
+    expect(done!.status).toBe("done");
+    expect(done!.agentActivityLog).toContain("Runtime one-shot fallback before implementer");
+    expect(done!.agentActivityLog).toContain("selectedProfile=profile-heavy-transport");
+    expect(done!.runtimeOptionsJson).not.toContain("contextFallback");
+    expect(done!.runtimeOptionsJson).toContain("profile-fast-transport");
+  });
+
   it.each([
     {
       name: "other-project",
