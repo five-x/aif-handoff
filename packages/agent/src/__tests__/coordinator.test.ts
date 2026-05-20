@@ -199,6 +199,11 @@ describe("coordinator", () => {
   function insertRuntimeProfile(input: {
     id: string;
     projectId?: string | null;
+    runtimeId?: string;
+    providerId?: string;
+    transport?: string | null;
+    enabled?: boolean;
+    options?: Record<string, unknown>;
     snapshot?: Record<string, unknown> | null;
   }): void {
     const now = new Date().toISOString();
@@ -208,9 +213,11 @@ describe("coordinator", () => {
         id: input.id,
         projectId: input.projectId === undefined ? "test-project" : input.projectId,
         name: `Profile ${input.id}`,
-        runtimeId: "claude",
-        providerId: "anthropic",
-        enabled: true,
+        runtimeId: input.runtimeId ?? "claude",
+        providerId: input.providerId ?? "anthropic",
+        transport: input.transport ?? null,
+        enabled: input.enabled ?? true,
+        optionsJson: input.options ? JSON.stringify(input.options) : "{}",
         runtimeLimitSnapshotJson: input.snapshot ? JSON.stringify(input.snapshot) : null,
         runtimeLimitUpdatedAt: input.snapshot ? now : null,
         createdAt: now,
@@ -2477,6 +2484,223 @@ describe("coordinator", () => {
     expect(task!.runtimeLimitSnapshotJson).toContain('"profileId":"profile-app-task-blocked"');
   });
 
+  it("schedules and consumes a durable one-shot fallback after implementer context overflow", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-32k",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-80k",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-32k",
+        defaultReviewRuntimeProfileId: "profile-heavy-80k",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-context-fallback",
+        projectId: "test-project",
+        title: "Context fallback",
+        status: "implementing",
+        retryCount: 2,
+        manualReviewRequired: true,
+      })
+      .run();
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "request exceeds the available context size",
+        undefined,
+        "context_length",
+      ),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db.select().from(tasks).where(eq(tasks.id, "task-context-fallback")).get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toContain("Runtime context limit recovery");
+    expect(blocked!.blockedReason).toContain("profile-heavy-80k");
+    expect(blocked!.blockedFromStatus).toBe("implementing");
+    expect(blocked!.retryAfter).toBeTruthy();
+    expect(blocked!.retryCount).toBe(3);
+    expect(blocked!.manualReviewRequired).toBe(false);
+    expect(blocked!.reworkRequested).toBe(false);
+    expect(blocked!.runtimeOptionsJson).toContain("profile-heavy-80k");
+    expect(blocked!.runtimeOptionsJson).toContain("profile-fast-32k");
+
+    db.update(tasks)
+      .set({ retryAfter: new Date(Date.now() - 1000).toISOString() })
+      .where(eq(tasks.id, "task-context-fallback"))
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledTimes(2);
+    const done = db.select().from(tasks).where(eq(tasks.id, "task-context-fallback")).get();
+    expect(done!.status).toBe("done");
+    expect(done!.agentActivityLog).toContain("Runtime one-shot fallback before implementer");
+    expect(done!.agentActivityLog).toContain("selectedProfile=profile-heavy-80k");
+    expect(done!.runtimeOptionsJson).not.toContain("contextFallback");
+    expect(done!.runtimeOptionsJson).toContain("profile-fast-32k");
+  });
+
+  it.each([
+    {
+      name: "other-project",
+      currentProfileId: "profile-current-32k",
+      currentContext: 32768,
+      fallbackProfileId: "profile-other-project-80k",
+      fallbackContext: 81920,
+      fallbackProjectId: "other-project",
+      fallbackEnabled: true,
+    },
+    {
+      name: "disabled",
+      currentProfileId: "profile-current-32k",
+      currentContext: 32768,
+      fallbackProfileId: "profile-disabled-80k",
+      fallbackContext: 81920,
+      fallbackProjectId: "test-project",
+      fallbackEnabled: false,
+    },
+    {
+      name: "smaller-context",
+      currentProfileId: "profile-current-80k",
+      currentContext: 81920,
+      fallbackProfileId: "profile-smaller-32k",
+      fallbackContext: 32768,
+      fallbackProjectId: "test-project",
+      fallbackEnabled: true,
+    },
+  ])(
+    "clears invalid durable context fallback instead of routing to a $name profile",
+    async (testCase) => {
+      const db = testDb.current;
+      const resetAt = new Date(Date.now() + 30 * 60_000).toISOString();
+      if (testCase.fallbackProjectId === "other-project") {
+        db.insert(projects)
+          .values({ id: "other-project", name: "Other", rootPath: "/tmp/other" })
+          .run();
+      }
+      insertRuntimeProfile({
+        id: testCase.currentProfileId,
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        transport: "api",
+        options: { n_ctx: testCase.currentContext },
+        snapshot: blockedRuntimeSnapshot(testCase.currentProfileId, resetAt),
+      });
+      insertRuntimeProfile({
+        id: testCase.fallbackProfileId,
+        projectId: testCase.fallbackProjectId,
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        transport: "api",
+        enabled: testCase.fallbackEnabled,
+        options: { n_ctx: testCase.fallbackContext },
+      });
+      db.update(projects)
+        .set({ defaultTaskRuntimeProfileId: testCase.currentProfileId })
+        .where(eq(projects.id, "test-project"))
+        .run();
+      db.insert(tasks)
+        .values({
+          id: `task-invalid-fallback-${testCase.name}`,
+          projectId: "test-project",
+          title: `Invalid fallback ${testCase.name}`,
+          status: "implementing",
+          runtimeOptionsJson: JSON.stringify({
+            __aifRuntimeRecovery: {
+              contextFallback: {
+                stage: "implementer",
+                profileId: testCase.fallbackProfileId,
+                previousProfileId: testCase.currentProfileId,
+                reason: "context_length",
+                attempt: 1,
+                createdAt: "2026-05-20T00:00:00.000Z",
+              },
+              failedContextProfileIds: {
+                implementer: [testCase.currentProfileId],
+              },
+            },
+          }),
+        })
+        .run();
+
+      await pollAndProcess();
+
+      expect(runImplementer).not.toHaveBeenCalledWith(
+        `task-invalid-fallback-${testCase.name}`,
+        "/tmp/test",
+      );
+      const task = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, `task-invalid-fallback-${testCase.name}`))
+        .get();
+      expect(task!.status).toBe("blocked_external");
+      expect(task!.retryAfter).toBe(resetAt);
+      expect(task!.runtimeLimitSnapshotJson).toContain(
+        `"profileId":"${testCase.currentProfileId}"`,
+      );
+      expect(task!.runtimeOptionsJson).not.toContain("contextFallback");
+    },
+  );
+
+  it("asks for operator input when context overflow has no compatible fallback", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-only",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 32768 },
+    });
+    db.update(projects)
+      .set({ defaultTaskRuntimeProfileId: "profile-fast-only" })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-context-no-fallback",
+        projectId: "test-project",
+        title: "Context no fallback",
+        status: "implementing",
+        retryCount: 4,
+        manualReviewRequired: true,
+      })
+      .run();
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "request exceeds the available context size",
+        undefined,
+        "context_length",
+      ),
+    );
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-context-no-fallback")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedReason).toContain("operator_input_required:");
+    expect(task!.blockedReason).toContain("larger compatible runtime profile");
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(4);
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.paused).toBe(true);
+  });
+
   it("should proactively block exact-threshold planning work before the provider hard-fails", async () => {
     const db = testDb.current;
     const resetAt = new Date(Date.now() + 45 * 60_000).toISOString();
@@ -4227,6 +4451,49 @@ describe("coordinator", () => {
     // Both tasks should have been picked up by planner
     expect(runPlanner).toHaveBeenCalledWith("p-task-1", "/tmp/parallel");
     expect(runPlanner).toHaveBeenCalledWith("p-task-2", "/tmp/parallel");
+  });
+
+  it("serializes parallel tasks that share one local qwen runtime profile", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-qwen-serial",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 32768 },
+    });
+    db.insert(projects)
+      .values({
+        id: "parallel-qwen-proj",
+        name: "Parallel Qwen",
+        rootPath: "/tmp/parallel-qwen",
+        parallelEnabled: true,
+        defaultTaskRuntimeProfileId: "profile-qwen-serial",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "qwen-task-1",
+        projectId: "parallel-qwen-proj",
+        title: "Q1",
+        status: "implementing",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "qwen-task-2",
+        projectId: "parallel-qwen-proj",
+        title: "Q2",
+        status: "implementing",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    const qwenCalls = vi
+      .mocked(runImplementer)
+      .mock.calls.filter(([taskId]) => String(taskId).startsWith("qwen-task-"));
+    expect(qwenCalls).toHaveLength(1);
   });
 
   it("should serialize branch-isolated parallel projects while task worktrees are disabled", async () => {

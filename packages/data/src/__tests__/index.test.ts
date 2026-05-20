@@ -1116,6 +1116,7 @@ describe("data layer", () => {
         blockedReason: "operator_input_required: provide fixture access",
         manualReviewRequired: true,
       });
+      expect(findTaskById(blockedTask.id)?.manualReviewRequired).toBe(false);
 
       expect(buildTaskArtifactTrustRollup(trustedTask.id)).toEqual(
         expect.objectContaining({
@@ -1143,8 +1144,11 @@ describe("data layer", () => {
           claimOutcome: "blocked",
           failureFamily: "external_blocker",
           nextAction: "provide_operator_input",
-          reasonCodes: expect.arrayContaining(["blocked", "manual_review_required"]),
+          reasonCodes: expect.arrayContaining(["blocked"]),
         }),
+      );
+      expect(buildTaskArtifactTrustRollup(blockedTask.id)?.reasonCodes).not.toContain(
+        "manual_review_required",
       );
     });
 
@@ -2818,6 +2822,7 @@ describe("data layer", () => {
         blockedReason: "operator_input_required: provide external source access",
         blockedFromStatus: "implementing",
         paused: false,
+        manualReviewRequired: true,
         retryAfter: "2026-05-14T11:00:00.000Z",
       });
 
@@ -2825,6 +2830,7 @@ describe("data layer", () => {
       expect(found.status).toBe("blocked_external");
       expect(found.blockedReason).toContain("operator_input_required");
       expect(found.paused).toBe(true);
+      expect(found.manualReviewRequired).toBe(false);
       expect(found.retryAfter).toBeNull();
     });
 
@@ -2835,22 +2841,26 @@ describe("data layer", () => {
         blockedReason: "operator_input_required: answer missing audit question",
         blockedFromStatus: "review",
         paused: false,
+        manualReviewRequired: true,
         retryAfter: "2026-05-14T11:00:00.000Z",
       });
 
       let found = findTaskById(t!.id)!;
       expect(found.paused).toBe(true);
+      expect(found.manualReviewRequired).toBe(false);
       expect(found.retryAfter).toBeNull();
 
       updateTask(t!.id, {
         blockedReason: "operator_input_required: answer updated audit question",
         paused: false,
+        manualReviewRequired: true,
         retryAfter: "2026-05-14T12:00:00.000Z",
       });
 
       found = findTaskById(t!.id)!;
       expect(found.status).toBe("blocked_external");
       expect(found.paused).toBe(true);
+      expect(found.manualReviewRequired).toBe(false);
       expect(found.retryAfter).toBeNull();
     });
   });

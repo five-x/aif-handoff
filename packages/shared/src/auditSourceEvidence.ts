@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -81,6 +82,10 @@ const INVENTORY_COMMAND_PATTERNS = [
   /^\s*test-path\b/i,
   /^\s*\[\s+-(?:e|f|d|s)\b/i,
 ];
+const EMPTY_GIT_BLOB_HASHES = new Set([
+  createHash("sha1").update("blob 0\0").digest("hex"),
+  createHash("sha256").update("blob 0\0").digest("hex"),
+]);
 
 function normalizeRelativePath(path: string): string {
   return path
@@ -106,6 +111,46 @@ function normalizePath(rawPath: string): string | null {
     return null;
   }
   return normalized;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function commandReferencesPath(command: string, path: string): boolean {
+  const normalizedCommand = command.replaceAll("\\", "/");
+  const escapedPath = escapeRegExp(path);
+  return new RegExp(`(?:^|\\s|["'\`])(?:\\./)?${escapedPath}(?=$|\\s|["'\`])`, "i").test(
+    normalizedCommand,
+  );
+}
+
+function hasEmptyHashObjectProof(entry: AuditCommandEvidence, path: string): boolean {
+  if (!/^\s*git\s+hash-object\b/i.test(entry.command)) return false;
+  if (!commandReferencesPath(entry.command, path)) return false;
+  return [...EMPTY_GIT_BLOB_HASHES].some((hash) =>
+    new RegExp(`\\b${hash}\\b`, "i").test(entry.evidence),
+  );
+}
+
+function hasEmptyWcProof(entry: AuditCommandEvidence, path: string): boolean {
+  if (!/^\s*wc\s+-c\b/i.test(entry.command)) return false;
+  if (!commandReferencesPath(entry.command, path)) return false;
+  const escapedPath = escapeRegExp(path);
+  const normalizedEvidence = entry.evidence.replaceAll("\\", "/");
+  return (
+    new RegExp(`(?:^|\\n)\\s*0\\s+(?:\\./)?${escapedPath}(?=\\s|$)`, "i").test(
+      normalizedEvidence,
+    ) ||
+    (/^\s*wc\s+-c\s+(?:--\s+)?(?:"[^"]+"|'[^']+'|\S+)\s*$/i.test(entry.command) &&
+      /(?:^|\n)\s*0\s*(?:\n|$)/.test(normalizedEvidence))
+  );
+}
+
+function hasEmptyFileCommandProof(evidence: AuditCommandEvidence[], path: string): boolean {
+  return evidence.some(
+    (entry) => hasEmptyHashObjectProof(entry, path) || hasEmptyWcProof(entry, path),
+  );
 }
 
 function fileLineCount(projectRoot: string, path: string): number | null {
@@ -228,6 +273,44 @@ export function collectExistingAuditLineEvidenceRefs(input: {
   return [...refs].sort();
 }
 
+export function collectExistingEmptyAuditFileEvidenceRefs(input: {
+  text: string;
+  projectRoot: string;
+  excludedReferencedPaths?: string[];
+  sourceReader?: AuditSourceEvidenceReader;
+}): string[] {
+  const excludedPaths = new Set(
+    (input.excludedReferencedPaths ?? []).map((path) => normalizePathForComparison(path)),
+  );
+  const refs = new Set<string>();
+  const commandEvidence = extractAuditCommandEvidence(input.text);
+  const pathPattern = /`((?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12})`/g;
+  for (const match of input.text.matchAll(pathPattern)) {
+    const path = normalizePath(match[1] ?? "");
+    if (!path || excludedPaths.has(normalizePathForComparison(path))) continue;
+    const lineCount = input.sourceReader
+      ? input.sourceReader.fileLineCount(path)
+      : fileLineCount(input.projectRoot, path);
+    if (lineCount === 0 && hasEmptyFileCommandProof(commandEvidence, path)) refs.add(path);
+  }
+  return [...refs].sort();
+}
+
+export function hasEmptyFileInspectionEvidence(input: {
+  text: string;
+  path: string;
+  projectRoot: string;
+  sourceReader?: AuditSourceEvidenceReader;
+}): boolean {
+  const path = normalizePath(input.path);
+  if (!path) return false;
+  const lineCount = input.sourceReader
+    ? input.sourceReader.fileLineCount(path)
+    : fileLineCount(input.projectRoot, path);
+  if (lineCount !== 0) return false;
+  return hasEmptyFileCommandProof(extractAuditCommandEvidence(input.text), path);
+}
+
 export function extractAuditCommandEvidence(text: string): AuditCommandEvidence[] {
   const evidence: AuditCommandEvidence[] = [];
   const seen = new Set<string>();
@@ -288,6 +371,7 @@ export function classifyAuditSourceEvidence(input: {
     ...input,
     excludeMetadataOnlyLineOne: true,
   });
+  const emptyFileEvidenceRefs = collectExistingEmptyAuditFileEvidenceRefs(input);
   const commandEvidence = extractAuditCommandEvidence(input.text);
   const substantiveCommandEvidence = commandEvidence.filter((entry) => !entry.inventoryOnly);
   const inventoryCommandEvidence = commandEvidence.filter((entry) => entry.inventoryOnly);
@@ -304,11 +388,11 @@ export function classifyAuditSourceEvidence(input: {
     if (
       hasNoFindingsRegister &&
       hasScopedNoFindingsRiskClaim(input.text) &&
-      substantiveLineEvidenceRefs.length > 0 &&
+      (substantiveLineEvidenceRefs.length > 0 || emptyFileEvidenceRefs.length > 0) &&
       substantiveCommandEvidence.length > 0
     ) {
       classification = "validated_no_findings";
-    } else if (existingLineEvidenceRefs.length > 0) {
+    } else if (existingLineEvidenceRefs.length > 0 || emptyFileEvidenceRefs.length > 0) {
       classification = "inventory_only_invalid";
     }
   }
@@ -316,7 +400,7 @@ export function classifyAuditSourceEvidence(input: {
   return {
     classification,
     validatedFindingCount,
-    existingLineEvidenceRefs,
+    existingLineEvidenceRefs: [...existingLineEvidenceRefs, ...emptyFileEvidenceRefs].sort(),
     commandEvidence,
     substantiveCommandEvidence,
     inventoryCommandEvidence,

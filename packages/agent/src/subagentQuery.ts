@@ -66,6 +66,7 @@ import { createStderrCollector } from "./stderrCollector.js";
 import { writeQueryAudit } from "./queryAudit.js";
 import { getActiveStageAbortController } from "./stageAbort.js";
 import { notifyProjectRuntimeLimitBroadcast } from "./notifier.js";
+import { splitRuntimeRecoveryOptions } from "./runtimeRecoveryOptions.js";
 
 const log = logger("subagent-query");
 
@@ -447,19 +448,6 @@ export interface SubagentQueryResult {
   resultText: string;
 }
 
-function parseRuntimeOptions(raw: string | null | undefined): Record<string, unknown> | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return null;
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 type WarmupSkipReason =
   | "feature_disabled"
   | "workflow_not_enabled"
@@ -610,7 +598,9 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
     mode: runtimeStage,
     systemDefaultRuntimeProfileId,
   });
-  const runtimeOptionsOverride = parseRuntimeOptions(task?.runtimeOptionsJson);
+  const runtimeOptionsOverride = splitRuntimeRecoveryOptions(
+    task?.runtimeOptionsJson,
+  ).adapterOptions;
   const fallbackProfile = getRuntimeStageFallbackProfile(options.taskId, runtimeStage);
   if (fallbackProfile && fallbackProfile.profileId !== effective.profile?.id) {
     const profile = getRuntimeProfileResponseById(fallbackProfile.profileId);

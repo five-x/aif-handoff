@@ -179,7 +179,7 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.plan).toContain("- [ ] Keep the run diagnostic-only");
   });
 
-  it("terminalizes imported audit report cards with non-repairable declared scope before runtime", async () => {
+  it("routes imported audit report cards with non-repairable declared scope to operator input before runtime", async () => {
     const db = testDb.current;
     writeFileSync(join(projectRoot, "README.md"), "# Test project\n");
 
@@ -228,19 +228,19 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-imported-broad-audit"))
       .get();
     expect(updatedTask?.implementationLog).toContain(
-      "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
+      "non-repairable declared scope; waiting for operator input before runtime prompt construction",
     );
     expect(updatedTask?.implementationLog).toContain("Declared scope roots: none");
     expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-imported-broad-audit");
     expect(artifact?.state).toBe("source_inconclusive");
     expect(artifact?.failureFamily).toBe("source_inconclusive");
   });
 
-  it("terminalizes generated audit cards with no tracked scope sentinel before runtime", async () => {
+  it("routes generated audit cards with no tracked scope sentinel to operator input before runtime", async () => {
     const db = testDb.current;
     writeFileSync(join(projectRoot, "README.md"), "# Untracked README\n");
 
@@ -289,16 +289,114 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-generated-no-tracked-scope"))
       .get();
     expect(updatedTask?.implementationLog).toContain(
-      "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
+      "non-repairable declared scope; waiting for operator input before runtime prompt construction",
     );
     expect(updatedTask?.implementationLog).toContain("Declared scope roots: none");
     expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
-    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.blockedReason).toContain("operator_input_required:");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-generated-no-tracked-scope");
     expect(artifact?.state).toBe("source_inconclusive");
     expect(artifact?.failureFamily).toBe("source_inconclusive");
+  });
+
+  it("normalizes empty tracked audit scope files deterministically before runtime", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "tests"), { recursive: true });
+    writeFileSync(join(projectRoot, "tests", "__init__.py"), "");
+    execFileSync("git", ["add", "tests/__init__.py"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed empty scope", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-empty-file-scope-audit",
+        projectId: "project-1",
+        title: "Audit empty test marker",
+        description: [
+          "Scope: tests/__init__.py",
+          "Audit mandate: Review empty test package marker.",
+          "Risk hypotheses: risk-empty-marker tests/__init__.py may hide package bootstrap defects.",
+          "Allowed changes: only create/update audit/empty-marker.md.",
+          "Report artifact: audit/empty-marker.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Produce empty marker audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-empty-marker",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-empty-file-scope-audit"],
+      artifacts: [
+        {
+          taskId: "task-empty-file-scope-audit",
+          role: "report",
+          artifactPath: "audit/empty-marker.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-empty-file-scope-audit", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-empty-file-scope-audit"))
+      .get();
+    expect(updatedTask?.blockedReason).toBeNull();
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
+    );
+
+    const artifact = findRoadmapBatchArtifactByTaskId("task-empty-file-scope-audit");
+    if (!artifact) throw new Error("missing empty scope artifact");
+    expect(artifact.state).toBe("valid");
+    const report = readFileSync(join(projectRoot, "audit", "empty-marker.md"), "utf8");
+    expect(report).toContain("`tests/__init__.py`");
+    expect(report).not.toContain("`tests/__init__.py:1`");
+    const manifest = readAuditReportManifest(report);
+    expect(manifest.scopeCoverage).toContainEqual(
+      expect.objectContaining({
+        root: "tests/__init__.py",
+        covered: true,
+      }),
+    );
+    const validation = validateAuditReportArtifact({
+      text: report,
+      projectRoot,
+      taskId: "task-empty-file-scope-audit",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: artifact.roadmapAlias,
+      taskDescription: updatedTask?.description ?? "",
+      reportArtifactPaths: ["audit/empty-marker.md"],
+      auditEvidenceUnits: listAuditEvidenceEvents({
+        taskId: "task-empty-file-scope-audit",
+        auditPlanId: `batch:${artifact.batchId}:task:task-empty-file-scope-audit`,
+      }),
+      requireLedgerEvidence: true,
+    });
+    expect(validation.ok).toBe(true);
   });
 
   it("normalizes readable legacy generated audit cards deterministically before runtime", async () => {

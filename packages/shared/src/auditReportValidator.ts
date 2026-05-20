@@ -6,6 +6,7 @@ import {
   classifyAuditSourceEvidence,
   extractSubstantiveAuditCommandEvidence,
   hasScopedNoFindingsRiskClaim,
+  hasEmptyFileInspectionEvidence,
   isConservativeMetadataOnlyLineOne,
   isAuditPublicReportOutcome,
   toAuditPublicReportOutcome,
@@ -1286,15 +1287,25 @@ function collectScopeCoverage(input: {
 
     if (kind === "file") {
       const coveredFiles = lineEvidenceFiles.filter((path) => isSameRepositoryPath(path, root));
+      const lineCount = input.sourceReader.fileLineCount(root);
+      const emptyFileCommandEvidence =
+        lineCount === 0 &&
+        hasEmptyFileInspectionEvidence({
+          text: input.text,
+          path: root,
+          projectRoot: input.projectRoot,
+          sourceReader: input.sourceReader,
+        });
+      const ok = coveredFiles.length > 0 || emptyFileCommandEvidence;
       return {
         root,
         exists: true,
         kind: "file",
         requiredEvidenceCount: 1,
-        coveredFiles,
-        missingRepresentativeFiles: coveredFiles.length > 0 ? [] : [root],
+        coveredFiles: ok && coveredFiles.length === 0 ? [root] : coveredFiles,
+        missingRepresentativeFiles: ok ? [] : [root],
         commandEvidence: true,
-        ok: coveredFiles.length > 0,
+        ok,
       };
     }
 
@@ -1831,6 +1842,9 @@ export function validateAuditReportArtifact(
       .filter((entry) => entry.exists && !entry.ok)
       .map((entry) => {
         if (entry.kind === "file") {
+          if (sourceReader.fileLineCount(entry.root) === 0) {
+            return `${entry.root} is empty and needs command/tool evidence that proves the file is empty`;
+          }
           return `${entry.root} needs an existing \`path:line\` or \`path:start-end\` citation to that exact file`;
         }
         if (entry.kind === "directory") {

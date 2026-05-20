@@ -28,6 +28,8 @@ import {
   persistTaskRuntimeLimitSnapshot,
   resolveEffectiveRuntimeProfile,
   resolveEffectiveRuntimeProfileExcluding,
+  getRuntimeProfileResponseById,
+  listRuntimeProfileResponses,
   findRoadmapBatchArtifactByTaskId,
   listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
@@ -64,6 +66,7 @@ import {
   type AutoReviewState,
   type ImplementationManifestIssueCode,
   type TaskStatus,
+  type RuntimeProfile,
   type RuntimeStage,
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
@@ -84,8 +87,16 @@ import {
 } from "./notifier.js";
 import { handleAutoReviewGate, type ReviewGateOutcome } from "./autoReviewHandler.js";
 import { classifyStageError } from "./stageErrorHandler.js";
+import { findRuntimeExecutionError, truncateReason } from "./errorClassifier.js";
 import { setActiveStageAbortController } from "./stageAbort.js";
 import { setCoordinatorId, setRuntimeStageFallbackProfile } from "./subagentQuery.js";
+import {
+  clearContextFallbackRuntimeOption,
+  markContextProfileFailed,
+  readContextFallbackRuntimeOption,
+  readFailedContextProfileIds,
+  setContextFallbackRuntimeOption,
+} from "./runtimeRecoveryOptions.js";
 import { readGitWorktreeReworkSnapshot } from "./reworkSnapshot.js";
 import {
   getDeterministicBackoffMinutes,
@@ -184,6 +195,7 @@ class StageSemaphore {
 }
 
 const stageSemaphore = new StageSemaphore();
+const runtimeProfileSemaphore = new StageSemaphore();
 
 // ── Public API ───────────────────────────────────────────────
 
@@ -252,6 +264,332 @@ function fallbackStagesForCoordinatorStage(stage: CoordinatorStage): RuntimeStag
 
 function shouldBlockOnRuntimeLimit(stage: RuntimeStage): boolean {
   return stage === "implementer" || stage === "audit" || stage === "synthesis";
+}
+
+function readPositiveInteger(value: unknown): number | null {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number(value.trim())
+        : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.trunc(parsed);
+}
+
+function readProfileContextCapacity(profile: RuntimeProfile | null | undefined): number | null {
+  if (!profile) return null;
+  const options = profile.options ?? {};
+  for (const key of ["contextWindow", "nCtx", "n_ctx", "maxContextTokens", "promptTokenBudget"]) {
+    const value = readPositiveInteger(options[key]);
+    if (value != null) return value;
+  }
+  return null;
+}
+
+function readRuntimeProfileConcurrency(
+  profile: RuntimeProfile | null | undefined,
+  stage: RuntimeStage,
+): number {
+  const globalMax = env.COORDINATOR_MAX_CONCURRENT_TASKS;
+  if (!profile) return globalMax;
+
+  const options = profile.options ?? {};
+  const stageConcurrency =
+    options.stageConcurrency && typeof options.stageConcurrency === "object"
+      ? (options.stageConcurrency as Record<string, unknown>)
+      : null;
+  const configured =
+    readPositiveInteger(stageConcurrency?.[stage]) ??
+    readPositiveInteger(options.maxConcurrent) ??
+    readPositiveInteger(options.maxConcurrentTasks);
+  if (configured != null) return Math.max(1, Math.min(configured, globalMax));
+
+  if (profile.runtimeId === "qwen-local-agent") return 1;
+  return globalMax;
+}
+
+function runtimeProfileSemaphoreKey(profile: RuntimeProfile | null | undefined): string | null {
+  return profile?.id ? `runtime-profile:${profile.id}` : null;
+}
+
+function getPreferredContextFallbackProfileIds(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+}): string[] {
+  const project = findProjectById(input.task.projectId);
+  const ids = [
+    project?.defaultPlanRuntimeProfileId,
+    project?.defaultReviewRuntimeProfileId,
+    getAppDefaultRuntimeProfileId("planner"),
+    getAppDefaultRuntimeProfileId("reviewer"),
+    project?.defaultTaskRuntimeProfileId,
+    getAppDefaultRuntimeProfileId(input.stage),
+  ];
+  return [...new Set(ids.filter((id): id is string => Boolean(id)))];
+}
+
+function isRuntimeProfileCompatibleForContextFallback(input: {
+  currentProfile: RuntimeProfile | null;
+  candidate: RuntimeProfile;
+  preferredHeavyDefaultIds: Set<string>;
+  failedProfileIds: Set<string>;
+}): boolean {
+  const { currentProfile, candidate, preferredHeavyDefaultIds, failedProfileIds } = input;
+  if (!candidate.enabled) return false;
+  if (failedProfileIds.has(candidate.id)) return false;
+  if (currentProfile?.id && candidate.id === currentProfile.id) return false;
+
+  if (currentProfile) {
+    if (candidate.runtimeId !== currentProfile.runtimeId) return false;
+    if (candidate.providerId !== currentProfile.providerId) return false;
+    if ((candidate.transport ?? null) !== (currentProfile.transport ?? null)) return false;
+  }
+
+  const currentCapacity = readProfileContextCapacity(currentProfile);
+  const candidateCapacity = readProfileContextCapacity(candidate);
+  if (currentCapacity != null && candidateCapacity != null) {
+    return candidateCapacity > currentCapacity;
+  }
+  if (currentCapacity == null && candidateCapacity == null) {
+    return preferredHeavyDefaultIds.has(candidate.id);
+  }
+  return currentCapacity == null && candidateCapacity != null;
+}
+
+function selectContextFallbackProfile(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  currentProfile: RuntimeProfile | null;
+  failedProfileIds: Set<string>;
+}): RuntimeProfile | null {
+  const preferredIds = getPreferredContextFallbackProfileIds({
+    task: input.task,
+    stage: input.stage,
+  });
+  const preferredSet = new Set(preferredIds);
+  const profiles = listRuntimeProfileResponses({
+    projectId: input.task.projectId,
+    includeGlobal: true,
+    enabledOnly: true,
+  });
+  const byId = new Map(profiles.map((profile) => [profile.id, profile]));
+  const ordered = [
+    ...preferredIds
+      .map((id) => byId.get(id))
+      .filter((profile): profile is RuntimeProfile => Boolean(profile)),
+    ...profiles.filter((profile) => !preferredSet.has(profile.id)),
+  ];
+
+  return (
+    ordered.find((candidate) =>
+      isRuntimeProfileCompatibleForContextFallback({
+        currentProfile: input.currentProfile,
+        candidate,
+        preferredHeavyDefaultIds: preferredSet,
+        failedProfileIds: input.failedProfileIds,
+      }),
+    ) ?? null
+  );
+}
+
+function applyDurableRuntimeFallbackSelection(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  selection: ReturnType<typeof resolveEffectiveRuntimeProfile>;
+}): ReturnType<typeof resolveEffectiveRuntimeProfile> {
+  const fallback = readContextFallbackRuntimeOption(input.task.runtimeOptionsJson, input.stage);
+  if (!fallback) return input.selection;
+  const visibleProfiles = listRuntimeProfileResponses({
+    projectId: input.task.projectId,
+    includeGlobal: true,
+    enabledOnly: true,
+  });
+  const profile = visibleProfiles.find((entry) => entry.id === fallback.profileId) ?? null;
+  const currentProfile = input.selection.profile;
+  if (
+    !profile ||
+    !currentProfile ||
+    !isRuntimeProfileCompatibleForContextFallback({
+      currentProfile,
+      candidate: profile,
+      preferredHeavyDefaultIds: new Set(
+        getPreferredContextFallbackProfileIds({ task: input.task, stage: input.stage }),
+      ),
+      failedProfileIds: new Set(
+        readFailedContextProfileIds(input.task.runtimeOptionsJson, input.stage),
+      ),
+    })
+  ) {
+    clearContextFallbackForTask(input.task.id, input.stage);
+    log.warn(
+      {
+        taskId: input.task.id,
+        stage: input.stage,
+        fallbackProfileId: fallback.profileId,
+        currentProfileId: currentProfile?.id ?? null,
+      },
+      "Cleared invalid durable runtime fallback",
+    );
+    return input.selection;
+  }
+  setRuntimeStageFallbackProfile({
+    taskId: input.task.id,
+    stage: input.stage,
+    profileId: profile.id,
+    source: "task_override",
+  });
+  return {
+    ...input.selection,
+    source: "task_override",
+    profile,
+  };
+}
+
+function clearContextFallbackForTask(taskId: string, stage: RuntimeStage): void {
+  const latest = findTaskById(taskId);
+  if (!latest?.runtimeOptionsJson) return;
+  const nextRuntimeOptionsJson = clearContextFallbackRuntimeOption(
+    latest.runtimeOptionsJson,
+    stage,
+  );
+  if (nextRuntimeOptionsJson === latest.runtimeOptionsJson) return;
+  setTaskFields(taskId, {
+    runtimeOptionsJson: nextRuntimeOptionsJson,
+    updatedAt: new Date().toISOString(),
+  });
+  setRuntimeStageFallbackProfile({ taskId, stage, profileId: null });
+}
+
+function handleContextLengthRecovery(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  stageLabel: CoordinatorStage;
+  stageInProgress: TaskStatus;
+  title: string;
+  err: unknown;
+}): boolean {
+  const runtimeError = findRuntimeExecutionError(input.err);
+  if (runtimeError?.category !== "context_length") return false;
+
+  const nowIso = new Date().toISOString();
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const activeFallback = readContextFallbackRuntimeOption(
+    latestTask.runtimeOptionsJson,
+    input.stage,
+  );
+  const resolvedSelection = resolveEffectiveRuntimeProfile({
+    taskId: latestTask.id,
+    projectId: latestTask.projectId,
+    mode: input.stage,
+    systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
+  });
+  const failedProfile =
+    (activeFallback ? getRuntimeProfileResponseById(activeFallback.profileId) : null) ??
+    resolvedSelection.profile ??
+    null;
+  const failedProfileId = failedProfile?.id ?? activeFallback?.profileId ?? null;
+  const failedProfileIds = new Set([
+    ...readFailedContextProfileIds(latestTask.runtimeOptionsJson, input.stage),
+    ...(failedProfileId ? [failedProfileId] : []),
+  ]);
+  const fallback = selectContextFallbackProfile({
+    task: latestTask,
+    stage: input.stage,
+    currentProfile: failedProfile,
+    failedProfileIds,
+  });
+
+  if (fallback) {
+    const retryCount = (latestTask.retryCount ?? 0) + 1;
+    const backoffMinutes = getDeterministicBackoffMinutes(latestTask.retryCount ?? 0);
+    const retryAfter = new Date(Date.now() + backoffMinutes * 60_000).toISOString();
+    const runtimeOptionsJson = setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
+      stage: input.stage,
+      profileId: fallback.id,
+      previousProfileId: failedProfileId,
+      failedProfileId,
+      attempt: retryCount,
+      createdAt: nowIso,
+    });
+    const blockedReason =
+      `Runtime context limit recovery: ${input.stageLabel} exceeded the selected model context; ` +
+      `next attempt will use fallback runtime profile ${fallback.name} (${fallback.id}).`;
+    clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
+    updateTaskStatus(
+      latestTask.id,
+      "blocked_external",
+      {
+        blockedReason,
+        blockedFromStatus: input.stageInProgress,
+        retryAfter,
+        retryCount,
+        paused: false,
+        reworkRequested: false,
+        manualReviewRequired: false,
+        runtimeOptionsJson,
+      },
+      { title: input.title, fromStatus: input.stageInProgress },
+    );
+    appendTaskActivityLog(
+      latestTask.id,
+      `[${nowIso}] Context overflow scheduled one-shot runtime fallback: failedProfile=${failedProfileId ?? "none"} selectedProfile=${fallback.id} retryAfter=${retryAfter}`,
+    );
+    log.warn(
+      {
+        taskId: latestTask.id,
+        stage: input.stageLabel,
+        failedProfileId,
+        fallbackProfileId: fallback.id,
+        retryAfter,
+        retryCount,
+      },
+      "Scheduled one-shot runtime fallback after context length failure",
+    );
+    return true;
+  }
+
+  const runtimeOptionsJson = markContextProfileFailed(
+    activeFallback
+      ? clearContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, input.stage)
+      : latestTask.runtimeOptionsJson,
+    input.stage,
+    failedProfileId,
+  );
+  const failedDisplay = [...failedProfileIds].join(", ") || "none";
+  const blockedReason =
+    "operator_input_required: Request exceeded the model context limit. " +
+    `Select a larger compatible runtime profile for ${input.stageLabel}, or split/reduce the task scope before retry. ` +
+    `Context-failed profiles: ${failedDisplay}.`;
+  clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
+  updateTaskStatus(
+    latestTask.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: input.stageInProgress,
+      retryAfter: null,
+      retryCount: latestTask.retryCount ?? 0,
+      reworkRequested: false,
+      manualReviewRequired: false,
+      runtimeOptionsJson,
+    },
+    { title: input.title, fromStatus: input.stageInProgress },
+  );
+  appendTaskActivityLog(
+    latestTask.id,
+    `[${nowIso}] Context overflow requires operator input: ${truncateReason(blockedReason)}`,
+  );
+  log.error(
+    {
+      taskId: latestTask.id,
+      stage: input.stageLabel,
+      failedProfileId,
+      failedProfileIds: [...failedProfileIds],
+    },
+    "Context length failure has no compatible fallback profile",
+  );
+  return true;
 }
 
 function appendRuntimeBudgetActivity(task: TaskRow, stage: RuntimeStage): boolean {
@@ -1286,9 +1624,13 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     projectRoot: input.projectRoot,
     auditEvidenceUnits,
   });
+  const taskForEvidence =
+    input.phase === "pre_implementation"
+      ? { ...input.task, manualReviewRequired: false }
+      : input.task;
   const result = evaluateTaskCompletionEvidence({
     task: {
-      ...input.task,
+      ...taskForEvidence,
       expectedReportArtifactPath: artifact?.artifactPath ?? null,
       allowedEvidenceArtifactPaths,
       auditArtifactRole,
@@ -1814,6 +2156,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       fromStatus: sourceStatus,
       title: taskTitle,
       phase: "pre_implementation",
+      extra: { manualReviewRequired: false },
     })
   ) {
     return false;
@@ -1828,6 +2171,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
   try {
     await runStageWithTimeout(stage.runner, task.id, executionRoot, stage.label);
+    clearContextFallbackForTask(task.id, runtimeStageForCoordinatorStage(stage.label));
 
     flushActivityQueue(task.id);
     let latestTask: TaskWithHydratedFields = findTaskById(task.id) ?? task;
@@ -2133,6 +2477,24 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     ) {
       flushActivityQueue(task.id);
       return false;
+    }
+
+    const runtimeStage = runtimeStageForCoordinatorStage(stage.label);
+    if (
+      handleContextLengthRecovery({
+        task,
+        stage: runtimeStage,
+        stageLabel: stage.label,
+        stageInProgress: stage.inProgress,
+        title: taskTitle,
+        err,
+      })
+    ) {
+      flushActivityQueue(task.id);
+      return false;
+    }
+    if (findRuntimeExecutionError(err)?.category !== "context_length") {
+      clearContextFallbackForTask(task.id, runtimeStage);
     }
 
     const recovery = classifyStageError({
@@ -2546,6 +2908,23 @@ export async function pollAndProcess(): Promise<void> {
         mode: runtimeStage,
         systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(runtimeStage),
       });
+      const durableFallback = readContextFallbackRuntimeOption(
+        task.runtimeOptionsJson,
+        runtimeStage,
+      );
+      if (durableFallback) {
+        runtimeSelection = applyDurableRuntimeFallbackSelection({
+          task,
+          stage: runtimeStage,
+          selection: runtimeSelection,
+        });
+        if (runtimeSelection.profile?.id === durableFallback.profileId) {
+          appendTaskActivityLog(
+            task.id,
+            `[${new Date().toISOString()}] Runtime one-shot fallback before ${runtimeStage}: selectedProfile=${durableFallback.profileId} previousProfile=${durableFallback.previousProfileId ?? "none"}`,
+          );
+        }
+      }
       let gateDecision = evaluateRuntimeLimitGate(runtimeSelection.profile);
       if (gateDecision.blocked) {
         if (!shouldBlockOnRuntimeLimit(runtimeStage) && runtimeSelection.profile?.id) {
@@ -2593,6 +2972,27 @@ export async function pollAndProcess(): Promise<void> {
         continue;
       }
 
+      const runtimeProfileKey = runtimeProfileSemaphoreKey(runtimeSelection.profile);
+      const runtimeProfileMax = readRuntimeProfileConcurrency(
+        runtimeSelection.profile,
+        runtimeStage,
+      );
+      if (
+        runtimeProfileKey &&
+        runtimeProfileSemaphore.available(runtimeProfileKey, runtimeProfileMax) <= 0
+      ) {
+        log.debug(
+          {
+            taskId: task.id,
+            stage: stage.label,
+            runtimeProfileId: runtimeSelection.profile?.id ?? null,
+            runtimeProfileMax,
+          },
+          "Runtime profile at concurrency capacity, skipping task",
+        );
+        continue;
+      }
+
       if (!claimTask(task.id, COORDINATOR_ID, CLAIM_LOCK_DURATION_MS, stage.label)) {
         log.debug({ taskId: task.id, stage: stage.label }, "Task claim failed (already claimed)");
         continue;
@@ -2605,6 +3005,25 @@ export async function pollAndProcess(): Promise<void> {
         releaseTaskClaim(task.id, COORDINATOR_ID);
         log.debug({ stage: stage.label }, "Semaphore full after claim");
         break;
+      }
+
+      let acquiredRuntimeProfileKey: string | null = null;
+      if (runtimeProfileKey) {
+        if (!runtimeProfileSemaphore.tryAcquire(runtimeProfileKey, runtimeProfileMax)) {
+          stageSemaphore.release(stage.label);
+          releaseTaskClaim(task.id, COORDINATOR_ID);
+          log.debug(
+            {
+              taskId: task.id,
+              stage: stage.label,
+              runtimeProfileId: runtimeSelection.profile?.id ?? null,
+              runtimeProfileMax,
+            },
+            "Runtime profile semaphore full after claim",
+          );
+          continue;
+        }
+        acquiredRuntimeProfileKey = runtimeProfileKey;
       }
 
       projectSpawnCount.set(task.projectId, projectCount + 1);
@@ -2627,6 +3046,9 @@ export async function pollAndProcess(): Promise<void> {
         })
         .finally(() => {
           stageSemaphore.release(stage.label);
+          if (acquiredRuntimeProfileKey) {
+            runtimeProfileSemaphore.release(acquiredRuntimeProfileKey);
+          }
           releaseTaskClaim(task.id, COORDINATOR_ID);
         });
 

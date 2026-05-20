@@ -1306,10 +1306,10 @@ function isExplicitHiddenAuditScopeRoot(scopeRoot: string): boolean {
   return Boolean(firstSegment && AUDIT_REPAIR_HIDDEN_TOOLING_ROOTS.has(firstSegment));
 }
 
-function fileHasLineEvidence(projectRoot: string, path: string): boolean {
+function fileHasAuditRepairEvidence(projectRoot: string, path: string): boolean {
   try {
     const content = readFileSync(resolve(projectRoot, path), "utf8");
-    return content.split(/\r?\n/).some((line) => line.trim().length > 0);
+    return content.length === 0 || content.split(/\r?\n/).some((line) => line.trim().length > 0);
   } catch {
     return false;
   }
@@ -1356,6 +1356,33 @@ function firstAuditRepairLineEvidenceRef(projectRoot: string, path: string): str
   return null;
 }
 
+function firstAuditRepairEvidenceRef(projectRoot: string, path: string): string | null {
+  const lineRef = firstAuditRepairLineEvidenceRef(projectRoot, path);
+  if (lineRef) return lineRef;
+  try {
+    const absPath = resolve(projectRoot, path);
+    if (!existsSync(absPath)) return null;
+    const stat = statSync(absPath);
+    if (!stat.isFile()) return null;
+    const content = readFileSync(absPath, "utf8");
+    return content.length === 0 ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+function isEmptyAuditRepairEvidenceFile(projectRoot: string, path: string): boolean {
+  try {
+    const absPath = resolve(projectRoot, path);
+    if (!existsSync(absPath)) return false;
+    const stat = statSync(absPath);
+    if (!stat.isFile()) return false;
+    return readFileSync(absPath, "utf8").length === 0;
+  } catch {
+    return false;
+  }
+}
+
 function collectAuditRepairEvidenceFiles(
   projectRoot: string,
   scopeRoot: string,
@@ -1390,7 +1417,7 @@ function collectAuditRepairEvidenceFiles(
         if (
           isAuditRepairIgnoredFile(relativePath) ||
           (!allowHiddenTooling && isAuditRepairHiddenToolingPath(relativePath)) ||
-          !fileHasLineEvidence(projectRoot, relativePath)
+          !fileHasAuditRepairEvidence(projectRoot, relativePath)
         ) {
           continue;
         }
@@ -1408,7 +1435,7 @@ function hasReadableDeclaredAuditScope(projectRoot: string, description: string 
     roots.length > 0 &&
     roots.every((root) =>
       collectAuditRepairEvidenceFiles(projectRoot, root).some((file) =>
-        Boolean(firstAuditRepairLineEvidenceRef(projectRoot, file)),
+        Boolean(firstAuditRepairEvidenceRef(projectRoot, file)),
       ),
     )
   );
@@ -1483,7 +1510,7 @@ function diagnoseDeclaredAuditScopeRepairability(
   const unreadableRoots = roots.filter(
     (root) =>
       !collectAuditRepairEvidenceFiles(projectRoot, root).some((file) =>
-        Boolean(firstAuditRepairLineEvidenceRef(projectRoot, file)),
+        Boolean(firstAuditRepairEvidenceRef(projectRoot, file)),
       ),
   );
   if (unreadableRoots.length === 0) {
@@ -1891,10 +1918,30 @@ function buildDeterministicAuditReportRepairContent(input: {
     const files = collectAuditRepairEvidenceFiles(input.projectRoot, root);
     const inspectionTargets = files.slice(0, 3);
     const lineRefs = inspectionTargets
-      .map((file) => firstAuditRepairLineEvidenceRef(input.projectRoot, file))
+      .map((file) => firstAuditRepairEvidenceRef(input.projectRoot, file))
       .filter((ref): ref is string => Boolean(ref));
-    const gitArgs = ["grep", "-n", "-m", "1", ".", "--", root];
-    const command = runGitCapture(input.projectRoot, gitArgs);
+    const grepCommand = runGitCapture(input.projectRoot, [
+      "grep",
+      "-n",
+      "-m",
+      "1",
+      ".",
+      "--",
+      root,
+    ]);
+    const emptyTargets = inspectionTargets.filter((file) =>
+      isEmptyAuditRepairEvidenceFile(input.projectRoot, file),
+    );
+    const emptyContentCommand =
+      emptyTargets.length > 0
+        ? runGitCapture(input.projectRoot, ["hash-object", "--", ...emptyTargets])
+        : null;
+    const command =
+      emptyContentCommand?.exitCode === 0
+        ? emptyContentCommand
+        : grepCommand.exitCode === 0 || lineRefs.length === 0
+          ? grepCommand
+          : runGitCapture(input.projectRoot, ["ls-files", "--", ...inspectionTargets]);
     const evidenceUnit =
       lineRefs.length > 0 && command.exitCode === 0
         ? persistAuditEvidencePayload(
@@ -3065,6 +3112,7 @@ function terminalizeSourceInconclusiveAuditReport(input: {
   fallbackIssueCodes?: string[];
   sourceSnapshotId?: string | null;
   validationDetails?: Record<string, unknown>;
+  operatorInputRequired?: boolean;
 }): string {
   const issueCodes = input.validation
     ? auditReportValidationIssueCodes(input.validation)
@@ -3079,9 +3127,13 @@ function terminalizeSourceInconclusiveAuditReport(input: {
     ...(input.reasons ?? []).map((reason) => reason.trim()).filter(Boolean),
     ...(issueCodes.length > 0 ? [`validator issue codes: ${issueCodes.join(", ")}`] : []),
   ];
-  const terminalReason = `source_inconclusive: audit report ${input.artifactPath} is terminal non-trusted${
-    details.length > 0 ? `: ${details.join("; ")}` : "."
-  }`;
+  const terminalReason = input.operatorInputRequired
+    ? `operator_input_required: Audit report ${input.artifactPath} cannot be produced until a concrete readable audit scope is provided${
+        details.length > 0 ? `: ${details.join("; ")}` : "."
+      }`
+    : `source_inconclusive: audit report ${input.artifactPath} is terminal non-trusted${
+        details.length > 0 ? `: ${details.join("; ")}` : "."
+      }`;
   const validationDetails =
     input.validationDetails ??
     (input.validation
@@ -3139,7 +3191,7 @@ function terminalizeSourceInconclusiveAuditReport(input: {
   setTaskFields(input.task.id, {
     status: "blocked_external",
     reworkRequested: false,
-    manualReviewRequired: true,
+    manualReviewRequired: input.operatorInputRequired ? false : true,
     blockedReason: terminalReason,
     blockedFromStatus: input.task.status,
     retryAfter: null,
@@ -3590,6 +3642,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       artifactPath: expectedAuditReportArtifactPath,
       reasons: auditScopeRepairability.reasons,
       fallbackIssueCodes: auditScopeRepairability.issueCodes,
+      operatorInputRequired: true,
       validationDetails: {
         issues: auditScopeRepairability.issueCodes.map((code) => ({
           code,
@@ -3612,7 +3665,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       },
     });
     const resultText = [
-      "Audit report card has a non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction.",
+      "Audit report card has a non-repairable declared scope; waiting for operator input before runtime prompt construction.",
       `Report artifact: ${expectedAuditReportArtifactPath}`,
       `Declared scope roots: ${auditScopeRepairability.roots.join(", ") || "none"}`,
       `Diagnostics: ${auditScopeRepairability.reasons.join("; ")}`,
@@ -3621,14 +3674,14 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
-      manualReviewRequired: true,
+      manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
     logActivity(
       taskId,
       "Agent",
-      "Audit report card terminalized as source_inconclusive before runtime prompt construction: non-repairable declared scope",
+      "Audit report card is waiting for operator input before runtime prompt construction: non-repairable declared scope",
     );
     log.info(
       {

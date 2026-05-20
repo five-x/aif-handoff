@@ -379,6 +379,10 @@ describe("hooks - activity logging", () => {
 
     it("allows a report manifest to cite the actual persisted runtime evidence id", async () => {
       const root = initGitFixture();
+      execFileSync("git", ["checkout", "-b", "task/runtime-evidence-report"], {
+        cwd: root,
+        stdio: "ignore",
+      });
       testDb.current
         .update(projects)
         .set({ rootPath: root })
@@ -440,6 +444,11 @@ describe("hooks - activity logging", () => {
         }),
         "utf8",
       );
+      execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "Add audit report", "--no-verify"], {
+        cwd: root,
+        stdio: "ignore",
+      });
 
       const result = evaluateTaskCompletionEvidence({
         projectRoot: root,

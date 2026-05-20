@@ -168,8 +168,6 @@ import {
   fingerprintConfig,
   isSecretLikeConfigKey,
   summarizeRuntimeProfileConfig,
-  summarizeRuntimeProfileForAudit,
-  summarizeTaskRuntimeOverride,
   validateProjectConfigObject,
 } from "@aif/shared";
 import { getDb } from "@aif/shared/server";
@@ -273,6 +271,7 @@ function normalizeOperatorInputHoldPatch(
   ) {
     patch.paused = true;
     patch.retryAfter = null;
+    patch.manualReviewRequired = false;
   }
 }
 

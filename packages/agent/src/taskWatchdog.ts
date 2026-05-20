@@ -53,6 +53,8 @@ export function releaseDueBlockedTasks(): void {
       blockedFromStatus: null,
       retryAfter: null,
       retryCount: task.retryCount ?? 0,
+      paused: false,
+      manualReviewRequired: false,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });

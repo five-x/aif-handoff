@@ -116,6 +116,7 @@ describe("releaseDueBlockedTasks", () => {
       blockedFromStatus: "planning",
       retryAfter: pastTime,
       retryCount: 1,
+      manualReviewRequired: true,
       runtimeLimitSnapshotJson: JSON.stringify({
         source: "sdk_event",
         status: "blocked",
@@ -134,6 +135,8 @@ describe("releaseDueBlockedTasks", () => {
     expect(task?.status).toBe("planning");
     expect(task?.blockedReason).toBeNull();
     expect(task?.retryCount).toBe(1);
+    expect(task?.manualReviewRequired).toBe(false);
+    expect(task?.paused).toBe(false);
     expect(task?.runtimeLimitSnapshotJson).toBeNull();
   });
 

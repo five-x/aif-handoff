@@ -214,6 +214,84 @@ describe("auditReportValidator", () => {
     expect(result.existingReferencedPaths).toContain("src/config.ts");
   });
 
+  it("accepts empty-file no-findings only with command output that proves emptiness", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(join(root, "tests", "__init__.py"), "", "utf8");
+    const emptyHash = execFileSync("git", ["hash-object", "--", "tests/__init__.py"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    const text = [
+      "# Empty File Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-empty-1 for `tests/__init__.py` empty package marker drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `tests/__init__.py`",
+      "",
+      "Checked commands:",
+      "- Command `git hash-object -- tests/__init__.py` output:",
+      "```",
+      emptyHash,
+      "```",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["tests/__init__.py"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(result.substantiveEvidence).toBe(true);
+    expect(issueCodes(result)).not.toContain("missing_scope_coverage");
+  });
+
+  it.each([
+    ["echo path", "- Command `echo tests/__init__.py` output: `tests/__init__.py`"],
+    ["inventory path", "- Command `git ls-files -- tests/__init__.py` output: `tests/__init__.py`"],
+    [
+      "unrelated hash-object",
+      "- Command `git hash-object -- README.md` output: `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`",
+    ],
+  ])("rejects empty-file no-findings with unsupported %s evidence", (_label, commandLine) => {
+    const root = initRepo();
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(join(root, "tests", "__init__.py"), "", "utf8");
+    const text = [
+      "# Empty File Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-empty-1 for `tests/__init__.py` empty package marker drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `tests/__init__.py`",
+      "",
+      "Checked commands:",
+      commandLine,
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["tests/__init__.py"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toContain("missing_scope_coverage");
+    expect(issueCodes(result)).toContain("missing_substantive_evidence");
+  });
+
   it("keeps weak or discarded findings out of the final source classification", () => {
     const root = initRepo();
     const text = [

@@ -4161,6 +4161,64 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("insufficient_report_evidence");
   });
 
+  it("blocks empty-file audit reports that cite unsupported command output", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(join(root, "tests", "__init__.py"), "", "utf8");
+    execFileSync("git", ["add", "tests/__init__.py"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add empty marker", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-empty-echo"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "No validated findings.",
+        "Risk hypotheses: risk-empty-1 for `tests/__init__.py` empty marker drift was covered and absent.",
+        "",
+        "Checked files:",
+        "- `tests/__init__.py`",
+        "",
+        "Checked commands:",
+        "- Command `echo tests/__init__.py` output: `tests/__init__.py`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add weak empty audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-empty-echo-source-report",
+        title: "Audit empty source report",
+        description:
+          "Scope: tests/__init__.py\nReport artifact: reports/audit.md. Evidence requirements: support no-findings with checked files and commands.",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(result.evidence.auditReportValidation.sourceClassification).not.toBe(
+      "validated_no_findings",
+    );
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).toContain(
+      "missing_scope_coverage",
+    );
+    expect(codes(result)).toContain("insufficient_report_evidence");
+  });
+
   it("blocks audit reports that cite manifest evidence without runtime ledger evidence", () => {
     const root = initRepo();
     const taskId = "audit-ledger-required";
