@@ -214,6 +214,47 @@ describe("auditReportValidator", () => {
     expect(result.existingReferencedPaths).toContain("src/config.ts");
   });
 
+  it("accepts git grep output whose matched content starts with numbered list text", () => {
+    const root = initRepo();
+    const readmeLines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
+    readmeLines[19] = "1. Local inbox";
+    readmeLines[22] = "2. Shared Memory";
+    writeFileSync(join(root, "README.md"), `${readmeLines.join("\n")}\n`, "utf8");
+    const text = [
+      "# Architecture Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-readme-boundary for `README.md` ownership routing drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `README.md:20`",
+      "- `README.md:23`",
+      "",
+      "Checked commands:",
+      "- Command `git grep -n . -- README.md` output:",
+      "```",
+      "README.md:20:1. Local inbox",
+      "README.md:23:2. Shared Memory",
+      "```",
+      "",
+      "Absence reasoning: risk-readme-boundary covered `README.md:20`, `README.md:23`; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["README.md"],
+      reportArtifactPaths: ["audit/architecture-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.substantiveEvidence).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(issueCodes(result)).not.toContain("invalid_line_reference");
+  });
+
   it("accepts empty-file no-findings only with command output that proves emptiness", () => {
     const root = initRepo();
     mkdirSync(join(root, "tests"), { recursive: true });

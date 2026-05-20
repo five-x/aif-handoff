@@ -62,6 +62,18 @@ export interface AuditSourceEvidenceReader {
 const LINE_REF_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12}):(\d+)(?:(?::|[-\u2013])(\d+))?(?=$|[\s`'"\]),.;])/gi;
 
+function normalizeLineReferenceEnd(input: {
+  fullToken: string;
+  startLine: number;
+  rawEndLine: number | null;
+}): number {
+  if (input.rawEndLine == null) return input.startLine;
+  if (input.rawEndLine < input.startLine && /:\d+:\d+\b/.test(input.fullToken)) {
+    return input.startLine;
+  }
+  return input.rawEndLine;
+}
+
 const LOW_QUALITY_SYNTHESIS_PATTERNS = [
   /\b(?:123abc|abc123|1234567890abcdef|deadbeef|cafebabe)\b/i,
   /\b(?:root-commit|Date:\s+Mon May 10 12:34:56 2026|Author:\s+qwen-local-agent\s+<>|Signed-off-by:\s+qwen-local-agent\s+<>|commit\s+[0-9a-f]*0c0c[0-9a-f]*\b)/i,
@@ -245,7 +257,12 @@ export function collectExistingAuditLineEvidenceRefs(input: {
   for (const match of input.text.matchAll(LINE_REF_PATTERN)) {
     const path = normalizePath(match[1] ?? "");
     const startLine = Number(match[2]);
-    const endLine = match[3] ? Number(match[3]) : startLine;
+    const rawEndLine = match[3] ? Number(match[3]) : null;
+    const endLine = normalizeLineReferenceEnd({
+      fullToken: match[0] ?? "",
+      startLine,
+      rawEndLine,
+    });
     if (
       !path ||
       excludedPaths.has(normalizePathForComparison(path)) ||

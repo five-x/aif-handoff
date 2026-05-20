@@ -981,10 +981,13 @@ interface LineReference {
 }
 
 function extractLineReference(fullToken: string): LineReference | null {
-  const match = fullToken.match(/:(\d+)(?:(?::|[-\u2013])(\d+))?\b/);
+  const match = fullToken.match(/:(\d+)(?:(:|[-\u2013])(\d+))?\b/);
   if (!match) return null;
   const start = Number.parseInt(match[1], 10);
-  const end = match[2] ? Number.parseInt(match[2], 10) : start;
+  const separator = match[2] ?? null;
+  const parsedEnd = match[3] ? Number.parseInt(match[3], 10) : null;
+  const end =
+    separator === ":" && parsedEnd != null && parsedEnd < start ? start : (parsedEnd ?? start);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
   return { start, end };
 }
