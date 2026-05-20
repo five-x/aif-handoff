@@ -57,25 +57,6 @@ function sidecarOutput(previousFindingId: string): string {
   ].join("\n");
 }
 
-function cleanSidecarOutput(): string {
-  return [
-    "## Blocking Findings",
-    "- none",
-    "",
-    "## Advisories",
-    "- audit/runtime.md:1 was inspected for audit artifact trust.",
-    "",
-    "## Previous Findings",
-    "- none",
-    "",
-    "## Security Coverage",
-    "- secret_leaks | covered | Checked audit artifact text for raw secrets.",
-    "- permissions_sandbox | covered | Checked review remained read-only.",
-    "- unsafe_shell_network_file | covered | Checked artifact review scope only.",
-    "- dependency_config | covered | Checked no dependency/config change was introduced.",
-  ].join("\n");
-}
-
 describe("runReviewer", () => {
   beforeEach(() => {
     testDb.current = createTestDb();
@@ -343,7 +324,7 @@ describe("runReviewer", () => {
     expect(storedTask?.agentActivityLog).toContain("Tool: read_file audit/runtime.md");
   });
 
-  it("bounds sidecar review for audit report artifacts that fail deterministic validation", async () => {
+  it("uses deterministic blocker output for audit report artifacts that fail validation", async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-invalid-audit-report-"));
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
     writeFileSync(
@@ -360,8 +341,6 @@ describe("runReviewer", () => {
       ].join("\n"),
       "utf8",
     );
-    executeSubagentQueryMock.mockResolvedValue({ resultText: cleanSidecarOutput() });
-
     const db = testDb.current;
     db.insert(projects)
       .values({
@@ -400,20 +379,21 @@ describe("runReviewer", () => {
 
     await runReviewer("task-invalid-audit-reviewer", projectRoot);
 
-    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
-    for (const call of executeSubagentQueryMock.mock.calls) {
-      const input = call[0] as {
-        prompt: string;
-        maxTurns?: number;
-        repositoryInspectionToolBudget?: number;
-      };
-      expect(input.maxTurns).toBe(20);
-      expect(input.repositoryInspectionToolBudget).toBe(8);
-      expect(input.prompt).toContain("Audit artifact review scope:");
-      expect(input.prompt).toContain("Expected artifact: audit/runtime.md");
-      expect(input.prompt).toContain("missing_report_manifest");
-      expect(input.prompt).toContain("Use no more than 8 repository-inspection tool calls");
-    }
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-invalid-audit-reviewer"))
+      .get();
+    expect(storedTask?.reviewComments).toContain(
+      "- Deterministic Review: audit_report_validation_failed",
+    );
+    expect(storedTask?.reviewComments).toContain("missing_report_manifest");
+    expect(storedTask?.reviewComments).toContain("## Security Coverage");
+    expect(storedTask?.reviewComments).toContain("secret_leaks | not_checked");
+    expect(storedTask?.reviewComments).toContain(
+      "sidecar review was skipped to avoid budget-exhaustion contract failures",
+    );
   });
 
   it("accepts synthesis references to validated source report artifacts outside the current checkout", async () => {

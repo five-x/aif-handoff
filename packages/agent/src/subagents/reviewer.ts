@@ -30,6 +30,7 @@ import { buildTaskMemoryContext } from "../memoryContext.js";
 import { executeSubagentQuery, startHeartbeat } from "../subagentQuery.js";
 import {
   buildStructuredReviewComments,
+  createAutoReviewFindingId,
   formatPreviousFindingsForPrompt,
   parseStructuredSidecarOutput,
 } from "../reviewContract.js";
@@ -422,6 +423,70 @@ function buildDeterministicAuditReportReviewComments(input: {
   ].join("\n");
 }
 
+function buildDeterministicAuditReportInvalidReviewComments(input: {
+  strategy: AutoReviewStrategy;
+  iteration: number;
+  artifactPath: string;
+  validation: ReturnType<typeof validateAuditReportArtifact>;
+  previousFindings: AutoReviewFinding[];
+}): string {
+  const issueCodes = [
+    ...new Set(input.validation.issues.map((issue) => issue.code).filter(Boolean)),
+  ].sort();
+  const validationSummary = [
+    `manifestStatus=${input.validation.manifestStatus}`,
+    `sourceClassification=${input.validation.sourceClassification}`,
+    `issueCodes=${issueCodes.join(", ") || "unknown"}`,
+  ].join("; ");
+  const previousFindingLines =
+    input.previousFindings.length > 0
+      ? input.previousFindings.map(
+          (finding) =>
+            `- [${finding.id}] ${finding.source} | still_blocking | Deterministic audit report validation still rejects \`${input.artifactPath}\` (${validationSummary}). Rework the artifact before this blocker can be closed.`,
+        )
+      : ["- none"];
+  const blockingLines =
+    input.validation.issues.length > 0
+      ? input.validation.issues.map((issue) => {
+          const text = `Audit report validator blocked completion (${issue.code}): ${issue.message}`;
+          return `- [${createAutoReviewFindingId("review_gate", text)}] review_gate | ${text}`;
+        })
+      : [
+          `- [${createAutoReviewFindingId(
+            "review_gate",
+            "Audit report validator blocked completion: artifact is not trusted.",
+          )}] review_gate | Audit report validator blocked completion: artifact is not trusted.`,
+        ];
+
+  return [
+    "## Auto Review Metadata",
+    `- Strategy: ${input.strategy}`,
+    `- Review Iteration: ${input.iteration}`,
+    "- Deterministic Review: audit_report_validation_failed",
+    "",
+    "## Previous Findings",
+    ...previousFindingLines,
+    "",
+    "## Blocking Findings",
+    ...blockingLines,
+    "",
+    "## Advisories",
+    `- review_gate | Deterministic validation rejected \`${input.artifactPath}\`; sidecar review was skipped to avoid budget-exhaustion contract failures.`,
+    "",
+    "## Security Coverage",
+    "- secret_leaks | not_checked | Audit report artifact failed deterministic manifest/evidence validation before security sidecar evidence could be trusted.",
+    "- permissions_sandbox | not_checked | Audit report artifact failed deterministic manifest/evidence validation before permission or sandbox claims could be trusted.",
+    "- unsafe_shell_network_file | not_checked | Audit report artifact failed deterministic manifest/evidence validation before shell, network, or file-operation claims could be trusted.",
+    "- dependency_config | not_checked | Audit report artifact failed deterministic manifest/evidence validation before dependency/configuration claims could be trusted.",
+    "",
+    "## Raw Code Review",
+    `Deterministic review-gate rejected ${input.artifactPath}. ${validationSummary}.`,
+    "",
+    "## Raw Security Audit",
+    `Security sidecar skipped because deterministic audit report validation already produced blocking issues for ${input.artifactPath}.`,
+  ].join("\n");
+}
+
 function buildDeterministicAuditSynthesisInconclusiveReviewComments(input: {
   strategy: AutoReviewStrategy;
   iteration: number;
@@ -543,6 +608,12 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
     deterministicReviewValidation &&
     isTrustedValidAuditReportValidation(deterministicReviewValidation) &&
     previousFindings.every((finding) => finding.source === "review_gate");
+  const canUseDeterministicAuditReportInvalidReview =
+    roadmapArtifact &&
+    roadmapArtifact.role === "report" &&
+    deterministicReviewValidation &&
+    !isTrustedValidAuditReportValidation(deterministicReviewValidation) &&
+    deterministicReviewValidation.issues.length > 0;
 
   const deterministicSynthesisOutcome =
     roadmapArtifact?.role === "synthesis"
@@ -596,6 +667,36 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
         sourceClassification: deterministicReviewValidation.sourceClassification,
       },
       "Review stage completed deterministically for trusted audit report artifact",
+    );
+    return;
+  }
+
+  if (canUseDeterministicAuditReportInvalidReview) {
+    recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
+    const combinedReview = buildDeterministicAuditReportInvalidReviewComments({
+      strategy,
+      iteration: reviewIteration,
+      artifactPath: roadmapArtifact.artifactPath,
+      validation: deterministicReviewValidation,
+      previousFindings,
+    });
+    setTaskFields(taskId, {
+      reviewComments: combinedReview,
+      updatedAt: new Date().toISOString(),
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      "review stage blocked deterministically (audit report validation failed)",
+    );
+    flushActivityQueue(taskId);
+    log.info(
+      {
+        taskId,
+        artifactPath: roadmapArtifact.artifactPath,
+        issueCodes: auditReportValidationIssueCodes(deterministicReviewValidation),
+      },
+      "Review stage completed deterministically for invalid audit report artifact",
     );
     return;
   }

@@ -3150,6 +3150,8 @@ describe("runImplementer rework behavior", () => {
       "No runtime-captured substantive audit evidence IDs are available yet",
     );
     expect(call.prompt).toContain("If it lists `ev_*` IDs for evidence you use");
+    expect(call.prompt).toContain("Do not mention nonexistent repository paths anywhere");
+    expect(call.prompt).toContain('do not write the phrase "No validated findings" anywhere');
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
     expect(repaired).toContain("No validated findings.");
     expect(repaired).toContain("## Finding: Candidate");
