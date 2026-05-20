@@ -5,6 +5,7 @@ import { lstat, mkdtemp, mkdir, readdir, readFile, realpath, writeFile } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  computeAuditReportContentSha256,
   decideShellPermission,
   getPermissionExecutionPolicy,
   redactProviderText,
@@ -218,6 +219,20 @@ export const QWEN_LOCAL_AGENT_TOOLS = [
       name: "git_status",
       description: "Return git status for the configured project root.",
       parameters: objectSchema({}),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "compute_audit_report_hash",
+      description:
+        "Compute the audit-report-manifest contentSha256 for an existing audit report file after stripping audit-report-manifest blocks.",
+      parameters: objectSchema(
+        {
+          path: { type: "string", description: "Relative audit report file path." },
+        },
+        ["path"],
+      ),
     },
   },
   {
@@ -480,6 +495,7 @@ const TOOL_ARGUMENT_KEYS = {
   apply_patch: new Set(["patch"]),
   run_shell: new Set(["command", "args", "cwd", "timeoutMs"]),
   git_status: new Set(),
+  compute_audit_report_hash: new Set(["path"]),
   git_commit: new Set(["paths", "message"]),
 };
 function sanitizeToolArgumentValue(value, depth = 0) {
@@ -535,6 +551,8 @@ function summarizeToolUse(toolName, args) {
       return " git commit";
     case "git_status":
       return " git status";
+    case "compute_audit_report_hash":
+      return readString(args.path) ? ` ${redactProviderText(readString(args.path) ?? "")}` : "";
     case "apply_patch":
       return " unified diff";
     default:
@@ -1146,6 +1164,30 @@ async function gitStatusTool(context) {
     signal: context.signal,
   });
 }
+async function computeAuditReportHashTool(args, context) {
+  assertNotAborted(context.signal, "compute_audit_report_hash");
+  const target = await resolveExistingPathInsideProjectRoot(
+    context.projectRoot,
+    readString(args.path),
+    "audit report hash path",
+  );
+  assertWritePathAllowed(context, target.relativePath, "audit report hash path");
+  if (!target.info.isFile()) {
+    throw new RuntimeExecutionError(
+      "audit report hash path is not a file",
+      undefined,
+      "permission",
+    );
+  }
+  const content = await readFile(target.absolutePath, "utf8");
+  const contentSha256 = computeAuditReportContentSha256(content);
+  return {
+    ok: true,
+    output: `contentSha256 ${target.relativePath.replaceAll("\\", "/")} ${contentSha256}`,
+    exitCode: 0,
+    touchedFiles: [],
+  };
+}
 async function gitCommitTool(args, context) {
   assertNotAborted(context.signal, "git_commit");
   const paths = readStringArray(args.paths);
@@ -1230,6 +1272,8 @@ export async function executeQwenLocalTool(toolName, rawArgs, context) {
         return await runShellTool(args, context);
       case "git_status":
         return await gitStatusTool(context);
+      case "compute_audit_report_hash":
+        return await computeAuditReportHashTool(args, context);
       case "git_commit":
         return await gitCommitTool(args, context);
       default:

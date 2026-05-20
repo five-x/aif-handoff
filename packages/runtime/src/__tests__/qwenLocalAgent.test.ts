@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { computeAuditReportContentSha256 } from "@aif/shared";
 import { RuntimeExecutionError } from "../errors.js";
 import {
   buildQwenLocalAgentRequestBody,
@@ -93,6 +94,7 @@ describe("qwen-local-agent adapter", () => {
         "apply_patch",
         "run_shell",
         "git_status",
+        "compute_audit_report_hash",
         "git_commit",
       ]),
     );
@@ -896,6 +898,49 @@ describe("qwen-local-agent adapter", () => {
     );
     await expect(readFile(path.join(root, "tmp_hash.py"), "utf8")).rejects.toThrow();
     await expect(readFile(path.join(root, "tmp_body.txt"), "utf8")).rejects.toThrow();
+  });
+  it("computes audit report manifest hashes for the scoped artifact only", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-hash-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    const reportBody = [
+      "# Architecture Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Evidence: README.md:1",
+      "",
+    ].join("\n");
+    const report = [
+      reportBody,
+      "```audit-report-manifest",
+      '{"contentSha256":"PLACEHOLDER"}',
+      "```",
+      "",
+    ].join("\n");
+    await writeFile(path.join(root, "audit", "report.md"), report, "utf8");
+    await writeFile(path.join(root, "audit", "other.md"), report, "utf8");
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: { allowedWritePaths: ["audit/report.md"] },
+    });
+
+    const result = await executeQwenLocalTool(
+      "compute_audit_report_hash",
+      { path: "audit/report.md" },
+      context,
+    );
+    const denied = await executeQwenLocalTool(
+      "compute_audit_report_hash",
+      { path: "audit/other.md" },
+      context,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.touchedFiles).toEqual([]);
+    expect(result.output).toContain("contentSha256 audit/report.md");
+    expect(result.output).toContain(computeAuditReportContentSha256(report));
+    expect(denied.ok).toBe(false);
+    expect(denied.error).toContain("allowed write paths (audit/report.md)");
   });
   it("applies context search caps and skips binary/cache paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-search-cap-"));
