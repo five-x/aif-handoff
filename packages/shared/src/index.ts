@@ -460,6 +460,7 @@ export {
   extractSubstantiveAuditCommandEvidence,
   isAuditPublicReportOutcome,
   isInventoryAuditCommand,
+  isLowSignalAuditEvidenceLine,
   toAuditPublicReportOutcome,
   type AuditCommandEvidence,
   type AuditPublicReportOutcome,

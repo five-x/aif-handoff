@@ -208,6 +208,55 @@ export function isConservativeMetadataOnlyLineOne(input: {
   return false;
 }
 
+export function isLowSignalAuditEvidenceLine(input: {
+  path: string;
+  line: number;
+  text: string | null;
+}): boolean {
+  if (input.text == null) return true;
+  const trimmed = input.text.trim();
+  if (!trimmed) return true;
+  if (isConservativeMetadataOnlyLineOne(input)) return true;
+  if (/^(?:\/\/|\/\*|\*\/?|\*|<!--|-->)/.test(trimmed)) return true;
+  if (/^#(?!\s*(?:!|include\b|define\b))/.test(trimmed)) return true;
+  if (/^(?:#{1,6}\s+|```|~~~)/.test(trimmed)) return true;
+  if (/^[{}()[\],;]+$/.test(trimmed)) return true;
+
+  if (/\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(input.path)) {
+    if (/^import(?:\s+type)?\s+/i.test(trimmed)) return true;
+    if (/^export\s+(?:type\s+)?(?:\{[^}]*\}|[A-Za-z0-9_$]+\s+from)\s+from\s+/i.test(trimmed)) {
+      return true;
+    }
+    if (/^(?:const|let|var)\s+\w+\s*=\s*require\(/i.test(trimmed)) return true;
+  }
+
+  if (/\.py$/i.test(input.path)) {
+    if (/^(?:from\s+[\w.]+\s+import\s+|import\s+[\w., ]+)/i.test(trimmed)) return true;
+    if (/^if\s+__name__\s*==\s*["']__main__["']\s*:/i.test(trimmed)) return true;
+    if (/^(?:raise\s+SystemExit|sys\.exit)\s*\(/i.test(trimmed)) return true;
+    if (/^pass$/i.test(trimmed)) return true;
+  }
+
+  if (/\.(?:java|kt|scala)$/i.test(input.path)) {
+    if (/^(?:package|import)\s+[\w.*]+;?$/i.test(trimmed)) return true;
+  }
+
+  if (/\.go$/i.test(input.path)) {
+    if (/^package\s+\w+$/i.test(trimmed)) return true;
+    if (/^import\s+(?:\(|"[^"]+")$/i.test(trimmed)) return true;
+  }
+
+  if (/\.rs$/i.test(input.path)) {
+    if (/^(?:use|mod)\s+[\w:]+(?:\s+as\s+\w+)?;?$/i.test(trimmed)) return true;
+  }
+
+  if (/\.(?:c|cc|cpp|h|hpp)$/i.test(input.path) && /^#\s*(?:include|define)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}
+
 export function hasScopedNoFindingsRiskClaim(text: string): boolean {
   if (!/\bNo validated findings\b/i.test(text)) return false;
   const scopedPathToken =
@@ -281,7 +330,7 @@ export function collectExistingAuditLineEvidenceRefs(input: {
       const lineText = input.sourceReader?.fileLine
         ? input.sourceReader.fileLine(path, startLine)
         : fileLine(input.projectRoot, path, startLine);
-      if (isConservativeMetadataOnlyLineOne({ path, line: startLine, text: lineText })) {
+      if (isLowSignalAuditEvidenceLine({ path, line: startLine, text: lineText })) {
         continue;
       }
     }

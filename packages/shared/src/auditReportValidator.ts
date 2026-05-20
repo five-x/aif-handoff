@@ -7,7 +7,7 @@ import {
   extractSubstantiveAuditCommandEvidence,
   hasScopedNoFindingsRiskClaim,
   hasEmptyFileInspectionEvidence,
-  isConservativeMetadataOnlyLineOne,
+  isLowSignalAuditEvidenceLine,
   isAuditPublicReportOutcome,
   toAuditPublicReportOutcome,
   type AuditPublicReportOutcome,
@@ -1134,11 +1134,7 @@ function collectExistingRefsWithLineNumbers(
       ) {
         const lineText = sourceReader.fileLine(normalized, reference.start);
         if (
-          isConservativeMetadataOnlyLineOne({
-            path: normalized,
-            line: reference.start,
-            text: lineText,
-          })
+          isLowSignalAuditEvidenceLine({ path: normalized, line: reference.start, text: lineText })
         ) {
           continue;
         }

@@ -214,6 +214,118 @@ describe("auditReportValidator", () => {
     expect(result.existingReferencedPaths).toContain("src/config.ts");
   });
 
+  it("rejects no-findings reports backed only by import and bootstrap line citations", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot", "service.py"),
+      [
+        "from pathlib import Path",
+        "import os",
+        "",
+        'if __name__ == "__main__":',
+        "    raise SystemExit(main())",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const text = [
+      "# Security Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-security for `src/bot/service.py` credential and auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/bot/service.py:1`",
+      "- `src/bot/service.py:2`",
+      "- `src/bot/service.py:4`",
+      "- `src/bot/service.py:5`",
+      "",
+      "Checked commands:",
+      "- Command `git grep -n . -- src/bot/service.py` output:",
+      "```",
+      "src/bot/service.py:1:from pathlib import Path",
+      "src/bot/service.py:2:import os",
+      'src/bot/service.py:4:if __name__ == "__main__":',
+      "src/bot/service.py:5:    raise SystemExit(main())",
+      "```",
+      '- Command `git grep -n -E "credential|secret|auth" -- src/bot/service.py` output:',
+      "```",
+      "command produced no output",
+      "```",
+      "",
+      "Absence reasoning: risk-security covered `src/bot/service.py:1`, `src/bot/service.py:2`, `src/bot/service.py:4`, `src/bot/service.py:5`; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/bot/service.py"],
+      reportArtifactPaths: ["audit/security-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.substantiveEvidence).toBe(false);
+    expect(result.sourceClassification).toBe("inventory_only_invalid");
+    expect(issueCodes(result)).toContain("missing_scope_coverage");
+    expect(issueCodes(result)).toContain("missing_substantive_evidence");
+  });
+
+  it("accepts no-findings reports that cite implementation lines instead of import scaffolding", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot", "service.py"),
+      [
+        "from pathlib import Path",
+        "",
+        "class Settings:",
+        '    auth_mode = "strict"',
+        "",
+        "def credential_paths() -> list[Path]:",
+        "    return []",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const text = [
+      "# Security Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-security for `src/bot/service.py` credential and auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/bot/service.py:3`",
+      "- `src/bot/service.py:4`",
+      "- `src/bot/service.py:6`",
+      "- `src/bot/service.py:7`",
+      "",
+      "Checked commands:",
+      '- Command `git grep -n -E "auth_mode|credential_paths" -- src/bot/service.py` output:',
+      "```",
+      'src/bot/service.py:4:    auth_mode = "strict"',
+      "src/bot/service.py:6:def credential_paths() -> list[Path]:",
+      "```",
+      "",
+      "Absence reasoning: risk-security covered `src/bot/service.py:3`, `src/bot/service.py:4`, `src/bot/service.py:6`, `src/bot/service.py:7`; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/bot/service.py"],
+      reportArtifactPaths: ["audit/security-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.substantiveEvidence).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+  });
+
   it("accepts git grep output whose matched content starts with numbered list text", () => {
     const root = initRepo();
     const readmeLines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);

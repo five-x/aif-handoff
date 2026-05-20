@@ -3414,7 +3414,7 @@ describe("runImplementer rework behavior", () => {
     });
     mkdirSync(join(projectRoot, "src"), { recursive: true });
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
-    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nruntime notes\n", "utf8");
     writeFileSync(join(projectRoot, "src", "alpha.ts"), "export const alpha = 1;\n", "utf8");
     writeFileSync(join(projectRoot, "src", "beta.ts"), "export const beta = 1;\n", "utf8");
     writeFileSync(join(projectRoot, "src", "gamma.ts"), "export const gamma = 1;\n", "utf8");

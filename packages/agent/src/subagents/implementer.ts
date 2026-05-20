@@ -32,6 +32,7 @@ import {
   extractAuditSynthesisCommandEvidence,
   formatAuditSynthesisOutcomeForArtifact,
   hashAifPlanManifest,
+  isLowSignalAuditEvidenceLine,
   resolveAuditPlanId,
   toAuditPublicReportOutcome,
   type AuditCardDecision,
@@ -1315,22 +1316,6 @@ function fileHasAuditRepairEvidence(projectRoot: string, path: string): boolean 
   }
 }
 
-function isAuditRepairMetadataOnlyLineOne(input: {
-  path: string;
-  line: number;
-  text: string | null;
-}): boolean {
-  if (input.line !== 1 || input.text == null) return false;
-  const trimmed = input.text.trim();
-  if (!trimmed) return true;
-  if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|kt|cs|c|cpp|h|hpp)$/i.test(input.path)) {
-    return /^(?:\/\/|\/\*|\*|#(?!\s*(?:!|include\b|define\b))|<!--)/.test(trimmed);
-  }
-  if (/^(?:---|\+\+\+|#\s+|<!--|\/\/|\/\*|\*)/.test(trimmed)) return true;
-  if (/^[{[]$/.test(trimmed)) return true;
-  return false;
-}
-
 function firstAuditRepairLineEvidenceRef(projectRoot: string, path: string): string | null {
   return auditRepairLineEvidenceRefs(projectRoot, path, 1)[0] ?? null;
 }
@@ -1345,7 +1330,7 @@ function auditRepairLineEvidenceRefs(projectRoot: string, path: string, limit = 
       if (!line.trim()) continue;
       const lineNumber = index + 1;
       if (
-        isAuditRepairMetadataOnlyLineOne({
+        isLowSignalAuditEvidenceLine({
           path,
           line: lineNumber,
           text: line,
@@ -1733,8 +1718,43 @@ function currentAuditReportSourceSnapshot(projectRoot: string): AuditReportSourc
   };
 }
 
-function firstAuditRepairOutputLine(output: string): string {
-  return output.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "<empty>";
+function parseAuditRepairGrepOutputLine(line: string): {
+  path: string;
+  line: number;
+  text: string;
+} | null {
+  const match = line.match(/^(.+?):(\d+):(.*)$/);
+  if (!match) return null;
+  const lineNumber = Number(match[2]);
+  if (!Number.isInteger(lineNumber) || lineNumber < 1) return null;
+  return {
+    path: (match[1] ?? "").replaceAll("\\", "/"),
+    line: lineNumber,
+    text: match[3] ?? "",
+  };
+}
+
+function firstAuditRepairOutputLine(output: string, preferredRefs: string[] = []): string {
+  const lines = output.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const preferred = new Set(preferredRefs);
+  for (const line of lines) {
+    const parsed = parseAuditRepairGrepOutputLine(line);
+    if (parsed && preferred.has(`${parsed.path}:${parsed.line}`)) return line;
+  }
+  for (const line of lines) {
+    const parsed = parseAuditRepairGrepOutputLine(line);
+    if (
+      parsed &&
+      !isLowSignalAuditEvidenceLine({
+        path: parsed.path,
+        line: parsed.line,
+        text: parsed.text,
+      })
+    ) {
+      return line;
+    }
+  }
+  return lines[0] ?? "<empty>";
 }
 
 function buildAuditReportManifest(input: {
@@ -2011,7 +2031,7 @@ function buildDeterministicAuditReportRepairContent(input: {
         const hasSubstantiveRiskEvidence =
           files.length > 0 &&
           pattern !== null &&
-          command.exitCode === 0 &&
+          (command.exitCode === 0 || command.exitCode === 1) &&
           command.output.trim().length > 0;
         const evidenceUnit = hasSubstantiveRiskEvidence
           ? persistAuditEvidencePayload(
@@ -2070,6 +2090,12 @@ function buildDeterministicAuditReportRepairContent(input: {
     if (!hasBoundEvidence) {
       decisionReasons.push(`Risk ${risk.id} has no bound scoped source evidence.`);
     }
+    if (
+      risk.terms.length > 0 &&
+      !riskEvidence.some((entry) => entry.riskId === risk.id && entry.evidenceUnit !== null)
+    ) {
+      decisionReasons.push(`Risk ${risk.id} has no captured risk-specific command evidence.`);
+    }
   }
   const decision: AuditReportRepairDecision = {
     outcome: decisionReasons.length === 0 ? "validated_no_findings" : "source_inconclusive",
@@ -2121,7 +2147,7 @@ function buildDeterministicAuditReportRepairContent(input: {
         entry.lineRefs.length > 0
           ? entry.lineRefs.map((ref) => `\`${ref}\``).join(", ")
           : "No tracked file evidence found";
-      return `| \`${entry.root}\` | ${evidence} | Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\` |`;
+      return `| \`${entry.root}\` | ${evidence} | Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output, entry.lineRefs)}\` |`;
     }),
     ...(decision.outcome === "validated_no_findings"
       ? [
