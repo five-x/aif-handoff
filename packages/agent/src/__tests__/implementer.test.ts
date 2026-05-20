@@ -361,19 +361,20 @@ describe("runImplementer rework behavior", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-empty-file-scope-audit"))
       .get();
-    expect(updatedTask?.blockedReason).toBeNull();
-    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.manualReviewRequired).toBe(true);
     expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
+      "Deterministic audit report repair completed as source_inconclusive",
     );
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-empty-file-scope-audit");
     if (!artifact) throw new Error("missing empty scope artifact");
-    expect(artifact.state).toBe("valid");
+    expect(artifact.state).toBe("source_inconclusive");
     const report = readFileSync(join(projectRoot, "audit", "empty-marker.md"), "utf8");
     expect(report).toContain("`tests/__init__.py`");
     expect(report).not.toContain("`tests/__init__.py:1`");
     const manifest = readAuditReportManifest(report);
+    expect(manifest.outcome).toBe("source_inconclusive");
     expect(manifest.scopeCoverage).toContainEqual(
       expect.objectContaining({
         root: "tests/__init__.py",
@@ -394,7 +395,7 @@ describe("runImplementer rework behavior", () => {
       }),
       requireLedgerEvidence: true,
     });
-    expect(validation.ok).toBe(true);
+    expect(validation.sourceClassification).not.toBe("validated_no_findings");
   });
 
   it("routes readable generated audit report cards through runtime on first run", async () => {
@@ -2048,7 +2049,7 @@ describe("runImplementer rework behavior", () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 
-  it("deterministically rewrites governance-only audit report rework", async () => {
+  it("routes governance-only audit report rework back to runtime before repair marker", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -2144,41 +2145,28 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-deterministic-repair", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(queryMock).toHaveBeenCalledTimes(1);
     const repaired = readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8");
-    expect(repaired).toContain("No validated findings.");
-    expect(repaired).toContain("`README.md:2`");
-    expect(repaired).toContain("`AGENTS.md:2`");
-    expect(repaired).toContain("`pyproject.toml:1`");
-    expect(repaired).toContain("`src/config.py:1`");
-    expect(repaired).not.toContain("Missing Ownership Clarity");
-    expect(repaired).not.toContain("1234567");
-    expect(repaired).toContain("```audit-report-manifest");
-    const manifest = readAuditReportManifest(repaired);
-    expect(manifest.outcome).toBe("validated_no_findings");
-    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-readme-md-audit-coverage");
+    expect(repaired).toContain("Missing Ownership Clarity");
+    expect(repaired).not.toContain("nf-deterministic-repair");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-deterministic-repair");
     if (!artifact) throw new Error("missing deterministic repair artifact");
-    expect(artifact.state).toBe("valid");
-    expect(artifact.failureFamily).toBeNull();
+    expect(artifact.state).toBe("invalid");
+    expect(artifact.failureFamily).toBe("invalid_artifact_contract");
     const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
-    expect(attempts).toHaveLength(2);
+    expect(attempts).toHaveLength(1);
     expect(attempts[0]?.state).toBe("invalid");
-    expect(attempts[1]?.state).toBe("valid");
-    expect(attempts[1]?.classification).toBe("validated_no_findings");
-    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-deterministic-repair"))
       .get();
-    expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
-    );
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
   }, 60_000);
 
-  it("deterministically rewrites structurally invalid audit validator reports", async () => {
+  it("routes structurally invalid audit validator reports back to runtime before repair marker", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -2259,33 +2247,24 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-repeated-validator-repair", projectRoot);
 
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(queryMock).toHaveBeenCalledTimes(1);
     const repaired = readFileSync(join(projectRoot, "audit", "security.md"), "utf8");
     expect(repaired).toContain("No validated findings.");
-    expect(repaired).toContain("`README.md:2`");
-    expect(repaired).toContain("`src/alpha.ts:1`");
-    expect(repaired).toContain("`src/beta.ts:1`");
-    expect(repaired).toContain("`src/gamma.ts:1`");
-    expect(repaired).not.toContain("Candidate");
-    expect(repaired).not.toContain("would show");
-    expect(repaired).toContain("```audit-report-manifest");
-    const manifest = readAuditReportManifest(repaired);
-    expect(manifest.outcome).toBe("validated_no_findings");
-    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-src-audit-coverage");
+    expect(repaired).toContain("Candidate");
+    expect(repaired).toContain("would show");
+    expect(repaired).not.toContain("nf-deterministic-repair");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-validator-repair");
     if (!artifact) throw new Error("missing repeated validator repair artifact");
-    expect(artifact.state).toBe("valid");
+    expect(artifact.state).toBe("expected");
     expect(artifact.failureFamily).toBeNull();
-    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-repeated-validator-repair"))
       .get();
-    expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.implementationLog).toContain(
-      "Deterministic audit report repair completed from scoped source evidence and passed strict validation",
-    );
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
   }, 60_000);
 
   it("routes first-run readable audit report artifacts to runtime source audit", async () => {
@@ -2797,6 +2776,8 @@ describe("runImplementer rework behavior", () => {
         plan: "## Plan\n- [ ] Repair audit report",
         reworkRequested: true,
         useSubagents: true,
+        blockedReason:
+          "invalid_artifact_content: audit_evidence_repair_required (missing_report_manifest): missing source report manifest.",
         reviewComments: "## Blocking Findings\n- Missing declared source scope.",
         autoReviewStateJson: JSON.stringify({
           strategy: "full_re_review",
@@ -2903,6 +2884,8 @@ describe("runImplementer rework behavior", () => {
           plan: "## Plan\n- [ ] Repair audit report",
           reworkRequested: true,
           useSubagents: true,
+          blockedReason:
+            "invalid_artifact_content: audit_evidence_repair_required (missing_report_manifest): missing source report manifest.",
           reviewComments:
             "## Blocking Findings\n- Hidden tooling evidence is not product evidence.",
           autoReviewStateJson: JSON.stringify({
@@ -3071,7 +3054,7 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
-  it("repairs explicit readable product scope to validated no-findings with scoped evidence", async () => {
+  it("terminalizes deterministic no-findings repair for readable product scope as non-trusted", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -3124,6 +3107,8 @@ describe("runImplementer rework behavior", () => {
         status: "implementing",
         plan: "## Plan\n- [ ] Repair audit report",
         reworkRequested: true,
+        blockedReason:
+          "invalid_artifact_content: audit_evidence_repair_required (missing_report_manifest): missing source report manifest.",
         useSubagents: true,
         reviewComments:
           "## Blocking Findings\n- Generic source presence is not risk-specific evidence.",
@@ -3158,29 +3143,35 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-generic-evidence-repair", projectRoot);
 
+    expect(queryMock).not.toHaveBeenCalled();
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
-    expect(repaired).toContain("No validated findings.");
-    expect(repaired).toContain("Absence reasoning: risk-timeout covered `src/app.ts:1`");
+    expect(repaired).toContain("Audit source inconclusive.");
+    expect(repaired).toContain("Risk risk-timeout has no captured risk-specific command evidence.");
     expect(repaired).toContain("`src/app.ts:1`");
     const manifest = readAuditReportManifest(repaired);
-    expect(manifest.outcome).toBe("validated_no_findings");
-    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-timeout");
+    expect(manifest.outcome).toBe("source_inconclusive");
+    expect(manifest.noFindingsClaims).toEqual([]);
     expect(JSON.stringify(manifest.riskHypotheses)).toContain("risk-timeout");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-generic-evidence-repair");
     if (!artifact) throw new Error("missing generic evidence repair artifact");
-    expect(artifact.state).toBe("valid");
-    expect(artifact.failureFamily).toBeNull();
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
     expect(listRoadmapBatchArtifactAttempts(artifact.id)[0]?.classification).toBe(
-      "validated_no_findings",
+      "source_inconclusive",
     );
-    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-generic-evidence-repair"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.implementationLog).toContain("passed strict validation");
+    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed as source_inconclusive",
+    );
+    expect(updatedTask?.implementationLog).toContain("missing_substantive_evidence");
   });
 
   it("keeps incidental paths inside scoped command output out of repaired audit references", async () => {
@@ -3245,6 +3236,8 @@ describe("runImplementer rework behavior", () => {
         status: "implementing",
         plan: "## Plan\n- [ ] Repair audit report",
         reworkRequested: true,
+        blockedReason:
+          "invalid_artifact_content: audit_evidence_repair_required (missing_report_manifest): missing source report manifest.",
         useSubagents: true,
         autoReviewStateJson: JSON.stringify({
           strategy: "full_re_review",
@@ -3277,9 +3270,11 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-scoped-config-repair", projectRoot);
 
+    expect(queryMock).not.toHaveBeenCalled();
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
     expect(repaired).toContain("No validated findings.");
     expect(repaired).toContain("`.ai-factory/config.yaml:1`");
+    expect(repaired).toContain("nf-deterministic-repair");
     expect(repaired).not.toContain(".ai-factory/DESCRIPTION.md");
     expect(repaired).not.toContain(".ai-factory/ARCHITECTURE.md");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-scoped-config-repair");
@@ -3300,12 +3295,13 @@ describe("runImplementer rework behavior", () => {
       auditEvidenceUnits,
       requireLedgerEvidence: true,
     });
-    expect(validation.ok).toBe(true);
+    expect(validation.ok).toBe(false);
+    expect(validation.issues.map((issue) => issue.code)).toContain("deterministic_fallback_report");
     expect(validation.missingReferencedPaths).toEqual([]);
-    expect(artifact.state).toBe("valid");
-    expect(artifact.failureFamily).toBeNull();
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
     expect(listRoadmapBatchArtifactAttempts(artifact.id)[0]?.classification).toBe(
-      "validated_no_findings",
+      "source_inconclusive",
     );
     const updatedTask = db
       .select()
@@ -3313,11 +3309,13 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-audit-scoped-config-repair"))
       .get();
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.blockedReason).toBeNull();
-    expect(updatedTask?.implementationLog).toContain("passed strict validation");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive");
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed as source_inconclusive",
+    );
   });
 
-  it("keeps deterministic no-findings repair trusted when evidence is risk-specific", async () => {
+  it("routes risk-specific audit report repair back to runtime before repair marker", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
@@ -3407,41 +3405,22 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-risk-specific-repair", projectRoot);
 
+    expect(queryMock).toHaveBeenCalledTimes(1);
     const repaired = readFileSync(join(projectRoot, "audit", "risk-specific.md"), "utf8");
-    expect(repaired).toContain("No validated findings.");
-    expect(repaired).toContain("risk-timeout");
-    expect(repaired).toContain("`src/app.ts:1`");
-    const manifest = readAuditReportManifest(repaired);
-    expect(manifest.outcome).toBe("validated_no_findings");
-    expect(JSON.stringify(manifest.noFindingsClaims)).toContain("risk-timeout");
+    expect(repaired).toContain("## Finding: Candidate");
+    expect(repaired).not.toContain("nf-deterministic-repair");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-risk-specific-repair");
     if (!artifact) throw new Error("missing risk-specific repair artifact");
-    expect(artifact.state).toBe("valid");
+    expect(artifact.state).toBe("expected");
     expect(artifact.failureFamily).toBeNull();
-    const auditEvidenceUnits = listAuditEvidenceEvents({
-      taskId: "task-audit-risk-specific-repair",
-      auditPlanId: `batch:${artifact.batchId}:task:task-audit-risk-specific-repair`,
-    });
-    const validation = validateAuditReportArtifact({
-      text: repaired,
-      projectRoot,
-      taskId: "task-audit-risk-specific-repair",
-      roadmapBatchId: artifact.batchId,
-      roadmapAlias: artifact.roadmapAlias,
-      taskDescription: description,
-      reportArtifactPaths: ["audit/risk-specific.md"],
-      requireProposedFix: true,
-      auditEvidenceUnits,
-      requireLedgerEvidence: true,
-    });
-    expect(validation.ok).toBe(true);
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-risk-specific-repair"))
       .get();
-    expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.blockedReason).toBeNull();
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
+    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
   });
 
   it("skips runtime repair when retrying an already-valid audit report after timeout", async () => {

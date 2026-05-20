@@ -194,7 +194,8 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   },
   {
     code: "deterministic_fallback_report",
-    pattern: /\bprevious candidate findings did not meet the audit finding contract\b/i,
+    pattern:
+      /\b(?:previous candidate findings did not meet the audit finding contract|nf-deterministic-repair|Deterministic repair used scoped source inspections)\b/i,
     message:
       "Report artifact contains a template no-findings conclusion from deterministic repair instead of a source-specific audit decision.",
   },

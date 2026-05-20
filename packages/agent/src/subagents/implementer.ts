@@ -1032,35 +1032,13 @@ function shouldUseDeterministicAuditReportRepair(
     task.reviewComments ?? "",
     ...(task.autoReviewState?.findings.map((finding) => finding.text) ?? []),
   ].join("\n");
-  if (
-    /\b(?:governance_observation_as_finding|governance\/documentation observations|synthetic-looking git|placeholder commit hash|fake command output)\b/i.test(
-      text,
-    )
-  ) {
-    return true;
-  }
 
   const reviewIteration = Math.max(
     task.autoReviewState?.iteration ?? 0,
     extractReviewIterationFromText(task.reviewComments),
   );
-  const validatorIssuePattern =
-    /\b(?:audit_evidence_|contradictory_findings_and_no_findings|invalid_or_missing_file_references|invalid_report_manifest|manifest_|missing_audit_evidence_ref|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|unsupported_report_manifest_version|unverified_inspection_claim|low_quality_report_evidence|insufficient_report_evidence)\b/i;
-  const deterministicReportIssuePattern =
-    /\b(?:audit_evidence_|contradictory_findings_and_no_findings|invalid_line_reference|invalid_report_manifest|manifest_|missing_audit_evidence_ref|missing_declared_scope_root|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|unsupported_report_manifest_version|unverified_inspection_claim)\b/i;
-  if (
-    reviewIteration >= 1 &&
-    currentReportIssueCodes.some((code) => deterministicReportIssuePattern.test(code))
-  ) {
-    return true;
-  }
-
-  return (
-    reviewIteration >= 2 &&
-    ((/\bAudit report validator blocked completion\b/i.test(text) &&
-      validatorIssuePattern.test(text)) ||
-      currentReportIssueCodes.some((code) => validatorIssuePattern.test(code)))
-  );
+  void currentReportIssueCodes;
+  return reviewIteration >= 2 && new RegExp(AUDIT_EVIDENCE_REPAIR_MARKER, "i").test(text);
 }
 
 function hasAttemptedDeterministicAuditReportRepair(
@@ -2048,8 +2026,18 @@ function buildDeterministicAuditReportRepairContent(input: {
         const hasSubstantiveRiskEvidence =
           files.length > 0 &&
           pattern !== null &&
-          (command.exitCode === 0 || command.exitCode === 1) &&
-          command.output.trim().length > 0;
+          command.exitCode === 0 &&
+          command.output.split(/\r?\n/).some((line) => {
+            const parsed = parseAuditRepairGrepOutputLine(line);
+            return (
+              parsed !== null &&
+              !isLowSignalAuditEvidenceLine({
+                path: parsed.path,
+                line: parsed.line,
+                text: parsed.text,
+              })
+            );
+          });
         const evidenceUnit = hasSubstantiveRiskEvidence
           ? persistAuditEvidencePayload(
               input.task.id,
@@ -3939,7 +3927,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     return;
   }
 
-  if (expectedAuditReportArtifactPath && task.reworkRequested) {
+  if (expectedAuditReportArtifactPath && task.reworkRequested && !localAuditReportScopeRepairable) {
     const nowIso = new Date().toISOString();
     const terminalReason = terminalizeSourceInconclusiveAuditReport({
       task,

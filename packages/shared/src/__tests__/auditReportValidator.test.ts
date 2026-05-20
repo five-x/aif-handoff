@@ -256,6 +256,64 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).toContain("missing_substantive_evidence");
   });
 
+  it("rejects deterministic repair manifests as trusted no-findings evidence", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Scope | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      "| `src/config.ts` | `src/config.ts:1` | Command `git grep -n . -- src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |",
+      "",
+      "## No-Findings Claims",
+      "",
+      "- Absence reasoning: risk-1 covered `src/config.ts:1`; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+    const text = withManifest({
+      body,
+      snapshot,
+      scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      riskHypotheses: [
+        {
+          id: "risk-1",
+          description: "Runtime timeout behavior is safe.",
+          scopeIds: ["src/config.ts"],
+          evidenceRefs: ["ev-1"],
+          status: "covered",
+        },
+      ],
+      noFindingsClaims: [
+        {
+          id: "nf-deterministic-repair",
+          scopeIds: ["src/config.ts"],
+          evidenceRefs: ["ev-1"],
+          riskIds: ["risk-1"],
+          reasoning:
+            "Deterministic repair used scoped source inspections and removed unvalidated candidate findings.",
+        },
+      ],
+    });
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireLedgerEvidence: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot, scopeIds: ["src/config.ts"] })],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toContain("deterministic_fallback_report");
+  });
+
   it("rejects no-findings reports backed only by import and bootstrap line citations", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot"), { recursive: true });
