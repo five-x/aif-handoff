@@ -35,6 +35,7 @@ import {
 } from "../reviewContract.js";
 
 const log = logger("reviewer");
+const AUDIT_ARTIFACT_REVIEW_MAX_TURNS = 20;
 
 const STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT =
   "Structured review contract not satisfied: review output must include complete unique Security Coverage rows for secret_leaks, permissions_sandbox, unsafe_shell_network_file, and dependency_config.";
@@ -241,6 +242,7 @@ async function runSidecar(
   useSubagentAgent: boolean,
   workflowSpec: RuntimeWorkflowSpec,
   fallbackSlashCommand?: string,
+  maxTurns?: number,
 ): Promise<string> {
   const { resultText } = await executeSubagentQuery({
     taskId,
@@ -253,6 +255,7 @@ async function runSidecar(
     workflowSpec,
     workflowKind: workflowSpec.workflowKind,
     fallbackSlashCommand,
+    maxTurns,
   });
   return resultText;
 }
@@ -327,6 +330,44 @@ function isTrustedValidAuditReportValidation(
     (validation.sourceClassification === "validated_no_findings" ||
       validation.sourceClassification === "validated_findings_present")
   );
+}
+
+function auditReportValidationIssueCodes(
+  validation: ReturnType<typeof validateAuditReportArtifact> | null,
+): string[] {
+  if (!validation) return [];
+  return [...new Set(validation.issues.map((issue) => issue.code))].sort();
+}
+
+function formatAuditArtifactReviewScopeBlock(input: {
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>> | null;
+  validation: ReturnType<typeof validateAuditReportArtifact> | null;
+}): string {
+  if (
+    !input.artifact ||
+    (input.artifact.role !== "report" && input.artifact.role !== "synthesis")
+  ) {
+    return "";
+  }
+
+  const issueCodes = auditReportValidationIssueCodes(input.validation);
+  const validationSummary = input.validation
+    ? [
+        `ok=${input.validation.ok}`,
+        `manifestStatus=${input.validation.manifestStatus}`,
+        `sourceClassification=${input.validation.sourceClassification}`,
+        `issueCodes=${issueCodes.join(", ") || "none"}`,
+      ].join("; ")
+    : "validation unavailable before sidecar review";
+
+  return `Audit artifact review scope:
+- Expected artifact: ${input.artifact.artifactPath}
+- Artifact role: ${input.artifact.role}
+- Deterministic validator state: ${validationSummary}
+- Review only the expected artifact, implementation log, validator issue codes, and repository files explicitly cited by the artifact or required to verify a cited claim.
+- Do not run a repository-wide audit, dependency inventory, or repeated broad reads. This sidecar verifies report trustworthiness; it does not re-run the source audit.
+- Use no more than 8 repository-inspection tool calls. If the validator state already proves the artifact cannot be trusted, report that concrete blocker instead of exploring unrelated files.
+`;
 }
 
 function buildDeterministicAuditReportReviewComments(input: {
@@ -519,6 +560,13 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
     deterministicSynthesisOutcome &&
     (deterministicSynthesisOutcome.kind === "source_inconclusive" ||
       deterministicSynthesisOutcome.kind === "inconclusive_batch_evidence");
+  const auditArtifactReviewScopeBlock = formatAuditArtifactReviewScopeBlock({
+    artifact: roadmapArtifact ?? null,
+    validation: deterministicReviewValidation,
+  });
+  const auditArtifactReviewMaxTurns = auditArtifactReviewScopeBlock
+    ? AUDIT_ARTIFACT_REVIEW_MAX_TURNS
+    : undefined;
 
   if (canUseDeterministicAuditReportReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
@@ -661,6 +709,8 @@ ${task.implementationLog ?? "No implementation log available."}
 
 ${auditSynthesisContext}
 
+${auditArtifactReviewScopeBlock}
+
 Auto-review strategy: ${strategy}
 Review iteration: ${reviewIteration}
 
@@ -691,6 +741,8 @@ Auto-review strategy: ${strategy}
 Review iteration: ${reviewIteration}
 
 ${auditSynthesisContext}
+
+${auditArtifactReviewScopeBlock}
 
 Previous Findings Input:
 ${securityPreviousFindings}
@@ -749,6 +801,7 @@ ${reviewOutputContract}`;
             true,
             reviewWorkflow,
             "/aif-review",
+            auditArtifactReviewMaxTurns,
           ),
           runSidecar(
             securityPrompt,
@@ -759,6 +812,7 @@ ${reviewOutputContract}`;
             true,
             securityWorkflow,
             "/aif-security-checklist",
+            auditArtifactReviewMaxTurns,
           ),
         ]);
       } else {
@@ -771,6 +825,7 @@ ${reviewOutputContract}`;
           false,
           reviewWorkflow,
           "/aif-review",
+          auditArtifactReviewMaxTurns,
         );
         securityResult = await runSidecar(
           securityPrompt,
@@ -781,6 +836,7 @@ ${reviewOutputContract}`;
           false,
           securityWorkflow,
           "/aif-security-checklist",
+          auditArtifactReviewMaxTurns,
         );
       }
     } finally {

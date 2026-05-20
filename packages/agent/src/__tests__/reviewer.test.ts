@@ -57,6 +57,25 @@ function sidecarOutput(previousFindingId: string): string {
   ].join("\n");
 }
 
+function cleanSidecarOutput(): string {
+  return [
+    "## Blocking Findings",
+    "- none",
+    "",
+    "## Advisories",
+    "- audit/runtime.md:1 was inspected for audit artifact trust.",
+    "",
+    "## Previous Findings",
+    "- none",
+    "",
+    "## Security Coverage",
+    "- secret_leaks | covered | Checked audit artifact text for raw secrets.",
+    "- permissions_sandbox | covered | Checked review remained read-only.",
+    "- unsafe_shell_network_file | covered | Checked artifact review scope only.",
+    "- dependency_config | covered | Checked no dependency/config change was introduced.",
+  ].join("\n");
+}
+
 describe("runReviewer", () => {
   beforeEach(() => {
     testDb.current = createTestDb();
@@ -322,6 +341,74 @@ describe("runReviewer", () => {
       "Agent: review-gate started (deterministic audit report validation)",
     );
     expect(storedTask?.agentActivityLog).toContain("Tool: read_file audit/runtime.md");
+  });
+
+  it("bounds sidecar review for audit report artifacts that fail deterministic validation", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-invalid-audit-report-"));
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "audit", "runtime.md"),
+      [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "",
+        "## Evidence Register",
+        "| Scope | Checked evidence | Verification |",
+        "| --- | --- | --- |",
+        "| `src` | `src/config.ts:1` | checked manually |",
+      ].join("\n"),
+      "utf8",
+    );
+    executeSubagentQueryMock.mockResolvedValue({ resultText: cleanSidecarOutput() });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-invalid-audit-reviewer",
+        name: "Invalid Audit Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-invalid-audit-reviewer",
+        projectId: "project-invalid-audit-reviewer",
+        title: "Audit runtime configuration",
+        description: "Scope: src\nReport artifact: audit/runtime.md",
+        taskIntent: "audit",
+        status: "review",
+        useSubagents: true,
+        implementationLog: "Runtime produced audit/runtime.md for review.",
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-invalid-audit-reviewer",
+      roadmapAlias: "audit-invalid-reviewer",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-invalid-audit-reviewer"],
+      artifacts: [
+        {
+          taskId: "task-invalid-audit-reviewer",
+          role: "report",
+          artifactPath: "audit/runtime.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runReviewer("task-invalid-audit-reviewer", projectRoot);
+
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    for (const call of executeSubagentQueryMock.mock.calls) {
+      const input = call[0] as { prompt: string; maxTurns?: number };
+      expect(input.maxTurns).toBe(20);
+      expect(input.prompt).toContain("Audit artifact review scope:");
+      expect(input.prompt).toContain("Expected artifact: audit/runtime.md");
+      expect(input.prompt).toContain("missing_report_manifest");
+      expect(input.prompt).toContain("Use no more than 8 repository-inspection tool calls");
+    }
   });
 
   it("accepts synthesis references to validated source report artifacts outside the current checkout", async () => {

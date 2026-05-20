@@ -58,6 +58,8 @@ const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
   IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET * PROMPT_BUDGET_CHARS_PER_TOKEN;
 const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesis-no-findings";
 const DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS = new Set(["feature", "fix", "docs", "tests"]);
+const SOURCE_AUDIT_FIRST_RUN_MAX_TURNS = 48;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_TURNS = 16;
 const PROMPT_SECTION_LIMITS = {
   reworkComment: 8_000,
   reworkCommentMessage: 5_000,
@@ -4107,20 +4109,27 @@ Rework handling protocol:
 - Stop collecting evidence once every declared risk hypothesis has either a validated finding or a source-specific no-findings rationale. Write ${expectedAuditReportArtifactPath}, commit only that artifact, verify it, and return.
 `
     : "";
-  const sourceAuditRuntimeRecoveryBlock =
+  const sourceAuditRuntimeRecoveryMode = Boolean(
     expectedAuditReportArtifactPath &&
     !task.reworkRequested &&
     ((task.retryCount ?? 0) > 0 ||
       /\bRuntime (?:audit report timeout recovery|context limit recovery|transient .* recovery|request timed out)\b/i.test(
         task.blockedReason ?? "",
-      ))
-      ? `Runtime recovery source-audit budget:
+      )),
+  );
+  const sourceAuditMaxTurns = expectedAuditReportArtifactPath
+    ? sourceAuditRuntimeRecoveryMode
+      ? SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_TURNS
+      : SOURCE_AUDIT_FIRST_RUN_MAX_TURNS
+    : undefined;
+  const sourceAuditRuntimeRecoveryBlock = sourceAuditRuntimeRecoveryMode
+    ? `Runtime recovery source-audit budget:
 - This audit report run is retrying after runtime context/timeout recovery. Complete a bounded report; do not keep exploring for perfect coverage.
 - Use no more than 12 additional repository-inspection tool calls before writing ${expectedAuditReportArtifactPath}. Prefer \`rg -n\`, \`git grep -n\`, and focused line snippets over broad repeated reads.
 - If the scoped evidence is sufficient for no validated findings, write a substantive no-findings report with an Evidence Register and risk-by-risk absence reasoning. If a real finding is supported, keep it with exact path:line evidence.
 - If some scoped area cannot be fully inspected within this bounded retry, record that as an explicit audit limitation or coverage gap in the report; do not leave the task blocked only because more exploratory search is possible.
 `
-      : "";
+    : "";
 
   const rawPrompt = `${topReworkHeader}${useSubagents ? "Implement the task using the provided plan." : implementSlashCommand}
 
@@ -4205,7 +4214,8 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     // Rework must always start a fresh session — resuming an old thread
     // leads Claude to treat the completed work as authoritative and ignore
     // the new rework request.
-    sessionReusePolicy: isRework ? "never" : "resume_if_available",
+    sessionReusePolicy:
+      isRework || sourceAuditRuntimeRecoveryMode ? "never" : "resume_if_available",
     systemPromptAppend: effectiveSystemAppend,
     metadata: {
       reworkRequested: task.reworkRequested,
@@ -4225,6 +4235,7 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     workflowSpec,
     workflowKind: "implementer",
     fallbackSlashCommand: implementSlashCommand,
+    maxTurns: sourceAuditMaxTurns,
   });
 
   // Post-run drift check: if the subagent switched branches during execution

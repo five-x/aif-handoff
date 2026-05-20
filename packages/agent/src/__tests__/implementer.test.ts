@@ -2374,7 +2374,10 @@ describe("runImplementer rework behavior", () => {
     await runImplementer("task-audit-first-run-report", projectRoot);
 
     expect(queryMock).toHaveBeenCalled();
-    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    const implementCall = queryMock.mock.calls[0]?.[0] as {
+      prompt: string;
+      options: { maxTurns?: number };
+    };
     expect(implementCall.prompt).toContain("Audit security and configuration controls");
     expect(implementCall.prompt).toContain(
       "A first-run source audit must make a source-specific decision.",
@@ -2386,6 +2389,7 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain("do not expand into a repository-wide dependency map");
     expect(implementCall.prompt).toContain("explain why each declared risk hypothesis is absent");
     expect(implementCall.prompt).toContain("Report artifact: audit/security-controls.md");
+    expect(implementCall.options.maxTurns).toBe(48);
     const reportPath = join(projectRoot, "audit", "security-controls.md");
     expect(existsSync(reportPath)).toBe(false);
 
@@ -2461,11 +2465,16 @@ describe("runImplementer rework behavior", () => {
     await runImplementer("task-audit-runtime-recovery", projectRoot);
 
     expect(queryMock).toHaveBeenCalledTimes(1);
-    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    const implementCall = queryMock.mock.calls[0]?.[0] as {
+      prompt: string;
+      options: { maxTurns?: number; resume?: string };
+    };
     expect(implementCall.prompt).toContain("Runtime recovery source-audit budget:");
     expect(implementCall.prompt).toContain("Use no more than 12 additional");
     expect(implementCall.prompt).toContain("Write audit/architecture.md");
     expect(implementCall.prompt).toContain("Source audit scope discipline:");
+    expect(implementCall.options.maxTurns).toBe(16);
+    expect(implementCall.options.resume).toBeUndefined();
   });
 
   it("terminalizes repeated deterministic audit report repair before runtime rework", async () => {
