@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-17",
+  "updated": "2026-05-19",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -557,6 +557,33 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260515-system-tz-configuration-governance",
       "updated": "2026-05-17"
+    },
+    {
+      "taskId": "work-20260519-enforce-non-green-inconclusive-lifecycle",
+      "title": "Enforce Non-Green Inconclusive Lifecycle",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260519-enforce-non-green-inconclusive-lifecycle",
+      "updated": "2026-05-19"
+    },
+    {
+      "taskId": "work-20260519-normalize-operator-input-runtime-retry",
+      "title": "Normalize Operator Input And Runtime Retry",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260519-normalize-operator-input-runtime-retry",
+      "updated": "2026-05-19"
+    },
+    {
+      "taskId": "work-20260519-tighten-generic-evidence-gates",
+      "title": "Tighten Generic Evidence Gates",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260519-tighten-generic-evidence-gates",
+      "updated": "2026-05-19"
     }
   ]
 }

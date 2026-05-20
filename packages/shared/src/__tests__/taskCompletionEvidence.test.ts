@@ -388,6 +388,13 @@ describe("taskCompletionEvidence", () => {
         id: "form-validation-fix",
         title: "Fix form validation error",
         plan: "## Plan\n- Update validation handling\n- Add focused coverage",
+        implementationManifestJson: implementationManifest({
+          taskId: "form-validation-fix",
+          intent: "fix",
+          changedFiles: ["src/form.ts"],
+          regressionExplanation:
+            "Form validation regressed because the submit path skipped errors.",
+        }),
       },
     });
 
@@ -458,6 +465,121 @@ describe("taskCompletionEvidence", () => {
     expect(result.ok).toBe(false);
     expect(codes(result)).toContain("missing_implementation_manifest");
   });
+
+  it("requires implementation manifests for inferred development completion tasks", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "docs", "api.md"), "# API\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "completion",
+      task: {
+        id: "inferred-docs-no-manifest",
+        title: "Update API docs",
+        plan: "## Plan\n- [x] Update docs/api.md\n- [x] Run docs validation",
+        reviewComments: "REVIEW PASS: docs update inspected.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.implementationManifestValidation?.intent).toBe("docs");
+    expect(codes(result)).toContain("missing_implementation_manifest");
+  });
+
+  it.each([
+    ["fix", "Fix checkout regression"],
+    ["docs", "Update API docs"],
+    ["tests", "Add API tests"],
+    ["feature", "Add checkout flow"],
+  ] as const)(
+    "requires implementation manifests for persisted-general %s completion tasks",
+    (expectedIntent, title) => {
+      const root = initRepo();
+
+      const result = evaluateTaskCompletionEvidence({
+        projectRoot: root,
+        phase: "completion",
+        task: {
+          id: `persisted-general-${expectedIntent}`,
+          title,
+          taskIntent: "general",
+          plan: "## Plan\n- [x] Make the scoped change\n- [x] Run focused verification",
+          reviewComments: "REVIEW PASS: scoped change inspected.",
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.evidence.implementationManifestValidation?.intent).toBe(expectedIntent);
+      expect(codes(result)).toContain("missing_implementation_manifest");
+    },
+  );
+
+  it("requires report evidence for persisted-general audit tasks", () => {
+    const root = initRepo();
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "completion",
+      task: {
+        id: "persisted-general-audit",
+        title: "Full project audit",
+        taskIntent: "general",
+        plan: "## Plan\n- [x] Inspect the project\n- [x] Write the audit report",
+        reviewComments: "REVIEW PASS: audit scope inspected.",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.riskyTask).toBe(true);
+    expect(codes(result)).toContain("missing_report_artifact");
+  });
+
+  it.each([
+    {
+      expectedIntent: "docs",
+      title: "Update API docs",
+      taskId: "persisted-general-docs-source-drift",
+      changedFile: "src/api.ts",
+      fileContent: "export const api = true;\n",
+    },
+    {
+      expectedIntent: "tests",
+      title: "Add API tests",
+      taskId: "persisted-general-tests-source-drift",
+      changedFile: "src/api.ts",
+      fileContent: "export const api = true;\n",
+    },
+  ] as const)(
+    "applies changed-file policy to persisted-general $expectedIntent tasks",
+    ({ expectedIntent, title, taskId, changedFile, fileContent }) => {
+      const root = initRepo();
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, changedFile), fileContent, "utf8");
+
+      const result = evaluateTaskCompletionEvidence({
+        projectRoot: root,
+        phase: "completion",
+        task: {
+          id: taskId,
+          title,
+          taskIntent: "general",
+          plan: "## Plan\n- [x] Make the scoped change\n- [x] Run focused verification",
+          implementationManifestJson: implementationManifest({
+            taskId,
+            intent: expectedIntent,
+            changedFiles: [changedFile],
+          }),
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.evidence.intentPolicyIssues[0]?.code).toBe(
+        "intent_changed_files_contradiction",
+      );
+      expect(codes(result)).toContain("intent_changed_files_contradiction");
+    },
+  );
 
   it("allows development review handoff with structured implementation evidence", () => {
     const root = initRepo();
@@ -572,6 +694,81 @@ describe("taskCompletionEvidence", () => {
 
     expect(result.ok).toBe(false);
     expect(codes(result)).toContain("missing_acceptance_evidence");
+  });
+
+  it("blocks waived acceptance criteria backed only by known limitations", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const manifest = JSON.parse(
+      implementationManifest({
+        taskId: "feature-known-limitation-waiver",
+        intent: "feature",
+        changedFiles: ["src/feature.ts"],
+      }),
+    ) as {
+      acceptanceCriteria: Array<{ status: string; evidenceRefs: string[] }>;
+      knownLimitations: string[];
+    };
+    manifest.acceptanceCriteria[0]!.status = "waived";
+    manifest.acceptanceCriteria[0]!.evidenceRefs = [];
+    manifest.knownLimitations = ["Production verification is not available."];
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-known-limitation-waiver",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        implementationManifestJson: JSON.stringify(manifest),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("missing_acceptance_evidence");
+  });
+
+  it("allows waived acceptance criteria with authority and verification evidence refs", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const manifest = JSON.parse(
+      implementationManifest({
+        taskId: "feature-authorized-waiver",
+        intent: "feature",
+        changedFiles: ["src/feature.ts"],
+      }),
+    ) as {
+      acceptanceCriteria: Array<{
+        status: string;
+        evidenceRefs: string[];
+        waiverAuthority?: string;
+        waiverEvidenceRefs?: string[];
+      }>;
+      knownLimitations: string[];
+    };
+    manifest.acceptanceCriteria[0]!.status = "waived";
+    manifest.acceptanceCriteria[0]!.evidenceRefs = [];
+    manifest.acceptanceCriteria[0]!.waiverAuthority = "Lead approval in review gate";
+    manifest.acceptanceCriteria[0]!.waiverEvidenceRefs = ["verify-1"];
+    manifest.knownLimitations = ["Production verification is not available."];
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-authorized-waiver",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        implementationManifestJson: JSON.stringify(manifest),
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("missing_acceptance_evidence");
   });
 
   it("allows development review handoff when a dirty plan artifact is outside the manifest", () => {
@@ -3029,7 +3226,7 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("low_quality_report_evidence");
   });
 
-  it("allows audit synthesis that explicitly closes as audit inconclusive", () => {
+  it("blocks audit synthesis that explicitly closes as audit inconclusive", () => {
     const root = initRepo();
     execFileSync("git", ["checkout", "-b", "feature/audit-explicit-inconclusive"], {
       cwd: root,
@@ -3093,9 +3290,9 @@ describe("taskCompletionEvidence", () => {
       },
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(result.evidence.auditSynthesisOutcome?.kind).toBe("source_inconclusive");
-    expect(codes(result)).not.toContain("audit_inconclusive");
+    expect(codes(result)).toContain("audit_inconclusive");
   });
 
   it("blocks explicit inconclusive audit synthesis that also includes a validated finding", () => {

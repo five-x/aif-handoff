@@ -742,19 +742,37 @@ function auditSlug(value: string): string {
 
 function formatAuditRiskHypotheses(title: string, scope: string): string {
   const riskPrefix = auditSlug(title).replace(/^audit-/, "risk-");
-  const titleTerms = auditSlug(title)
-    .replace(/^audit-/, "")
-    .split("-")
-    .filter((term) => term.length > 2)
-    .slice(0, 3)
-    .join(" ");
+  const areaSlug = auditSlug(title).replace(/^audit-/, "");
+  const riskTemplate = auditRiskTemplateForArea(areaSlug);
   return scope
     .split(/\s*,\s*/)
     .map((scopeRoot, index) => {
       const riskId = `${riskPrefix}-${index + 1}`;
-      return `${riskId} ${scopeRoot} should be searched for ${titleTerms || "audit"} evidence gaps, unsafe defaults, boundary drift, or missing verification tied to this file`;
+      return `${riskId} ${scopeRoot} ${riskTemplate}`;
     })
     .join("; ");
+}
+
+function auditRiskTemplateForArea(areaSlug: string): string {
+  if (areaSlug.includes("security") || areaSlug.includes("configuration")) {
+    return "may expose hardcoded credentials, permissive auth defaults, unsafe shell/file access, or unvalidated configuration paths";
+  }
+  if (areaSlug.includes("performance") || areaSlug.includes("runtime")) {
+    return "may perform repeated blocking work, omit timeout handling, leak resources, or grow runtime state without bounds";
+  }
+  if (areaSlug.includes("persistence") || areaSlug.includes("data")) {
+    return "may perform non-atomic writes, destructive migrations, weak backup/restore steps, or unchecked concurrent updates";
+  }
+  if (areaSlug.includes("integration") || areaSlug.includes("orchestration")) {
+    return "may mishandle retries, idempotency, external contract errors, or cross-service state handoff";
+  }
+  if (areaSlug.includes("test") || areaSlug.includes("operations")) {
+    return "may leave critical runtime behavior untested, release commands undocumented, or incident rollback procedures unverifiable";
+  }
+  if (areaSlug.includes("architecture") || areaSlug.includes("ownership")) {
+    return "may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe";
+  }
+  return "may hide actionable technical-quality risks tied to the requested audit area";
 }
 
 function buildAuditRoadmapItem(
@@ -1022,6 +1040,10 @@ function buildAuditAreasForProject(projectRoot: string): AuditArea[] {
     "AGENTS.md",
     "pyproject.toml",
     "package.json",
+    "packages",
+    "apps",
+    "lib",
+    "server",
     "src",
     "tests",
     ".ai-factory/config.yaml",
@@ -1133,6 +1155,7 @@ function buildAuditAreasForProject(projectRoot: string): AuditArea[] {
           "docker-compose.production.yml",
           "docs/ops",
           "scripts",
+          ...packageChildren.slice(0, 2),
           ...testChildren.slice(0, 3),
           ...docsOpsChildren.slice(0, 2),
         ],

@@ -165,6 +165,67 @@ const featureTimeline: WorkflowTimeline = {
   events: [],
 };
 
+const auditInconclusiveTimeline: WorkflowTimeline = {
+  ...auditTimeline,
+  artifacts: [
+    {
+      ...auditTimeline.artifacts[0]!,
+      id: "artifact-inconclusive",
+      kind: "audit_synthesis",
+      label: "Synthesis artifact",
+      path: "docs/audit/summary.md",
+      state: "inconclusive",
+      metadata: {
+        ...auditTimeline.artifacts[0]!.metadata,
+        role: "synthesis",
+        originalState: "valid",
+        reasonCodes: ["audit_inconclusive", "untrusted_artifact", "valid"],
+        failureSignature: null,
+      },
+    },
+  ],
+  attempts: [
+    {
+      ...auditTimeline.attempts[0]!,
+      artifactId: "artifact-inconclusive",
+      state: "inconclusive",
+      outcome: "inconclusive",
+      trustLevel: "untrusted",
+      metadata: {
+        ...auditTimeline.attempts[0]!.metadata,
+        role: "synthesis",
+        originalState: "valid",
+        reasonCodes: ["audit_inconclusive", "untrusted_artifact", "valid"],
+        failureSignature: null,
+      },
+    },
+  ],
+  claims: [
+    {
+      ...auditTimeline.claims[0]!,
+      id: "claim-inconclusive",
+      artifactId: "artifact-inconclusive",
+      outcome: "inconclusive",
+      trustLevel: "untrusted",
+      metadata: {
+        ...auditTimeline.claims[0]!.metadata,
+        role: "synthesis",
+        originalState: "valid",
+        reasonCodes: ["audit_inconclusive", "untrusted_artifact", "valid"],
+        failureSignature: null,
+      },
+    },
+  ],
+  evidenceLinks: [
+    {
+      ...auditTimeline.evidenceLinks[0]!,
+      artifactId: "artifact-inconclusive",
+      claimId: "claim-inconclusive",
+      relation: "context",
+    },
+  ],
+};
+
 describe("WorkflowTimelinePanel", () => {
   it("renders populated audit-compatible timeline with generic labels and secondary details", () => {
     render(<WorkflowTimelinePanel timeline={auditTimeline} />);
@@ -197,6 +258,19 @@ describe("WorkflowTimelinePanel", () => {
     expect(screen.getByText("feature evidence preview")).toBeDefined();
     expect(screen.getByText("Workflow: feature")).toBeDefined();
     expect(screen.queryByText(/audit/i)).toBeNull();
+  });
+
+  it("renders audit_inconclusive synthesis as inconclusive and untrusted", () => {
+    render(<WorkflowTimelinePanel timeline={auditInconclusiveTimeline} />);
+
+    expect(screen.getByText("Synthesis artifact")).toBeDefined();
+    expect(screen.getAllByText("Inconclusive").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Trust: untrusted").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("Reason codes: audit_inconclusive, untrusted_artifact, valid").length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("Supported")).toBeNull();
+    expect(screen.queryByText("Trust: trusted")).toBeNull();
   });
 
   it("renders an empty generic timeline", () => {

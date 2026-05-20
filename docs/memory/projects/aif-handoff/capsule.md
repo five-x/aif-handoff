@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260519-audit-pipeline-top-level-fix::project-capsule
+memory_id: task::aif-handoff::work::work-20260519-tighten-generic-evidence-gates::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260519-audit-pipeline-top-level-fix
-source_path: docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix
+task_id: work-20260519-tighten-generic-evidence-gates
+source_path: docs/rdpi/work/work-20260519-tighten-generic-evidence-gates
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -24,10 +24,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/research.md
-- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/design.md
-- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/plan.md
-- docs/rdpi/work/work-20260519-audit-pipeline-top-level-fix/result.md
+- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/research.md
+- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/design.md
+- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/plan.md
+- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/result.md
   created_at: 2026-05-19
   last_verified_at: 2026-05-19
 
@@ -35,7 +35,7 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260519-audit-pipeline-top-level-fix.
+Current capsule for project aif-handoff, refreshed by task work-20260519-tighten-generic-evidence-gates.
 
 # Why it matters
 

@@ -43,6 +43,8 @@ export interface ImplementationManifestAcceptanceCriterion {
   description?: string;
   status: ImplementationManifestAcceptanceStatus;
   evidenceRefs: string[];
+  waiverAuthority?: string | null;
+  waiverEvidenceRefs?: string[];
   notes?: string | null;
 }
 
@@ -449,6 +451,8 @@ function coerceManifest(rawJson: string): ImplementationManifest | null {
         description: typeof entry.description === "string" ? entry.description : undefined,
         status: entry.status,
         evidenceRefs: isStringArray(entry.evidenceRefs) ? entry.evidenceRefs : [],
+        waiverAuthority: typeof entry.waiverAuthority === "string" ? entry.waiverAuthority : null,
+        waiverEvidenceRefs: isStringArray(entry.waiverEvidenceRefs) ? entry.waiverEvidenceRefs : [],
         notes: typeof entry.notes === "string" ? entry.notes : null,
       };
     })
@@ -560,7 +564,7 @@ export function validateImplementationManifest(
   input: ValidateImplementationManifestInput,
 ): ImplementationManifestValidationResult {
   const intent = inferTaskIntent({
-    taskIntent: input.task.taskIntent,
+    taskIntent: input.task.taskIntent === "general" ? null : input.task.taskIntent,
     isFix: input.task.isFix,
     title: input.task.title,
     description: input.task.description,
@@ -692,7 +696,6 @@ export function validateImplementationManifest(
       .map((entry) => entry.id)
       .filter(usefulString),
   );
-  const knownLimitations = manifest.knownLimitations.filter(usefulString);
   const manifestAcceptanceCriteriaById = new Map(
     manifest.acceptanceCriteria.map((entry) => [entry.id, entry] as const),
   );
@@ -705,7 +708,12 @@ export function validateImplementationManifest(
       return evidenceRefs.length === 0 || evidenceRefs.some((ref) => !allowedEvidenceRefs.has(ref));
     }
     if (entry.status === "waived") {
-      return knownLimitations.length === 0;
+      const waiverEvidenceRefs = (entry.waiverEvidenceRefs ?? []).filter(usefulString);
+      return (
+        !usefulString(entry.waiverAuthority) ||
+        waiverEvidenceRefs.length === 0 ||
+        waiverEvidenceRefs.some((ref) => !allowedEvidenceRefs.has(ref))
+      );
     }
     return true;
   });
@@ -719,7 +727,7 @@ export function validateImplementationManifest(
         "missing_acceptance_evidence",
         missingPlanAcceptanceCriteria.length > 0
           ? `Implementation manifest must cover every approved plan acceptance criterion. Missing: ${missingPlanAcceptanceCriteria.join(", ")}.`
-          : "Every implementation acceptance criterion must be satisfied with evidence, or waived with a known limitation.",
+          : "Every implementation acceptance criterion must be satisfied with evidence, or waived with explicit waiver authority and concrete verification evidence refs.",
       ),
     );
   }

@@ -823,6 +823,8 @@ export interface ProjectQueueStateResponse {
   projectId: string;
   autoQueueMode: boolean;
   countsByStatus: Partial<Record<TaskStatus, number>>;
+  executionActiveCount: number;
+  queueGatingActiveCount: number;
   backlog: ProjectQueueBacklogItem[];
 }
 

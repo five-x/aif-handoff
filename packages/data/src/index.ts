@@ -132,6 +132,7 @@ import {
   type WorkflowTimelineTrustLevel,
   validateImplementationManifest,
   isDevelopmentImplementationIntent,
+  inferTaskIntent,
   normalizeTaskIntent,
   resolveRuntimeLimitFutureHint,
   sanitizeRuntimeLimitSnapshotForExposure,
@@ -187,6 +188,24 @@ function resolvePersistedTaskIntent(input: {
 }): TaskIntent {
   if (input.isFix === true) return "fix";
   return normalizeTaskIntent(input.taskIntent, "general");
+}
+
+function resolveInferredTaskIntent(input: {
+  taskIntent?: TaskIntent | null;
+  isFix?: boolean | null;
+  title: string;
+  description?: string | null;
+  roadmapAlias?: string | null;
+  tags?: string | null;
+}): TaskIntent {
+  return inferTaskIntent({
+    taskIntent: input.taskIntent === "general" ? null : input.taskIntent,
+    isFix: input.isFix,
+    title: input.title,
+    description: input.description,
+    roadmapAlias: input.roadmapAlias,
+    tags: parseTags(input.tags),
+  });
 }
 
 export type TaskRow = typeof tasks.$inferSelect;
@@ -994,11 +1013,16 @@ export function buildProjectQueueState(projectId: string): ProjectQueueStateResp
   for (const task of projectTasks) {
     countsByStatus[task.status] = (countsByStatus[task.status] ?? 0) + 1;
   }
+  const executionActiveCount = (
+    ["planning", "plan_ready", "implementing", "review", "blocked_external"] as const
+  ).reduce((total, status) => total + (countsByStatus[status] ?? 0), 0);
 
   return {
     projectId,
     autoQueueMode: Boolean(project.autoQueueMode),
     countsByStatus,
+    executionActiveCount,
+    queueGatingActiveCount: countActivePipelineTasksForProject(projectId),
     backlog: projectTasks
       .filter((task) => task.status === "backlog" || task.status === "planning")
       .slice(0, 100)
@@ -4778,7 +4802,6 @@ function isAcceptedTerminalAuditInconclusiveArtifact(input: {
   validationDetails: unknown;
   trustedSynthesisInput: boolean;
 }): boolean {
-  if (!input.trustedSynthesisInput) return false;
   if (input.artifact.role !== "synthesis" || input.artifact.state !== "valid") return false;
   return readAuditCardDecision(input.validationDetails)?.finalStatus === "audit_inconclusive";
 }
@@ -4791,6 +4814,7 @@ function acceptedTerminalAuditInconclusiveReasonCodes(validationDetails: unknown
       "audit_inconclusive",
       outcomeKind === "inconclusive_batch_evidence" ? "inconclusive_batch_evidence" : null,
       "source_inconclusive",
+      "untrusted_artifact",
       "valid",
     ]),
   ]
@@ -4803,7 +4827,6 @@ function artifactDisplayFailureSignature(input: {
   validationDetails: unknown;
   trustedSynthesisInput: boolean;
 }): string | null {
-  if (isAcceptedTerminalAuditInconclusiveArtifact(input)) return null;
   return input.artifact.failureSignature;
 }
 
@@ -4876,7 +4899,12 @@ function hasTrustedAuditSourceClassification(artifact: RoadmapBatchArtifactRow):
 
 function roadmapArtifactCountsAsValid(artifact: RoadmapBatchArtifactRow): boolean {
   if (artifact.state !== "valid") return false;
-  if (artifact.role === "synthesis") return true;
+  if (artifact.role === "synthesis") {
+    return (
+      readAuditCardDecision(parseValidationDetails(artifact.validationDetailsJson))?.finalStatus !==
+      "audit_inconclusive"
+    );
+  }
   if (artifact.role === "report") return hasTrustedAuditSourceClassification(artifact);
   return false;
 }
@@ -4997,7 +5025,13 @@ function collectValidationReasonCodes(value: unknown): string[] {
 
 function artifactTrustedForSynthesisInput(artifact: RoadmapBatchArtifactRow): boolean {
   if (artifact.role === "report") return roadmapArtifactCountsAsValid(artifact);
-  return artifact.role === "synthesis" && artifact.state === "valid" && !artifact.failureFamily;
+  if (artifact.role !== "synthesis" || artifact.state !== "valid" || artifact.failureFamily) {
+    return false;
+  }
+  return (
+    readAuditCardDecision(parseValidationDetails(artifact.validationDetailsJson))?.finalStatus !==
+    "audit_inconclusive"
+  );
 }
 
 function mapArtifactTrustLevel(artifact: RoadmapBatchArtifactRow): WorkflowTimelineTrustLevel {
@@ -5159,6 +5193,24 @@ function taskStatusTerminalForGenericTrust(status: TaskStatus): boolean {
   return status === "done" || status === "verified";
 }
 
+function hasTerminalGenericEvidenceFailure(reasonCodes: string[]): boolean {
+  return reasonCodes.some((code) =>
+    [
+      "missing_implementation_manifest",
+      "invalid_implementation_manifest",
+      "implementation_plan_manifest_hash_mismatch",
+      "implementation_changed_files_mismatch",
+      "implementation_scope_mismatch",
+      "missing_verification_evidence",
+      "missing_acceptance_evidence",
+      "plan_checklist_drift",
+      "unintended_uncommitted_changes",
+      "missing_review_closure_evidence",
+      "missing_fix_regression_explanation",
+    ].includes(code),
+  );
+}
+
 function genericArtifactTrust(input: {
   task: TaskRow;
   hasBackingData: boolean;
@@ -5179,6 +5231,12 @@ function genericArtifactTrust(input: {
         "redaction_blocked",
       ].includes(code),
     )
+  ) {
+    return "untrusted";
+  }
+  if (
+    taskStatusTerminalForGenericTrust(input.task.status as TaskStatus) &&
+    hasTerminalGenericEvidenceFailure(input.reasonCodes)
   ) {
     return "untrusted";
   }
@@ -5234,7 +5292,7 @@ function buildGenericArtifactSeeds(task: TaskRow): GenericArtifactSeed[] {
   const createdAt = task.createdAt;
   const updatedAt = task.updatedAt;
   const seeds: GenericArtifactSeed[] = [];
-  const workflowKind = normalizeTaskIntent(task.taskIntent, task.isFix ? "fix" : "general");
+  const workflowKind = resolveInferredTaskIntent(task);
   const planQuality = evaluateTaskPlanQuality({
     task: { ...task, tags: parseTags(task.tags) },
     plan: task.plan,
@@ -5253,7 +5311,7 @@ function buildGenericArtifactSeeds(task: TaskRow): GenericArtifactSeed[] {
   const implementationManifestValidation =
     task.implementationManifestJson || requiresImplementationManifest
       ? validateImplementationManifest({
-          task,
+          task: { ...task, taskIntent: workflowKind },
           manifestJson: task.implementationManifestJson,
           changedFiles: manifestChangedFiles,
           meaningfulChangedFiles: manifestChangedFiles,
@@ -5471,7 +5529,7 @@ function buildGenericArtifactSeeds(task: TaskRow): GenericArtifactSeed[] {
 }
 
 function buildGenericTaskProjection(task: TaskRow, generatedAt = new Date().toISOString()): GenericTaskProjection {
-  const workflowKind = normalizeTaskIntent(task.taskIntent, task.isFix ? "fix" : "general");
+  const workflowKind = resolveInferredTaskIntent(task);
   const seeds = buildGenericArtifactSeeds(task);
   const artifacts: WorkflowTimelineArtifact[] = [];
   const attempts: WorkflowTimelineAttempt[] = [];
@@ -5772,6 +5830,11 @@ export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustR
     validationDetails,
     trustedSynthesisInput,
   });
+  const acceptedTerminalAuditInconclusive = isAcceptedTerminalAuditInconclusiveArtifact({
+    artifact,
+    validationDetails,
+    trustedSynthesisInput,
+  });
   const nextAction = buildArtifactTrustNextAction({
     artifact,
     synthesisReady: summary.synthesisReady,
@@ -5783,7 +5846,9 @@ export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustR
     artifactRole: artifact.role,
     artifactState: artifact.state,
     artifactTrustLevel: mapArtifactTrustLevel(artifact),
-    claimOutcome: mapWorkflowClaimOutcome(artifact.state),
+    claimOutcome: acceptedTerminalAuditInconclusive
+      ? "inconclusive"
+      : mapWorkflowClaimOutcome(artifact.state),
     failureFamily: artifact.failureFamily,
     reasonCodes: buildArtifactTrustReasonCodes({
       artifact,
@@ -6185,6 +6250,55 @@ function mapWorkflowTrustLevel(input: {
   return "untrusted";
 }
 
+function workflowProjectionForArtifact(input: {
+  artifact: RoadmapBatchArtifactRow;
+  validationDetails: unknown;
+  trustedSynthesisInput: boolean;
+}): {
+  artifactState: WorkflowTimelineArtifactState;
+  claimOutcome: WorkflowTimelineClaimOutcome;
+  trustLevel: WorkflowTimelineTrustLevel;
+} {
+  if (isAcceptedTerminalAuditInconclusiveArtifact(input)) {
+    return {
+      artifactState: "inconclusive",
+      claimOutcome: "inconclusive",
+      trustLevel: "untrusted",
+    };
+  }
+  return {
+    artifactState: mapWorkflowArtifactState(input.artifact.state),
+    claimOutcome: mapWorkflowClaimOutcome(input.artifact.state),
+    trustLevel: mapWorkflowTrustLevel({
+      state: input.artifact.state,
+      failureFamily: input.artifact.failureFamily,
+    }),
+  };
+}
+
+function workflowProjectionForAttempt(attempt: RoadmapBatchArtifactAttemptRow): {
+  artifactState: WorkflowTimelineArtifactState;
+  claimOutcome: WorkflowTimelineClaimOutcome;
+  trustLevel: WorkflowTimelineTrustLevel;
+} {
+  const validationDetails = parseValidationDetails(attempt.validationDetailsJson);
+  if (isAcceptedTerminalAuditInconclusiveAttempt({ attempt, validationDetails })) {
+    return {
+      artifactState: "inconclusive",
+      claimOutcome: "inconclusive",
+      trustLevel: "untrusted",
+    };
+  }
+  return {
+    artifactState: mapWorkflowArtifactState(attempt.state),
+    claimOutcome: mapWorkflowClaimOutcome(attempt.state),
+    trustLevel: mapWorkflowTrustLevel({
+      state: attempt.state,
+      failureFamily: attempt.failureFamily,
+    }),
+  };
+}
+
 function artifactKindFromCompatibilityRole(role: string): string {
   if (role === "synthesis") return "audit_synthesis";
   if (role === "report") return "audit_report";
@@ -6209,6 +6323,11 @@ function listRoadmapBatchArtifactsByTaskId(taskId: string): RoadmapBatchArtifact
 function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimelineArtifact {
   const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
   const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
+  const projection = workflowProjectionForArtifact({
+    artifact,
+    validationDetails,
+    trustedSynthesisInput,
+  });
   const failureSignature = artifactDisplayFailureSignature({
     artifact,
     validationDetails,
@@ -6220,7 +6339,7 @@ function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimel
     kind: artifactKindFromCompatibilityRole(artifact.role),
     label: artifactLabelFromCompatibilityRole(artifact.role),
     path: artifact.artifactPath,
-    state: mapWorkflowArtifactState(artifact.state),
+    state: projection.artifactState,
     currentAttemptNumber: artifact.attemptNumber,
     createdAt: artifact.createdAt,
     updatedAt: artifact.updatedAt,
@@ -6254,17 +6373,15 @@ function buildWorkflowArtifact(artifact: RoadmapBatchArtifactRow): WorkflowTimel
 }
 
 function buildWorkflowAttempt(attempt: RoadmapBatchArtifactAttemptRow): WorkflowTimelineAttempt {
+  const projection = workflowProjectionForAttempt(attempt);
   return {
     id: attempt.id,
     artifactId: attempt.artifactId,
     taskId: attempt.taskId,
     attemptNumber: attempt.attemptNumber,
-    state: mapWorkflowArtifactState(attempt.state),
-    outcome: mapWorkflowClaimOutcome(attempt.state),
-    trustLevel: mapWorkflowTrustLevel({
-      state: attempt.state,
-      failureFamily: attempt.failureFamily,
-    }),
+    state: projection.artifactState,
+    outcome: projection.claimOutcome,
+    trustLevel: projection.trustLevel,
     sourceSnapshotId: attempt.sourceSnapshotId,
     createdAt: attempt.createdAt,
     metadata: {
@@ -6290,6 +6407,8 @@ function buildWorkflowClaim(input: {
   attemptId: string | null;
   state: string;
   failureFamily?: string | null;
+  outcome?: WorkflowTimelineClaimOutcome;
+  trustLevel?: WorkflowTimelineTrustLevel;
   evaluatedAt: string | null;
   metadata: Record<string, unknown>;
 }): WorkflowTimelineClaim {
@@ -6299,11 +6418,13 @@ function buildWorkflowClaim(input: {
     taskId: input.taskId,
     attemptId: input.attemptId,
     label: "Artifact claim",
-    outcome: mapWorkflowClaimOutcome(input.state),
-    trustLevel: mapWorkflowTrustLevel({
-      state: input.state,
-      failureFamily: input.failureFamily,
-    }),
+    outcome: input.outcome ?? mapWorkflowClaimOutcome(input.state),
+    trustLevel:
+      input.trustLevel ??
+      mapWorkflowTrustLevel({
+        state: input.state,
+        failureFamily: input.failureFamily,
+      }),
     evaluatedAt: input.evaluatedAt,
     metadata: input.metadata,
   };
@@ -6345,7 +6466,7 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
   const task = findTaskById(taskId);
   if (!task) return null;
 
-  const workflowKind = normalizeTaskIntent(task.taskIntent, task.isFix ? "fix" : "general");
+  const workflowKind = resolveInferredTaskIntent(task);
   const generatedAt = new Date().toISOString();
   const artifacts = listRoadmapBatchArtifactsByTaskId(taskId);
   if (artifacts.length === 0) {
@@ -6365,6 +6486,11 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
   const currentClaims = artifacts.map((artifact) => {
     const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
     const trustedSynthesisInput = artifactTrustedForSynthesisInput(artifact);
+    const projection = workflowProjectionForArtifact({
+      artifact,
+      validationDetails,
+      trustedSynthesisInput,
+    });
     const failureSignature = artifactDisplayFailureSignature({
       artifact,
       validationDetails,
@@ -6377,6 +6503,8 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
       attemptId: null,
       state: artifact.state,
       failureFamily: artifact.failureFamily,
+      outcome: projection.claimOutcome,
+      trustLevel: projection.trustLevel,
       evaluatedAt: artifact.validatedAt ?? artifact.updatedAt,
       metadata: {
         compatibilitySource: "roadmap_batch_artifact",
@@ -6401,26 +6529,31 @@ export function buildTaskWorkflowTimeline(taskId: string): WorkflowTimeline | nu
     });
   });
   const attemptClaims = attempts.map((attempt) =>
-    buildWorkflowClaim({
-      id: `${attempt.id}:claim`,
-      artifactId: attempt.artifactId,
-      taskId: attempt.taskId,
-      attemptId: attempt.id,
-      state: attempt.state,
-      failureFamily: attempt.failureFamily,
-      evaluatedAt: attempt.createdAt,
-      metadata: {
-        compatibilitySource: "roadmap_batch_artifact_attempt",
-        role: attempt.role,
-        roadmapAlias: attempt.roadmapAlias,
-        originalState: attempt.state,
-        classification: attempt.classification,
+    {
+      const projection = workflowProjectionForAttempt(attempt);
+      return buildWorkflowClaim({
+        id: `${attempt.id}:claim`,
+        artifactId: attempt.artifactId,
+        taskId: attempt.taskId,
+        attemptId: attempt.id,
+        state: attempt.state,
         failureFamily: attempt.failureFamily,
-        reasonCodes: buildWorkflowAttemptReasonCodes(attempt),
-        failureSignature: attemptDisplayFailureSignature(attempt),
-        reworkStatus: attempt.reworkStatus,
-      },
-    }),
+        outcome: projection.claimOutcome,
+        trustLevel: projection.trustLevel,
+        evaluatedAt: attempt.createdAt,
+        metadata: {
+          compatibilitySource: "roadmap_batch_artifact_attempt",
+          role: attempt.role,
+          roadmapAlias: attempt.roadmapAlias,
+          originalState: attempt.state,
+          classification: attempt.classification,
+          failureFamily: attempt.failureFamily,
+          reasonCodes: buildWorkflowAttemptReasonCodes(attempt),
+          failureSignature: attemptDisplayFailureSignature(attempt),
+          reworkStatus: attempt.reworkStatus,
+        },
+      });
+    },
   );
   const claims = [...currentClaims, ...attemptClaims];
   const evidence = evidenceUnits.map(buildWorkflowEvidence);

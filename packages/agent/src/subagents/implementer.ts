@@ -3137,11 +3137,11 @@ function terminalizeSourceInconclusiveAuditReport(input: {
   });
   const nowIso = new Date().toISOString();
   setTaskFields(input.task.id, {
-    status: "done",
+    status: "blocked_external",
     reworkRequested: false,
-    manualReviewRequired: false,
-    blockedReason: null,
-    blockedFromStatus: null,
+    manualReviewRequired: true,
+    blockedReason: terminalReason,
+    blockedFromStatus: input.task.status,
     retryAfter: null,
     retryCount: 0,
     lastHeartbeatAt: nowIso,
@@ -3621,7 +3621,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
-      manualReviewRequired: false,
+      manualReviewRequired: true,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
@@ -3797,7 +3797,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
-      manualReviewRequired: false,
+      manualReviewRequired: true,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });
@@ -3863,7 +3863,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
-      manualReviewRequired: false,
+      manualReviewRequired: true,
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     });

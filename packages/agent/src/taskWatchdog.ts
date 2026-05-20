@@ -18,8 +18,10 @@ const env = getEnv();
 const STALE_TIMEOUT_MS = Math.max(env.AGENT_STAGE_STALE_TIMEOUT_MS, 60_000);
 const STALE_MAX_RETRY = Math.max(env.AGENT_STAGE_STALE_MAX_RETRY, 1);
 
-export function getRandomBackoffMinutes(): number {
-  return Math.floor(Math.random() * 11) + 5; // 5..15
+export function getDeterministicBackoffMinutes(retryCount: number): number {
+  const attempt = Math.max(0, Math.trunc(retryCount));
+  const sequence = [5, 10, 15, 30, 60];
+  return sequence[Math.min(attempt, sequence.length - 1)] ?? 60;
 }
 
 function getResumeStatusForStaleTask(status: TaskStatus): TaskStatus {
@@ -123,7 +125,7 @@ export function recoverStaleInProgressTasks(): void {
       continue;
     }
 
-    const backoffMinutes = getRandomBackoffMinutes();
+    const backoffMinutes = getDeterministicBackoffMinutes(retryCount);
     const retryAfter = new Date(now + backoffMinutes * 60_000).toISOString();
     setTaskFields(task.id, {
       status: "blocked_external",

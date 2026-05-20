@@ -1520,6 +1520,62 @@ describe("coordinator", () => {
     expect(task!.reworkRequested).toBe(true);
   });
 
+  it("should block review with sanitized operator input hold", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-review-operator-input",
+        projectId: "test-project",
+        title: "Review needs operator input",
+        status: "review",
+        autoMode: true,
+        reviewComments: "## Code Review\n- operator input needed",
+      })
+      .run();
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "operator_input_required",
+      currentIteration: 1,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 1,
+        findings: [
+          {
+            id: "op-input",
+            source: "code_review",
+            text: "operator_input_required: provide source account id access_token=oauth-token",
+            closureEvidence: "review output included access_token=oauth-token",
+          },
+        ],
+      },
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-review-operator-input")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.blockedReason).toContain("operator_input_required:");
+    expect(task!.blockedReason).toContain("provide source account id");
+    expect(task!.blockedReason).not.toContain("oauth-token");
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.paused).toBe(true);
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.autoReviewStateJson).toContain("op-input");
+    expect(task!.autoReviewStateJson).not.toContain("oauth-token");
+    expect(task!.agentActivityLog).toContain("Auto review blocked for operator input");
+    expect(task!.agentActivityLog).not.toContain("oauth-token");
+  });
+
   it("should skip auto review gate when autoMode=false", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -2137,7 +2193,7 @@ describe("coordinator", () => {
     expect(runImplementer).not.toHaveBeenCalled();
   });
 
-  it("should revert status on planner failure", async () => {
+  it("should block unknown planner failure with sanitized reason", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({ id: "task-4", projectId: "test-project", title: "Fail plan", status: "planning" })
@@ -2148,7 +2204,13 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-4")).get();
-    expect(task!.status).toBe("planning");
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("planning");
+    expect(task!.blockedReason).toBe(
+      "Unexpected planner stage failure. Operator action required before retry.",
+    );
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(1);
   });
 
   it("should move task to blocked_external on external planner failure", async () => {
@@ -2638,7 +2700,7 @@ describe("coordinator", () => {
     expect(task!.retryCount).toBe(0);
   });
 
-  it("should revert status on implementer failure", async () => {
+  it("should block unknown implementer failure with sanitized reason", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({ id: "task-5", projectId: "test-project", title: "Fail impl", status: "plan_ready" })
@@ -2649,7 +2711,13 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-5")).get();
-    expect(task!.status).toBe("implementing");
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toBe(
+      "Unexpected implementer stage failure. Operator action required before retry.",
+    );
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(1);
   });
 
   it("should move task to blocked_external when implementer is blocked by permissions", async () => {
@@ -2672,7 +2740,9 @@ describe("coordinator", () => {
     const task = db.select().from(tasks).where(eq(tasks.id, "task-impl-perm")).get();
     expect(task!.status).toBe("blocked_external");
     expect(task!.blockedFromStatus).toBe("implementing");
-    expect(task!.retryAfter).toBeTruthy();
+    expect(task!.blockedReason).toContain("operator_input_required:");
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(0);
   });
 
   it("should fast-retry on implementer stream interruption before worker dispatch", async () => {
@@ -2700,7 +2770,7 @@ describe("coordinator", () => {
     expect(getCoordinatorRuntimeCounters().fastRetryStreamInterruptions).toBe(1);
   });
 
-  it("should revert to source status on checklist sync error from implementer", async () => {
+  it("should block checklist sync error from implementer with sanitized reason", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -2718,12 +2788,16 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-impl-checklist")).get();
-    expect(task!.status).toBe("implementing");
-    expect(task!.blockedReason).toBeNull();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toBe(
+      "Unexpected implementer stage failure. Operator action required before retry.",
+    );
     expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(1);
   });
 
-  it("should revert status on plan checker failure", async () => {
+  it("should block unknown plan checker failure with sanitized reason", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -2740,7 +2814,13 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-checker-fail")).get();
-    expect(task!.status).toBe("plan_ready");
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.blockedReason).toBe(
+      "Unexpected plan-checker stage failure. Operator action required before retry.",
+    );
+    expect(task!.retryAfter).toBeNull();
+    expect(task!.retryCount).toBe(1);
     expect(runImplementer).not.toHaveBeenCalled();
   });
 

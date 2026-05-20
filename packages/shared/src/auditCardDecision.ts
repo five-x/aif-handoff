@@ -64,8 +64,26 @@ export interface BuildAuditCardDecisionFromReportInput {
   reportText?: string | null;
 }
 
+export interface BuildAcceptedAuditCardDecisionInput {
+  artifactRole: "report" | "synthesis";
+  reportText?: string | null;
+  reportArtifactFiles: string[];
+  meaningfulChangedFiles: string[];
+  substantiveReportEvidence: boolean;
+  manifestStatus?: string | null;
+  sourceClassification?: string | null;
+  auditSynthesisOutcome?: { kind?: string | null; reason?: string | null } | null;
+}
+
 export function classifyAuditCardDecision(input: AuditCardDecisionInput): AuditCardDecision {
   const verificationInaccessible = input.verificationStrength === "inaccessible";
+  const hasImplementationEvidence = input.implementationEvidence.some(
+    (entry) => entry.trim().length > 0,
+  );
+  const hasVerificationEvidence = input.verificationEvidence.some(
+    (entry) => entry.trim().length > 0,
+  );
+  const hasRequiredEvidence = hasImplementationEvidence && hasVerificationEvidence;
   const requirementCompletion = verificationInaccessible
     ? "not_verifiable"
     : input.otzAcceptanceSatisfied
@@ -77,7 +95,7 @@ export function classifyAuditCardDecision(input: AuditCardDecisionInput): AuditC
     finalStatus = "audit_inconclusive";
   } else if (!input.otzAcceptanceSatisfied) {
     finalStatus = "rework_required";
-  } else if (input.verificationStrength === "verified") {
+  } else if (input.verificationStrength === "verified" && hasRequiredEvidence) {
     finalStatus = "closed_verified";
   } else if (input.verificationStrength === "missing_production") {
     finalStatus = "closed_with_residual_risk";
@@ -234,5 +252,47 @@ export function buildAuditCardDecisionFromReport(
     weakFindingCount,
     discardedFindingCount,
     residualRisks: input.residualRisks ?? [],
+  });
+}
+
+export function buildAcceptedAuditCardDecision(
+  input: BuildAcceptedAuditCardDecisionInput,
+): AuditCardDecision {
+  const terminalAuditInconclusive =
+    input.sourceClassification === "source_inconclusive" ||
+    input.auditSynthesisOutcome?.kind === "source_inconclusive" ||
+    input.auditSynthesisOutcome?.kind === "inconclusive_batch_evidence";
+  const implementationEvidence =
+    input.reportArtifactFiles.length > 0 ? input.reportArtifactFiles : input.meaningfulChangedFiles;
+  const verificationEvidence = [
+    "completion evidence guard accepted audit artifact",
+    input.manifestStatus === "valid" ? "audit report manifest valid" : null,
+    input.substantiveReportEvidence ? "substantive report evidence accepted" : null,
+    input.sourceClassification ? `source classification: ${input.sourceClassification}` : null,
+    input.auditSynthesisOutcome?.kind
+      ? `synthesis outcome: ${input.auditSynthesisOutcome.kind}`
+      : null,
+  ].filter((entry): entry is string => Boolean(entry));
+
+  return buildAuditCardDecisionFromReport({
+    otzRequirement:
+      input.artifactRole === "synthesis"
+        ? "Produce an accepted audit synthesis for the scoped OTZ card."
+        : "Produce an accepted audit source report for the scoped OTZ card.",
+    acceptanceCriteria: [
+      "Report artifact exists and is trusted valid.",
+      "Accepted findings meet the evidence contract or no-findings evidence is substantive.",
+    ],
+    otzAcceptanceSatisfied: !terminalAuditInconclusive,
+    implementationEvidence,
+    verificationEvidence,
+    verificationStrength: terminalAuditInconclusive ? "inaccessible" : "verified",
+    residualRisks: terminalAuditInconclusive
+      ? [
+          input.auditSynthesisOutcome?.reason ??
+            "Audit evidence is terminally inconclusive and cannot support a trusted finding or no-findings result.",
+        ]
+      : [],
+    reportText: input.reportText,
   });
 }

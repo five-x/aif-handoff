@@ -554,6 +554,116 @@ describe("workflow timeline read model", () => {
     }
   });
 
+  it("projects legacy valid audit_inconclusive synthesis as inconclusive and untrusted", () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-audit-inconclusive-synthesis",
+        projectId: "proj-1",
+        title: "Synthesize audit findings",
+        taskIntent: "audit",
+        roadmapAlias: "audit-inconclusive",
+        status: "done",
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "proj-1",
+      roadmapAlias: "audit-inconclusive",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-inconclusive-synthesis"],
+      synthesisTaskId: "task-audit-inconclusive-synthesis",
+      artifacts: [
+        {
+          taskId: "task-audit-inconclusive-synthesis",
+          role: "synthesis",
+          artifactPath: "docs/audit/summary.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-audit-inconclusive-synthesis",
+      state: "valid",
+      failureFamily: null,
+      validationDetails: {
+        evidence: {
+          auditSynthesisOutcome: {
+            kind: "inconclusive_batch_evidence",
+            reason: "Audit inconclusive: source reports were weak or terminal.",
+          },
+        },
+        auditCardDecision: {
+          otzRequirement: "Produce an accepted audit synthesis.",
+          acceptanceCriteria: ["Report artifact exists and is trusted valid."],
+          implementationEvidence: ["docs/audit/summary.md"],
+          verificationEvidence: ["completion evidence guard accepted audit artifact"],
+          requirementCompletion: "not_verifiable",
+          verificationStrength: "inaccessible",
+          auditFindingValidity: {
+            validFindings: 0,
+            weakFindings: 1,
+            discardedFindings: 0,
+          },
+          residualRisks: ["Audit inconclusive: source reports were weak or terminal."],
+          finalStatus: "audit_inconclusive",
+        },
+      },
+    });
+    appendEvidenceUnitEvent(
+      buildEvidenceUnit(
+        {
+          taskId: "task-audit-inconclusive-synthesis",
+          auditPlanId: "task:task-audit-inconclusive-synthesis",
+          sourceSnapshotId: "git:inconclusive",
+        },
+        buildEvidenceUnitPayload({
+          id: "ev-inconclusive",
+          toolName: "Read",
+          evidenceKind: "file_read",
+          evidenceGrade: "discovery",
+          paths: ["docs/audit/summary.md"],
+          output: "inconclusive synthesis evidence",
+        }),
+      ),
+    );
+
+    const timeline = buildTaskWorkflowTimeline("task-audit-inconclusive-synthesis");
+
+    expect(timeline?.artifacts[0]).toEqual(
+      expect.objectContaining({
+        state: "inconclusive",
+      }),
+    );
+    expect(timeline?.attempts[0]).toEqual(
+      expect.objectContaining({
+        state: "inconclusive",
+        outcome: "inconclusive",
+        trustLevel: "untrusted",
+      }),
+    );
+    expect(timeline?.claims).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          attemptId: null,
+          outcome: "inconclusive",
+          trustLevel: "untrusted",
+          metadata: expect.objectContaining({
+            reasonCodes: expect.arrayContaining(["audit_inconclusive", "untrusted_artifact"]),
+          }),
+        }),
+      ]),
+    );
+    expect(timeline?.claims).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          outcome: "supported",
+          trustLevel: "trusted",
+        }),
+      ]),
+    );
+    expect(timeline?.evidenceLinks[0]).toEqual(expect.objectContaining({ relation: "context" }));
+  });
+
   it("returns null for missing tasks", () => {
     expect(buildTaskWorkflowTimeline("missing")).toBeNull();
   });

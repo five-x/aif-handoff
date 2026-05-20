@@ -10,6 +10,7 @@ import {
   buildEvidenceUnit,
   buildEvidenceUnitPayload,
   configAuditEvents,
+  formatAuditSynthesisOutcomeForArtifact,
   projects,
   roadmapBatchArtifacts,
   runtimeProfiles,
@@ -3101,6 +3102,101 @@ describe("tasks API", () => {
       );
     });
 
+    it("should block approve_done for explicit inconclusive audit synthesis", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-inconclusive-"));
+      initGitProject(rootPath);
+      execFileSync("git", ["checkout", "-b", "feature/audit-inconclusive"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      mkdirSync(join(rootPath, "audit"), { recursive: true });
+      writeFileSync(
+        join(rootPath, "audit", "summary.md"),
+        [
+          "# Audit Inconclusive",
+          "",
+          formatAuditSynthesisOutcomeForArtifact({
+            kind: "inconclusive_batch_evidence",
+            reason: "Audit inconclusive: source reports did not contain trusted evidence.",
+            sourceReportCount: 2,
+            validatedFindingCount: 0,
+            substantiveNoFindingsReportCount: 0,
+            inventoryOnlyNoFindingsReportCount: 0,
+            weakReportCount: 2,
+          }),
+          "",
+          "Audit outcome: Audit inconclusive",
+          "",
+          "## Child Report Status",
+          "",
+          "| Task | Report | State | Trust | Decision |",
+          "| --- | --- | --- | --- | --- |",
+          "| source-one | `audit/source-1.md` | source_inconclusive | untrusted | Excluded from validated no-findings. |",
+          "| source-two | `audit/source-2.md` | missing | untrusted | Excluded from validated no-findings. |",
+        ].join("\n"),
+        "utf8",
+      );
+      execFileSync("git", ["add", "audit/summary.md"], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "add inconclusive synthesis", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      db.insert(projects)
+        .values({ id: "project-audit-inconclusive", name: "Audit Inconclusive", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-audit-inconclusive-1",
+          projectId: "project-audit-inconclusive",
+          title: "Synthesize audit",
+          description: "Report artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "done",
+          plan: "## Plan\n- Synthesize reports\n- Write final report",
+          agentActivityLog: [
+            "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started",
+            "[2026-05-09T00:00:01.000Z] Tool: read_file audit/summary.md",
+            "[2026-05-09T00:00:02.000Z] Tool: git_commit git commit",
+            "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator complete",
+            "[2026-05-09T00:00:04.000Z] Agent: review-gate started",
+            "[2026-05-09T00:00:05.000Z] Tool: read_file audit/summary.md",
+            "[2026-05-09T00:00:06.000Z] Agent: review-gate complete",
+          ].join("\n"),
+        })
+        .run();
+      const batch = createRoadmapBatchContract({
+        projectId: "project-audit-inconclusive",
+        roadmapAlias: "audit-inconclusive",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["ev-audit-inconclusive-1"],
+        synthesisTaskId: "ev-audit-inconclusive-1",
+        artifacts: [
+          {
+            taskId: "ev-audit-inconclusive-1",
+            role: "synthesis",
+            artifactPath: "audit/summary.md",
+            projectRoot: rootPath,
+          },
+        ],
+      });
+
+      const res = await app.request("/tasks/ev-audit-inconclusive-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedReason).toContain("audit_inconclusive");
+      const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      expect(artifact.state).not.toBe("valid");
+      expect(artifact.failureFamily).toBe("inconclusive_batch_evidence");
+    });
+
     it("should not read unsafe roadmap artifact paths while approving audit tasks", async () => {
       const db = testDb.current;
       const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-unsafe-"));
@@ -3554,7 +3650,7 @@ describe("tasks API", () => {
         .values({
           id: "ev-commit-fail",
           projectId: "test-project",
-          title: "Done commit fail",
+          title: "Done commit approval",
           status: "done",
         })
         .run();

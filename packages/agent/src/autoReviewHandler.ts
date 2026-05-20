@@ -48,6 +48,12 @@ export type ReviewGateOutcome =
       metrics: ReviewGateMetrics;
       autoReviewState: AutoReviewState;
       handoffReason: AutoReviewHandlerHandoffReason;
+    }
+  | {
+      status: "operator_input_required";
+      currentIteration: number;
+      metrics: ReviewGateMetrics;
+      autoReviewState: AutoReviewState;
     };
 
 interface AutoReviewInput {
@@ -76,7 +82,7 @@ function buildReviewGateTaskContext(task: NonNullable<ReturnType<typeof findTask
 }
 
 function buildSummaryComment(input: {
-  outcome: "success" | "request_changes" | "manual_review_required";
+  outcome: "success" | "request_changes" | "manual_review_required" | "operator_input_required";
   metrics: ReviewGateMetrics;
   currentIteration: number;
   maxIterations: number;
@@ -111,7 +117,9 @@ function buildSummaryComment(input: {
     return lines.join("\n");
   }
 
-  if (input.outcome === "manual_review_required") {
+  if (input.outcome === "operator_input_required") {
+    lines.push("Automatic review needs operator input before it can continue.");
+  } else if (input.outcome === "manual_review_required") {
     lines.push(
       "Automatic review convergence stopped. Human review is required before final resolution.",
     );
@@ -139,7 +147,7 @@ function buildSummaryComment(input: {
 }
 
 function buildActivityMessage(input: {
-  outcome: "accepted" | "rework_requested" | "manual_review_required";
+  outcome: "accepted" | "rework_requested" | "manual_review_required" | "operator_input_required";
   metrics: ReviewGateMetrics;
   currentIteration: number;
   maxIterations: number;
@@ -323,6 +331,49 @@ export async function handleAutoReviewGate(
       currentIteration,
       metrics: reviewGate.metrics,
       autoReviewState: null,
+    };
+  }
+
+  if (reviewGate.status === "operator_input_required") {
+    createTaskComment({
+      taskId: input.taskId,
+      author: "agent",
+      message: buildSummaryComment({
+        outcome: "operator_input_required",
+        metrics: reviewGate.metrics,
+        currentIteration,
+        maxIterations,
+        fixesMarkdown: reviewGate.fixesMarkdown,
+      }),
+      attachments: [],
+    });
+
+    log.info(
+      {
+        taskId: input.taskId,
+        currentIteration,
+        maxIterations,
+        metrics: reviewGate.metrics,
+      },
+      "Auto review requires operator input",
+    );
+
+    logActivity(
+      input.taskId,
+      "Agent",
+      buildActivityMessage({
+        outcome: "operator_input_required",
+        metrics: reviewGate.metrics,
+        currentIteration,
+        maxIterations,
+      }),
+    );
+
+    return {
+      status: "operator_input_required",
+      currentIteration,
+      metrics: reviewGate.metrics,
+      autoReviewState: reviewGate.autoReviewState,
     };
   }
 

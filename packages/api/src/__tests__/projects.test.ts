@@ -1134,6 +1134,26 @@ describe("projects API", () => {
           position: 1,
         })
         .run();
+      db.insert(tasks)
+        .values([
+          {
+            id: "operator-plan-ready-task",
+            projectId: "operator-project",
+            title: "Plan ready task",
+            status: "plan_ready",
+            priority: 2,
+            position: 2,
+          },
+          {
+            id: "operator-blocked-task",
+            projectId: "operator-project",
+            title: "Blocked task",
+            status: "blocked_external",
+            priority: 2,
+            position: 3,
+          },
+        ])
+        .run();
       db.insert(memoryItems)
         .values({
           id: "operator-knowledge",
@@ -1236,7 +1256,13 @@ describe("projects API", () => {
       expect(queueRes.status).toBe(200);
       expect(await queueRes.json()).toEqual(
         expect.objectContaining({
-          countsByStatus: expect.objectContaining({ backlog: 1 }),
+          countsByStatus: expect.objectContaining({
+            backlog: 1,
+            plan_ready: 1,
+            blocked_external: 1,
+          }),
+          executionActiveCount: 2,
+          queueGatingActiveCount: 2,
           backlog: [expect.objectContaining({ id: "operator-queued-task" })],
         }),
       );

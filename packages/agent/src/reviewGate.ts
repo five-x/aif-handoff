@@ -6,6 +6,7 @@ import {
   extractAuditReportManifestEvidenceRefs,
   hasSubstantiveReportEvidence,
   isRiskyTask,
+  redactProviderText,
   resolveAuditPlanId,
   type AutoReviewFinding,
   type AutoReviewStrategy,
@@ -63,6 +64,10 @@ export type ReviewGateResult =
       status: "manual_review_required";
       autoReviewState: ReturnType<typeof toAutoReviewState>;
       handoffReason: ReviewGateManualHandoffReason;
+    })
+  | (ReviewGateBaseResult & {
+      status: "operator_input_required";
+      autoReviewState: ReturnType<typeof toAutoReviewState>;
     });
 
 export interface ReviewGateInput {
@@ -85,6 +90,127 @@ function formatFixesMarkdown(findings: AutoReviewFinding[]): string {
   return findings
     .map((finding) => `- [${finding.id}] ${finding.source} | ${finding.text}`)
     .join("\n");
+}
+
+function sanitizeReviewText(text: string): string {
+  return redactProviderText(text.replace(/\s+/g, " ").trim()).replace(
+    /\[REDACTED\]\]+/g,
+    "[REDACTED]",
+  );
+}
+
+function isExplicitOperatorInputFinding(finding: AutoReviewFinding): boolean {
+  return /^operator_input_required:/i.test(finding.text.trim());
+}
+
+function isPolicyOrSecuritySensitiveAmbiguity(text: string): boolean {
+  return /\b(policy|security|secret|token|credential|private key|bearer|cookie|malformed|unsafe to auto-close|ambiguous evidence|human judgment|manual review)\b/i.test(
+    text,
+  );
+}
+
+function isConcreteOperatorInputFinding(finding: AutoReviewFinding): boolean {
+  const text = finding.text.trim();
+  if (isExplicitOperatorInputFinding(finding)) return true;
+  if (finding.source === "review_gate") return false;
+  if (isPolicyOrSecuritySensitiveAmbiguity(text)) return false;
+  return (
+    /\b(operator|user|human|maintainer|owner)\b/i.test(text) &&
+    /\b(provide|supply|choose|select|confirm|decide|approve|grant|configure|set|update)\b/i.test(
+      text,
+    ) &&
+    /\b(data|input|answer|decision|approval|access|permission|config|configuration|profile|value|setting|account|login)\b/i.test(
+      text,
+    )
+  );
+}
+
+function normalizeOperatorInputFindings(findings: AutoReviewFinding[]): AutoReviewFinding[] {
+  return findings.map((finding) => {
+    const safeText = sanitizeReviewText(finding.text);
+    const text = /^operator_input_required:/i.test(safeText)
+      ? safeText.replace(/^operator_input_required:/i, "operator_input_required:")
+      : `operator_input_required: ${safeText}`;
+    return {
+      ...finding,
+      text,
+      closureEvidence: finding.closureEvidence
+        ? sanitizeReviewText(finding.closureEvidence)
+        : finding.closureEvidence,
+    };
+  });
+}
+
+function buildOperatorInputDecision(input: {
+  reviewInput: ReviewGateInput;
+  metrics: ReviewGateMetrics;
+  findings: AutoReviewFinding[];
+}): ReviewGateResult {
+  const enrichedFindings = enrichBlockingFindings({
+    findings: normalizeOperatorInputFindings(input.findings),
+    previousFindings: input.reviewInput.previousFindings,
+    iteration: input.reviewInput.iteration,
+  });
+  return {
+    status: "operator_input_required",
+    metrics: input.metrics,
+    blockingFindings: enrichedFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedFindings),
+    autoReviewState: toAutoReviewState({
+      strategy: input.reviewInput.strategy,
+      iteration: input.reviewInput.iteration,
+      findings: enrichedFindings,
+    }),
+  };
+}
+
+function maybeBuildOperatorInputDecision(input: {
+  reviewInput: ReviewGateInput;
+  metrics: ReviewGateMetrics;
+  findings: AutoReviewFinding[];
+}): ReviewGateResult | null {
+  if (input.findings.length === 0 || !input.findings.every(isConcreteOperatorInputFinding)) {
+    return null;
+  }
+  return buildOperatorInputDecision({
+    reviewInput: input.reviewInput,
+    metrics: input.metrics,
+    findings: input.findings,
+  });
+}
+
+function maybeBuildManualReviewDecision(input: {
+  reviewInput: ReviewGateInput;
+  metrics: ReviewGateMetrics;
+  findings: AutoReviewFinding[];
+}): ReviewGateResult | null {
+  const manualFindings = input.findings.filter((finding) =>
+    /^manual_review_required:/i.test(finding.text.trim()),
+  );
+  if (manualFindings.length === 0) return null;
+  const enrichedFindings = enrichBlockingFindings({
+    findings: manualFindings.map((finding) => ({
+      ...finding,
+      text: sanitizeReviewText(finding.text),
+      closureEvidence: finding.closureEvidence
+        ? sanitizeReviewText(finding.closureEvidence)
+        : finding.closureEvidence,
+    })),
+    previousFindings: input.reviewInput.previousFindings,
+    iteration: input.reviewInput.iteration,
+  });
+  return {
+    status: "manual_review_required",
+    handoffReason: "malformed_review_output_fallback",
+    metrics: input.metrics,
+    blockingFindings: enrichedFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedFindings),
+    autoReviewState: toAutoReviewState({
+      strategy: input.reviewInput.strategy,
+      iteration: input.reviewInput.iteration,
+      findings: enrichedFindings,
+    }),
+  };
 }
 
 function mergeFindings(...groups: AutoReviewFinding[][]): AutoReviewFinding[] {
@@ -152,8 +278,13 @@ function reviewGateFinding(text: string): AutoReviewFinding {
   };
 }
 
+function isDeterministicAuditSynthesisInconclusiveReview(reviewComments: string | null): boolean {
+  return /\bDeterministic Review:\s*audit_synthesis_inconclusive\b/i.test(reviewComments ?? "");
+}
+
 function collectDeterministicReviewGateFindings(input: ReviewGateInput): AutoReviewFinding[] {
   if (!input.task || !isRiskyTask(input.task)) return [];
+  if (isDeterministicAuditSynthesisInconclusiveReview(input.reviewComments)) return [];
   const artifact = findRoadmapBatchArtifactByTaskId(input.taskId);
   const evidenceRefs = artifact
     ? extractAuditReportManifestEvidenceRefs(
@@ -620,6 +751,24 @@ function buildStructuredDecision(
     blockerHistory: parsed.previousFindings,
   });
 
+  const manualReviewDecision = maybeBuildManualReviewDecision({
+    reviewInput: input,
+    metrics,
+    findings: enrichedBlockingFindings,
+  });
+  if (manualReviewDecision) {
+    return manualReviewDecision;
+  }
+
+  const operatorInputDecision = maybeBuildOperatorInputDecision({
+    reviewInput: input,
+    metrics,
+    findings: enrichedBlockingFindings,
+  });
+  if (operatorInputDecision) {
+    return operatorInputDecision;
+  }
+
   if (
     input.strategy === "closure_first" &&
     input.previousFindings.length > 0 &&
@@ -711,6 +860,24 @@ function buildFallbackDecision(
     previousFindings: input.previousFindings,
     iteration: input.iteration,
   });
+  const manualReviewDecision = maybeBuildManualReviewDecision({
+    reviewInput: input,
+    metrics,
+    findings: enrichedFindings,
+  });
+  if (manualReviewDecision) {
+    return manualReviewDecision;
+  }
+
+  const operatorInputDecision = maybeBuildOperatorInputDecision({
+    reviewInput: input,
+    metrics,
+    findings: enrichedFindings,
+  });
+  if (operatorInputDecision) {
+    return operatorInputDecision;
+  }
+
   return {
     status: "request_changes",
     metrics,
@@ -773,6 +940,24 @@ function buildLegacyBlockingSectionDecision(
     iteration: input.iteration,
     findings: enrichedBlockingFindings,
   });
+
+  const manualReviewDecision = maybeBuildManualReviewDecision({
+    reviewInput: input,
+    metrics,
+    findings: enrichedBlockingFindings,
+  });
+  if (manualReviewDecision) {
+    return manualReviewDecision;
+  }
+
+  const operatorInputDecision = maybeBuildOperatorInputDecision({
+    reviewInput: input,
+    metrics,
+    findings: enrichedBlockingFindings,
+  });
+  if (operatorInputDecision) {
+    return operatorInputDecision;
+  }
 
   if (
     input.strategy === "closure_first" &&

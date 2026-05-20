@@ -45,7 +45,7 @@ import {
   logger,
   getEnv,
   CLEAN_STATE_RESET,
-  buildAuditCardDecisionFromReport,
+  buildAcceptedAuditCardDecision,
   evaluateTaskCompletionEvidence,
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
@@ -56,10 +56,12 @@ import {
   resolveAuditPlanId,
   TaskPlanQualityError,
   buildDeterministicDiagnosticPlan,
+  redactProviderText,
   withTimeout,
   type AuditCardDecision,
   type AuditFailureFamily,
   type AutoReviewFinding,
+  type AutoReviewState,
   type ImplementationManifestIssueCode,
   type TaskStatus,
   type RuntimeStage,
@@ -86,7 +88,7 @@ import { setActiveStageAbortController } from "./stageAbort.js";
 import { setCoordinatorId, setRuntimeStageFallbackProfile } from "./subagentQuery.js";
 import { readGitWorktreeReworkSnapshot } from "./reworkSnapshot.js";
 import {
-  getRandomBackoffMinutes,
+  getDeterministicBackoffMinutes,
   releaseDueBlockedTasks,
   recoverStaleInProgressTasks,
 } from "./taskWatchdog.js";
@@ -303,9 +305,13 @@ function appendRuntimeBudgetActivity(task: TaskRow, stage: RuntimeStage): boolea
   return applied;
 }
 
-function resolveRuntimeGateRetryAfter(gateDecision: ReturnType<typeof evaluateRuntimeLimitGate>): {
+function resolveRuntimeGateRetryAfter(
+  gateDecision: ReturnType<typeof evaluateRuntimeLimitGate>,
+  retryCount: number,
+): {
   retryAfter: string;
-  source: "resetAt" | "retryAfterSeconds" | "random_backoff";
+  source: "resetAt" | "retryAfterSeconds" | "deterministic_backoff";
+  backoffMinutes: number | null;
 } {
   if (gateDecision.futureHint.resetAt && gateDecision.futureHint.isFuture) {
     return {
@@ -313,6 +319,7 @@ function resolveRuntimeGateRetryAfter(gateDecision: ReturnType<typeof evaluateRu
       source: gateDecision.futureHint.source.includes("retry_after")
         ? "retryAfterSeconds"
         : "resetAt",
+      backoffMinutes: null,
     };
   }
 
@@ -326,12 +333,15 @@ function resolveRuntimeGateRetryAfter(gateDecision: ReturnType<typeof evaluateRu
         Date.now() + gateDecision.futureHint.retryAfterSeconds * 1000,
       ).toISOString(),
       source: "retryAfterSeconds",
+      backoffMinutes: null,
     };
   }
 
+  const backoffMinutes = getDeterministicBackoffMinutes(retryCount);
   return {
-    retryAfter: new Date(Date.now() + getRandomBackoffMinutes() * 60_000).toISOString(),
-    source: "random_backoff",
+    retryAfter: new Date(Date.now() + backoffMinutes * 60_000).toISOString(),
+    source: "deterministic_backoff",
+    backoffMinutes,
   };
 }
 
@@ -363,9 +373,9 @@ function proactivelyBlockTaskForRuntimeGate(
   gateDecision: ReturnType<typeof evaluateRuntimeLimitGate>,
 ): void {
   const snapshot = gateDecision.snapshot;
-  const { retryAfter, source } = resolveRuntimeGateRetryAfter(gateDecision);
-  const blockedReason = buildRuntimeGateBlockedReason(gateDecision);
   const retryCount = (task.retryCount ?? 0) + 1;
+  const { retryAfter, source } = resolveRuntimeGateRetryAfter(gateDecision, task.retryCount ?? 0);
+  const blockedReason = buildRuntimeGateBlockedReason(gateDecision);
   const persistedAt = new Date().toISOString();
   const applied = blockTaskForRuntimeGateIfEligible({
     taskId: task.id,
@@ -505,45 +515,17 @@ function acceptedAuditCardDecision(input: {
 }): AuditCardDecision {
   const validation = input.result.evidence.auditReportValidation;
   const auditSynthesisOutcome = input.result.evidence.auditSynthesisOutcome;
-  const terminalAuditInconclusive =
-    validation.sourceClassification === "source_inconclusive" ||
-    auditSynthesisOutcome?.kind === "source_inconclusive" ||
-    auditSynthesisOutcome?.kind === "inconclusive_batch_evidence";
   const reportText = readAuditArtifactText(input.projectRoot, input.artifact) ?? "";
-  const implementationEvidence =
-    input.result.evidence.reportArtifactFiles.length > 0
-      ? input.result.evidence.reportArtifactFiles
-      : input.result.evidence.meaningfulChangedFiles;
-  const verificationEvidence = [
-    "completion evidence guard accepted audit artifact",
-    validation.manifestStatus === "valid" ? "audit report manifest valid" : null,
-    input.result.evidence.substantiveReportEvidence ? "substantive report evidence accepted" : null,
-    validation.sourceClassification
-      ? `source classification: ${validation.sourceClassification}`
-      : null,
-    auditSynthesisOutcome ? `synthesis outcome: ${auditSynthesisOutcome.kind}` : null,
-  ].filter((entry): entry is string => Boolean(entry));
 
-  return buildAuditCardDecisionFromReport({
-    otzRequirement:
-      input.artifact.role === "synthesis"
-        ? "Produce an accepted audit synthesis for the scoped OTZ card."
-        : "Produce an accepted audit source report for the scoped OTZ card.",
-    acceptanceCriteria: [
-      "Report artifact exists and is trusted valid.",
-      "Accepted findings meet the evidence contract or no-findings evidence is substantive.",
-    ],
-    otzAcceptanceSatisfied: !terminalAuditInconclusive,
-    implementationEvidence,
-    verificationEvidence,
-    verificationStrength: terminalAuditInconclusive ? "inaccessible" : "verified",
-    residualRisks: terminalAuditInconclusive
-      ? [
-          auditSynthesisOutcome?.reason ??
-            "Audit evidence is terminally inconclusive and cannot support a trusted finding or no-findings result.",
-        ]
-      : [],
+  return buildAcceptedAuditCardDecision({
+    artifactRole: input.artifact.role === "synthesis" ? "synthesis" : "report",
     reportText,
+    reportArtifactFiles: input.result.evidence.reportArtifactFiles,
+    meaningfulChangedFiles: input.result.evidence.meaningfulChangedFiles,
+    substantiveReportEvidence: input.result.evidence.substantiveReportEvidence,
+    manifestStatus: validation.manifestStatus,
+    sourceClassification: validation.sourceClassification,
+    auditSynthesisOutcome,
   });
 }
 
@@ -895,7 +877,9 @@ function formatAutoReviewFindingsForBlockedReason(
   findings: AutoReviewFinding[] | undefined,
 ): string {
   if (!findings || findings.length === 0) return "none";
-  return findings.map((finding) => `[${finding.id}] ${finding.source}: ${finding.text}`).join("; ");
+  return findings
+    .map((finding) => `[${finding.id}] ${finding.source}: ${redactProviderText(finding.text)}`)
+    .join("; ");
 }
 
 function buildManualAutoReviewBlockedReason(
@@ -907,6 +891,19 @@ function buildManualAutoReviewBlockedReason(
       outcome.autoReviewState.findings,
     )}`
   );
+}
+
+function buildOperatorInputAutoReviewBlockedReason(autoReviewState: AutoReviewState): string {
+  const firstFinding = autoReviewState.findings[0]?.text;
+  if (!firstFinding) {
+    return "operator_input_required: Provide the missing operator input requested by review.";
+  }
+  const safeFinding = redactProviderText(firstFinding).replace(/^operator_input_required:\s*/i, "");
+  return `operator_input_required: ${safeFinding}`;
+}
+
+function sanitizeAutoReviewStateForPersistence(state: AutoReviewState): AutoReviewState {
+  return JSON.parse(redactProviderText(JSON.stringify(state))) as AutoReviewState;
 }
 
 function terminalizeRoadmapSourceReportAsInconclusive(input: {
@@ -1848,22 +1845,6 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       return false;
     }
 
-    if (
-      stage.label === "implementer" &&
-      latestTask.status === "done" &&
-      findRoadmapBatchArtifactByTaskId(task.id)?.state === "source_inconclusive"
-    ) {
-      log.info(
-        {
-          taskId: task.id,
-          from: stage.inProgress,
-          to: latestTask.status,
-        },
-        "Implementer completed terminal source_inconclusive audit report before review handoff",
-      );
-      return true;
-    }
-
     if (stage.label === "implementer" && latestTask.skipReview) {
       if (
         blockTaskForCompletionEvidenceIfNeeded({
@@ -1956,6 +1937,44 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
             handoffReason: outcome.handoffReason,
           },
           "Auto review gate blocked unresolved manual review handoff",
+        );
+        return false;
+      }
+
+      if (outcome?.status === "operator_input_required") {
+        const safeAutoReviewState = sanitizeAutoReviewStateForPersistence(outcome.autoReviewState);
+        const blockedReason = buildOperatorInputAutoReviewBlockedReason(safeAutoReviewState);
+        clearTaskRuntimeLimitSnapshot(task.id);
+        updateTaskStatus(
+          task.id,
+          "blocked_external",
+          {
+            blockedReason,
+            blockedFromStatus: stage.inProgress,
+            retryAfter: null,
+            retryCount: 0,
+            reworkRequested: false,
+            reviewIterationCount: outcome.currentIteration,
+            manualReviewRequired: false,
+            autoReviewState: safeAutoReviewState,
+          },
+          {
+            title: taskTitle,
+            fromStatus: stage.inProgress,
+          },
+        );
+        appendTaskActivityLog(
+          task.id,
+          `[${new Date().toISOString()}] Auto review blocked for operator input: ${blockedReason}`,
+        );
+        log.info(
+          {
+            taskId: task.id,
+            from: stage.inProgress,
+            to: "blocked_external",
+            reviewIteration: outcome.currentIteration,
+          },
+          "Auto review gate blocked task for operator input",
         );
         return false;
       }

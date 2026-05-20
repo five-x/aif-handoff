@@ -73,6 +73,7 @@ const {
   updateScheduledAt,
   getAutoQueueMode,
   setAutoQueueMode,
+  buildProjectQueueState,
   getMinBacklogPosition,
   nextBacklogTaskByPosition,
   listAutoQueueProjects,
@@ -1003,10 +1004,11 @@ describe("data layer", () => {
         expect.objectContaining({
           taskStatus: "done",
           artifactState: "valid",
-          artifactTrustLevel: "trusted",
+          artifactTrustLevel: "untrusted",
+          trustedSynthesisInput: false,
+          claimOutcome: "inconclusive",
           failureFamily: null,
-          failureSignature: null,
-          nextAction: "none",
+          nextAction: "wait_for_source_artifacts",
           auditCardDecision: expect.objectContaining({
             finalStatus: "audit_inconclusive",
             verificationStrength: "inaccessible",
@@ -1022,9 +1024,7 @@ describe("data layer", () => {
           "valid",
         ]),
       );
-      expect(synthesisRollup?.reasonCodes).not.toEqual(
-        expect.arrayContaining(["insufficient_substantive_evidence", "missing_substantive_evidence"]),
-      );
+      expect(synthesisRollup?.reasonCodes).toContain("untrusted_artifact");
       expect(
         listRoadmapBatchArtifactAttempts(
           listRoadmapBatchArtifacts(batch.batchId).find(
@@ -1167,6 +1167,28 @@ describe("data layer", () => {
           claimOutcome: "refuted",
           nextAction: "retry_source_rework",
           summary: "Done with untrusted plan manifest",
+        }),
+      );
+    });
+
+    it("keeps inferred done development tasks untrusted without an implementation manifest", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Fix missing generic evidence gate",
+        description: "Patch the task completion behavior and run regression tests.",
+      })!;
+      updateTaskStatus(task.id, "done", {
+        implementationLog: "Changed packages/data/src/index.ts\nTests passed.",
+      });
+
+      expect(buildTaskArtifactTrustRollup(task.id)).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactRole: "implementation_manifest",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "refuted",
+          reasonCodes: expect.arrayContaining(["missing_implementation_manifest"]),
+          nextAction: "retry_source_rework",
         }),
       );
     });
@@ -3598,6 +3620,33 @@ describe("data layer", () => {
       const a = createTask({ projectId: "proj-1", title: "A", description: "" });
       updateTaskStatus(a!.id, "blocked_external");
       expect(countActivePipelineTasksForProject("proj-1")).toBe(1);
+    });
+
+    it("buildProjectQueueState separates raw execution-active and scheduler queue-gating counts", () => {
+      const backlog = createTask({ projectId: "proj-1", title: "Backlog", description: "" });
+      const planning = createTask({ projectId: "proj-1", title: "Planning", description: "" });
+      const planReady = createTask({ projectId: "proj-1", title: "Plan ready", description: "" });
+      const blocked = createTask({ projectId: "proj-1", title: "Blocked", description: "" });
+      const done = createTask({ projectId: "proj-1", title: "Done", description: "" });
+      updateTaskStatus(planning!.id, "planning");
+      updateTaskStatus(planReady!.id, "plan_ready");
+      updateTaskStatus(blocked!.id, "blocked_external");
+      updateTaskStatus(done!.id, "done");
+
+      expect(backlog).toBeDefined();
+      expect(buildProjectQueueState("proj-1")).toEqual(
+        expect.objectContaining({
+          executionActiveCount: 3,
+          queueGatingActiveCount: 3,
+          countsByStatus: expect.objectContaining({
+            backlog: 1,
+            planning: 1,
+            plan_ready: 1,
+            blocked_external: 1,
+            done: 1,
+          }),
+        }),
+      );
     });
 
     it("countActivePipelineTasksForProject ignores terminal manual audit report blocks", () => {

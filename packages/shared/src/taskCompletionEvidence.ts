@@ -256,22 +256,36 @@ function combinedTaskText(task: TaskCompletionEvidenceTask): string {
     .join("\n");
 }
 
+function hasExplicitGeneralEvidenceIntent(task: TaskCompletionEvidenceTask): boolean {
+  return parseTags(task.tags).some((tag) =>
+    ["intent:general", "kind:general"].includes(tag.trim().toLowerCase()),
+  );
+}
+
+function taskForEvidenceInference(task: TaskCompletionEvidenceTask): TaskCompletionEvidenceTask {
+  if (task.taskIntent !== "general" || hasExplicitGeneralEvidenceIntent(task)) {
+    return task;
+  }
+  return { ...task, taskIntent: null };
+}
+
 export function isRiskyTask(task: TaskCompletionEvidenceTask): boolean {
+  const inferenceTask = taskForEvidenceInference(task);
   const taskIntent = inferTaskIntent({
-    taskIntent: task.taskIntent,
-    title: task.title,
-    description: task.description,
-    roadmapAlias: task.roadmapAlias,
-    tags: task.tags,
+    taskIntent: inferenceTask.taskIntent,
+    title: inferenceTask.title,
+    description: inferenceTask.description,
+    roadmapAlias: inferenceTask.roadmapAlias,
+    tags: inferenceTask.tags,
   });
   if (taskIntent === "audit" || taskIntent === "spike") return true;
-  if (isTaskIntent(task.taskIntent)) return false;
+  if (isTaskIntent(inferenceTask.taskIntent)) return false;
   const text = [
-    task.title,
-    task.description,
-    task.taskIntent,
-    task.roadmapAlias,
-    ...parseTags(task.tags),
+    inferenceTask.title,
+    inferenceTask.description,
+    inferenceTask.taskIntent,
+    inferenceTask.roadmapAlias,
+    ...parseTags(inferenceTask.tags),
   ]
     .filter(Boolean)
     .join("\n");
@@ -1236,8 +1250,16 @@ function formatPathExamples(paths: string[], limit = 8): string {
 }
 
 function taskExplicitlyRequiresImplementationManifest(task: TaskCompletionEvidenceTask): boolean {
-  if (task.isFix === true) return true;
-  return isTaskIntent(task.taskIntent) && isDevelopmentImplementationIntent(task.taskIntent);
+  const inferenceTask = taskForEvidenceInference(task);
+  const taskIntent = inferTaskIntent({
+    taskIntent: inferenceTask.taskIntent,
+    isFix: inferenceTask.isFix,
+    title: inferenceTask.title,
+    description: inferenceTask.description,
+    roadmapAlias: inferenceTask.roadmapAlias,
+    tags: inferenceTask.tags,
+  });
+  return isDevelopmentImplementationIntent(taskIntent);
 }
 
 export function evaluateTaskCompletionEvidence(
@@ -1245,6 +1267,7 @@ export function evaluateTaskCompletionEvidence(
 ): TaskCompletionEvidenceResult {
   const { task, projectRoot } = input;
   const phase = input.phase ?? "completion";
+  const inferenceTask = taskForEvidenceInference(task);
   const riskyTask = isRiskyTask(task);
   const genericPlan = hasGenericPlan(task);
   const gitEvidence = collectChangedFiles(projectRoot);
@@ -1257,7 +1280,7 @@ export function evaluateTaskCompletionEvidence(
   const intentPolicyResult =
     phase !== "pre_implementation"
       ? validateTaskIntentChangedFiles({
-          task,
+          task: inferenceTask,
           changedFiles: gitEvidence.files,
           meaningfulChangedFiles,
         })
@@ -1265,7 +1288,7 @@ export function evaluateTaskCompletionEvidence(
   const implementationManifestValidation =
     phase !== "pre_implementation" && taskExplicitlyRequiresImplementationManifest(task)
       ? validateImplementationManifest({
-          task,
+          task: inferenceTask,
           manifestJson: task.implementationManifestJson,
           changedFiles: gitEvidence.files,
           meaningfulChangedFiles,
@@ -1448,13 +1471,8 @@ export function evaluateTaskCompletionEvidence(
       );
     }
     if (
-      (auditSynthesisOutcome?.kind === "source_inconclusive" ||
-        auditSynthesisOutcome?.kind === "inconclusive_batch_evidence") &&
-      !hasExplicitAuditInconclusiveSynthesisConclusion({
-        text: reportText,
-        projectRoot,
-        auditReportValidation,
-      })
+      auditSynthesisOutcome?.kind === "source_inconclusive" ||
+      auditSynthesisOutcome?.kind === "inconclusive_batch_evidence"
     ) {
       issues.push(
         issue("audit_inconclusive", `Audit inconclusive: ${auditSynthesisOutcome.reason}`),

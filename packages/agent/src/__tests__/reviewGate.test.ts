@@ -120,6 +120,141 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     return root;
   }
 
+  it("returns operator_input_required for explicit operator input findings", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [op-1] code_review | operator_input_required: provide the missing staging account id token=abc123",
+        "",
+        "## Advisories",
+        "- code_review | none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("operator_input_required");
+    if (result.status !== "operator_input_required") {
+      throw new Error("expected operator_input_required");
+    }
+    expect(result.blockingFindings[0]?.text).toContain("operator_input_required:");
+    expect(result.blockingFindings[0]?.text).not.toContain("abc123");
+    expect(JSON.stringify(result.autoReviewState)).not.toContain("abc123");
+  });
+
+  it("normalizes concrete unprefixed operator input findings", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [op-2] code_review | Operator must provide the source system account id before this can be verified",
+        "",
+        "## Advisories",
+        "- code_review | none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("operator_input_required");
+    if (result.status !== "operator_input_required") {
+      throw new Error("expected operator_input_required");
+    }
+    expect(result.blockingFindings[0]?.text).toMatch(/^operator_input_required:/);
+    expect(result.blockingFindings[0]?.text).toContain("source system account id");
+  });
+
+  it("keeps mixed operator input and code blockers in request changes", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [op-3] code_review | operator_input_required: provide the target staging account id",
+        "- [code-1] code_review | Fix the failing unit test in packages/agent/src/__tests__/reviewGate.test.ts before closure",
+        "",
+        "## Advisories",
+        "- code_review | none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
+    }
+    expect(result.blockingFindings).toHaveLength(2);
+    expect(result.blockingFindings.map((finding) => finding.id)).toEqual(["op-3", "code-1"]);
+    expect(result.fixesMarkdown).toContain("target staging account id");
+    expect(result.fixesMarkdown).toContain("Fix the failing unit test");
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual([
+      "op-3",
+      "code-1",
+    ]);
+  });
+
+  it("keeps policy and security-sensitive ambiguity as manual review", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [sec-1] security_audit | manual_review_required: security evidence is ambiguous and unsafe to auto-close",
+        "",
+        "## Advisories",
+        "- security_audit | none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | not_checked | Security evidence is ambiguous",
+        "- permissions_sandbox | not_checked | Security evidence is ambiguous",
+        "- unsafe_shell_network_file | not_checked | Security evidence is ambiguous",
+        "- dependency_config | not_checked | Security evidence is ambiguous",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+  });
+
   function structuredAdvisoryOnlyReviewComments(): string {
     return [
       "## Auto Review Metadata",

@@ -471,11 +471,6 @@ function OverviewView({
     ? getAuditCardDecisionRows(trust.auditCardDecision)
     : [];
   const memoryCount = task.memoryCandidateCount ?? 0;
-  const activeQueueCount =
-    (projectQueue?.countsByStatus.backlog ?? 0) +
-    (projectQueue?.countsByStatus.planning ?? 0) +
-    (projectQueue?.countsByStatus.implementing ?? 0) +
-    (projectQueue?.countsByStatus.review ?? 0);
 
   return (
     <div className="space-y-3">
@@ -491,7 +486,11 @@ function OverviewView({
             "Project auto queue",
             projectQueue ? (projectQueue.autoQueueMode ? "Enabled" : "Off") : "Unknown",
           ],
-          ["Active queue", projectQueue ? activeQueueCount : "Unknown"],
+          ["Execution active", projectQueue ? (projectQueue.executionActiveCount ?? 0) : "Unknown"],
+          [
+            "Queue-gating active",
+            projectQueue ? (projectQueue.queueGatingActiveCount ?? 0) : "Unknown",
+          ],
         ]}
       />
       {trust?.summary && (

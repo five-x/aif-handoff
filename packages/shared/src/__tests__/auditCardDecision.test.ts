@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAcceptedAuditCardDecision,
   buildAuditCardDecisionFromReport,
   classifyAuditCardDecision,
   extractWeakOrDiscardedAuditFindings,
@@ -29,6 +30,57 @@ describe("auditCardDecision", () => {
 
     expect(decision.finalStatus).toBe("closed_verified");
     expect(decision.auditFindingValidity.weakFindings).toBe(1);
+  });
+
+  it("does not close verified cards without implementation and verification evidence", () => {
+    const withoutImplementationEvidence = classifyAuditCardDecision({
+      ...baseInput(),
+      implementationEvidence: [],
+    });
+    const withoutVerificationEvidence = classifyAuditCardDecision({
+      ...baseInput(),
+      verificationEvidence: [],
+    });
+
+    expect(withoutImplementationEvidence.finalStatus).toBe("rework_required");
+    expect(withoutVerificationEvidence.finalStatus).toBe("rework_required");
+  });
+
+  it("classifies accepted source_inconclusive reports as audit_inconclusive", () => {
+    const decision = buildAcceptedAuditCardDecision({
+      artifactRole: "report",
+      reportText: "# Audit\n\nAudit outcome: Source inconclusive\n",
+      reportArtifactFiles: ["audit/source.md"],
+      meaningfulChangedFiles: [],
+      substantiveReportEvidence: false,
+      manifestStatus: "valid",
+      sourceClassification: "source_inconclusive",
+      auditSynthesisOutcome: null,
+    });
+
+    expect(decision.finalStatus).toBe("audit_inconclusive");
+    expect(decision.requirementCompletion).toBe("not_verifiable");
+    expect(decision.verificationStrength).toBe("inaccessible");
+  });
+
+  it("classifies accepted inconclusive synthesis as audit_inconclusive", () => {
+    const decision = buildAcceptedAuditCardDecision({
+      artifactRole: "synthesis",
+      reportText: "# Audit Inconclusive\n\nAudit outcome: Audit inconclusive\n",
+      reportArtifactFiles: ["audit/summary.md"],
+      meaningfulChangedFiles: [],
+      substantiveReportEvidence: false,
+      manifestStatus: "valid",
+      sourceClassification: "insufficient_substantive_evidence",
+      auditSynthesisOutcome: {
+        kind: "inconclusive_batch_evidence",
+        reason: "Audit inconclusive: source reports were weak.",
+      },
+    });
+
+    expect(decision.finalStatus).toBe("audit_inconclusive");
+    expect(decision.requirementCompletion).toBe("not_verifiable");
+    expect(decision.verificationStrength).toBe("inaccessible");
   });
 
   it("classifies completed OTZ cards with missing production verification as residual risk", () => {

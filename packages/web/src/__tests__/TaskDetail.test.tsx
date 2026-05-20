@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { Task } from "@aif/shared/browser";
+import type { Task, WorkflowTimeline } from "@aif/shared/browser";
 
 const mockTask: Task = {
   id: "detail-1",
@@ -204,6 +204,84 @@ const mockAuditDecisionTask: Task = {
   },
 };
 
+const mockAuditInconclusiveTimelineTask: Task = {
+  ...mockDoneTask,
+  id: "detail-audit-inconclusive-timeline",
+  title: "Audit Inconclusive Timeline",
+};
+
+const mockAuditInconclusiveTimeline: WorkflowTimeline = {
+  context: {
+    taskId: "detail-audit-inconclusive-timeline",
+    projectId: "test-project",
+    workflowPackId: "audit",
+    workflowKind: "audit",
+    roadmapAlias: "audit-inconclusive",
+    sourceKind: "roadmap_batch",
+    sourceId: "batch-inconclusive",
+    status: "done",
+    generatedAt: "2026-05-19T00:00:00.000Z",
+  },
+  artifacts: [
+    {
+      id: "artifact-inconclusive",
+      taskId: "detail-audit-inconclusive-timeline",
+      kind: "audit_synthesis",
+      label: "Synthesis artifact",
+      path: "audit/summary.md",
+      state: "inconclusive",
+      currentAttemptNumber: 1,
+      createdAt: "2026-05-19T00:00:00.000Z",
+      updatedAt: "2026-05-19T00:05:00.000Z",
+      metadata: {
+        role: "synthesis",
+        originalState: "valid",
+        reasonCodes: ["audit_inconclusive", "untrusted_artifact", "valid"],
+        failureSignature: null,
+      },
+    },
+  ],
+  attempts: [
+    {
+      id: "attempt-inconclusive",
+      artifactId: "artifact-inconclusive",
+      taskId: "detail-audit-inconclusive-timeline",
+      attemptNumber: 1,
+      state: "inconclusive",
+      outcome: "inconclusive",
+      trustLevel: "untrusted",
+      sourceSnapshotId: null,
+      createdAt: "2026-05-19T00:05:00.000Z",
+      metadata: {
+        role: "synthesis",
+        originalState: "valid",
+        reasonCodes: ["audit_inconclusive", "untrusted_artifact", "valid"],
+        reworkStatus: "accepted",
+      },
+    },
+  ],
+  claims: [
+    {
+      id: "claim-inconclusive",
+      artifactId: "artifact-inconclusive",
+      taskId: "detail-audit-inconclusive-timeline",
+      attemptId: null,
+      label: "Artifact claim",
+      outcome: "inconclusive",
+      trustLevel: "untrusted",
+      evaluatedAt: "2026-05-19T00:05:00.000Z",
+      metadata: {
+        role: "synthesis",
+        originalState: "valid",
+        reasonCodes: ["audit_inconclusive", "untrusted_artifact", "valid"],
+      },
+    },
+  ],
+  evidence: [],
+  evidenceLinks: [],
+  events: [],
+};
+
 const mockPlanReadyManualTask: Task = {
   ...mockTask,
   id: "detail-plan-ready-manual",
@@ -291,19 +369,24 @@ vi.mock("@/hooks/useTasks", () => ({
                     ? mockBlockedTask
                     : id === "detail-audit-decision"
                       ? mockAuditDecisionTask
-                      : id === "detail-plan-ready-manual"
-                        ? mockPlanReadyManualTask
-                        : id === "detail-review"
-                          ? mockReviewTask
-                          : id === "detail-with-attachment"
-                            ? mockTaskWithAttachment
-                            : id === "detail-no-plan-no-log"
-                              ? mockTaskNoPlanNoLog
-                              : id === "detail-planning-activity"
-                                ? mockPlanningTaskWithActivityOnly
-                                : null,
+                      : id === "detail-audit-inconclusive-timeline"
+                        ? mockAuditInconclusiveTimelineTask
+                        : id === "detail-plan-ready-manual"
+                          ? mockPlanReadyManualTask
+                          : id === "detail-review"
+                            ? mockReviewTask
+                            : id === "detail-with-attachment"
+                              ? mockTaskWithAttachment
+                              : id === "detail-no-plan-no-log"
+                                ? mockTaskNoPlanNoLog
+                                : id === "detail-planning-activity"
+                                  ? mockPlanningTaskWithActivityOnly
+                                  : null,
   }),
-  useTaskTimeline: () => ({ data: null, isLoading: false }),
+  useTaskTimeline: (id: string | null) => ({
+    data: id === "detail-audit-inconclusive-timeline" ? mockAuditInconclusiveTimeline : null,
+    isLoading: false,
+  }),
   useTaskEvidence: () => ({ data: null, isLoading: false }),
   useTaskMemoryCandidates: () => ({ data: { candidates: [] }, isLoading: false }),
   useTaskRuntimeUsage: () => ({ data: null, isLoading: false }),
@@ -323,6 +406,8 @@ vi.mock("@/hooks/useTasks", () => ({
       projectId: "test-project",
       autoQueueMode: true,
       countsByStatus: {},
+      executionActiveCount: 2,
+      queueGatingActiveCount: 1,
       backlog: [],
     },
     isLoading: false,
@@ -390,6 +475,15 @@ describe("TaskDetail", () => {
     expect(screen.getAllByText("Full description here").length).toBeGreaterThan(0);
   });
 
+  it("separates execution-active and queue-gating counts in the overview", () => {
+    render(<TaskDetail taskId="detail-1" onClose={vi.fn()} />, { wrapper: Wrapper });
+    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
+
+    expect(screen.getByText("Execution active").parentElement?.textContent).toContain("2");
+    expect(screen.getByText("Queue-gating active").parentElement?.textContent).toContain("1");
+    expect(screen.queryByText("Active queue")).toBeNull();
+  });
+
   it("should show Settings button for backlog tasks", () => {
     render(<TaskDetail taskId="detail-backlog" onClose={vi.fn()} />, { wrapper: Wrapper });
     expect(screen.getByText("Settings")).toBeDefined();
@@ -430,6 +524,20 @@ describe("TaskDetail", () => {
     render(<TaskDetail taskId="detail-1" onClose={vi.fn()} />, { wrapper: Wrapper });
     fireEvent.click(screen.getByText("Timeline"));
     expect(screen.getByText("Timeline unavailable.")).toBeDefined();
+  });
+
+  it("renders audit_inconclusive workflow timeline as untrusted in the detail panel", () => {
+    render(<TaskDetail taskId="detail-audit-inconclusive-timeline" onClose={vi.fn()} />, {
+      wrapper: Wrapper,
+    });
+
+    fireEvent.click(screen.getByText("Timeline"));
+
+    expect(screen.getByText("Synthesis artifact")).toBeDefined();
+    expect(screen.getAllByText("Inconclusive").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Trust: untrusted").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Supported")).toBeNull();
+    expect(screen.queryByText("Trust: trusted")).toBeNull();
   });
 
   it("should render operator projection tabs", () => {
@@ -547,9 +655,9 @@ describe("TaskDetail", () => {
     expect(screen.getByText("Requirement completion")).toBeDefined();
     expect(screen.getByText("satisfied")).toBeDefined();
     expect(screen.getByText("Weak findings")).toBeDefined();
-    expect(screen.getByText("2")).toBeDefined();
+    expect(screen.getByText("Weak findings").parentElement?.textContent).toContain("2");
     expect(screen.getByText("Discarded findings")).toBeDefined();
-    expect(screen.getByText("3")).toBeDefined();
+    expect(screen.getByText("Discarded findings").parentElement?.textContent).toContain("3");
     expect(screen.queryByText(/human review is required/i)).toBeNull();
   });
 

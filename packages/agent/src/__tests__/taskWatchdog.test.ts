@@ -21,7 +21,7 @@ import {
   parseUpdatedAtMs,
   releaseDueBlockedTasks,
   recoverStaleInProgressTasks,
-  getRandomBackoffMinutes,
+  getDeterministicBackoffMinutes,
 } from "../taskWatchdog.js";
 
 const PROJECT_ID = "proj-watchdog-test";
@@ -90,13 +90,15 @@ describe("parseUpdatedAtMs", () => {
   });
 });
 
-describe("getRandomBackoffMinutes", () => {
-  it("returns a number between 5 and 15", () => {
-    for (let i = 0; i < 50; i++) {
-      const mins = getRandomBackoffMinutes();
-      expect(mins).toBeGreaterThanOrEqual(5);
-      expect(mins).toBeLessThanOrEqual(15);
-    }
+describe("getDeterministicBackoffMinutes", () => {
+  it("returns fixed capped values by retry count", () => {
+    expect(getDeterministicBackoffMinutes(0)).toBe(5);
+    expect(getDeterministicBackoffMinutes(1)).toBe(10);
+    expect(getDeterministicBackoffMinutes(2)).toBe(15);
+    expect(getDeterministicBackoffMinutes(3)).toBe(30);
+    expect(getDeterministicBackoffMinutes(4)).toBe(60);
+    expect(getDeterministicBackoffMinutes(99)).toBe(60);
+    expect(getDeterministicBackoffMinutes(-1)).toBe(5);
   });
 });
 
@@ -173,23 +175,29 @@ describe("recoverStaleInProgressTasks", () => {
     insertProject(testDb.current);
   });
 
-  it("blocks stale planning task with auto-recover", () => {
+  it("blocks stale planning task with deterministic auto-recover", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-19T10:00:00.000Z"));
     const db = testDb.current;
-    const staleTime = new Date(Date.now() - 100 * 60_000).toISOString();
-    const id = insertTask(db, {
-      status: "planning",
-      lastHeartbeatAt: staleTime,
-      updatedAt: staleTime,
-      retryCount: 0,
-    });
+    try {
+      const staleTime = new Date(Date.now() - 100 * 60_000).toISOString();
+      const id = insertTask(db, {
+        status: "planning",
+        lastHeartbeatAt: staleTime,
+        updatedAt: staleTime,
+        retryCount: 0,
+      });
 
-    recoverStaleInProgressTasks();
+      recoverStaleInProgressTasks();
 
-    const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
-    expect(task?.status).toBe("blocked_external");
-    expect(task?.blockedFromStatus).toBe("planning");
-    expect(task?.retryCount).toBe(1);
-    expect(task?.retryAfter).toBeTruthy();
+      const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
+      expect(task?.status).toBe("blocked_external");
+      expect(task?.blockedFromStatus).toBe("planning");
+      expect(task?.retryCount).toBe(1);
+      expect(task?.retryAfter).toBe("2026-05-19T10:05:00.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("quarantines task after max retries", () => {

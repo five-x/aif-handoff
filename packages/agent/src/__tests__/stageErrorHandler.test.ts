@@ -22,7 +22,7 @@ vi.mock("@aif/data", () => ({
 
 // Stable backoff for deterministic assertions
 vi.mock("../taskWatchdog.js", () => ({
-  getRandomBackoffMinutes: () => 10,
+  getDeterministicBackoffMinutes: () => 10,
 }));
 
 vi.mock("@aif/shared", async (importOriginal) => {
@@ -131,7 +131,7 @@ describe("classifyStageError", () => {
       // 10 min backoff (mocked)
       expect(retryMs).toBeGreaterThanOrEqual(before + 10 * 60_000 - 1000);
       expect(retryMs).toBeLessThanOrEqual(before + 10 * 60_000 + 1000);
-      expect(result.retryAfterSource).toBe("random_backoff");
+      expect(result.retryAfterSource).toBe("deterministic_backoff");
     }
   });
 
@@ -275,37 +275,83 @@ describe("classifyStageError", () => {
     expect(msg).toMatch(/external error/i);
   });
 
-  it("writes activity log for external failure", () => {
-    classifyStageError(
+  it("blocks auth failures as sanitized operator input with no auto retry", () => {
+    const result = classifyStageError(
       makeInput({
-        err: new RuntimeExecutionError("auth failed", undefined, "auth"),
+        err: new RuntimeExecutionError("auth failed token=abc123", undefined, "auth"),
         sourceStatus: "planning",
         stageLabel: "planner",
       }),
     );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toContain("operator_input_required:");
+      expect(result.blockedReason).toContain("Runtime authentication failed");
+      expect(result.blockedReason).not.toContain("abc123");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(0);
+    }
 
     expect(appendTaskActivityLog).toHaveBeenCalledOnce();
     const logText = vi.mocked(appendTaskActivityLog).mock.calls[0][1];
     expect(logText).toContain("blocked_external");
     expect(logText).toContain("planning");
     expect(logText).toContain("planner");
+    expect(logText).not.toContain("abc123");
   });
 
-  // --- revert ---
+  it("blocks permission failures as sanitized operator input with no auto retry", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError("permission denied bearer abc123", undefined, "permission"),
+        retryCount: 7,
+      }),
+    );
 
-  it("returns revert for unknown errors", () => {
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toContain("operator_input_required:");
+      expect(result.blockedReason).toContain("Grant the required runtime access");
+      expect(result.blockedReason).not.toContain("abc123");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(7);
+    }
+  });
+
+  // --- unexpected stage failures ---
+
+  it("blocks unknown errors with sanitized reason and retry counter", () => {
     const result = classifyStageError(
       makeInput({ err: new Error("Cannot read property 'foo' of undefined") }),
     );
-    expect(result).toEqual({ kind: "revert" });
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toBe(
+        "Unexpected implementer stage failure. Operator action required before retry.",
+      );
+      expect(result.blockedReason).not.toContain("foo");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(1);
+    }
   });
 
-  it("returns revert for non-Error values", () => {
-    const result = classifyStageError(makeInput({ err: 42 }));
-    expect(result).toEqual({ kind: "revert" });
+  it("blocks non-Error values with sanitized reason and retry counter", () => {
+    const result = classifyStageError(makeInput({ err: 42, retryCount: 3 }));
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toBe(
+        "Unexpected implementer stage failure. Operator action required before retry.",
+      );
+      expect(result.blockedReason).not.toContain("42");
+      expect(result.retryCount).toBe(4);
+    }
   });
 
-  it("logs scrubbed error metadata for revert", () => {
+  it("logs scrubbed error metadata for unknown stage failures", () => {
     const err = new Error("unexpected null");
     classifyStageError(makeInput({ err, taskId: "t-rev", stageLabel: "planner" }));
 
@@ -317,7 +363,7 @@ describe("classifyStageError", () => {
       errorName: "Error",
       errorMessage: "unexpected null",
     });
-    expect(msg).toMatch(/reverting status/i);
+    expect(msg).toMatch(/unexpected stage error/i);
   });
 
   it("scrubs raw provider text in blocked_external logs", () => {
@@ -338,9 +384,12 @@ describe("classifyStageError", () => {
     expect(String(meta.errorMessage)).not.toContain("abc@example.com");
   });
 
-  it("does not write activity log for revert errors", () => {
+  it("writes sanitized activity log for unknown stage failures", () => {
     classifyStageError(makeInput({ err: new Error("internal bug") }));
-    expect(appendTaskActivityLog).not.toHaveBeenCalled();
+    expect(appendTaskActivityLog).toHaveBeenCalledOnce();
+    const activityText = vi.mocked(appendTaskActivityLog).mock.calls[0][1];
+    expect(activityText).toContain("Unexpected implementer stage failure");
+    expect(activityText).not.toContain("internal bug");
   });
 
   // --- priority: fast_retry beats external ---

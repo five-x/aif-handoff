@@ -4,7 +4,7 @@ import {
   applyHumanTaskEvent,
   assertCurrentBranch,
   ensureFeatureBranch,
-  buildAuditCardDecisionFromReport,
+  buildAcceptedAuditCardDecision,
   evaluateTaskCompletionEvidence,
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
@@ -205,34 +205,18 @@ function acceptedAuditCardDecision(input: {
   projectRoot: string;
 }): AuditCardDecision {
   const validation = input.result.evidence.auditReportValidation;
+  const auditSynthesisOutcome = input.result.evidence.auditSynthesisOutcome;
   const reportText = readAuditArtifactText(input.projectRoot, input.auditArtifact) ?? "";
-  const implementationEvidence =
-    input.result.evidence.reportArtifactFiles.length > 0
-      ? input.result.evidence.reportArtifactFiles
-      : input.result.evidence.meaningfulChangedFiles;
-  const verificationEvidence = [
-    "completion evidence guard accepted audit artifact",
-    validation.manifestStatus === "valid" ? "audit report manifest valid" : null,
-    input.result.evidence.substantiveReportEvidence ? "substantive report evidence accepted" : null,
-    validation.sourceClassification
-      ? `source classification: ${validation.sourceClassification}`
-      : null,
-  ].filter((entry): entry is string => Boolean(entry));
 
-  return buildAuditCardDecisionFromReport({
-    otzRequirement:
-      input.auditArtifact.role === "synthesis"
-        ? "Produce an accepted audit synthesis for the scoped OTZ card."
-        : "Produce an accepted audit source report for the scoped OTZ card.",
-    acceptanceCriteria: [
-      "Report artifact exists and is trusted valid.",
-      "Accepted findings meet the evidence contract or no-findings evidence is substantive.",
-    ],
-    otzAcceptanceSatisfied: true,
-    implementationEvidence,
-    verificationEvidence,
-    verificationStrength: "verified",
+  return buildAcceptedAuditCardDecision({
+    artifactRole: input.auditArtifact.role === "synthesis" ? "synthesis" : "report",
     reportText,
+    reportArtifactFiles: input.result.evidence.reportArtifactFiles,
+    meaningfulChangedFiles: input.result.evidence.meaningfulChangedFiles,
+    substantiveReportEvidence: input.result.evidence.substantiveReportEvidence,
+    manifestStatus: validation.manifestStatus,
+    sourceClassification: validation.sourceClassification,
+    auditSynthesisOutcome,
   });
 }
 

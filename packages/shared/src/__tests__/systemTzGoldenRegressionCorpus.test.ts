@@ -495,6 +495,55 @@ describe("System TZ golden regression corpus", () => {
       expectedCodes: ["missing_review_closure_evidence"],
     },
     {
+      id: "inferred_feature_missing_manifest",
+      run: () => {
+        const root = initRepo();
+        mkdirSync(join(root, "src"), { recursive: true });
+        writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+        return completionCodes(
+          evaluateTaskCompletionEvidence({
+            projectRoot: root,
+            phase: "review_handoff",
+            task: {
+              id: "inferred-feature-missing-manifest",
+              title: "Add feature",
+            },
+          }),
+        );
+      },
+      expectedCodes: ["missing_implementation_manifest"],
+    },
+    {
+      id: "waiver_known_limitations_only",
+      run: () => {
+        const root = initRepo();
+        mkdirSync(join(root, "src"), { recursive: true });
+        writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+        const manifest = JSON.parse(
+          implementationManifest({
+            taskId: "waiver-known-limitations-only",
+            intent: "feature",
+            changedFiles: ["src/feature.ts"],
+            acceptanceCriteria: [{ id: "AC1", status: "waived", evidenceRefs: [] }],
+          }),
+        ) as { knownLimitations: string[] };
+        manifest.knownLimitations = ["Production verification was unavailable."];
+        return completionCodes(
+          evaluateTaskCompletionEvidence({
+            projectRoot: root,
+            phase: "review_handoff",
+            task: {
+              id: "waiver-known-limitations-only",
+              title: "Add feature",
+              taskIntent: "feature",
+              implementationManifestJson: JSON.stringify(manifest),
+            },
+          }),
+        );
+      },
+      expectedCodes: ["missing_acceptance_evidence"],
+    },
+    {
       id: "rework_without_delta",
       run: () =>
         completionCodes(

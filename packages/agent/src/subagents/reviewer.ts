@@ -636,6 +636,7 @@ Rules:
 - If a previous finding lacks closure evidence, repeats the same validator failure, or the required self-check was not performed, mark that same ID still_blocking and state the evidence gap.
 - Mark not_reproducible only when you inspected the current attempt and can cite concrete evidence showing the original blocker is absent or no longer applicable.
 - Mark manual_review_required when evidence is ambiguous, potentially secret-bearing, externally dependent, permission-sensitive, or unsafe to auto-close.
+- If completion is blocked only because the operator must provide a concrete data item, access grant, runtime/config value/profile choice, or decision/approval text, write the blocking finding starting exactly with "operator_input_required:" and ask for that specific missing input. Do not use this for policy/security-sensitive ambiguity, malformed output, secret values, or judgment calls; those remain manual_review_required.
 - For audit/report artifact rework, do not mark prior review_gate findings resolved unless the artifact proves valid manifest requirements, bound evidenceRefs, declared scope coverage, and substantive evidence.
 - Security Coverage is required. For non-security code review, use not_applicable rows. For security audit, each row must describe the check performed or the blocker found.
 - Security blocking findings must include Severity:, Claim:, Required fix:, and Verification: in the finding text, with redacted evidence only.

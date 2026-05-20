@@ -161,6 +161,44 @@ describe("TaskCard", () => {
     expect(screen.getByText("Inspect untrusted source")).toBeDefined();
   });
 
+  it("renders audit_inconclusive valid synthesis as untrusted", () => {
+    render(
+      <TaskCard
+        task={withArtifactTrust({
+          artifactRole: "synthesis",
+          artifactState: "valid",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "inconclusive",
+          trustedSynthesisInput: false,
+          nextAction: "retry_synthesis",
+          nextActionLabel: "Retry synthesis",
+          reasonCodes: ["audit_inconclusive", "untrusted_artifact", "valid"],
+          summary: "Done with untrusted valid artifact",
+          auditCardDecision: {
+            otzRequirement: "Produce an accepted audit synthesis.",
+            acceptanceCriteria: ["Report artifact exists and is trusted valid."],
+            implementationEvidence: ["audit/final.md"],
+            verificationEvidence: ["completion evidence guard accepted audit artifact"],
+            requirementCompletion: "not_verifiable",
+            verificationStrength: "inaccessible",
+            auditFindingValidity: {
+              validFindings: 0,
+              weakFindings: 1,
+              discardedFindings: 0,
+            },
+            residualRisks: ["Audit inconclusive: source reports were weak or terminal."],
+            finalStatus: "audit_inconclusive",
+          },
+        })}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Done / untrusted artifact")).toBeDefined();
+    expect(screen.getByText("Done with untrusted valid artifact")).toBeDefined();
+    expect(screen.getByText("Retry synthesis")).toBeDefined();
+  });
+
   it("renders done with rejected artifact as untrusted", () => {
     render(
       <TaskCard

@@ -21,11 +21,11 @@ import {
   isFastRetryableFailure,
   truncateReason,
 } from "./errorClassifier.js";
-import { getRandomBackoffMinutes } from "./taskWatchdog.js";
+import { getDeterministicBackoffMinutes } from "./taskWatchdog.js";
 
 const log = logger("stage-error-handler");
 
-type RetryAfterSource = "resetAt" | "retryAfterSeconds" | "random_backoff" | "none";
+type RetryAfterSource = "resetAt" | "retryAfterSeconds" | "deterministic_backoff" | "none";
 
 const NON_RETRYABLE_RUNTIME_CATEGORIES = new Set([
   "model_not_found",
@@ -76,7 +76,24 @@ function buildUserSafeExternalReason(err: unknown): string {
   }
 }
 
-function resolveRetryAfter(err: unknown): {
+function buildOperatorInputRuntimeReason(category: "auth" | "permission"): string {
+  if (category === "auth") {
+    return (
+      "operator_input_required: Runtime authentication failed. " +
+      "Refresh or select a valid runtime profile or login state before retry."
+    );
+  }
+
+  return (
+    "operator_input_required: Runtime permissions blocked this task. " +
+    "Grant the required runtime access or update the approval/sandbox policy before retry."
+  );
+}
+
+function resolveRetryAfter(
+  err: unknown,
+  retryCount: number,
+): {
   retryAfter: string;
   retryAfterSource: RetryAfterSource;
   backoffMinutes: number | null;
@@ -115,10 +132,10 @@ function resolveRetryAfter(err: unknown): {
     };
   }
 
-  const backoffMinutes = getRandomBackoffMinutes();
+  const backoffMinutes = getDeterministicBackoffMinutes(retryCount);
   return {
     retryAfter: new Date(Date.now() + backoffMinutes * 60_000).toISOString(),
-    retryAfterSource: "random_backoff",
+    retryAfterSource: "deterministic_backoff",
     backoffMinutes,
     limitSnapshot,
   };
@@ -196,6 +213,47 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
   }
 
   const runtimeError = findRuntimeExecutionError(err);
+  if (
+    runtimeError &&
+    (runtimeError.category === "auth" || runtimeError.category === "permission")
+  ) {
+    const blockedReason = buildOperatorInputRuntimeReason(runtimeError.category);
+    const limitSnapshot = getEnv().AIF_USAGE_LIMITS_ENABLED
+      ? (runtimeError.limitSnapshot ?? null)
+      : null;
+
+    logActivity(
+      taskId,
+      "Agent",
+      `coordinator moved to blocked_external from ${sourceStatus} at ${stageLabel}; retryAfter=manual; source=none; reason=${truncateReason(blockedReason)}`,
+    );
+
+    log.error(
+      {
+        taskId,
+        stage: stageLabel,
+        retryAfter: null,
+        retryAfterSource: "none",
+        runtimeCategory: runtimeError.category,
+        errorName: err instanceof Error ? err.name : typeof err,
+        errorMessage:
+          err instanceof Error
+            ? redactProviderTextForLogs(err.message)
+            : redactProviderTextForLogs(String(err)),
+      },
+      "Subagent failed with runtime operator-input error, task requires operator action",
+    );
+
+    return {
+      kind: "blocked_external",
+      blockedReason,
+      retryAfter: null,
+      retryAfterSource: "none",
+      retryCount: input.retryCount ?? 0,
+      limitSnapshot,
+    };
+  }
+
   if (runtimeError && NON_RETRYABLE_RUNTIME_CATEGORIES.has(runtimeError.category)) {
     const safeReason = mapSafeRuntimeErrorReason(runtimeError);
     const blockedReason = `${safeReason.reason} Manual action required before retry.`;
@@ -247,7 +305,10 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
   }
 
   if (isExternalFailure(err)) {
-    const { retryAfter, retryAfterSource, backoffMinutes, limitSnapshot } = resolveRetryAfter(err);
+    const { retryAfter, retryAfterSource, backoffMinutes, limitSnapshot } = resolveRetryAfter(
+      err,
+      input.retryCount ?? 0,
+    );
     const reason = err instanceof Error ? err.message : String(err);
     const blockedReason = buildUserSafeExternalReason(err);
     const runtimeError = findRuntimeExecutionError(err);
@@ -264,7 +325,7 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
       );
     }
 
-    if (retryAfterSource === "random_backoff") {
+    if (retryAfterSource === "deterministic_backoff") {
       log.warn(
         {
           taskId,
@@ -275,7 +336,7 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
           providerId: limitSnapshot?.providerId ?? null,
           profileId: limitSnapshot?.profileId ?? null,
         },
-        "Structured reset metadata missing for external error, falling back to random backoff",
+        "Structured reset metadata missing for external error, falling back to deterministic backoff",
       );
     }
 
@@ -323,8 +384,22 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
           ? redactProviderTextForLogs(err.message)
           : redactProviderTextForLogs(String(err)),
     },
-    "Subagent failed, reverting status",
+    "Subagent failed with unexpected stage error, task blocked for operator decision",
   );
 
-  return { kind: "revert" };
+  const blockedReason = `Unexpected ${stageLabel} stage failure. Operator action required before retry.`;
+  logActivity(
+    taskId,
+    "Agent",
+    `coordinator moved to blocked_external from ${sourceStatus} at ${stageLabel}; retryAfter=manual; source=none; reason=${truncateReason(blockedReason)}`,
+  );
+
+  return {
+    kind: "blocked_external",
+    blockedReason,
+    retryAfter: null,
+    retryAfterSource: "none",
+    retryCount: (input.retryCount ?? 0) + 1,
+    limitSnapshot: null,
+  };
 }
