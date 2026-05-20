@@ -1718,6 +1718,205 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("invalid_or_missing_file_references");
   });
 
+  it("does not treat bare slash paths inside scoped command output as missing report paths", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(
+      join(root, "tests", "test_local_state_adapters.py"),
+      [
+        "class _RecordingMemoryClient:",
+        '    references=[Reference(reference_id="unexpected", file_path="docs/unexpected.md")]',
+        "    def ask(self):",
+        "        return None",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "tests/test_local_state_adapters.py"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add local state adapter test", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/test-readiness-command-output-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "test-readiness-audit.md"),
+      [
+        "# Audit: test and operations readiness",
+        "",
+        "No validated findings.",
+        "",
+        "Risk hypotheses: risk-test-readiness-1 for `tests/test_local_state_adapters.py` adapter references was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `tests/test_local_state_adapters.py:1`",
+        "- `tests/test_local_state_adapters.py:2`",
+        "",
+        "Checked commands:",
+        "- Command `git grep -n . -- tests/test_local_state_adapters.py` output:",
+        "```",
+        "tests/test_local_state_adapters.py:1:class _RecordingMemoryClient:",
+        'tests/test_local_state_adapters.py:2:    references=[Reference(reference_id="unexpected", file_path="docs/unexpected.md")]',
+        "```",
+        "",
+        "Absence reasoning: risk-test-readiness-1 covered `tests/test_local_state_adapters.py:1` and `tests/test_local_state_adapters.py:2`; no actionable finding was identified in the scoped inspection.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/test-readiness-audit.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-command-output-bare-slash-path",
+        title: "Audit test and operations readiness",
+        taskIntent: "audit",
+        description: "Scope: tests/test_local_state_adapters.py",
+        plan: "## Plan\n- Validate tests/test_local_state_adapters.py\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toContain("tests/test_local_state_adapters.py");
+    expect(result.evidence.missingReportReferencedPaths).not.toContain("docs/unexpected.md");
+    expect(codes(result)).not.toContain("invalid_or_missing_file_references");
+  });
+
+  it("still rejects bare missing slash paths in report checked file lists", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/missing-path-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime-audit.md"),
+      [
+        "# Audit: runtime",
+        "",
+        "No validated findings.",
+        "",
+        "Risk hypotheses: risk-runtime-1 for `src/config.ts` timeout drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "- `src/missing.ts`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+        "",
+        "Absence reasoning: risk-runtime-1 covered `src/config.ts:1`; no actionable finding was identified in the scoped inspection.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-bare-missing-slash-path",
+        title: "Audit runtime behavior",
+        taskIntent: "audit",
+        description: "Scope: src/config.ts",
+        plan: "## Plan\n- Validate src/config.ts\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.missingReportReferencedPaths).toContain("src/missing.ts");
+    expect(codes(result)).toContain("invalid_or_missing_file_references");
+  });
+
+  it("still rejects bare missing slash paths in non-command fenced report text", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/non-command-fence-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "runtime-audit.md"),
+      [
+        "# Audit: runtime",
+        "",
+        "No validated findings.",
+        "",
+        "Risk hypotheses: risk-runtime-1 for `src/config.ts` timeout drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Evidence notes:",
+        "```",
+        "src/missing.ts",
+        "```",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+        "",
+        "Absence reasoning: risk-runtime-1 covered `src/config.ts:1`; no actionable finding was identified in the scoped inspection.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime-audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-non-command-fence-missing-slash-path",
+        title: "Audit runtime behavior",
+        taskIntent: "audit",
+        description: "Scope: src/config.ts",
+        plan: "## Plan\n- Validate src/config.ts\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.missingReportReferencedPaths).toContain("src/missing.ts");
+    expect(codes(result)).toContain("invalid_or_missing_file_references");
+  });
+
   it("accepts report evidence paths followed by nearby line ranges", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });

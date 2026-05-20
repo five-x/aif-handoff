@@ -1092,6 +1092,44 @@ function isInsideMarkdownFence(text: string, index: number): boolean {
   return fenceCount % 2 === 1;
 }
 
+function isInsideCommandOutputFence(text: string, index: number): boolean {
+  if (!isInsideMarkdownFence(text, index)) return false;
+  const before = text.slice(0, index);
+  const fenceMatches = [...before.matchAll(/(?:^|\n)```[^\n]*\r?\n?/g)];
+  const openingFence = fenceMatches[fenceMatches.length - 1];
+  if (!openingFence) return false;
+  const intro = before
+    .slice(0, openingFence.index)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join("\n");
+  const commandNames =
+    "npm|pnpm|yarn|rg|grep|cat|ls|sed|head|tail|find|wc|git|vitest|jest|tsc|eslint|node|curl|read_file|list_files|search_files";
+  return new RegExp(
+    `\\b(?:command|cmd|shell|powershell|pwsh)\\b[^\\n]{0,240}\\b(?:${commandNames})\\b[^\\n]{0,240}\\b(?:output|stdout|stderr)\\s*:`,
+    "i",
+  ).test(intro);
+}
+
+function isBareMissingPath(rawPath: string, projectRoot: string): boolean {
+  const normalized = normalizeRelativePath(rawPath.replace(/[),.;\]]+$/g, ""));
+  return Boolean(normalized && !existsSync(resolve(projectRoot, normalized)));
+}
+
+function isBareMissingCommandOutputPathReference(
+  text: string,
+  match: RegExpMatchArray,
+  rawPath: string,
+  projectRoot: string,
+): boolean {
+  if (extractLineReference(match[0] ?? "")) return false;
+  return (
+    isBareMissingPath(rawPath, projectRoot) && isInsideCommandOutputFence(text, match.index ?? 0)
+  );
+}
+
 function extractReferencedPaths(
   text: string,
   projectRoot: string,
@@ -1106,6 +1144,8 @@ function extractReferencedPaths(
 
   for (const match of text.matchAll(SLASH_PATH_TOKEN_PATTERN)) {
     const raw = match[1]?.trim();
+    if (!raw) continue;
+    if (isBareMissingCommandOutputPathReference(text, match, raw, projectRoot)) continue;
     addReferencedPath(refs, projectRoot, raw);
   }
   for (const match of text.matchAll(ROOT_FILE_TOKEN_PATTERN)) {
