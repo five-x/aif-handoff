@@ -1641,6 +1641,83 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("invalid_or_missing_file_references");
   });
 
+  it("does not treat quoted fixture filenames inside grep output as missing report paths", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(
+      join(root, "tests", "test_backup_crypto.py"),
+      [
+        "from pathlib import Path",
+        "",
+        "def test_encrypt_fixture():",
+        '    (Path("source") / "note.txt").write_text("hello", encoding="utf-8")',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "tests/test_backup_crypto.py"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add backup crypto test", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/test-readiness-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "test-readiness-audit.md"),
+      [
+        "# Audit: test and operations readiness",
+        "",
+        "No validated findings.",
+        "",
+        "Risk hypotheses: risk-test-readiness-1 for `tests/test_backup_crypto.py` fixture coverage was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `tests/test_backup_crypto.py:1`",
+        "- `tests/test_backup_crypto.py:4`",
+        "",
+        "Checked commands:",
+        "- Command `git grep -n . -- tests/test_backup_crypto.py` output:",
+        "```",
+        "tests/test_backup_crypto.py:1:from pathlib import Path",
+        'tests/test_backup_crypto.py:4:    (Path("source") / "note.txt").write_text("hello", encoding="utf-8")',
+        "```",
+        "",
+        "Absence reasoning: risk-test-readiness-1 covered `tests/test_backup_crypto.py:1` and `tests/test_backup_crypto.py:4`; no actionable finding was identified in the scoped inspection.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/test-readiness-audit.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-grep-fixture-root-file",
+        title: "Audit test and operations readiness",
+        plan: "## Plan\n- Validate tests/test_backup_crypto.py\n- Write report",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportReferencedPaths).toContain("tests/test_backup_crypto.py");
+    expect(result.evidence.missingReportReferencedPaths).not.toContain("note.txt");
+    expect(codes(result)).not.toContain("invalid_or_missing_file_references");
+  });
+
   it("accepts report evidence paths followed by nearby line ranges", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });

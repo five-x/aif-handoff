@@ -1086,6 +1086,12 @@ function isInReferenceSentence(text: string, match: RegExpMatchArray): boolean {
   );
 }
 
+function isInsideMarkdownFence(text: string, index: number): boolean {
+  const before = text.slice(0, index);
+  const fenceCount = (before.match(/(?:^|\n)```/g) ?? []).length;
+  return fenceCount % 2 === 1;
+}
+
 function extractReferencedPaths(
   text: string,
   projectRoot: string,
@@ -1114,8 +1120,9 @@ function extractReferencedPaths(
         continue;
       }
       if (
-        !isDelimitedReference(text, match, raw) &&
-        !(options.includeUndelimitedMissingRootFiles && isInReferenceSentence(text, match))
+        isInsideMarkdownFence(text, match.index ?? 0) ||
+        (!isDelimitedReference(text, match, raw) &&
+          !(options.includeUndelimitedMissingRootFiles && isInReferenceSentence(text, match)))
       ) {
         continue;
       }
