@@ -3485,6 +3485,9 @@ describe("runImplementer rework behavior", () => {
         blockedReason:
           "Audit report validator blocked completion (missing_report_file_references): retry after timeout.",
         useSubagents: true,
+        autoReviewStateJson: JSON.stringify({
+          findings: [{ id: "stale-review-finding", text: "stale finding from an earlier gate" }],
+        }),
         reviewComments: [
           "## Auto Review Metadata",
           "- Strategy: full_re_review",

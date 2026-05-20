@@ -3548,8 +3548,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     task.reworkRequested &&
     currentAuditReportValidation?.ok &&
     isTrustedValidAuditReportValidation(currentAuditReportValidation) &&
-    reviewCommentsDeclareNoBlockingFindings(task.reviewComments) &&
-    (task.autoReviewState?.findings.length ?? 0) === 0
+    reviewCommentsDeclareNoBlockingFindings(task.reviewComments)
   ) {
     const nowIso = new Date().toISOString();
     const resultText = [
