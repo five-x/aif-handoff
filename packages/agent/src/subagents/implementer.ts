@@ -983,6 +983,51 @@ function formatAuditEvidenceLedgerForPrompt(input: {
   return lines.join("\n");
 }
 
+function formatAuditReportManifestContractForPrompt(input: {
+  task: TaskRow;
+  projectRoot: string;
+  artifactPath: string;
+}): string {
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  const auditPlanId = resolveAuditPlanId({
+    taskId: input.task.id,
+    roadmapBatchId: artifact?.batchId ?? null,
+  });
+  const roadmapAlias = artifact?.roadmapAlias ?? input.task.roadmapAlias ?? null;
+  const sourceSnapshot = currentAuditReportSourceSnapshot(input.projectRoot);
+  const contentHashScript = [
+    "const fs=require('fs'),crypto=require('crypto');",
+    "const p=process.argv[1];",
+    "const t=fs.readFileSync(p,'utf8');",
+    "const f=String.fromCharCode(96,96,96);",
+    "const re=new RegExp('(?:^|\\\\n)'+f+'audit-report-manifest\\\\s*\\\\r?\\\\n[\\\\s\\\\S]*?\\\\r?\\\\n'+f,'gi');",
+    "const b=t.replace(re,'\\\\n').trim();",
+    "console.log(crypto.createHash('sha256').update(b).digest('hex'));",
+  ].join("");
+  const contentHashCommand = `node -e ${JSON.stringify(contentHashScript)} ${JSON.stringify(
+    input.artifactPath,
+  )}`;
+
+  return [
+    "Audit report manifest contract:",
+    `- The expected audit report artifact is \`${input.artifactPath}\`. Every audit report attempt, including first run, must end with exactly one manifest fence whose opening line is exactly three backtick characters followed by \`audit-report-manifest\`.`,
+    "- Required manifest identity values:",
+    `  - auditPlanId: ${auditPlanId}`,
+    `  - taskId: ${input.task.id}`,
+    ...(artifact?.batchId ? [`  - batchId: ${artifact.batchId}`] : []),
+    ...(roadmapAlias ? [`  - roadmapAlias: ${roadmapAlias}`] : []),
+    `  - artifactPath: ${input.artifactPath}`,
+    `  - sourceSnapshot: ${JSON.stringify(sourceSnapshot)}`,
+    "- The manifest must include: version, auditPlanId, taskId, batchId when listed above, roadmapAlias when listed above, artifactPath, contentSha256, sourceSnapshot, outcome, scopeCoverage, riskHypotheses, findings, noFindingsClaims, and evidenceRefs.",
+    "- `contentSha256` is the SHA-256 of the report body after removing all audit-report-manifest blocks. After writing the report body and manifest, run this command and update `contentSha256` to the exact 64-hex output:",
+    `  - ${contentHashCommand}`,
+    "- Use `outcome: validated_findings_present` only when the report body contains at least one accepted technical finding with concrete Evidence, Risk, Proposed fix, and Verification. Otherwise use `validated_no_findings` with substantive noFindingsClaims, or `source_inconclusive` for explicit coverage gaps.",
+    "- When a repository tool result JSON contains `auditEvidence.id`, cite that exact ID in manifest `evidenceRefs`, matching `scopeCoverage[].evidenceRefs`, and each finding or noFindingsClaims entry that relies on it. Do not invent `ev_*` IDs.",
+    "- Each `scopeCoverage[].root` must be one of the declared scope roots and must be covered in the report body by an existing exact `path:line` or `path:start-end` citation. Verify ranges do not exceed file length.",
+    "- Do not mention bare filenames or unscoped import-like paths in the report body; use project-root-relative paths exactly as they exist, for example `src/bot_intevra/bot.py:123`.",
+  ].join("\n");
+}
+
 function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSynthesisInputs {
   const synthesisArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   if (!synthesisArtifact || synthesisArtifact.role !== "synthesis") {
@@ -3495,6 +3540,13 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         }),
       })
     : "No audit report artifact is expected for this task.";
+  const auditReportManifestContractBlock = expectedAuditReportArtifactPath
+    ? formatAuditReportManifestContractForPrompt({
+        task,
+        projectRoot,
+        artifactPath: expectedAuditReportArtifactPath,
+      })
+    : "";
   const currentAuditReportValidation =
     expectedAuditReportArtifactPath && task.reworkRequested
       ? validateAuditReportArtifactWithTaskContext({
@@ -4216,6 +4268,8 @@ Audit evidence ledger:
 <<<AUDIT_EVIDENCE_LEDGER
 ${auditEvidenceLedgerForPrompt}
 AUDIT_EVIDENCE_LEDGER
+
+${auditReportManifestContractBlock}
 
 ${
   expectedSynthesisArtifactPath

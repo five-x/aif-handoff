@@ -2362,6 +2362,11 @@ describe("runImplementer rework behavior", () => {
       "A first-run source audit must make a source-specific decision.",
     );
     expect(implementCall.prompt).toContain("Source audit scope discipline:");
+    expect(implementCall.prompt).toContain("Audit report manifest contract:");
+    expect(implementCall.prompt).toContain("taskId: task-audit-first-run-report");
+    expect(implementCall.prompt).toContain("artifactPath: audit/security-controls.md");
+    expect(implementCall.prompt).toContain("contentSha256");
+    expect(implementCall.prompt).toContain("auditEvidence.id");
     expect(implementCall.prompt).toContain(
       "Treat the task's `Scope:` line as the authoritative audit boundary.",
     );
@@ -3150,6 +3155,10 @@ describe("runImplementer rework behavior", () => {
       "No runtime-captured substantive audit evidence IDs are available yet",
     );
     expect(call.prompt).toContain("If it lists `ev_*` IDs for evidence you use");
+    expect(call.prompt).toContain("Audit report manifest contract:");
+    expect(call.prompt).toContain("taskId: task-audit-generic-evidence-repair");
+    expect(call.prompt).toContain("artifactPath: audit/generic.md");
+    expect(call.prompt).toContain("auditEvidence.id");
     expect(call.prompt).toContain("Do not mention nonexistent repository paths anywhere");
     expect(call.prompt).toContain('do not write the phrase "No validated findings" anywhere');
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");

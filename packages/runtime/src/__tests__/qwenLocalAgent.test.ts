@@ -363,6 +363,15 @@ describe("qwen-local-agent adapter", () => {
       "discovery",
     );
     expect(evidence.every((entry) => /^[a-f0-9]{64}$/.test(entry.outputSha256))).toBe(true);
+    const secondRequest = JSON.parse(fetchMock.mock.calls[1][1].body);
+    const toolPayloads = secondRequest.messages
+      .filter((message) => message.role === "tool")
+      .map((message) => JSON.parse(message.content));
+    expect(toolPayloads).toHaveLength(3);
+    expect(toolPayloads.map((payload) => payload.auditEvidence?.id)).toEqual(
+      evidence.map((entry) => entry.id),
+    );
+    expect(toolPayloads.every((payload) => payload.auditEvidence?.evidenceKind)).toBe(true);
     expect(JSON.stringify(auditEvents)).toContain("[REDACTED]");
     expect(JSON.stringify(auditEvents)).not.toContain("sk-SECRETSECRETSECRETSECRET");
   });

@@ -1222,13 +1222,28 @@ export async function executeQwenLocalTool(toolName, rawArgs, context) {
     };
   }
 }
-export function qwenToolResultForModel(result, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
+export function qwenToolResultForModel(
+  result,
+  maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
+  auditEvidence = null,
+) {
   return JSON.stringify({
     ok: result.ok,
     output: safeModelText(result.output ?? "", maxOutputChars),
     ...(result.error ? { error: safeModelText(result.error, maxOutputChars) } : {}),
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
     touchedFiles: result.touchedFiles,
+    ...(auditEvidence
+      ? {
+          auditEvidence: {
+            id: auditEvidence.id,
+            evidenceKind: auditEvidence.evidenceKind,
+            evidenceGrade: auditEvidence.evidenceGrade,
+            scopeIds: auditEvidence.scopeIds,
+            riskHypothesisIds: auditEvidence.riskHypothesisIds,
+          },
+        }
+      : {}),
   });
 }
 export function createDefaultQwenToolContext(input) {

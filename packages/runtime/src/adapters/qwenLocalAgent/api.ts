@@ -334,7 +334,7 @@ function emitToolResult(input, events, toolCall, result) {
     },
   });
 }
-function emitAuditEvidenceResult(input, events, toolCall, args, result) {
+function buildAuditEvidenceResultForTool(toolCall, args, result) {
   if (result.repositoryInspectionBudgetExhausted === true) return;
   const toolName = sanitizeQwenToolNameForLog(toolCall.function.name);
   let evidenceKind = null;
@@ -370,7 +370,7 @@ function emitAuditEvidenceResult(input, events, toolCall, args, result) {
   const output = [result.output, result.error ? `error:\n${result.error}` : ""]
     .filter(Boolean)
     .join("\n");
-  const evidenceUnit = buildAuditEvidencePayload({
+  return buildAuditEvidencePayload({
     toolName,
     evidenceKind,
     evidenceGrade,
@@ -379,11 +379,14 @@ function emitAuditEvidenceResult(input, events, toolCall, args, result) {
     exitCode: result.exitCode ?? null,
     output,
   });
+}
+function emitAuditEvidenceResult(input, events, toolCall, evidenceUnit, result) {
+  if (!evidenceUnit) return;
   emitEvent(input, events, {
     type: AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
     timestamp: new Date().toISOString(),
     level: result.ok ? "info" : "warn",
-    message: `${toolName} audit evidence captured`,
+    message: `${sanitizeQwenToolNameForLog(toolCall.function.name)} audit evidence captured`,
     data: {
       auditEvidence: evidenceUnit,
       evidenceUnit,
@@ -610,13 +613,14 @@ export async function runQwenLocalAgentApi(input, logger) {
             );
           }
         }
+        const auditEvidenceResult = buildAuditEvidenceResultForTool(toolCall, args, result);
         emitToolResult(input, events, toolCall, result);
-        emitAuditEvidenceResult(input, events, toolCall, args, result);
+        emitAuditEvidenceResult(input, events, toolCall, auditEvidenceResult, result);
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,
           name: toolCall.function.name,
-          content: qwenToolResultForModel(result, toolContext.maxOutputChars),
+          content: qwenToolResultForModel(result, toolContext.maxOutputChars, auditEvidenceResult),
         });
         if (repeatedToolCallSuppressions >= REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS) {
           const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
