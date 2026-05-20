@@ -29,7 +29,18 @@ The change does not mark weak or inconclusive audit output as done. It keeps inv
 
 ## Deployment
 
-Pending commit/push/deploy step. If SSH to `192.168.88.67` remains unavailable, deployment is blocked by public-key authentication and must be completed from a host/session with the server key.
+- Commit `4c30ef15` was pushed to `origin/main`.
+- Server `192.168.88.67` was updated from `f4c1870` to `4c30ef1` in `/opt/aif-handoff`.
+- `docker compose build api agent web` passed on the server.
+- `docker compose up -d api agent web` restarted the changed services.
+- Server health checks passed: `http://192.168.88.67/api/health` returned `{"status":"ok"}` and `http://192.168.88.67:3100/health` returned `{"status":"ok"}`.
+- `docker compose ps api agent web mcp` showed all four services running.
+
+## Live Cleanup
+
+- Deleted the 7 stale `audit-v18` botIntevra cards that were created before this deploy.
+- Verified `GET /api/tasks?projectId=e4a3a101-ec7f-4f93-9b68-e297ffe8952f` returned 0 tasks after cleanup.
+- Verified the live database had no remaining `audit-v18` rows in `tasks`, `roadmap_batches`, `roadmap_batch_artifacts`, or `roadmap_batch_artifact_attempts`.
 
 ## Memory Sync
 
