@@ -440,7 +440,10 @@ describe("roadmapGeneration", () => {
 
     it("should replace invalid generated audit roadmaps with a deterministic diagnostic roadmap", async () => {
       const { projectId, tmpDir } = createProjectWithDescription("# My App\nA service to audit");
-      writeFileSync(join(tmpDir, "README.md"), "# My App\n");
+      writeFileSync(
+        join(tmpDir, "README.md"),
+        "# My App\n\nService entry points and ownership are documented here.\n",
+      );
       writeFileSync(join(tmpDir, "pyproject.toml"), '[project]\nname = "my-app"\n');
       mkdirSync(join(tmpDir, "src", "my_app"), { recursive: true });
       writeFileSync(join(tmpDir, "src", "my_app", "config.py"), "DEBUG = False\n");
@@ -513,12 +516,22 @@ describe("roadmapGeneration", () => {
       const { projectId, tmpDir } = createProjectWithDescription("# botIntevra\nTelegram bot");
       mkdirSync(join(tmpDir, "src", "bot_intevra"), { recursive: true });
       mkdirSync(join(tmpDir, "tests"), { recursive: true });
+      writeFileSync(
+        join(tmpDir, "src", "bot_intevra", "__init__.py"),
+        '"""Single-user Telegram bot."""\n\n__all__ = ["__version__"]\n__version__ = "0.1.0"\n',
+      );
+      writeFileSync(
+        join(tmpDir, "src", "bot_intevra", "__main__.py"),
+        'from bot_intevra.cli import main\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n',
+      );
       writeFileSync(join(tmpDir, "src", "bot_intevra", "config.py"), "TOKEN = None\n");
       writeFileSync(join(tmpDir, "src", "bot_intevra", "secret_scan.py"), "def scan(): pass\n");
       writeFileSync(join(tmpDir, "src", "bot_intevra", "service.py"), "def run(): pass\n");
       writeFileSync(join(tmpDir, "tests", "__init__.py"), "\n");
       writeFileSync(join(tmpDir, "tests", "test_bot.py"), "def test_bot():\n    assert True\n");
       trackFiles(tmpDir, [
+        "src/bot_intevra/__init__.py",
+        "src/bot_intevra/__main__.py",
         "src/bot_intevra/config.py",
         "src/bot_intevra/secret_scan.py",
         "src/bot_intevra/service.py",
@@ -545,6 +558,8 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain("src/bot_intevra/secret_scan.py");
       expect(result.content).toContain("src/bot_intevra/service.py");
       expect(result.content).toContain("tests/test_bot.py");
+      expect(result.content).not.toContain("src/bot_intevra/__init__.py");
+      expect(result.content).not.toContain("src/bot_intevra/__main__.py");
       expect(result.content).toContain("Risk hypotheses: risk-");
       expect(result.content).not.toContain("Scope: .");
       expect(result.content).not.toMatch(/^\s+- Scope: src\s*$/m);

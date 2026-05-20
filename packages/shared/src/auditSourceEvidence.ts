@@ -234,6 +234,8 @@ export function isLowSignalAuditEvidenceLine(input: {
     if (/^(?:from\s+[\w.]+\s+import\s+|import\s+[\w., ]+)/i.test(trimmed)) return true;
     if (/^if\s+__name__\s*==\s*["']__main__["']\s*:/i.test(trimmed)) return true;
     if (/^(?:raise\s+SystemExit|sys\.exit)\s*\(/i.test(trimmed)) return true;
+    if (/^(?:[rubf]{0,4})?["']{3}/i.test(trimmed)) return true;
+    if (/^__(?:all|version)__\s*=/i.test(trimmed)) return true;
     if (/^pass$/i.test(trimmed)) return true;
   }
 

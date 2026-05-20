@@ -20,6 +20,7 @@ import {
   extractAuditPathTokens,
   isAuditReportArtifactPath,
   isAuditSynthesisTitle,
+  isLowSignalAuditEvidenceLine,
   parseAuditScopeRoots,
   parseExpectedAuditReportArtifactPath,
   projectSupportsTaskWorktrees,
@@ -963,7 +964,14 @@ function isConcreteAuditScopeFile(projectRoot: string, path: string): boolean {
     const stat = statSync(join(projectRoot, normalized));
     if (!stat.isFile() || stat.size === 0) return false;
     const content = readFileSync(join(projectRoot, normalized), "utf8");
-    return content.split(/\r?\n/).some((line) => line.trim().length > 0);
+    return content.split(/\r?\n/).some((line, index) => {
+      if (!line.trim()) return false;
+      return !isLowSignalAuditEvidenceLine({
+        path: normalized,
+        line: index + 1,
+        text: line,
+      });
+    });
   } catch {
     return false;
   }
