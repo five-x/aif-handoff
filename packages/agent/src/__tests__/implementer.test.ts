@@ -2367,7 +2367,9 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain("artifactPath: audit/security-controls.md");
     expect(implementCall.prompt).toContain("contentSha256");
     expect(implementCall.prompt).toContain("compute_audit_report_hash");
+    expect(implementCall.prompt).toContain("finalize_audit_report_manifest");
     expect(implementCall.prompt).toContain("Never use PLACEHOLDER");
+    expect(implementCall.prompt).toContain("COMPUTE_ME");
     expect(implementCall.prompt).toContain("Do not create temporary helper files");
     expect(implementCall.prompt).toContain("auditEvidence.id");
     expect(implementCall.prompt).toContain(

@@ -20,6 +20,8 @@ const DEFAULT_MAX_SEARCH_FILE_BYTES = 256_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 12_000;
 const DEFAULT_MAX_PATCH_BYTES = 256_000;
+const AUDIT_REPORT_MANIFEST_BLOCK_PATTERN =
+  /(^|\n)```audit-report-manifest\s*\r?\n([\s\S]*?)\r?\n```/gi;
 const PLANNER_MAX_FILE_BYTES = 8_000;
 const PLANNER_MAX_FILE_LINES = 120;
 const PLANNER_MAX_DIRECTORY_ENTRIES = 120;
@@ -227,6 +229,20 @@ export const QWEN_LOCAL_AGENT_TOOLS = [
       name: "compute_audit_report_hash",
       description:
         "Compute the audit-report-manifest contentSha256 for an existing audit report file after stripping audit-report-manifest blocks.",
+      parameters: objectSchema(
+        {
+          path: { type: "string", description: "Relative audit report file path." },
+        },
+        ["path"],
+      ),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "finalize_audit_report_manifest",
+      description:
+        "Update the contentSha256 field in an existing audit-report-manifest block to the exact hash for the current report body.",
       parameters: objectSchema(
         {
           path: { type: "string", description: "Relative audit report file path." },
@@ -496,6 +512,7 @@ const TOOL_ARGUMENT_KEYS = {
   run_shell: new Set(["command", "args", "cwd", "timeoutMs"]),
   git_status: new Set(),
   compute_audit_report_hash: new Set(["path"]),
+  finalize_audit_report_manifest: new Set(["path"]),
   git_commit: new Set(["paths", "message"]),
 };
 function sanitizeToolArgumentValue(value, depth = 0) {
@@ -552,6 +569,7 @@ function summarizeToolUse(toolName, args) {
     case "git_status":
       return " git status";
     case "compute_audit_report_hash":
+    case "finalize_audit_report_manifest":
       return readString(args.path) ? ` ${redactProviderText(readString(args.path) ?? "")}` : "";
     case "apply_patch":
       return " unified diff";
@@ -1188,6 +1206,117 @@ async function computeAuditReportHashTool(args, context) {
     touchedFiles: [],
   };
 }
+function isAllowedPathForContext(context, relativePath) {
+  const allowed = context.allowedWritePaths ?? [];
+  if (allowed.length === 0) return true;
+  return allowed.includes(normalizePathForPolicy(relativePath));
+}
+function updateAuditReportManifestContentSha256(content, label) {
+  const matches = [...content.matchAll(AUDIT_REPORT_MANIFEST_BLOCK_PATTERN)];
+  if (matches.length !== 1) {
+    throw new RuntimeExecutionError(
+      matches.length === 0
+        ? `${label} is missing an exact audit report manifest fence; the opening line must be \`\`\`audit-report-manifest`
+        : `${label} must include exactly one audit report manifest fence`,
+      undefined,
+      "permission",
+    );
+  }
+  const match = matches[0];
+  const prefix = match[1] ?? "";
+  const manifestText = match[2] ?? "";
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch (error) {
+    throw new RuntimeExecutionError(
+      `audit report manifest JSON is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      undefined,
+      "permission",
+    );
+  }
+  const contentSha256 = computeAuditReportContentSha256(content);
+  manifest.contentSha256 = contentSha256;
+  const replacement = `${prefix}\`\`\`audit-report-manifest\n${JSON.stringify(
+    manifest,
+    null,
+    2,
+  )}\n\`\`\``;
+  const updated =
+    content.slice(0, match.index) + replacement + content.slice(match.index + match[0].length);
+  return { updated, contentSha256 };
+}
+async function finalizeAuditReportManifestTool(args, context) {
+  assertNotAborted(context.signal, "finalize_audit_report_manifest");
+  const target = await resolveExistingPathInsideProjectRoot(
+    context.projectRoot,
+    readString(args.path),
+    "audit report finalize path",
+  );
+  assertWritePathAllowed(context, target.relativePath, "audit report finalize path");
+  if (!target.info.isFile()) {
+    throw new RuntimeExecutionError(
+      "audit report finalize path is not a file",
+      undefined,
+      "permission",
+    );
+  }
+  const content = await readFile(target.absolutePath, "utf8");
+  const { updated, contentSha256 } = updateAuditReportManifestContentSha256(
+    content,
+    "audit report finalize path",
+  );
+  assertNotAborted(context.signal, "finalize_audit_report_manifest");
+  if (updated !== content) {
+    await writeFile(target.absolutePath, updated, "utf8");
+  }
+  return {
+    ok: true,
+    output: `updated contentSha256 ${target.relativePath.replaceAll("\\", "/")} ${contentSha256}`,
+    exitCode: 0,
+    touchedFiles: [target.relativePath],
+  };
+}
+async function assertAuditReportReadyForCommitIfApplicable(context, relativePath) {
+  if (!isAllowedPathForContext(context, relativePath)) return;
+  const normalized = normalizePathForPolicy(relativePath);
+  if (!normalized.startsWith("audit/") || !normalized.endsWith(".md")) return;
+  const target = await resolveExistingPathInsideProjectRoot(
+    context.projectRoot,
+    relativePath,
+    "git commit audit report path",
+  );
+  if (!target.info.isFile()) return;
+  const content = await readFile(target.absolutePath, "utf8");
+  const matches = [...content.matchAll(AUDIT_REPORT_MANIFEST_BLOCK_PATTERN)];
+  if (matches.length !== 1) {
+    throw new RuntimeExecutionError(
+      matches.length === 0
+        ? "audit report must include an exact manifest fence before git_commit; opening line must be ```audit-report-manifest. Call finalize_audit_report_manifest after fixing the fence."
+        : "audit report must include exactly one manifest fence before git_commit",
+      undefined,
+      "permission",
+    );
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(matches[0][2] ?? "");
+  } catch (error) {
+    throw new RuntimeExecutionError(
+      `audit report manifest JSON is invalid before git_commit: ${error instanceof Error ? error.message : String(error)}`,
+      undefined,
+      "permission",
+    );
+  }
+  const expected = computeAuditReportContentSha256(content);
+  if (manifest.contentSha256 !== expected) {
+    throw new RuntimeExecutionError(
+      "audit report contentSha256 is not finalized before git_commit; call finalize_audit_report_manifest with the report path and then retry git_commit",
+      undefined,
+      "permission",
+    );
+  }
+}
 async function gitCommitTool(args, context) {
   assertNotAborted(context.signal, "git_commit");
   const paths = readStringArray(args.paths);
@@ -1221,6 +1350,9 @@ async function gitCommitTool(args, context) {
     if (!target.info.isFile()) {
       throw new RuntimeExecutionError("git commit path is not a file", undefined, "permission");
     }
+  }
+  for (const entry of relativePaths) {
+    await assertAuditReportReadyForCommitIfApplicable(context, entry);
   }
   const root = resolveProjectRoot(context.projectRoot);
   const env = buildSanitizedToolEnv(context.env);
@@ -1274,6 +1406,8 @@ export async function executeQwenLocalTool(toolName, rawArgs, context) {
         return await gitStatusTool(context);
       case "compute_audit_report_hash":
         return await computeAuditReportHashTool(args, context);
+      case "finalize_audit_report_manifest":
+        return await finalizeAuditReportManifestTool(args, context);
       case "git_commit":
         return await gitCommitTool(args, context);
       default:

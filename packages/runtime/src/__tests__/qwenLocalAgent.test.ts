@@ -95,6 +95,7 @@ describe("qwen-local-agent adapter", () => {
         "run_shell",
         "git_status",
         "compute_audit_report_hash",
+        "finalize_audit_report_manifest",
         "git_commit",
       ]),
     );
@@ -899,7 +900,7 @@ describe("qwen-local-agent adapter", () => {
     await expect(readFile(path.join(root, "tmp_hash.py"), "utf8")).rejects.toThrow();
     await expect(readFile(path.join(root, "tmp_body.txt"), "utf8")).rejects.toThrow();
   });
-  it("computes audit report manifest hashes for the scoped artifact only", async () => {
+  it("computes and finalizes audit report manifest hashes for the scoped artifact only", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-hash-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
     const reportBody = [
@@ -929,6 +930,11 @@ describe("qwen-local-agent adapter", () => {
       { path: "audit/report.md" },
       context,
     );
+    const finalized = await executeQwenLocalTool(
+      "finalize_audit_report_manifest",
+      { path: "audit/report.md" },
+      context,
+    );
     const denied = await executeQwenLocalTool(
       "compute_audit_report_hash",
       { path: "audit/other.md" },
@@ -939,8 +945,50 @@ describe("qwen-local-agent adapter", () => {
     expect(result.touchedFiles).toEqual([]);
     expect(result.output).toContain("contentSha256 audit/report.md");
     expect(result.output).toContain(computeAuditReportContentSha256(report));
+    expect(finalized.ok).toBe(true);
+    expect(finalized.output).toContain(computeAuditReportContentSha256(report));
+    expect(finalized.touchedFiles.map((entry) => entry.replaceAll("\\", "/"))).toEqual([
+      "audit/report.md",
+    ]);
+    const finalizedContent = await readFile(path.join(root, "audit", "report.md"), "utf8");
+    expect(finalizedContent).toContain(
+      `"contentSha256": "${computeAuditReportContentSha256(report)}"`,
+    );
+    expect(finalizedContent).not.toContain("PLACEHOLDER");
     expect(denied.ok).toBe(false);
     expect(denied.error).toContain("allowed write paths (audit/report.md)");
+  });
+  it("blocks git_commit when a scoped audit report hash is not finalized", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-commit-guard-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      [
+        "# Audit",
+        "",
+        "Evidence: README.md:1",
+        "",
+        "```audit-report-manifest",
+        '{"contentSha256":"COMPUTE_ME"}',
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: { allowedWritePaths: ["audit/report.md"] },
+    });
+
+    const result = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["audit/report.md"], message: "commit report" },
+      context,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("contentSha256 is not finalized");
+    expect(result.error).toContain("finalize_audit_report_manifest");
   });
   it("applies context search caps and skips binary/cache paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-search-cap-"));
