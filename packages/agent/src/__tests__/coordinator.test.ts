@@ -2484,7 +2484,7 @@ describe("coordinator", () => {
     expect(task!.runtimeLimitSnapshotJson).toContain('"profileId":"profile-app-task-blocked"');
   });
 
-  it("schedules and consumes a durable one-shot fallback after implementer context overflow", async () => {
+  it("retries in progress with a durable one-shot fallback after implementer context overflow", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
       id: "profile-fast-32k",
@@ -2527,22 +2527,20 @@ describe("coordinator", () => {
 
     await pollAndProcess();
 
-    const blocked = db.select().from(tasks).where(eq(tasks.id, "task-context-fallback")).get();
-    expect(blocked!.status).toBe("blocked_external");
-    expect(blocked!.blockedReason).toContain("Runtime context limit recovery");
-    expect(blocked!.blockedReason).toContain("profile-heavy-80k");
-    expect(blocked!.blockedFromStatus).toBe("implementing");
-    expect(blocked!.retryAfter).toBeTruthy();
-    expect(blocked!.retryCount).toBe(3);
-    expect(blocked!.manualReviewRequired).toBe(false);
-    expect(blocked!.reworkRequested).toBe(false);
-    expect(blocked!.runtimeOptionsJson).toContain("profile-heavy-80k");
-    expect(blocked!.runtimeOptionsJson).toContain("profile-fast-32k");
-
-    db.update(tasks)
-      .set({ retryAfter: new Date(Date.now() - 1000).toISOString() })
-      .where(eq(tasks.id, "task-context-fallback"))
-      .run();
+    const retrying = db.select().from(tasks).where(eq(tasks.id, "task-context-fallback")).get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.blockedReason).toContain("Runtime context limit recovery");
+    expect(retrying!.blockedReason).toContain("profile-heavy-80k");
+    expect(retrying!.blockedFromStatus).toBeNull();
+    expect(retrying!.retryAfter).toBeNull();
+    expect(retrying!.retryCount).toBe(3);
+    expect(retrying!.manualReviewRequired).toBe(false);
+    expect(retrying!.reworkRequested).toBe(false);
+    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-80k");
+    expect(retrying!.runtimeOptionsJson).toContain("profile-fast-32k");
+    expect(retrying!.agentActivityLog).toContain(
+      "Context overflow scheduled immediate one-shot runtime fallback",
+    );
 
     await pollAndProcess();
 

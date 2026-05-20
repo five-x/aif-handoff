@@ -502,8 +502,6 @@ function handleContextLengthRecovery(input: {
 
   if (fallback) {
     const retryCount = (latestTask.retryCount ?? 0) + 1;
-    const backoffMinutes = getDeterministicBackoffMinutes(latestTask.retryCount ?? 0);
-    const retryAfter = new Date(Date.now() + backoffMinutes * 60_000).toISOString();
     const runtimeOptionsJson = setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
       stage: input.stage,
       profileId: fallback.id,
@@ -514,15 +512,15 @@ function handleContextLengthRecovery(input: {
     });
     const blockedReason =
       `Runtime context limit recovery: ${input.stageLabel} exceeded the selected model context; ` +
-      `next attempt will use fallback runtime profile ${fallback.name} (${fallback.id}).`;
+      `retrying immediately with fallback runtime profile ${fallback.name} (${fallback.id}).`;
     clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
     updateTaskStatus(
       latestTask.id,
-      "blocked_external",
+      input.stageInProgress,
       {
         blockedReason,
-        blockedFromStatus: input.stageInProgress,
-        retryAfter,
+        blockedFromStatus: null,
+        retryAfter: null,
         retryCount,
         paused: false,
         reworkRequested: false,
@@ -533,7 +531,7 @@ function handleContextLengthRecovery(input: {
     );
     appendTaskActivityLog(
       latestTask.id,
-      `[${nowIso}] Context overflow scheduled one-shot runtime fallback: failedProfile=${failedProfileId ?? "none"} selectedProfile=${fallback.id} retryAfter=${retryAfter}`,
+      `[${nowIso}] Context overflow scheduled immediate one-shot runtime fallback: failedProfile=${failedProfileId ?? "none"} selectedProfile=${fallback.id}`,
     );
     log.warn(
       {
@@ -541,10 +539,9 @@ function handleContextLengthRecovery(input: {
         stage: input.stageLabel,
         failedProfileId,
         fallbackProfileId: fallback.id,
-        retryAfter,
         retryCount,
       },
-      "Scheduled one-shot runtime fallback after context length failure",
+      "Scheduled immediate one-shot runtime fallback after context length failure",
     );
     return true;
   }
