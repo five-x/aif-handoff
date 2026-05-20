@@ -1332,6 +1332,11 @@ function isAuditRepairMetadataOnlyLineOne(input: {
 }
 
 function firstAuditRepairLineEvidenceRef(projectRoot: string, path: string): string | null {
+  return auditRepairLineEvidenceRefs(projectRoot, path, 1)[0] ?? null;
+}
+
+function auditRepairLineEvidenceRefs(projectRoot: string, path: string, limit = 3): string[] {
+  const refs: string[] = [];
   try {
     const content = readFileSync(resolve(projectRoot, path), "utf8");
     const lines = content.split(/\r?\n/);
@@ -1348,12 +1353,13 @@ function firstAuditRepairLineEvidenceRef(projectRoot: string, path: string): str
       ) {
         continue;
       }
-      return `${path}:${lineNumber}`;
+      refs.push(`${path}:${lineNumber}`);
+      if (refs.length >= limit) return refs;
     }
   } catch {
-    return null;
+    return refs;
   }
-  return null;
+  return refs;
 }
 
 function firstAuditRepairEvidenceRef(projectRoot: string, path: string): string | null {
@@ -1917,18 +1923,24 @@ function buildDeterministicAuditReportRepairContent(input: {
   const evidenceByRoot = roots.map((root) => {
     const files = collectAuditRepairEvidenceFiles(input.projectRoot, root);
     const inspectionTargets = files.slice(0, 3);
-    const lineRefs = inspectionTargets
-      .map((file) => firstAuditRepairEvidenceRef(input.projectRoot, file))
-      .filter((ref): ref is string => Boolean(ref));
-    const grepCommand = runGitCapture(input.projectRoot, [
-      "grep",
-      "-n",
-      "-m",
-      "1",
-      ".",
-      "--",
-      root,
-    ]);
+    const lineRefs = inspectionTargets.flatMap((file) => {
+      const refs = auditRepairLineEvidenceRefs(input.projectRoot, file, 3);
+      if (refs.length > 0) return refs;
+      const fallbackRef = firstAuditRepairEvidenceRef(input.projectRoot, file);
+      return fallbackRef ? [fallbackRef] : [];
+    });
+    const grepArgs = isAuditRepairHiddenToolingPath(root)
+      ? ["grep", "-n", "-m", "1", ".", "--", ...inspectionTargets]
+      : ["grep", "-n", ".", "--", ...inspectionTargets];
+    const grepCommand =
+      inspectionTargets.length > 0
+        ? runGitCapture(input.projectRoot, grepArgs)
+        : {
+            args: [],
+            command: "git grep -n . -- <no scoped files>",
+            exitCode: 1,
+            output: "No scoped files available",
+          };
     const emptyTargets = inspectionTargets.filter((file) =>
       isEmptyAuditRepairEvidenceFile(input.projectRoot, file),
     );
@@ -2410,6 +2422,20 @@ function collectSynthesisNoFindingsCommandEvidence(
   return commandsByArtifact;
 }
 
+function formatTrustedSourceReportAbsenceReasoning(artifacts: ValidatedAuditArtifactContent[]) {
+  const paths = [...new Set(artifacts.map((artifact) => artifact.artifactPath).filter(Boolean))]
+    .sort()
+    .map((artifactPath) => `\`${artifactPath}\``);
+  if (paths.length === 0) {
+    return "Absence reasoning: no trusted source reports were available for a validated no-findings synthesis.";
+  }
+  const reportLabel = paths.length === 1 ? "trusted source report" : "trusted source reports";
+  const statusLabel = paths.length === 1 ? "was classified" : "were each classified";
+  return `Absence reasoning: ${reportLabel} ${paths.join(
+    ", ",
+  )} ${statusLabel} as validated_no_findings with substantive child evidence; synthesis preserved those child outcomes and did not promote unsupported findings.`;
+}
+
 function isLowQualitySynthesisCommandEvidence(evidence: string): boolean {
   return (
     /\bgit\s+grep\s+-n\s+-m\s+1\s+\.\s+--\s+/i.test(evidence) ||
@@ -2646,7 +2672,6 @@ function buildDeterministicAuditSynthesisContent(
         [...refsByArtifact.values()].flatMap((refs) => refs).filter((ref) => ref.length > 0),
       ),
     ].sort();
-    const absenceClaimRef = checkedRefs[0] ?? null;
     const lines = [
       "# Audit Summary",
       "",
@@ -2655,12 +2680,8 @@ function buildDeterministicAuditSynthesisContent(
       "No validated findings.",
       "",
       "Audit outcome: Validated no-findings with substantive audit evidence.",
-      ...(absenceClaimRef
-        ? [
-            "",
-            `Absence reasoning: \`${absenceClaimRef}\` ruled out validated source-report findings across the trusted audit batch inputs.`,
-          ]
-        : []),
+      "",
+      formatTrustedSourceReportAbsenceReasoning(artifacts),
       "",
       "Generated from terminal audit batch report artifacts. Source report findings were included only when they carried concrete path:line Evidence, Risk, Proposed fix, and Verification sections.",
       "",

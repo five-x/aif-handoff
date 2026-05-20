@@ -1495,6 +1495,10 @@ describe("runImplementer rework behavior", () => {
     expect(summary).not.toContain("owner-area|defects|that|produce");
     expect(summary).not.toContain("git ls-files --");
     expect(summary).toContain("Audit outcome: Validated no-findings");
+    expect(summary).toContain(
+      "Absence reasoning: trusted source report `audit/runtime.md` was classified as validated_no_findings with substantive child evidence",
+    );
+    expect(summary).not.toContain("ruled out validated source-report findings");
     expect(summary).not.toContain("Risk:");
     expect(summary).not.toContain("Proposed fix:");
     expect(summary).toContain("```audit-report-manifest");
@@ -1520,6 +1524,7 @@ describe("runImplementer rework behavior", () => {
       requireLedgerEvidence: true,
     });
     expect(validation.ok).toBe(true);
+    expect(validation.sourceClassification).toBe("validated_no_findings");
   });
 
   it("writes inconclusive synthesis when all source reports are inventory-only no-findings", async () => {

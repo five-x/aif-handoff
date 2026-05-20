@@ -185,4 +185,42 @@ describe("auditCardDecision", () => {
       discardedFindings: 1,
     });
   });
+
+  it("does not count an empty weak/discarded section as a weak finding", () => {
+    const reportText = [
+      "# Audit Summary",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `README.md:2`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
+      "",
+      "## Weak/discarded findings",
+      "",
+      "No weak or discarded findings were omitted from the synthesis output.",
+      "",
+    ].join("\n");
+
+    expect(extractWeakOrDiscardedAuditFindings(reportText)).toEqual([]);
+
+    const decision = buildAuditCardDecisionFromReport({
+      otzRequirement: "Complete the synthesis card.",
+      acceptanceCriteria: ["No unsupported finding is promoted."],
+      otzAcceptanceSatisfied: true,
+      implementationEvidence: ["audit/summary.md"],
+      verificationEvidence: ["validator accepted synthesis"],
+      verificationStrength: "verified",
+      reportText,
+    });
+
+    expect(decision.finalStatus).toBe("closed_verified");
+    expect(decision.auditFindingValidity).toEqual({
+      validFindings: 0,
+      weakFindings: 0,
+      discardedFindings: 0,
+    });
+  });
 });

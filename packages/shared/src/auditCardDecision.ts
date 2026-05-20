@@ -154,6 +154,17 @@ function stripWeakOrDiscardedAuditFindingSections(text: string): string {
   return kept.join("\n");
 }
 
+function isEmptyWeakOrDiscardedAuditFindingStatement(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    /\bno\b/.test(normalized) &&
+    /\bweak\b/.test(normalized) &&
+    /\b(?:discarded|omitted|rejected|invalid)\b/.test(normalized) &&
+    /\b(?:finding|findings|report|reports|artifact|artifacts|claim|claims)\b/.test(normalized)
+  );
+}
+
 export function extractWeakOrDiscardedAuditFindings(text: string): WeakOrDiscardedAuditFinding[] {
   const findings: WeakOrDiscardedAuditFinding[] = [];
   const lines = text.split(/\r?\n/);
@@ -169,6 +180,7 @@ export function extractWeakOrDiscardedAuditFindings(text: string): WeakOrDiscard
       .filter((entry): entry is string => Boolean(entry));
     if (bullets.length > 0) {
       for (const bullet of bullets) {
+        if (isEmptyWeakOrDiscardedAuditFindingStatement(bullet)) continue;
         findings.push({
           kind: /\b(?:discarded|rejected|omitted)\b/i.test(bullet) ? "discarded" : sectionKind,
           text: bullet,
@@ -178,6 +190,10 @@ export function extractWeakOrDiscardedAuditFindings(text: string): WeakOrDiscard
       return;
     }
     const body = sectionLines.join("\n").trim();
+    if (isEmptyWeakOrDiscardedAuditFindingStatement(body)) {
+      sectionLines.length = 0;
+      return;
+    }
     if (body) {
       findings.push({ kind: sectionKind, text: body });
     }
