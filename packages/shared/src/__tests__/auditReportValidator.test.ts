@@ -813,6 +813,146 @@ describe("auditReportValidator", () => {
     ]);
   });
 
+  it("ignores bare missing paths that appear only inside scoped command output", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(
+      join(root, "tests", "test_local_state_adapters.py"),
+      [
+        "class _RecordingMemoryClient:",
+        '    references=[Reference(reference_id="unexpected", file_path="docs/unexpected.md")]',
+        "    def ask(self):",
+        "        return None",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const text = [
+      "# Test Readiness Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-tests for `tests/test_local_state_adapters.py` coverage was checked and is absent.",
+      "",
+      "Checked files:",
+      "- `tests/test_local_state_adapters.py:1`",
+      "",
+      "Checked commands:",
+      "- Command `git grep -n . -- tests/test_local_state_adapters.py` output:",
+      "```",
+      "tests/test_local_state_adapters.py:1:class _RecordingMemoryClient:",
+      'tests/test_local_state_adapters.py:2:    references=[Reference(reference_id="unexpected", file_path="docs/unexpected.md")]',
+      "```",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: tests/test_local_state_adapters.py",
+      reportArtifactPaths: ["audit/test-readiness-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.missingReferencedPaths).not.toContain("docs/unexpected.md");
+    expect(issueCodes(result)).not.toContain("missing_report_file_references");
+  });
+
+  it("rejects bare missing slash paths in checked file lists", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `src/missing.ts`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.missingReferencedPaths).toContain("src/missing.ts");
+    expect(issueCodes(result)).toContain("missing_report_file_references");
+  });
+
+  it("rejects bare missing slash paths in non-command fenced evidence", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Evidence notes:",
+      "```",
+      "src/missing.ts",
+      "```",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.missingReferencedPaths).toContain("src/missing.ts");
+    expect(issueCodes(result)).toContain("missing_report_file_references");
+  });
+
+  it("still validates out-of-range line refs inside command output fences", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      "- Command `rg -n timeoutMs src/config.ts` output:",
+      "```",
+      "src/config.ts:99:export const timeoutMs = 1000;",
+      "```",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("invalid_line_reference");
+  });
+
   it("rejects missing files and out-of-range line refs in report evidence", () => {
     const root = initRepo();
     const text = [
