@@ -59,10 +59,16 @@ const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
   IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET * PROMPT_BUDGET_CHARS_PER_TOKEN;
 const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesis-no-findings";
 const DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS = new Set(["feature", "fix", "docs", "tests"]);
-const SOURCE_AUDIT_FIRST_RUN_MAX_TURNS = 48;
-const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_TURNS = 32;
-const SOURCE_AUDIT_FIRST_RUN_INSPECTION_TOOL_BUDGET = 28;
-const SOURCE_AUDIT_RUNTIME_RECOVERY_INSPECTION_TOOL_BUDGET = 12;
+const SOURCE_AUDIT_FIRST_RUN_MIN_MAX_TURNS = 48;
+const SOURCE_AUDIT_FIRST_RUN_MAX_MAX_TURNS = 96;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_MAX_TURNS = 32;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_MAX_TURNS = 56;
+const SOURCE_AUDIT_FIRST_RUN_MIN_INSPECTION_TOOL_BUDGET = 32;
+const SOURCE_AUDIT_FIRST_RUN_MAX_INSPECTION_TOOL_BUDGET = 80;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET = 12;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_INSPECTION_TOOL_BUDGET = 32;
+const SOURCE_AUDIT_FIRST_RUN_TIMEOUT_MS = 18 * 60 * 1000;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
 const PROMPT_SECTION_LIMITS = {
   reworkComment: 8_000,
   reworkCommentMessage: 5_000,
@@ -1119,6 +1125,19 @@ function hasRepeatedAuditReportToolLoopSignal(task: Pick<TaskRow, "implementatio
   );
 }
 
+function hasPostWriteAuditRuntimeRecoverySignal(
+  task: Pick<TaskRow, "blockedReason" | "agentActivityLog" | "implementationLog">,
+): boolean {
+  const text = [
+    task.blockedReason ?? "",
+    task.agentActivityLog ?? "",
+    task.implementationLog ?? "",
+  ].join("\n");
+  return /\bruntime_(?:timeout|context_length|rate_limit|connection|server_error|unknown)_after_audit_artifact_write\b|\bRuntime failure after audit artifact write was converted to validation-guided audit recovery\b/i.test(
+    text,
+  );
+}
+
 function isAuditEvidenceRepairMode(
   task: Pick<TaskRow, "reworkRequested" | "blockedReason" | "reviewComments"> & {
     autoReviewState?: { findings: Array<{ text: string }> } | null;
@@ -1170,6 +1189,47 @@ function hasAttemptedDeterministicAuditReportRepair(
 ): boolean {
   const text = [task.implementationLog ?? "", task.agentActivityLog ?? ""].join("\n");
   return /\bDeterministic audit report repair (?:completed|complete)\b/i.test(text);
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function computeSourceAuditInspectionToolBudget(input: {
+  rootCount: number;
+  runtimeRecoveryMode: boolean;
+}): number {
+  const rootCount = Math.max(1, input.rootCount);
+  if (input.runtimeRecoveryMode) {
+    return clampNumber(
+      rootCount * 3 + 6,
+      SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET,
+      SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_INSPECTION_TOOL_BUDGET,
+    );
+  }
+  return clampNumber(
+    rootCount * 8 + 12,
+    SOURCE_AUDIT_FIRST_RUN_MIN_INSPECTION_TOOL_BUDGET,
+    SOURCE_AUDIT_FIRST_RUN_MAX_INSPECTION_TOOL_BUDGET,
+  );
+}
+
+function computeSourceAuditMaxTurns(input: {
+  inspectionToolBudget: number;
+  runtimeRecoveryMode: boolean;
+}): number {
+  if (input.runtimeRecoveryMode) {
+    return clampNumber(
+      input.inspectionToolBudget + 20,
+      SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_MAX_TURNS,
+      SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_MAX_TURNS,
+    );
+  }
+  return clampNumber(
+    input.inspectionToolBudget + 24,
+    SOURCE_AUDIT_FIRST_RUN_MIN_MAX_TURNS,
+    SOURCE_AUDIT_FIRST_RUN_MAX_MAX_TURNS,
+  );
 }
 
 function logDeterministicAuditReportRepairActivity(input: {
@@ -3744,6 +3804,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const auditEvidenceRepairMode = isAuditEvidenceRepairMode(task, expectedAuditReportArtifactPath);
   const repeatedDeterministicAuditReportRepair =
     expectedAuditReportArtifactPath && hasAttemptedDeterministicAuditReportRepair(task);
+  const postWriteAuditRuntimeRecovery =
+    expectedAuditReportArtifactPath && hasPostWriteAuditRuntimeRecoverySignal(task);
   const auditSynthesisInputs = isAuditSynthesisTask
     ? readAuditSynthesisInputs(taskId, projectRoot)
     : { validatedArtifacts: [], weakArtifacts: [] };
@@ -4149,11 +4211,12 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     expectedAuditReportArtifactPath &&
     localAuditReportScopeRepairable &&
     task.reworkRequested &&
-    hasRepeatedAuditReportToolLoopSignal(task) &&
+    (hasRepeatedAuditReportToolLoopSignal(task) || postWriteAuditRuntimeRecovery) &&
     (auditEvidenceRepairMode ||
       currentReportNeedsDeterministicRepair ||
       currentSourceInconclusiveLocalAudit) &&
     (currentSourceInconclusiveLocalAudit ||
+      postWriteAuditRuntimeRecovery ||
       shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)) &&
     (!repeatedDeterministicAuditReportRepair || currentSourceInconclusiveLocalAudit)
   ) {
@@ -4534,22 +4597,38 @@ Rework handling protocol:
         task.blockedReason ?? "",
       )),
   );
-  const sourceAuditMaxTurns = expectedAuditReportArtifactPath
-    ? sourceAuditRuntimeRecoveryMode
-      ? SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_TURNS
-      : SOURCE_AUDIT_FIRST_RUN_MAX_TURNS
-    : undefined;
   const sourceAuditInspectionToolBudget = expectedAuditReportArtifactPath
+    ? computeSourceAuditInspectionToolBudget({
+        rootCount: auditScopeRepairability.roots.length,
+        runtimeRecoveryMode: sourceAuditRuntimeRecoveryMode,
+      })
+    : undefined;
+  const sourceAuditMaxTurns =
+    expectedAuditReportArtifactPath && sourceAuditInspectionToolBudget != null
+      ? computeSourceAuditMaxTurns({
+          inspectionToolBudget: sourceAuditInspectionToolBudget,
+          runtimeRecoveryMode: sourceAuditRuntimeRecoveryMode,
+        })
+      : undefined;
+  const sourceAuditRunTimeoutMs = expectedAuditReportArtifactPath
     ? sourceAuditRuntimeRecoveryMode
-      ? SOURCE_AUDIT_RUNTIME_RECOVERY_INSPECTION_TOOL_BUDGET
-      : SOURCE_AUDIT_FIRST_RUN_INSPECTION_TOOL_BUDGET
+      ? SOURCE_AUDIT_RUNTIME_RECOVERY_TIMEOUT_MS
+      : SOURCE_AUDIT_FIRST_RUN_TIMEOUT_MS
     : undefined;
   const sourceAuditRuntimeRecoveryBlock = sourceAuditRuntimeRecoveryMode
     ? `Runtime recovery source-audit budget:
 - This audit report run is retrying after runtime context/timeout recovery. Complete a bounded report; do not keep exploring for perfect coverage.
-- Use no more than 12 additional repository-inspection tool calls before writing ${expectedAuditReportArtifactPath}. Prefer \`rg -n\`, \`git grep -n\`, and focused line snippets over broad repeated reads.
+- Use no more than ${sourceAuditInspectionToolBudget ?? SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET} additional repository-inspection tool calls before writing ${expectedAuditReportArtifactPath}. Prefer \`rg -n\`, \`git grep -n\`, and focused line snippets over broad repeated reads.
 - If the scoped evidence is sufficient for no validated findings, write a substantive no-findings report with an Evidence Register and risk-by-risk absence reasoning. If a real finding is supported, keep it with exact path:line evidence.
 - If some scoped area cannot be fully inspected within this bounded retry, record that as an explicit audit limitation or coverage gap in the report; do not leave the task blocked only because more exploratory search is possible.
+`
+    : "";
+  const sourceAuditDynamicBudgetBlock = expectedAuditReportArtifactPath
+    ? `Source audit dynamic budget:
+- Declared scope roots: ${auditScopeRepairability.roots.join(", ") || "none"}.
+- Runtime repository-inspection budget for this run: ${sourceAuditInspectionToolBudget ?? "default"} tool calls; max tool turns: ${sourceAuditMaxTurns ?? "default"}; run timeout: ${sourceAuditRunTimeoutMs ? `${Math.round(sourceAuditRunTimeoutMs / 60000)} minutes` : "default"}.
+- Allocate the budget to coverage before depth: every declared scope root needs at least one substantive exact \`path:line\` citation from that root before a trusted no-findings outcome.
+- If a repository-inspection budget warning appears, stop requesting read/search/list/run_shell repository-inspection tools. Finalize the current report from the existing ledger evidence, or mark the report \`source_inconclusive\` with the exact missing roots instead of looping.
 `
     : "";
 
@@ -4599,6 +4678,7 @@ ${isRework ? "Rework mode: true (requested from done/request_changes)." : "Rewor
 ${auditValidatorRepairGuidanceBlock}
 ${auditEvidenceRepairBlock}
 ${sourceAuditScopeDisciplineBlock}
+${sourceAuditDynamicBudgetBlock}
 ${sourceAuditRuntimeRecoveryBlock}
 
 Execution rules:
@@ -4682,6 +4762,7 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     fallbackSlashCommand: implementSlashCommand,
     maxTurns: sourceAuditMaxTurns,
     repositoryInspectionToolBudget: sourceAuditInspectionToolBudget,
+    runTimeoutMs: sourceAuditRunTimeoutMs,
   });
 
   // Post-run drift check: if the subagent switched branches during execution

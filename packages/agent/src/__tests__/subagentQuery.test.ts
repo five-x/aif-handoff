@@ -510,6 +510,7 @@ describe("executeSubagentQuery attribution", () => {
       workflowKind: "implementer",
       maxTurns: 32,
       repositoryInspectionToolBudget: 12,
+      runTimeoutMs: 123_000,
     });
 
     expect(adapter.run).toHaveBeenCalledWith(
@@ -517,6 +518,7 @@ describe("executeSubagentQuery attribution", () => {
         execution: expect.objectContaining({
           maxTurns: 32,
           repositoryInspectionToolBudget: 12,
+          runTimeoutMs: 123_000,
         }),
       }),
     );

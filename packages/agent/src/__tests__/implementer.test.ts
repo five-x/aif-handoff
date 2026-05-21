@@ -2470,6 +2470,182 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.reworkRequested).toBe(false);
   }, 60_000);
 
+  it("uses deterministic repair after post-write audit runtime timeout validation on readable source scope", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src", "bot_intevra"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "bot_intevra", "bot.py"),
+      [
+        "from bot_intevra.service import NoteService",
+        "",
+        "async def handle_message(message, service: NoteService):",
+        "    return await service.create_note(message.text)",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "src", "bot_intevra", "service.py"),
+      [
+        "class NoteService:",
+        "    async def create_note(self, text: str) -> dict[str, str]:",
+        "        return {'text': text}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "audit", "architecture-timeout.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "No validated findings.",
+        "",
+        "### Finding: direct store access is a blocker",
+        "**Evidence**: `src/bot_intevra/bot.py:1`",
+        "**Risk**: This is an ownership smell, not a proven runtime failure.",
+        "**Proposed fix**: Extract a facade.",
+        "**Verification**: Command output would show this.",
+        "",
+        "```audit-report-manifest",
+        JSON.stringify(
+          {
+            version: 1,
+            auditPlanId: "batch:batch-timeout:task:task-audit-timeout-repair",
+            taskId: "task-audit-timeout-repair",
+            batchId: "batch-timeout",
+            roadmapAlias: "audit-timeout",
+            artifactPath: "audit/architecture-timeout.md",
+            sourceSnapshot: {
+              id: "git:placeholder:placeholder",
+              commit: "placeholder",
+              tree: "placeholder",
+            },
+            outcome: "validated_findings_present",
+            scopeCoverage: [],
+            riskHypotheses: [],
+            findings: [{ id: "AOB-001", evidenceRefs: ["AOB-001"] }],
+            noFindingsClaims: [{ id: "nf-weak", evidenceRefs: [] }],
+            evidenceRefs: ["AOB-001"],
+          },
+          null,
+          2,
+        ),
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "src", "audit/architecture-timeout.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = [
+      "Scope: src/bot_intevra/bot.py, src/bot_intevra/service.py",
+      "Risk hypotheses: risk-architecture-1 src/bot_intevra/bot.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe; risk-architecture-2 src/bot_intevra/service.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe",
+      "Report artifact: audit/architecture-timeout.md",
+    ].join("\n");
+    db.insert(tasks)
+      .values({
+        id: "task-audit-timeout-repair",
+        projectId: "project-1",
+        title: "Audit architecture timeout repair",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        blockedReason:
+          "invalid_artifact_content: Audit report validator blocked completion (missing_scope_coverage): Report artifact does not cover declared audit scope roots.; runtime_timeout_after_audit_artifact_write: model transport failed after writing an audit report; coordinator used deterministic validation before retrying.",
+        reviewComments:
+          "## Blocking Findings\n- [scope] review_gate | Audit report validator blocked completion (missing_scope_coverage): missing scope coverage.",
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 1,
+          findings: [
+            {
+              id: "scope",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (missing_scope_coverage): missing scope coverage.",
+            },
+          ],
+        }),
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-timeout",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-timeout-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-timeout-repair",
+          role: "report",
+          artifactPath: "audit/architecture-timeout.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-timeout-repair", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const repaired = readFileSync(join(projectRoot, "audit", "architecture-timeout.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("src/bot_intevra/bot.py:3");
+    expect(repaired).toContain("src/bot_intevra/service.py:2");
+    expect(repaired).not.toContain("direct store access is a blocker");
+    expect(repaired).not.toContain("AOB-001");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-timeout-repair");
+    if (!artifact) throw new Error("missing timeout repair artifact");
+    const auditPlanId = `batch:${artifact.batchId}:task:task-audit-timeout-repair`;
+    const validation = validateAuditReportArtifact({
+      text: repaired,
+      projectRoot,
+      taskId: "task-audit-timeout-repair",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: "audit-timeout",
+      auditPlanId,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/architecture-timeout.md"],
+      expectedReportArtifactPath: "audit/architecture-timeout.md",
+      requireProposedFix: true,
+      auditEvidenceUnits: listAuditEvidenceEvents({
+        taskId: "task-audit-timeout-repair",
+        auditPlanId,
+      }),
+      requireLedgerEvidence: true,
+    });
+    expect(validation.ok, JSON.stringify(validation.issues)).toBe(true);
+    expect(validation.sourceClassification).toBe("validated_no_findings");
+    expect(artifact.state).toBe("valid");
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-timeout-repair"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation.",
+    );
+    expect(updatedTask?.reworkRequested).toBe(false);
+  }, 60_000);
+
   it("routes first-run readable audit report artifacts to runtime source audit", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
@@ -2587,9 +2763,11 @@ describe("runImplementer rework behavior", () => {
       "Treat the task's `Scope:` line as the authoritative audit boundary.",
     );
     expect(implementCall.prompt).toContain("do not expand into a repository-wide dependency map");
+    expect(implementCall.prompt).toContain("Source audit dynamic budget:");
+    expect(implementCall.prompt).toContain("Runtime repository-inspection budget for this run: 60");
     expect(implementCall.prompt).toContain("explain why each declared risk hypothesis is absent");
     expect(implementCall.prompt).toContain("Report artifact: audit/security-controls.md");
-    expect(implementCall.options.maxTurns).toBe(48);
+    expect(implementCall.options.maxTurns).toBe(84);
     const reportPath = join(projectRoot, "audit", "security-controls.md");
     expect(existsSync(reportPath)).toBe(false);
 
