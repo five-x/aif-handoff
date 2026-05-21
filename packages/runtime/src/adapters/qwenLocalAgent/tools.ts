@@ -1464,7 +1464,73 @@ async function finalizeAuditReportManifestTool(args, context) {
     touchedFiles: [target.relativePath],
   };
 }
-function formatAuditReportValidationResult(validation) {
+function extractAuditFindingHeadings(content) {
+  const findingsSection = content.match(
+    /(?:^|\n)##\s+Findings\b[\s\S]*?(?=\n##\s+(?:No-Validated-Finding Claims|Verification|Scope Coverage|Weak|Discarded|Limitations|$))/i,
+  )?.[0];
+  const source = findingsSection ?? content;
+  const headings = [];
+  for (const match of source.matchAll(/^\s{0,3}#{3,6}\s+(.+?)\s*$/gm)) {
+    const heading = String(match[1] ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!heading || /\b(?:weak|discarded|no-validated|verification|scope)\b/i.test(heading)) {
+      continue;
+    }
+    headings.push(heading);
+  }
+  return [...new Set(headings)].slice(0, 8);
+}
+function formatAuditReportIssueActions(validation, issueCodes) {
+  const issueCodeSet = new Set(issueCodes);
+  const actions = [];
+  if (issueCodeSet.has("non_actionable_audit_observation")) {
+    actions.push(
+      "non_actionable_audit_observation => delete broad architecture/maintainability-smell findings unless the report proves a concrete broken behavior, unsafe runtime boundary, data-loss path, or security/control failure.",
+    );
+  }
+  if (issueCodeSet.has("governance_observation_as_finding")) {
+    actions.push(
+      "governance_observation_as_finding => move documentation/ownership/API-boundary observations out of trusted findings; they may only appear as weak/discarded context or be omitted.",
+    );
+  }
+  if (issueCodeSet.has("unverified_inspection_claim")) {
+    actions.push(
+      "unverified_inspection_claim => remove claims based on skipped large-file searches, budget limits, 'too large', 'not visible', 'would show', or other unobserved evidence.",
+    );
+  }
+  if (issueCodeSet.has("missing_scope_coverage")) {
+    const uncovered = validation.scopeCoverage
+      .filter((entry) => entry.exists && !entry.ok)
+      .map((entry) => entry.root)
+      .slice(0, 8);
+    actions.push(
+      `missing_scope_coverage => add exact existing path:line citations for every declared scope root${uncovered.length ? `: ${uncovered.join(", ")}` : ""}.`,
+    );
+  }
+  if (issueCodeSet.has("missing_report_file_references")) {
+    actions.push(
+      "missing_report_file_references => remove or rewrite every bare/nonexistent path token; proposed new files must be described generically or anchored to an existing file:line.",
+    );
+  }
+  if (issueCodeSet.has("invalid_line_reference")) {
+    actions.push(
+      "invalid_line_reference => verify each cited line number against the current file and replace invalid ranges with exact existing lines.",
+    );
+  }
+  if (issueCodeSet.has("missing_audit_evidence_ref")) {
+    actions.push(
+      "missing_audit_evidence_ref => copy exact full runtime ledger evidence IDs; do not abbreviate or invent ev_* IDs.",
+    );
+  }
+  if (issueCodeSet.has("manifest_outcome_mismatch")) {
+    actions.push(
+      `manifest_outcome_mismatch => set manifest outcome to match the repaired report. Validator currently classifies the report as ${validation.sourceClassification}.`,
+    );
+  }
+  return actions.slice(0, 10);
+}
+function formatAuditReportValidationResult(validation, content = "") {
   const issueCodes = [...new Set(validation.issues.map((entry) => entry.code))].sort();
   const issueLines = validation.issues
     .slice(0, 12)
@@ -1481,7 +1547,7 @@ function formatAuditReportValidationResult(validation) {
     `sourceClassification=${validation.sourceClassification}`,
     `manifestStatus=${validation.manifestStatus}`,
     `issueCodes=${issueCodes.length > 0 ? issueCodes.join(",") : "none"}`,
-    formatAuditReportRepairDirective(validation, issueCodes),
+    formatAuditReportRepairDirective(validation, issueCodes, content),
     `referencedPaths=${validation.referencedPaths.length}`,
     `missingReferencedPaths=${validation.missingReferencedPaths.length}`,
     issueLines ? `issues:\n${issueLines}${suffix}` : "issues: none",
@@ -1489,7 +1555,7 @@ function formatAuditReportValidationResult(validation) {
     .filter(Boolean)
     .join("\n");
 }
-function formatAuditReportRepairDirective(validation, issueCodes) {
+function formatAuditReportRepairDirective(validation, issueCodes, content = "") {
   const issueCodeSet = new Set(issueCodes);
   const lowQualityCodes = [
     "fake_or_placeholder_command_output",
@@ -1507,11 +1573,25 @@ function formatAuditReportRepairDirective(validation, issueCodes) {
       validation.sourceClassification,
     );
   if (!lowQualityIssuePresent && !invalidTrustedOutcome) return "";
+  const rejectedFindingHeadings = extractAuditFindingHeadings(content);
+  const issueActions = formatAuditReportIssueActions(validation, issueCodes);
   return [
     "repairDirective=LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED",
+    "reviewerRepairBrief=The deterministic reviewer rejected the current trusted-report shape. Treat this as a new report repair brief, not as a request to cosmetically rewrite the same findings.",
+    ...(rejectedFindingHeadings.length > 0
+      ? [
+          "rejectedFindingCandidates:",
+          ...rejectedFindingHeadings.map((heading) => `- ${heading}`),
+          "Do not keep, rename, or rephrase the rejected finding candidates as trusted findings unless you can replace them with a concrete broken behavior proven by existing ledger-backed evidence.",
+        ]
+      : []),
+    ...(issueActions.length > 0
+      ? ["requiredRepairActions:", ...issueActions.map((entry) => `- ${entry}`)]
+      : []),
     "Delete every finding that depends on the rejected observation; do not rephrase it as another trusted finding.",
     "Do not spend more source-inspection budget during this repair; use the existing ledger evidence and edit only the audit report artifact, then finalize it again.",
     "If no finding remains after deleting weak observations, rewrite the report as validated_no_findings with an Evidence Register and risk-by-risk no-findings claims tied to observed file:line evidence.",
+    "If existing ledger evidence cannot support either trusted findings or substantive no-findings coverage, set the report outcome to source_inconclusive and state the exact coverage gap instead of looping.",
     "Do not promote line-count, central-hub, monolithic-file, import-count, module-boundary-documentation, __all__, optional-dependency/runtime-guard, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
   ].join("\n");
 }
@@ -1551,7 +1631,7 @@ async function validateAuditReportTool(args, context) {
   const validation = runAuditReportValidationForTarget(context, target, content);
   return {
     ok: validation.ok,
-    output: `audit report validation ${validation.ok ? "passed" : "failed"} ${target.relativePath.replaceAll("\\", "/")}\n${formatAuditReportValidationResult(validation)}`,
+    output: `audit report validation ${validation.ok ? "passed" : "failed"} ${target.relativePath.replaceAll("\\", "/")}\n${formatAuditReportValidationResult(validation, content)}`,
     ...(validation.ok ? {} : { error: "audit report validation failed" }),
     exitCode: validation.ok ? 0 : 1,
     touchedFiles: [],

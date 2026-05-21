@@ -3397,6 +3397,101 @@ function validateAuditReportArtifactWithTaskContext(input: {
   });
 }
 
+function extractAuditFindingHeadingsForRepairPrompt(text: string): string[] {
+  const findingsSection = text.match(
+    /(?:^|\n)##\s+Findings\b[\s\S]*?(?=\n##\s+(?:No-Validated-Finding Claims|Verification|Scope Coverage|Weak|Discarded|Limitations|$))/i,
+  )?.[0];
+  const source = findingsSection ?? text;
+  const headings = [...source.matchAll(/^\s{0,3}#{2,6}\s+(.+?)\s*$/gm)]
+    .map((match) => match[1]?.replace(/\s+/g, " ").trim())
+    .filter((heading): heading is string => Boolean(heading))
+    .filter(
+      (heading) =>
+        !/\b(?:findings|weak|discarded|no-validated|verification|scope)\b/i.test(heading),
+    );
+  return [...new Set(headings)].slice(0, 8);
+}
+
+function formatAuditValidatorRepairGuidanceForPrompt(input: {
+  validation: ReturnType<typeof validateAuditReportArtifact> | null;
+  projectRoot: string;
+  artifactPath: string;
+}): string {
+  if (!input.validation || isTrustedValidAuditReportValidation(input.validation)) return "";
+  const artifactPath = resolveSafeArtifactPath(input.projectRoot, input.artifactPath);
+  const artifactText = existsSync(artifactPath) ? readFileSync(artifactPath, "utf8") : "";
+  const issueCodes = auditReportValidationIssueCodes(input.validation);
+  const issueCodeSet = new Set(issueCodes);
+  const headings = extractAuditFindingHeadingsForRepairPrompt(artifactText);
+  const lines = [
+    "Audit validator repair guidance:",
+    `- Current validator classification: ${input.validation.sourceClassification}`,
+    `- Issue codes: ${issueCodes.length > 0 ? issueCodes.join(", ") : "none"}`,
+    "- Treat these validator issues as a reviewer-authored repair brief. Do not cosmetically rewrite rejected findings.",
+  ];
+  if (headings.length > 0) {
+    lines.push("- Rejected or suspect finding candidates from the current report:");
+    lines.push(...headings.map((heading) => `  - ${heading}`));
+    lines.push(
+      "- Delete those candidates unless you can replace them with a concrete broken behavior, unsafe boundary, data-loss path, or security/control failure proven by exact ledger-backed evidence.",
+    );
+  }
+  if (issueCodeSet.has("non_actionable_audit_observation")) {
+    lines.push(
+      "- non_actionable_audit_observation: broad maintainability, line-count, central-hub, coupling-smell, and ownership-smell observations are not trusted findings.",
+    );
+  }
+  if (issueCodeSet.has("governance_observation_as_finding")) {
+    lines.push(
+      "- governance_observation_as_finding: documentation/ownership/API-boundary observations must be removed from trusted findings; at most keep them as weak/discarded context.",
+    );
+  }
+  if (issueCodeSet.has("unverified_inspection_claim")) {
+    lines.push(
+      "- unverified_inspection_claim: remove claims based on skipped large-file searches, budget limits, hypothetical output, or unobserved evidence.",
+    );
+  }
+  if (issueCodeSet.has("missing_scope_coverage")) {
+    const uncovered = input.validation.scopeCoverage
+      .filter((entry) => entry.exists && !entry.ok)
+      .map((entry) => entry.root)
+      .slice(0, 8);
+    lines.push(
+      `- missing_scope_coverage: add exact existing path:line citations for every declared scope root${uncovered.length > 0 ? ` (${uncovered.join(", ")})` : ""}.`,
+    );
+  }
+  if (issueCodeSet.has("missing_report_file_references")) {
+    lines.push(
+      "- missing_report_file_references: remove bare/nonexistent path tokens from every section, including proposed fixes.",
+    );
+  }
+  if (issueCodeSet.has("invalid_line_reference")) {
+    lines.push(
+      "- invalid_line_reference: replace invalid ranges with exact existing source lines.",
+    );
+  }
+  if (issueCodeSet.has("missing_audit_evidence_ref")) {
+    lines.push(
+      "- missing_audit_evidence_ref: copy exact full evidence IDs from AUDIT_EVIDENCE_LEDGER; do not shorten or invent IDs.",
+    );
+  }
+  if (issueCodeSet.has("manifest_outcome_mismatch")) {
+    lines.push(
+      "- manifest_outcome_mismatch: after repair, set manifest outcome to the actual report outcome.",
+    );
+  }
+  lines.push(
+    "- If no trusted finding survives, write `No validated findings` with substantive risk-by-risk `noFindingsClaims`, ledger `evidenceRefs`, scope coverage, and source-specific absence reasoning.",
+  );
+  lines.push(
+    "- If existing ledger evidence cannot support either trusted findings or substantive no-findings coverage, set outcome `source_inconclusive` and state the precise coverage gap instead of looping.",
+  );
+  lines.push(
+    "- After every edit, call `finalize_audit_report_manifest`, then `validate_audit_report`; only commit after validation passes.",
+  );
+  return lines.join("\n");
+}
+
 async function runChecklistSyncQuery(input: {
   task: TaskRow;
   projectRoot: string;
@@ -3567,8 +3662,16 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       : null;
   const currentAuditReportIssueCodes =
     currentAuditReportValidation?.issues.map((issue) => issue.code) ?? [];
+  const auditValidatorRepairGuidanceBlock =
+    expectedAuditReportArtifactPath && task.reworkRequested
+      ? formatAuditValidatorRepairGuidanceForPrompt({
+          validation: currentAuditReportValidation,
+          projectRoot,
+          artifactPath: expectedAuditReportArtifactPath,
+        })
+      : "";
   const currentReportNeedsDeterministicRepair = currentAuditReportIssueCodes.some((code) =>
-    /\b(?:audit_evidence_discovery_only|audit_evidence_identity_mismatch|audit_evidence_risk_mismatch|audit_evidence_scope_mismatch|audit_evidence_source_snapshot_mismatch|contradictory_findings_and_no_findings|invalid_line_reference|invalid_report_manifest|manifest_content_hash_mismatch|manifest_identity_mismatch|manifest_outcome_mismatch|manifest_source_snapshot_mismatch|missing_audit_evidence_ref|missing_declared_scope_root|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|unsupported_report_manifest_version|unverified_inspection_claim)\b/i.test(
+    /\b(?:audit_evidence_discovery_only|audit_evidence_identity_mismatch|audit_evidence_risk_mismatch|audit_evidence_scope_mismatch|audit_evidence_source_snapshot_mismatch|contradictory_findings_and_no_findings|governance_observation_as_finding|invalid_line_reference|invalid_report_manifest|manifest_content_hash_mismatch|manifest_identity_mismatch|manifest_outcome_mismatch|manifest_source_snapshot_mismatch|missing_audit_evidence_ref|missing_declared_scope_root|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|non_actionable_audit_observation|unsupported_report_manifest_version|unverified_inspection_claim)\b/i.test(
       code,
     ),
   );
@@ -4299,6 +4402,7 @@ ${planSection}
 
 ${isRework ? "Rework mode: true (requested from done/request_changes)." : "Rework mode: false."}
 
+${auditValidatorRepairGuidanceBlock}
 ${auditEvidenceRepairBlock}
 ${sourceAuditScopeDisciplineBlock}
 ${sourceAuditRuntimeRecoveryBlock}

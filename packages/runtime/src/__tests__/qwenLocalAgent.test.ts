@@ -944,8 +944,19 @@ describe("qwen-local-agent adapter", () => {
     const secondRequest = JSON.parse(fetchMock.mock.calls[1][1].body);
     const toolMessage = secondRequest.messages.find((message) => message.role === "tool");
     expect(toolMessage.content).toContain("LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED");
+    expect(toolMessage.content).toContain("reviewerRepairBrief=");
+    expect(toolMessage.content).toContain("rejectedFindingCandidates");
+    expect(toolMessage.content).toContain(
+      "Finding AOB-1: bot.py is a monolithic hub file with cross-module responsibilities",
+    );
+    expect(toolMessage.content).toContain(
+      "Finding AOB-2: optional dependency without runtime guard",
+    );
+    expect(toolMessage.content).toContain("requiredRepairActions");
+    expect(toolMessage.content).toContain("non_actionable_audit_observation => delete broad");
     expect(toolMessage.content).toContain("Delete every finding");
     expect(toolMessage.content).toContain("do not rephrase");
+    expect(toolMessage.content).toContain("source_inconclusive");
     expect(toolMessage.content).toContain("Do not spend more source-inspection budget");
   });
 

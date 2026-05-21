@@ -2147,6 +2147,11 @@ describe("runImplementer rework behavior", () => {
     await runImplementer("task-audit-deterministic-repair", projectRoot);
 
     expect(queryMock).toHaveBeenCalledTimes(1);
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain("Audit validator repair guidance:");
+    expect(implementCall.prompt).toContain("governance_observation_as_finding");
+    expect(implementCall.prompt).toContain("Missing Ownership Clarity");
+    expect(implementCall.prompt).toContain("Do not cosmetically rewrite rejected findings");
     const repaired = readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8");
     expect(repaired).toContain("Missing Ownership Clarity");
     expect(repaired).not.toContain("nf-deterministic-repair");
@@ -2249,6 +2254,12 @@ describe("runImplementer rework behavior", () => {
     await runImplementer("task-audit-repeated-validator-repair", projectRoot);
 
     expect(queryMock).toHaveBeenCalledTimes(1);
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain("Audit validator repair guidance:");
+    expect(implementCall.prompt).toContain("unverified_inspection_claim");
+    expect(implementCall.prompt).toContain("missing_scope_coverage");
+    expect(implementCall.prompt).toContain("Candidate");
+    expect(implementCall.prompt).toContain("finalize_audit_report_manifest");
     const repaired = readFileSync(join(projectRoot, "audit", "security.md"), "utf8");
     expect(repaired).toContain("No validated findings.");
     expect(repaired).toContain("Candidate");
