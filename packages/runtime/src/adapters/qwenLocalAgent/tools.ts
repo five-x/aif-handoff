@@ -1510,6 +1510,7 @@ function formatAuditReportRepairDirective(validation, issueCodes) {
   return [
     "repairDirective=LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED",
     "Delete every finding that depends on the rejected observation; do not rephrase it as another trusted finding.",
+    "Do not spend more source-inspection budget during this repair; use the existing ledger evidence and edit only the audit report artifact, then finalize it again.",
     "If no finding remains after deleting weak observations, rewrite the report as validated_no_findings with an Evidence Register and risk-by-risk no-findings claims tied to observed file:line evidence.",
     "Do not promote line-count, central-hub, monolithic-file, import-count, module-boundary-documentation, __all__, optional-dependency/runtime-guard, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
   ].join("\n");

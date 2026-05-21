@@ -46,6 +46,7 @@ const REPOSITORY_INSPECTION_TOOL_NAMES = new Set([
   "search_files",
   "run_shell",
 ]);
+const AUDIT_ARTIFACT_MAINTENANCE_TOOL_NAMES = new Set(["list_files", "read_file"]);
 const MAX_REPOSITORY_INSPECTION_TOOL_BUDGET = 200;
 const READ_ONLY_WORKFLOWS = new Set([
   "planner",
@@ -60,6 +61,44 @@ function asRecord(value) {
 }
 function readString(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+function normalizeRepositoryBudgetPath(value) {
+  const raw = readString(value);
+  if (!raw) return null;
+  const normalized = raw
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+/g, "/")
+    .replace(/\/$/, "");
+  return normalized || ".";
+}
+function dirnameForRepositoryBudgetPath(normalizedPath) {
+  const index = normalizedPath.lastIndexOf("/");
+  return index > 0 ? normalizedPath.slice(0, index) : ".";
+}
+function isAuditArtifactMaintenanceToolCall(input, toolContext, toolName, args) {
+  if (input.workflowKind !== "audit") return false;
+  if (!AUDIT_ARTIFACT_MAINTENANCE_TOOL_NAMES.has(toolName)) return false;
+  const artifactPath = normalizeRepositoryBudgetPath(
+    toolContext.auditReportValidation?.expectedReportArtifactPath ??
+      input.execution?.auditReportArtifactPath,
+  );
+  if (!artifactPath) return false;
+  const allowed = toolContext.allowedWritePaths ?? [];
+  if (allowed.length > 0 && !allowed.includes(artifactPath)) return false;
+  const requestedPath = normalizeRepositoryBudgetPath(args.path);
+  if (!requestedPath) return false;
+  if (toolName === "read_file") return requestedPath === artifactPath;
+  if (toolName === "list_files") {
+    return requestedPath === dirnameForRepositoryBudgetPath(artifactPath);
+  }
+  return false;
+}
+function isRepositoryInspectionToolCall(input, toolContext, toolName, args) {
+  return (
+    REPOSITORY_INSPECTION_TOOL_NAMES.has(toolName) &&
+    !isAuditArtifactMaintenanceToolCall(input, toolContext, toolName, args)
+  );
 }
 function readNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -349,9 +388,10 @@ function emitToolResult(input, events, toolCall, result) {
     },
   });
 }
-function buildAuditEvidenceResultForTool(toolCall, args, result) {
+function buildAuditEvidenceResultForTool(input, toolContext, toolCall, args, result) {
   if (result.repositoryInspectionBudgetExhausted === true) return;
   const toolName = sanitizeQwenToolNameForLog(toolCall.function.name);
+  if (isAuditArtifactMaintenanceToolCall(input, toolContext, toolName, args)) return;
   let evidenceKind = null;
   let evidenceGrade = undefined;
   let paths = [];
@@ -577,8 +617,11 @@ export async function runQwenLocalAgentApi(input, logger) {
           input.workflowKind,
           toolCall.function.name,
         );
-        const isRepositoryInspectionTool = REPOSITORY_INSPECTION_TOOL_NAMES.has(
+        const isRepositoryInspectionTool = isRepositoryInspectionToolCall(
+          input,
+          toolContext,
           toolCall.function.name,
+          args,
         );
         const shouldDenyRepositoryInspection =
           toolAllowed &&
@@ -634,7 +677,13 @@ export async function runQwenLocalAgentApi(input, logger) {
             );
           }
         }
-        const auditEvidenceResult = buildAuditEvidenceResultForTool(toolCall, args, result);
+        const auditEvidenceResult = buildAuditEvidenceResultForTool(
+          input,
+          toolContext,
+          toolCall,
+          args,
+          result,
+        );
         const auditEvidenceUnit = appendQwenAuditEvidenceUnit(toolContext, auditEvidenceResult);
         emitToolResult(input, events, toolCall, result);
         emitAuditEvidenceResult(

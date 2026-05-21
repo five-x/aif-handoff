@@ -511,6 +511,7 @@ describe("qwen-local-agent adapter", () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
     await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    await writeFile(path.join(root, "audit", "architecture.md"), "# Audit\n\nDraft.\n", "utf8");
     const events = [];
     fetchMock
       .mockResolvedValueOnce(
@@ -528,6 +529,29 @@ describe("qwen-local-agent adapter", () => {
                     function: {
                       name: "read_file",
                       arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-report",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "audit/architecture.md" }),
                     },
                   },
                 ],
@@ -594,7 +618,10 @@ describe("qwen-local-agent adapter", () => {
 
     const result = await runQwenLocalAgentApi(
       createRunInput(root, {
+        workflowKind: "audit",
         execution: {
+          allowedWritePaths: ["audit/architecture.md"],
+          auditReportArtifactPath: "audit/architecture.md",
           repositoryInspectionToolBudget: 1,
           onEvent: (event) => events.push(event),
         },
@@ -606,9 +633,11 @@ describe("qwen-local-agent adapter", () => {
       "No validated findings",
     );
     expect(JSON.stringify(result.events)).toContain("Repository inspection budget exhausted");
+    expect(JSON.stringify(result.events)).toContain("read_file ok");
     const auditEvents = events.filter((event) => event.type === "audit:evidence");
     expect(auditEvents).toHaveLength(1);
     expect(JSON.stringify(auditEvents)).not.toContain("AGENTS.md");
+    expect(JSON.stringify(auditEvents)).not.toContain("audit/architecture.md");
   });
   it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));
@@ -917,6 +946,7 @@ describe("qwen-local-agent adapter", () => {
     expect(toolMessage.content).toContain("LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED");
     expect(toolMessage.content).toContain("Delete every finding");
     expect(toolMessage.content).toContain("do not rephrase");
+    expect(toolMessage.content).toContain("Do not spend more source-inspection budget");
   });
 
   it("does not log raw provider-supplied unknown tool names or ids", async () => {
