@@ -32,6 +32,7 @@ const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3;
 const MIN_FINALIZATION_OUTPUT_TOKENS = 512;
 const DEFAULT_ENDPOINT_COOLDOWN_MS = 30_000;
 const DEFAULT_ENDPOINT_HEALTH_TIMEOUT_MS = 5_000;
+const DEFAULT_ENDPOINT_COOLDOWN_WAIT_MAX_MS = 45_000;
 const REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS = "repository_inspection_budget_exhausted";
 const LOCAL_ENDPOINT_BUDGETS = new Map([
   [
@@ -79,6 +80,7 @@ const REPOSITORY_INSPECTION_TOOL_NAMES = new Set([
 ]);
 const AUDIT_ARTIFACT_MAINTENANCE_TOOL_NAMES = new Set(["list_files", "read_file"]);
 const MAX_REPOSITORY_INSPECTION_TOOL_BUDGET = 200;
+const LOCAL_WAIT_ABORT = Symbol("qwenLocalAgentLocalWaitAbort");
 const endpointSemaphores = new Map();
 const endpointCircuitBreakers = new Map();
 const READ_ONLY_WORKFLOWS = new Set([
@@ -270,6 +272,14 @@ function isAbortTimeoutError(error) {
 }
 function abortError(message) {
   return new DOMException(message, "AbortError");
+}
+function localWaitAbortError(message) {
+  const error = abortError(message);
+  Object.defineProperty(error, LOCAL_WAIT_ABORT, { value: true });
+  return error;
+}
+function isLocalWaitAbortError(error) {
+  return Boolean(error && typeof error === "object" && error[LOCAL_WAIT_ABORT]);
 }
 function truncateTextForRequest(value, maxChars) {
   const text = String(value ?? "");
@@ -752,6 +762,34 @@ function readEndpointHealthTimeoutMs(input) {
   if (raw == null || raw <= 0) return DEFAULT_ENDPOINT_HEALTH_TIMEOUT_MS;
   return Math.max(1_000, Math.floor(raw));
 }
+function readEndpointCooldownWaitMaxMs(input) {
+  const options = asRecord(input.options);
+  const raw = readNumber(options.endpointCooldownWaitMaxMs);
+  if (raw == null || raw < 0) return DEFAULT_ENDPOINT_COOLDOWN_WAIT_MAX_MS;
+  return Math.floor(raw);
+}
+async function delayWithAbort(ms, signal, message) {
+  if (ms <= 0) return;
+  if (signal?.aborted) {
+    throw localWaitAbortError(message);
+  }
+  await new Promise((resolve, reject) => {
+    let timeout;
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      signal?.removeEventListener?.("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(localWaitAbortError(message));
+    };
+    timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
 function endpointFailureCategory(error) {
   if (error instanceof RuntimeExecutionError) return error.category;
   if (isAbortTimeoutError(error)) return "timeout";
@@ -759,12 +797,6 @@ function endpointFailureCategory(error) {
 }
 function shouldTripEndpointCircuit(error) {
   return ["transport", "stream", "timeout"].includes(endpointFailureCategory(error));
-}
-function endpointRetryAfterSeconds(state) {
-  if (!state?.cooldownUntilMs) return null;
-  const remainingMs = state.cooldownUntilMs - Date.now();
-  if (remainingMs <= 0) return null;
-  return Math.max(1, Math.ceil(remainingMs / 1000));
 }
 function isEndpointCooldownRuntimeError(error) {
   return (
@@ -834,39 +866,60 @@ async function checkEndpointHealth(input, baseUrl, signal) {
 }
 async function assertEndpointCircuitAllowsRequest(input, policy, signal, logger) {
   if (!policy.endpoint || !policy.budget) return;
-  const state = endpointCircuitBreakers.get(policy.endpoint.key);
-  if (!state) return;
-  const remainingSeconds = endpointRetryAfterSeconds(state);
-  if (remainingSeconds && remainingSeconds > 0) {
-    throw buildEndpointCircuitError(policy.endpoint, remainingSeconds);
-  }
-  try {
-    await checkEndpointHealth(input, policy.baseUrl, signal);
-    endpointCircuitBreakers.delete(policy.endpoint.key);
-    logger?.info?.(
-      {
-        runtimeId: input.runtimeId,
-        profileId: input.profileId ?? null,
-        baseUrl: policy.baseUrl,
-        endpointKey: policy.endpoint.key,
-      },
-      "Qwen local endpoint circuit closed after health check",
-    );
-  } catch (error) {
-    const cooldownMs = readEndpointCooldownMs(input);
-    const failures = (state.failures ?? 0) + 1;
-    endpointCircuitBreakers.set(policy.endpoint.key, {
-      failures,
-      cooldownUntilMs: Date.now() + cooldownMs,
-    });
-    throw buildEndpointCircuitError(
-      policy.endpoint,
-      Math.ceil(cooldownMs / 1000),
-      classifyQwenLocalAgentRuntimeError(error),
-    );
+  const maxWaitMs = readEndpointCooldownWaitMaxMs(input);
+  for (;;) {
+    const state = endpointCircuitBreakers.get(policy.endpoint.key);
+    if (!state) return;
+    const remainingMs = Math.max(0, (state.cooldownUntilMs ?? 0) - Date.now());
+    if (remainingMs > 0) {
+      const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+      if (remainingMs > maxWaitMs) {
+        throw buildEndpointCircuitError(policy.endpoint, remainingSeconds);
+      }
+      logger?.info?.(
+        {
+          runtimeId: input.runtimeId,
+          profileId: input.profileId ?? null,
+          baseUrl: policy.baseUrl,
+          endpointKey: policy.endpoint.key,
+          cooldownWaitMs: remainingMs,
+        },
+        "Waiting for qwen-local-agent endpoint circuit cooldown before health check",
+      );
+      await delayWithAbort(remainingMs, signal, "qwen-local-agent endpoint cooldown wait aborted");
+      continue;
+    }
+    try {
+      await checkEndpointHealth(input, policy.baseUrl, signal);
+      endpointCircuitBreakers.delete(policy.endpoint.key);
+      logger?.info?.(
+        {
+          runtimeId: input.runtimeId,
+          profileId: input.profileId ?? null,
+          baseUrl: policy.baseUrl,
+          endpointKey: policy.endpoint.key,
+        },
+        "Qwen local endpoint circuit closed after health check",
+      );
+      return;
+    } catch (error) {
+      const currentState = endpointCircuitBreakers.get(policy.endpoint.key) ?? state;
+      const cooldownMs = readEndpointCooldownMs(input);
+      const failures = (currentState.failures ?? 0) + 1;
+      endpointCircuitBreakers.set(policy.endpoint.key, {
+        failures,
+        cooldownUntilMs: Date.now() + cooldownMs,
+      });
+      throw buildEndpointCircuitError(
+        policy.endpoint,
+        Math.ceil(cooldownMs / 1000),
+        classifyQwenLocalAgentRuntimeError(error),
+      );
+    }
   }
 }
 function recordEndpointFailure(input, policy, error, logger) {
+  if (isLocalWaitAbortError(error)) return null;
   if (isEndpointCooldownRuntimeError(error)) return null;
   if (!policy.endpoint || !policy.budget || !shouldTripEndpointCircuit(error)) return null;
   const previous = endpointCircuitBreakers.get(policy.endpoint.key);
@@ -900,7 +953,7 @@ async function acquireEndpointSemaphore(policy, signal) {
     endpointSemaphores.set(policy.endpoint.key, state);
   }
   if (signal?.aborted) {
-    throw abortError("qwen-local-agent endpoint semaphore wait aborted");
+    throw localWaitAbortError("qwen-local-agent endpoint semaphore wait aborted");
   }
   if (state.active) {
     await new Promise((resolve, reject) => {
@@ -914,7 +967,7 @@ async function acquireEndpointSemaphore(policy, signal) {
           const index = state.queue.indexOf(entry);
           if (index >= 0) state.queue.splice(index, 1);
           cleanup();
-          reject(abortError("qwen-local-agent endpoint semaphore wait aborted"));
+          reject(localWaitAbortError("qwen-local-agent endpoint semaphore wait aborted"));
         },
       };
       const cleanup = () => {
@@ -968,15 +1021,15 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
     body = buildQwenLocalAgentRequestBody(input, messages);
     logContext.maxOutputTokens =
       typeof body.max_tokens === "number" ? body.max_tokens : logContext.maxOutputTokens;
-    await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
-    const response = await withEndpointSemaphore(policy, signal, () =>
-      fetch(`${policy.baseUrl}/chat/completions`, {
+    const response = await withEndpointSemaphore(policy, signal, async () => {
+      await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
+      return fetch(`${policy.baseUrl}/chat/completions`, {
         method: "POST",
         headers: buildHeaders(input),
         body: JSON.stringify(body),
         ...(signal ? { signal } : {}),
-      }),
-    );
+      });
+    });
     logger?.info?.(
       {
         ...logContext,

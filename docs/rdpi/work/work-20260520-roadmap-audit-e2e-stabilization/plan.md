@@ -94,3 +94,13 @@ Implementation and live probing require independent `PLAN PASS`.
 24. Keep deterministic repair fail-closed for empty or non-line-addressable scopes.
 25. Run `npm.cmd test --workspace=@aif/agent -- --run src/__tests__/implementer.test.ts`.
 26. Run relevant broader validation, commit, push, deploy, cleanup `auditstrong20260521oom1`, and restart from step 11 with a new alias.
+
+## Restart Addendum: 2026-05-21 endpoint cooldown blocker
+
+27. Patch qwen-local endpoint circuit handling so short cooldowns are awaited with an abort-aware timer before `/models` health check, instead of surfacing immediate `endpoint_cooldown` as a task-level `blocked_external`.
+28. Preserve bounded behavior for long cooldowns through the existing `endpoint_cooldown` error and retryAfter metadata.
+29. Add runtime regression tests for short cooldown wait/health-check/retry and long cooldown bounded failure.
+30. Run targeted qwen runtime tests, then broad validation, commit, push, deploy, cleanup `auditstrong20260521oom2`, and restart from step 11 with a new alias.
+31. Address review-gate findings by ensuring aborts during local semaphore/cooldown waits do not record endpoint failures or extend circuit cooldown.
+32. Move cooldown wait plus `/models` health check inside the per-endpoint semaphore, re-reading circuit state after each wait so concurrent waiters cannot bypass reopened cooldown.
+33. Add runtime regression tests for aborted local cooldown wait and concurrent waiters after failed health check, then rerun independent TEST and REVIEW gates.

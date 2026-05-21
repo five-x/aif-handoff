@@ -2738,12 +2738,133 @@ describe("qwen-local-agent adapter", () => {
     releaseFirst?.();
     await expect(first).resolves.toMatchObject({ outputText: "done" });
   });
-  it("opens endpoint cooldown after a local transport timeout and avoids immediate retry storms", async () => {
+  it("waits for short endpoint cooldowns before health-checking and retrying a new request", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-cooldown-"));
     const input = createRunInput(root, {
       options: {
         baseUrl: "http://192.168.88.62:8003/v1",
+        endpointCooldownMs: 1_000,
+      },
+    });
+    fetchMock
+      .mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"))
+      .mockResolvedValueOnce(jsonResponse({ data: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-after-cooldown",
+          choices: [{ message: { role: "assistant", content: "done after cooldown" } }],
+        }),
+      );
+
+    await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
+      category: "timeout",
+      retryAfterSeconds: expect.any(Number),
+    });
+    await expect(runQwenLocalAgentApi(input)).resolves.toMatchObject({
+      outputText: "done after cooldown",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe("http://192.168.88.62:8003/v1/models");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe(
+      "http://192.168.88.62:8003/v1/chat/completions",
+    );
+  });
+  it("does not extend endpoint cooldown when aborting during the local cooldown wait", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-cooldown-abort-"));
+    const options = {
+      baseUrl: "http://192.168.88.62:8003/v1",
+      endpointCooldownMs: 1_000,
+      endpointCooldownWaitMaxMs: 1_200,
+    };
+    const input = createRunInput(root, { options });
+    fetchMock.mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"));
+
+    await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
+      category: "timeout",
+      retryAfterSeconds: expect.any(Number),
+    });
+
+    const abort = new AbortController();
+    const waiting = runQwenLocalAgentApi(
+      createRunInput(root, {
+        options,
+        execution: { abortController: abort },
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    abort.abort(new Error("stage timeout"));
+
+    await expect(waiting).rejects.toMatchObject({ category: "timeout" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] })).mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-after-aborted-cooldown-wait",
+        choices: [{ message: { role: "assistant", content: "done after abort" } }],
+      }),
+    );
+
+    await expect(runQwenLocalAgentApi(input)).resolves.toMatchObject({
+      outputText: "done after abort",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe("http://192.168.88.62:8003/v1/models");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe(
+      "http://192.168.88.62:8003/v1/chat/completions",
+    );
+  });
+  it("serializes cooldown health checks when concurrent waiters see a reopened circuit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-cooldown-concurrent-"));
+    const options = {
+      baseUrl: "http://192.168.88.62:8003/v1",
+      endpointCooldownMs: 1_000,
+      endpointCooldownWaitMaxMs: 1_200,
+    };
+    const input = createRunInput(root, { options });
+    fetchMock
+      .mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"))
+      .mockRejectedValueOnce(new Error("health check still failing"));
+
+    await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
+      category: "timeout",
+      retryAfterSeconds: expect.any(Number),
+    });
+
+    const abort = new AbortController();
+    const firstWaiter = runQwenLocalAgentApi(input);
+    const secondWaiter = runQwenLocalAgentApi(
+      createRunInput(root, {
+        options,
+        execution: { abortController: abort },
+      }),
+    );
+
+    await expect(firstWaiter).rejects.toMatchObject({
+      category: "transport",
+      retryAfterSeconds: expect.any(Number),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe("http://192.168.88.62:8003/v1/models");
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    abort.abort(new Error("stop queued waiter"));
+
+    await expect(secondWaiter).rejects.toMatchObject({ category: "timeout" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("keeps long endpoint cooldowns bounded instead of sleeping indefinitely", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-long-cooldown-"));
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8003/v1",
         endpointCooldownMs: 5_000,
+        endpointCooldownWaitMaxMs: 0,
       },
     });
     fetchMock.mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"));

@@ -54,6 +54,20 @@ The first post-hardening canary proved that compact-or-fail behavior works, but 
 - otherwise terminalize as non-trusted `source_inconclusive` without re-entering full repository inspection;
 - preserve the existing guard that empty or non-line-addressable scopes remain source-inconclusive.
 
+## Endpoint Cooldown Refinement
+
+The second canary showed that short circuit-breaker cooldown is not by itself an audit-card blocker. When a new qwen-local request starts while the endpoint is still cooling down after a transport/timeout failure:
+
+- wait for the remaining short cooldown inside the runtime request path;
+- keep the wait abort-aware so AIF stage timeout still cancels the pending upstream work;
+- treat aborts while waiting locally for semaphore/cooldown as cancellation, not as endpoint transport failures that extend the circuit;
+- serialize cooldown wait, `/models` health check, and chat request under the same per-endpoint semaphore;
+- re-read circuit state after each cooldown wait before probing health, so reopened circuits are not bypassed by concurrent waiters;
+- run the existing `/models` health check after the cooldown and only then send the next chat completion;
+- preserve bounded behavior by retaining immediate `endpoint_cooldown` for cooldowns longer than the configured wait cap.
+
+This keeps circuit breaking visible in logs while avoiding user-visible `blocked_external` churn between sequential audit cards.
+
 ## Verification Design
 
 - Runtime unit tests cover request body budgeting, endpoint semaphore keying, compacted tool/evidence/ledger payloads, cooldown and health-check behavior, bounded retry after transport/timeout, and abort propagation to `fetch`.

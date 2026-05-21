@@ -64,3 +64,13 @@ Stabilize the live `botIntevra` audit roadmap workflow end to end until two clea
 - The runtime then denied 3 additional repository-inspection requests and raised controlled `repository_inspection_budget_exhausted` instead of retrying a full repository context or storming between `8003` and `8005`.
 - The compact ledger-writer recovery ran with `repositoryInspectionToolBudget: 0`, but timed out before writing the report artifact. Coordinator terminalized the artifact as `source_inconclusive` and blocked the task with `manual_review_required: repository_inspection_budget_exhausted`.
 - System cause: the safety layer prevented the OOM-prone behavior, but recovery still depended on a model writer to create the report artifact. If that writer timed out, the workflow had no deterministic artifact finalization path and therefore blocked.
+
+## Live Evidence: auditstrong20260521oom2
+
+- Fresh UI roadmap alias `auditstrong20260521oom2` created 7 audit tasks after cleanup and deploy of the deterministic report-repair fallback.
+- The first source card reached 60 repository-inspection calls, compacted to about 17k input tokens, denied 3 further repository-inspection requests, and then used deterministic fallback after ledger-writer timeout. The final artifact closed as trusted `validated_no_findings`.
+- The security source card initially started during the endpoint cooldown opened by the previous recovery timeout. The adapter threw immediate `endpoint_cooldown`, so the task entered `blocked_external` with a short retryAfter, then the watchdog released it and a health check closed the circuit.
+- The same transient `blocked_external` pattern recurred for later source cards immediately after a prior card's recovery timeout: the next card was advanced by auto-queue before the qwen-local endpoint cooldown had elapsed.
+- System cause: endpoint circuit breaking correctly prevented retry storms, but the qwen-local adapter exposed short cooldown as a synchronous task failure. The coordinator/stage-error path then surfaced this expected cooldown as a card block instead of waiting for cooldown plus health check inside the bounded runtime request path.
+- Independent review of the initial cooldown-wait patch found two edge cases: aborting while waiting locally for cooldown could be recorded as an endpoint failure, and concurrent waiters could health-check from stale circuit state outside endpoint serialization.
+- The refined fix treats local wait aborts as cancellation rather than endpoint failure, and runs cooldown wait plus `/models` health check under the per-endpoint semaphore so reopened circuits are observed by later waiters.
