@@ -924,7 +924,7 @@ describe("executeSubagentQuery attribution", () => {
       "- `README.md:2`",
       "",
       "Checked commands:",
-      '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
+      "- Command `Grep README.md` output: `README.md:2:runtime audit evidence`",
       "",
     ].join("\n");
     mkdirSync(join(root, "reports"), { recursive: true });

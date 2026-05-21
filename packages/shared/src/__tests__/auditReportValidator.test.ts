@@ -1828,6 +1828,44 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).not.toContain("missing_audit_evidence_ref");
   });
 
+  it("rejects report command/output blocks that are not backed by cited runtime ledger evidence", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "## Finding A-1: Timeout setting is too low",
+      "Evidence: `src/config.ts:1` defines the timeout value used by the runtime.",
+      "Risk: A low runtime timeout can make longer operations fail prematurely.",
+      "Proposed fix: Increase the configured timeout after measuring expected runtime duration.",
+      "Verification:",
+      "```",
+      'Command: grep -n "timeoutMs" src/config.ts',
+      "Output: src/config.ts:1:export const timeoutMs = 1000;",
+      "```",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot })],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("unbacked_runtime_command_evidence");
+  });
+
   it("rejects no-findings manifests without risk hypothesis ids", () => {
     const root = initRepo();
     const snapshot = gitSnapshot(root);

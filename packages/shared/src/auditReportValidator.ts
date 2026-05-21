@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import {
   classifyAuditSourceEvidence,
+  extractAuditCommandEvidence,
   extractSubstantiveAuditCommandEvidence,
   hasScopedNoFindingsRiskClaim,
   hasEmptyFileInspectionEvidence,
@@ -49,6 +50,7 @@ export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "audit_evidence_scope_mismatch",
   "audit_evidence_risk_mismatch",
   "audit_evidence_discovery_only",
+  "unbacked_runtime_command_evidence",
 ] as const;
 
 export type AuditReportValidationIssueCode = (typeof AUDIT_REPORT_VALIDATION_ISSUE_CODES)[number];
@@ -785,6 +787,169 @@ function validateManifestEvidenceRefs(input: {
   }
 
   return issues;
+}
+
+interface ReportedAuditCommandClaim {
+  command: string;
+  evidence: string;
+}
+
+const AUDIT_COMMAND_NAME_PATTERN =
+  /^(?:npm|pnpm|yarn|rg|grep|cat|ls|sed|head|tail|find|wc|git|vitest|jest|tsc|eslint|node|curl|read_file|list_files|search_files)\b/i;
+
+function normalizeReportedCommand(value: string): string {
+  return value
+    .trim()
+    .replace(/^`+|`+$/g, "")
+    .replace(/^\$+\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function commandComparableTokens(value: string): string[] {
+  return normalizeReportedCommand(value)
+    .replace(/[,"'`]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !token.startsWith("-"));
+}
+
+function addReportedCommandClaim(
+  claims: Map<string, ReportedAuditCommandClaim>,
+  command: string,
+  evidence: string,
+): void {
+  const normalized = normalizeReportedCommand(command);
+  if (!normalized || !AUDIT_COMMAND_NAME_PATTERN.test(normalized)) return;
+  if (!claims.has(normalized)) claims.set(normalized, { command: command.trim(), evidence });
+}
+
+function collectReportedAuditCommandClaims(text: string): ReportedAuditCommandClaim[] {
+  const claims = new Map<string, ReportedAuditCommandClaim>();
+  for (const entry of extractAuditCommandEvidence(text)) {
+    addReportedCommandClaim(claims, entry.command, entry.evidence);
+  }
+
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const match = line.match(/^\s*(?:[-*]\s*)?(?:Verification:\s*)?Command\s*:\s*`?(.+?)`?\s*$/i);
+    if (!match) continue;
+    const command = (match[1] ?? "").trim();
+    const window = lines.slice(index, index + 5).join("\n");
+    if (!/\b(?:Output|stdout|stderr|returned|matched|included)\s*:/i.test(window)) continue;
+    addReportedCommandClaim(claims, command, window.trim());
+  }
+
+  return [...claims.values()];
+}
+
+function evidenceCommandSignatures(unit: AuditEvidenceUnit): string[] {
+  const signatures = new Set<string>();
+  if (unit.command?.command) {
+    signatures.add(unit.command.command);
+    const withArgs = [unit.command.command, ...unit.command.args].filter(Boolean).join(" ");
+    signatures.add(withArgs);
+  }
+
+  const previewFirstLine = (unit.outputPreview ?? "").split(/\r?\n/)[0]?.trim() ?? "";
+  const toolPreview = previewFirstLine.match(
+    /^\[(read_file|list_files|search_files)\s+([^\]]+)\]/i,
+  );
+  if (toolPreview) {
+    signatures.add(`${toolPreview[1]} ${toolPreview[2]}`);
+  }
+  for (const scopeId of unit.scopeIds) {
+    if (scopeId) signatures.add(`${unit.toolName} ${scopeId}`);
+  }
+  return [...signatures].map(normalizeReportedCommand).filter(Boolean);
+}
+
+function commandTokensAreCompatible(reported: string, signature: string): boolean {
+  const reportedTokens = commandComparableTokens(reported);
+  const signatureTokens = commandComparableTokens(signature);
+  if (reportedTokens.length === 0 || signatureTokens.length === 0) return false;
+  if (reportedTokens[0] !== signatureTokens[0]) return false;
+  const requiredTokens = signatureTokens.slice(1);
+  if (requiredTokens.length === 0) return true;
+  return requiredTokens.every((token) => reportedTokens.includes(token));
+}
+
+function reportedCommandMatchesUnit(
+  claim: ReportedAuditCommandClaim,
+  unit: AuditEvidenceUnit,
+): boolean {
+  const normalizedClaim = normalizeReportedCommand(claim.command);
+  return evidenceCommandSignatures(unit).some((signature) => {
+    if (normalizedClaim === signature) return true;
+    if (normalizedClaim.startsWith(`${signature} `)) return true;
+    if (signature.startsWith(`${normalizedClaim} `)) return true;
+    return commandTokensAreCompatible(normalizedClaim, signature);
+  });
+}
+
+function validateReportedRuntimeCommandClaims(input: {
+  text: string;
+  projectRoot: string;
+  manifest: AuditReportManifest | null;
+  evidenceUnits: AuditEvidenceUnit[];
+  allowedEvidenceArtifactPaths: string[];
+  requireLedgerEvidence: boolean;
+}): AuditReportValidationIssue[] {
+  if (!input.requireLedgerEvidence) return [];
+  const claims = collectReportedAuditCommandClaims(input.text);
+  if (claims.length === 0) return [];
+
+  const byId = new Map(input.evidenceUnits.map((entry) => [entry.id, entry]));
+  const candidateUnits =
+    input.manifest && input.manifest.evidenceRefs.length > 0
+      ? input.manifest.evidenceRefs
+          .map((id) => byId.get(id))
+          .filter((entry): entry is AuditEvidenceUnit => Boolean(entry))
+      : input.evidenceUnits;
+
+  const unbacked = claims.filter(
+    (claim) =>
+      !candidateUnits.some((unit) => reportedCommandMatchesUnit(claim, unit)) &&
+      !reportedCommandAppearsInAllowedArtifact({
+        claim,
+        projectRoot: input.projectRoot,
+        allowedEvidenceArtifactPaths: input.allowedEvidenceArtifactPaths,
+      }),
+  );
+  if (unbacked.length === 0) return [];
+  return [
+    issue(
+      "unbacked_runtime_command_evidence",
+      `Report artifact contains Command/Output evidence not backed by cited runtime audit ledger evidence: ${unbacked
+        .slice(0, 5)
+        .map((claim) => claim.command)
+        .join("; ")}.`,
+    ),
+  ];
+}
+
+function reportedCommandAppearsInAllowedArtifact(input: {
+  claim: ReportedAuditCommandClaim;
+  projectRoot: string;
+  allowedEvidenceArtifactPaths: string[];
+}): boolean {
+  const normalizedClaim = normalizeReportedCommand(input.claim.command);
+  if (!normalizedClaim) return false;
+  for (const artifactPath of input.allowedEvidenceArtifactPaths) {
+    const normalizedPath = normalizeRelativePath(artifactPath);
+    const absPath = resolve(input.projectRoot, normalizedPath);
+    if (!isInsideRoot(input.projectRoot, absPath) || !existsSync(absPath)) continue;
+    try {
+      const content = readFileSync(absPath, "utf8");
+      if (normalizeReportedCommand(content).includes(normalizedClaim)) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 function formatPathExamples(paths: string[], limit = 8): string {
@@ -1893,6 +2058,16 @@ export function validateAuditReportArtifact(
         expectedSnapshot,
         taskId: input.taskId,
         evidenceUnits: input.auditEvidenceUnits ?? [],
+        requireLedgerEvidence: input.requireLedgerEvidence ?? false,
+      }),
+    );
+    issues.push(
+      ...validateReportedRuntimeCommandClaims({
+        text: classificationText,
+        projectRoot: input.projectRoot,
+        manifest,
+        evidenceUnits: input.auditEvidenceUnits ?? [],
+        allowedEvidenceArtifactPaths,
         requireLedgerEvidence: input.requireLedgerEvidence ?? false,
       }),
     );
