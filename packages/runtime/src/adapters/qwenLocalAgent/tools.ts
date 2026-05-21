@@ -1546,7 +1546,7 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   }
   if (issueCodeSet.has("audit_evidence_scope_mismatch")) {
     actions.push(
-      "audit_evidence_scope_mismatch => every manifest scopeCoverage, finding, and noFindingsClaims evidenceRefs entry must cite ledger IDs whose scopeIds cover that exact declared scope root.",
+      "audit_evidence_scope_mismatch => every manifest scopeCoverage, finding, and noFindingsClaims evidenceRefs entry must cite actual ev_* ledger IDs whose scopeIds cover that exact declared scope root; finding labels, risk IDs, paths, and AOB-style IDs are not evidenceRefs.",
     );
   }
   if (issueCodeSet.has("audit_evidence_risk_mismatch")) {
@@ -1562,6 +1562,16 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   if (issueCodeSet.has("missing_report_file_references")) {
     actions.push(
       "missing_report_file_references => replace bare basenames like `bot.py` or `backup_crypto.py` with full repository-relative paths everywhere, including headings, tables, and limitations.",
+    );
+  }
+  if (issueCodeSet.has("invalid_or_missing_file_references")) {
+    actions.push(
+      "invalid_or_missing_file_references => remove nonexistent/future paths and basename-only tokens from Evidence, Risk, Proposed fix, limitations, and manifest fields; use existing repository-relative paths with lines or describe remediation generically.",
+    );
+  }
+  if (issueCodeSet.has("low_quality_report_evidence")) {
+    actions.push(
+      "low_quality_report_evidence => delete duplicated-initialization/DRY, import-chain/tight-coupling, private-method/direct-store, and partially inspected source_inconclusive findings unless existing ledger evidence proves concrete broken behavior.",
     );
   }
   if (issueCodeSet.has("invalid_line_reference")) {
@@ -1659,8 +1669,10 @@ function formatAuditReportRepairDirective(validation, issueCodes, content = "") 
     "If no finding remains after deleting weak observations, rewrite the report as validated_no_findings with an Evidence Register and risk-by-risk no-findings claims tied to observed file:line evidence.",
     "For validated_no_findings, do not create `### Finding` or `### Risk` sections; use a concise checklist/table in the body and manifest noFindingsClaims with matching ledger evidenceRefs.",
     "If existing ledger evidence cannot support either trusted findings or substantive no-findings coverage, set the report outcome to source_inconclusive and state the exact coverage gap instead of looping.",
+    "Manifest evidenceRefs arrays must contain actual runtime audit ledger IDs (`ev_*`) only. Do not put finding labels, risk IDs, path names, AOB-style IDs, or invented short tokens in evidenceRefs.",
+    "Every repository path in Evidence, Risk, Proposed fix, limitations, and manifest fields must be an existing repository-relative path with concrete lines when used as evidence. Remove basename-only paths and future file names.",
     "Do not cite `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs as source evidence for trusted outcomes.",
-    "Do not promote line-count, central-hub, monolithic-file, import-count, module-boundary-documentation, __all__, optional-dependency/runtime-guard, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
+    "Do not promote line-count, central-hub, monolithic-file, import-count, duplicated-initialization/DRY, import-chain/tight-coupling-without-real-cycle, private-method/direct-store/abstraction-bypass, module-boundary-documentation, __all__, optional-dependency/runtime-guard, source_inconclusive-as-finding, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
   ].join("\n");
 }
 function runAuditReportValidationForTarget(context, target, content) {

@@ -149,6 +149,23 @@ describe("auditRoadmapContract", () => {
     );
   });
 
+  it("does not classify audit guardrails as implementation-shaped work", () => {
+    const result = validateGeneratedAuditCard({
+      title: "Audit: architecture and ownership boundaries",
+      description: [
+        completeAuditDescription(),
+        "Evidence ID rule: manifest evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 are never evidenceRefs.",
+        "Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py.",
+        "Rejected finding shapes: duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle, and private-method/direct-store/abstraction-bypass smells are not trusted findings.",
+        "Inconclusive rule: a partially inspected source_inconclusive observation is not a finding.",
+      ].join("\n"),
+    });
+
+    expect(result.issueDetails.map((issue) => issue.code)).not.toContain(
+      "implementation_shaped_description",
+    );
+  });
+
   it("classifies broad repository audit requests as decomposed report batches", () => {
     expect(
       classifyAuditDecompositionRequest(

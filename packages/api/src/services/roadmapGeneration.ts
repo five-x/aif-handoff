@@ -506,12 +506,22 @@ function hasImplementationShapedAuditContent(text: string): boolean {
   ];
   const diagnosticFrame =
     /\b(?:diagnostic|findings?\s+(?:about|for|on)|report\s+(?:about|on)|review\s+(?:of|for)|inventory\s+(?:of|for)|evidence\s+(?:of|for)|risk\s+(?:in|of|from))\b/i;
+  const guardrailLine =
+    /^\s*(?:[-*]\s*)?(?:proposed\s+fix|evidence requirements|evidence id rule|path rule|rejected finding shapes|inconclusive rule)\s*:/i;
+  const candidateText = text
+    .split(/\r?\n/)
+    .filter((line) => !guardrailLine.test(line.trim()))
+    .join("\n");
 
-  return splitAuditTextLines(text).some((line) => {
+  return splitAuditTextLines(candidateText).some((line) => {
     if (/\b(?:do not|must not|forbid|forbidden|no source|no config|no test)\b/i.test(line)) {
       return false;
     }
-    if (/\b(?:proposed\s+fix|evidence requirements)\s*:/i.test(line)) {
+    if (
+      /\b(?:proposed\s+fix|evidence requirements|evidence id rule|path rule|rejected finding shapes|inconclusive rule)\s*:/i.test(
+        line,
+      )
+    ) {
       return false;
     }
     if (!implementationPatterns.some((pattern) => pattern.test(line))) {
@@ -861,8 +871,11 @@ function buildAuditRoadmapItem(
     "  - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.",
     "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
     "  - Manifest requirements: include a fenced `audit-report-manifest` JSON block with version 1, auditPlanId `task:<task-id>` or `batch:<batch-id>:task:<task-id>`, taskId, batchId when assigned, roadmapAlias when assigned, artifactPath, contentSha256 for the markdown body without the manifest block, sourceSnapshot commit/tree/id, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
+    "  - Evidence ID rule: manifest evidenceRefs, scopeCoverage[].evidenceRefs, findings[].evidenceRefs, and noFindingsClaims[].evidenceRefs must cite actual runtime audit ledger IDs (`ev_*`) only; finding labels such as AOB-001 or invented IDs are never evidenceRefs.",
+    "  - Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as `config.py`, future files such as `cli_context.py`, or generated `.ai-factory/*` files as source evidence.",
     '  - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
-    "  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, missing facade, missing `__all__`, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.",
+    "  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, missing facade, missing `__all__`, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.",
+    "  - Inconclusive rule: a partially inspected or `source_inconclusive` observation is not a finding. Either inspect enough scoped source to validate it, omit it, or set the whole report outcome to `source_inconclusive` with the exact coverage gap.",
     '  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     "  - No-findings shape: do not write `### Finding` or `### Risk` subsections for no-findings claims; use a concise checklist/table and manifest `noFindingsClaims` tied to scoped evidenceRefs.",
     `  - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}`,
@@ -1679,8 +1692,11 @@ ${priorContextLine}  - Allowed changes: only create/update one report artifact.
   - Report artifact: audit/${reportDate}-<short-name>-audit.md
   - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.
   - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
+  - Evidence ID rule: manifest evidenceRefs, scopeCoverage[].evidenceRefs, findings[].evidenceRefs, and noFindingsClaims[].evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 or invented IDs are never evidenceRefs.
+  - Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py, future files such as cli_context.py, or generated .ai-factory/* files as source evidence.
   - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.
-  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, missing facade, missing __all__, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.
+  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, missing facade, missing __all__, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.
+  - Inconclusive rule: a partially inspected or source_inconclusive observation is not a finding. Either inspect enough scoped source to validate it, omit it, or set the whole report outcome to source_inconclusive with the exact coverage gap.
   - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.
   - No-findings shape: do not write ### Finding or ### Risk subsections for no-findings claims; use a concise checklist/table and manifest noFindingsClaims tied to scoped evidenceRefs.
   - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}

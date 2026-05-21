@@ -609,6 +609,10 @@ describe("roadmapGeneration", () => {
       expect(mockRunApiRuntimeOneShot.mock.calls[0][0].prompt).toContain(
         "Code-only audit requested",
       );
+      expect(mockRunApiRuntimeOneShot.mock.calls[0][0].prompt).toContain("Evidence ID rule");
+      expect(result.content).toContain("Evidence ID rule");
+      expect(result.content).toContain("duplicated initialization/DRY/refactor-helper claims");
+      expect(result.content).toContain("source_inconclusive");
     });
 
     it("should build deterministic audit scopes for botIntevra-like projects", async () => {

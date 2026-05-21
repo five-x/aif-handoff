@@ -3189,6 +3189,9 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("auditEvidence.id");
     expect(call.prompt).toContain("Do not mention nonexistent repository paths anywhere");
     expect(call.prompt).toContain('do not write the phrase "No validated findings" anywhere');
+    expect(call.prompt).toContain("finding labels such as AOB-001");
+    expect(call.prompt).toContain("duplicated initialization/DRY/refactor-helper claims");
+    expect(call.prompt).toContain("basename-only paths");
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
     expect(repaired).toContain("No validated findings.");
     expect(repaired).toContain("## Finding: Candidate");

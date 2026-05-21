@@ -187,6 +187,12 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> =
   },
   {
     pattern:
+      /\b(?:duplicated initialization|duplicate(?:d)? init(?:ialization)?|same [\w-]+ initialization appears|extract (?:the )?.{0,80}(?:helper|factory|context)|DRY|import chain forms (?:a )?(?:tight coupling|dependency)|tight coupling[^.\n]+import|top-level import error[^.\n]+fail(?:s)? to start|transient import-time side-effect|future change[^.\n]+(?:must|needs to|requires?) be duplicated|private method call|direct store access|service\.store\.create_note|bypassing (?:the )?service layer|violates? (?:the )?(?:service-layer )?abstraction|abstraction bypass)\b/i,
+    message:
+      "Report artifact contains refactor/abstraction-smell observations instead of concrete broken behavior.",
+  },
+  {
+    pattern:
       /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|missing ownership clarity|incomplete ownership clarity|does not (?:explicitly )?define (?:module )?ownership(?: boundaries)?|does not explicitly define boundaries|does not map each stage to a responsible module|does not map (?:these |the |conceptual )?layers? to (?:actual )?module (?:paths?|boundaries)|module-to-(?:layer|stage) mapping|module-path mappings?|cannot determine which module owns|branch naming convention and ownership policy|unclear ownership|orphaned (?:utility|module|code)|undocumented integration|no visible invocation|audit all imports of|missing [`']?__all__[`']?|without an? [`']?__all__[`']? declaration|not enforced via __all__|no explicit public api boundary|public (?:api|interface) surface|documented interface contract|documented as an ownership boundary|document the contract between|module docstrings?|module-level docstrings?|ownership documentation|ownership gap|no documented owner|no documented ownership|no integration point|wire [^.:\n]+ into [^.:\n]+ lifecycle|intentionally decoupled[^.\n]+owned by|owned by a separate subsystem|cross-reference documentation)\b/i,
     message:
       "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",

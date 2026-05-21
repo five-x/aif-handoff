@@ -3467,7 +3467,7 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
   }
   if (issueCodeSet.has("audit_evidence_scope_mismatch")) {
     lines.push(
-      "- audit_evidence_scope_mismatch: every manifest scopeCoverage, finding, and noFindingsClaims evidenceRefs entry must cite ledger IDs whose scopeIds cover that exact declared scope root.",
+      "- audit_evidence_scope_mismatch: every manifest scopeCoverage, finding, and noFindingsClaims evidenceRefs entry must cite actual `ev_*` ledger IDs whose scopeIds cover that exact declared scope root. Finding labels such as AOB-001, risk IDs, and path names are not evidenceRefs.",
     );
   }
   if (issueCodeSet.has("audit_evidence_risk_mismatch")) {
@@ -3483,6 +3483,16 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
   if (issueCodeSet.has("missing_report_file_references")) {
     lines.push(
       "- missing_report_file_references: replace bare basenames such as `bot.py`, `backup_crypto.py`, or `attachments.py` with full repository-relative paths in every heading, table, limitation, and manifest rationale.",
+    );
+  }
+  if (issueCodeSet.has("invalid_or_missing_file_references")) {
+    lines.push(
+      "- invalid_or_missing_file_references: remove nonexistent/future paths and basename-only tokens from Evidence, Risk, Proposed fix, limitations, and manifest fields. Use existing repository-relative paths with line numbers, or describe the remediation generically.",
+    );
+  }
+  if (issueCodeSet.has("low_quality_report_evidence")) {
+    lines.push(
+      "- low_quality_report_evidence: delete duplicated-initialization/DRY, import-chain/tight-coupling, private-method/direct-store, and partially inspected source_inconclusive findings unless the existing ledger proves concrete broken behavior.",
     );
   }
   if (issueCodeSet.has("invalid_line_reference")) {
@@ -4344,6 +4354,7 @@ Rework handling protocol:
 - Rebuild the report from observed evidence. Remove speculative claims, placeholder command output, "could not read", "would show", "likely", "may contain", and any fake commit hashes or synthetic tool output.
 - Add an "Evidence Register" section near the top with a markdown table: ID | Claim | Evidence | Verification. Each row must tie one claim to concrete existing repository file references such as \`path/to/file.ext:line\` and/or exact command output you actually observed.
 - Use AUDIT_EVIDENCE_LEDGER as the source of truth for manifest evidence IDs. If it lists \`ev_*\` IDs for evidence you use, cite those exact full IDs in \`audit-report-manifest.evidenceRefs\`, \`scopeCoverage[].evidenceRefs\`, and each finding/noFindingsClaims entry. Copy every hyphenated UUID segment; do not abbreviate evidence IDs.
+- Do not put finding labels such as AOB-001, risk IDs, path names, or invented short tokens in any manifest \`evidenceRefs\` array. Evidence refs must be runtime ledger IDs only.
 - In \`audit-report-manifest.sourceSnapshot\`, use the source snapshot associated with the cited ledger evidence. This is the audited source snapshot, not necessarily the later report-artifact commit.
 - The fenced manifest must start exactly with three backticks followed by \`audit-report-manifest\` and must end with three backticks. Do not use underscores, tildes, indented fences, or partial/truncated manifest blocks.
 - Every finding kept in the report must include these labels: Evidence:, Risk:, Proposed fix:, Verification:. Evidence must include concrete existing file:line references. Verification must name the exact command or tool used and paste the observed output or a concise exact excerpt.
@@ -4364,6 +4375,8 @@ Rework handling protocol:
 - Use targeted repository tools to decide each declared risk hypothesis from the scoped evidence. For large scoped files, prefer line-specific searches or snippets over full-file rereads.
 - When AUDIT_EVIDENCE_LEDGER lists substantive \`ev_*\` evidence IDs, build the report manifest from those actual IDs instead of placeholders. Every trusted finding or no-findings claim must cite ledger IDs whose scope/risk fields cover the claim.
 - Do not recursively search every import, symbol, or dependency. Use at most one supporting out-of-scope lookup only when it is needed to interpret scoped evidence, then return to the scoped files. Do not promote out-of-scope files or missing scope expansion into blocker findings; record them only as limitations, weak/discarded observations, or \`source_inconclusive\` when scoped evidence cannot support a trusted conclusion.
+- Do not promote duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real import cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, or partially inspected \`source_inconclusive\` observations into trusted findings. If no concrete broken behavior remains, write validated_no_findings with ledger-backed noFindingsClaims.
+- Every path mentioned in Evidence, Risk, Proposed fix, limitations, and manifest fields must be an existing repository path. Avoid basename-only paths such as \`config.py\` and future file names such as \`cli_context.py\`; anchor remediation advice to existing scoped files or describe it generically.
 - Stop collecting evidence once every declared risk hypothesis has either a validated finding or a source-specific no-findings rationale. Write ${expectedAuditReportArtifactPath}, commit only that artifact, verify it, and return.
 `
     : "";

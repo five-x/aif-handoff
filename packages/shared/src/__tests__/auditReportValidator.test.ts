@@ -185,6 +185,45 @@ describe("auditReportValidator", () => {
     );
   });
 
+  it("rejects refactor-smell audit findings even when manifest evidenceRefs are ledger-backed", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "### Finding AOB-001: Duplicated initialization should be extracted into a helper",
+      "Evidence: `src/config.ts:1` shows the scoped configuration path.",
+      "Risk: Future changes must be duplicated across two code blocks, creating a DRY issue.",
+      "Proposed fix: Extract the initialization into a shared helper.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+    const text = withManifest({
+      body,
+      snapshot,
+      outcome: "validated_findings_present",
+      scopeCoverage: [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
+      riskHypotheses: [
+        { id: "risk-1", description: "Architecture boundary risk", status: "covered" },
+      ],
+    });
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskId: "task-audit",
+      auditPlanId: "task:task-audit",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+      auditEvidenceUnits: [manifestEvidenceUnit({ snapshot })],
+      requireLedgerEvidence: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_findings_present");
+    expect(issueCodes(result)).toContain("non_actionable_audit_observation");
+  });
+
   it("accepts valid no-findings reports with checked files, commands, and scoped risk claims", () => {
     const root = initRepo();
     const text = [

@@ -803,8 +803,14 @@ export function hasImplementationShapedAuditText(text: string): boolean {
   ];
   const diagnosticFrame =
     /\b(?:diagnostic|findings?\s+(?:about|for|on)|report\s+(?:about|on)|review\s+(?:of|for)|inventory\s+(?:of|for)|evidence\s+(?:of|for)|risk\s+(?:in|of|from))\b/i;
+  const guardrailLine =
+    /^\s*(?:[-*]\s*)?(?:proposed\s+fix|evidence requirements|evidence id rule|path rule|rejected finding shapes|inconclusive rule)\s*:/i;
+  const candidateText = text
+    .split(/\r?\n/)
+    .filter((line) => !guardrailLine.test(line.trim()))
+    .join("\n");
 
-  return auditTextLines(text).some((line) => {
+  return auditTextLines(candidateText).some((line) => {
     const lower = line.toLowerCase();
     if (/\b(?:do not|must not|forbid|forbidden|no source|no config|no test)\b/i.test(lower)) {
       return false;

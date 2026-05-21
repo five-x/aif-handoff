@@ -957,6 +957,10 @@ describe("qwen-local-agent adapter", () => {
     expect(toolMessage.content).toContain("Delete every finding");
     expect(toolMessage.content).toContain("do not rephrase");
     expect(toolMessage.content).toContain("do not create `### Finding` or `### Risk` sections");
+    expect(toolMessage.content).toContain("actual runtime audit ledger IDs");
+    expect(toolMessage.content).toContain("AOB-style IDs");
+    expect(toolMessage.content).toContain("duplicated-initialization/DRY");
+    expect(toolMessage.content).toContain("basename-only paths");
     expect(toolMessage.content).toContain("Do not cite `.ai-factory/*`");
     expect(toolMessage.content).toContain("source_inconclusive");
     expect(toolMessage.content).toContain("Do not spend more source-inspection budget");
