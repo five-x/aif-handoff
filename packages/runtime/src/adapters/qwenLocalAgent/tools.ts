@@ -1390,7 +1390,31 @@ function normalizeAuditManifestEvidenceRefs(value, expandEvidenceRef) {
   );
 }
 
-function updateAuditReportManifestContentSha256(content, label, auditEvidenceUnits = []) {
+function applyAuditReportManifestRuntimeIdentity(manifest, auditReportValidation, artifactPath) {
+  if (!auditReportValidation) return manifest;
+  const updated = { ...manifest };
+  if (auditReportValidation.taskId) updated.taskId = auditReportValidation.taskId;
+  if (auditReportValidation.roadmapBatchId) {
+    updated.batchId = auditReportValidation.roadmapBatchId;
+  }
+  if (auditReportValidation.roadmapAlias) updated.roadmapAlias = auditReportValidation.roadmapAlias;
+  if (artifactPath) updated.artifactPath = artifactPath;
+  if (auditReportValidation.taskId || auditReportValidation.auditPlanId) {
+    updated.auditPlanId = resolveAuditPlanId({
+      taskId: auditReportValidation.taskId,
+      auditPlanId: auditReportValidation.auditPlanId,
+      roadmapBatchId: auditReportValidation.roadmapBatchId,
+    });
+  }
+  return updated;
+}
+function updateAuditReportManifestContentSha256(
+  content,
+  label,
+  auditEvidenceUnits = [],
+  auditReportValidation = null,
+  artifactPath = null,
+) {
   const expandEvidenceRef = buildAuditEvidenceRefExpander(auditEvidenceUnits);
   const expanded = expandAuditEvidenceRefPrefixesInContent(content, expandEvidenceRef);
   const normalizedContent = expanded.content;
@@ -1411,6 +1435,11 @@ function updateAuditReportManifestContentSha256(content, label, auditEvidenceUni
   try {
     manifest = JSON.parse(manifestText);
     manifest = normalizeAuditManifestEvidenceRefs(manifest, expandEvidenceRef);
+    manifest = applyAuditReportManifestRuntimeIdentity(
+      manifest,
+      auditReportValidation,
+      artifactPath,
+    );
   } catch (error) {
     throw new RuntimeExecutionError(
       `audit report manifest JSON is invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -1452,6 +1481,8 @@ async function finalizeAuditReportManifestTool(args, context) {
       content,
       "audit report finalize path",
       context.auditEvidenceUnits ?? [],
+      context.auditReportValidation ?? null,
+      target.relativePath.replaceAll("\\", "/"),
     );
   assertNotAborted(context.signal, "finalize_audit_report_manifest");
   if (updated !== content) {
@@ -1505,17 +1536,17 @@ function formatAuditReportIssueActions(validation, issueCodes) {
       .map((entry) => entry.root)
       .slice(0, 8);
     actions.push(
-      `missing_scope_coverage => add exact existing path:line citations for every declared scope root${uncovered.length ? `: ${uncovered.join(", ")}` : ""}.`,
+      `missing_scope_coverage => cover every declared scope root${uncovered.length ? ` (${uncovered.join(", ")})` : ""} with exact existing path:line or path:start-end citations to substantive lines; do not use line 1 when it is only a heading, import, comment, docstring, blank line, brace, or metadata.`,
     );
   }
   if (issueCodeSet.has("missing_report_file_references")) {
     actions.push(
-      "missing_report_file_references => remove or rewrite every bare/nonexistent path token; proposed new files must be described generically or anchored to an existing file:line.",
+      "missing_report_file_references => replace bare basenames like `bot.py` or `backup_crypto.py` with full repository-relative paths everywhere, including headings, tables, and limitations.",
     );
   }
   if (issueCodeSet.has("invalid_line_reference")) {
     actions.push(
-      "invalid_line_reference => verify each cited line number against the current file and replace invalid ranges with exact existing lines.",
+      "invalid_line_reference => cite real source lines only; do not place `read_file(...)`, `search_files(...)`, shell commands, or tool-output snippets immediately after a source path:line as if they were source text.",
     );
   }
   if (issueCodeSet.has("missing_audit_evidence_ref")) {
@@ -1526,6 +1557,11 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   if (issueCodeSet.has("manifest_outcome_mismatch")) {
     actions.push(
       `manifest_outcome_mismatch => set manifest outcome to match the repaired report. Validator currently classifies the report as ${validation.sourceClassification}.`,
+    );
+  }
+  if (issueCodeSet.has("manifest_identity_mismatch")) {
+    actions.push(
+      "manifest_identity_mismatch => call `finalize_audit_report_manifest` after editing; the tool normalizes runtime identity fields such as taskId, batchId, roadmapAlias, auditPlanId, and artifactPath.",
     );
   }
   return actions.slice(0, 10);

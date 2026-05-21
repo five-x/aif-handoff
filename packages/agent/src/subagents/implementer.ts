@@ -3457,17 +3457,17 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
       .map((entry) => entry.root)
       .slice(0, 8);
     lines.push(
-      `- missing_scope_coverage: add exact existing path:line citations for every declared scope root${uncovered.length > 0 ? ` (${uncovered.join(", ")})` : ""}.`,
+      `- missing_scope_coverage: add exact existing path:line or path:start-end citations for every declared scope root${uncovered.length > 0 ? ` (${uncovered.join(", ")})` : ""}; cite substantive lines, not line 1 when it is only a heading, import, comment, docstring, blank line, brace, or metadata.`,
     );
   }
   if (issueCodeSet.has("missing_report_file_references")) {
     lines.push(
-      "- missing_report_file_references: remove bare/nonexistent path tokens from every section, including proposed fixes.",
+      "- missing_report_file_references: replace bare basenames such as `bot.py`, `backup_crypto.py`, or `attachments.py` with full repository-relative paths in every heading, table, limitation, and manifest rationale.",
     );
   }
   if (issueCodeSet.has("invalid_line_reference")) {
     lines.push(
-      "- invalid_line_reference: replace invalid ranges with exact existing source lines.",
+      "- invalid_line_reference: replace invalid ranges with exact existing source lines, and do not place `read_file(...)`, `search_files(...)`, shell commands, or tool-output snippets immediately after a source `path:line` as if they were source text.",
     );
   }
   if (issueCodeSet.has("missing_audit_evidence_ref")) {
@@ -3478,6 +3478,11 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
   if (issueCodeSet.has("manifest_outcome_mismatch")) {
     lines.push(
       "- manifest_outcome_mismatch: after repair, set manifest outcome to the actual report outcome.",
+    );
+  }
+  if (issueCodeSet.has("manifest_identity_mismatch")) {
+    lines.push(
+      "- manifest_identity_mismatch: do not hand-type runtime identity fields; call `finalize_audit_report_manifest` after editing so taskId, batchId, roadmapAlias, auditPlanId, and artifactPath are normalized from runtime context.",
     );
   }
   lines.push(

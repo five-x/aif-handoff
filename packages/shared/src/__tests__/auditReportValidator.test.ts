@@ -214,6 +214,35 @@ describe("auditReportValidator", () => {
     expect(result.existingReferencedPaths).toContain("src/config.ts");
   });
 
+  it("does not treat tool invocations after source line citations as source assertions", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for file config.ts was covered and is absent.",
+      "",
+      "| Citation | Verification |",
+      "|---|---|",
+      '| `src/config.ts:1` | `read_file("src/config.ts", lineCount=1)` - ev-1 |',
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(issueCodes(result)).not.toContain("invalid_line_reference");
+    expect(issueCodes(result)).not.toContain("missing_report_file_references");
+    expect(result.existingReferencedPaths).toContain("src/config.ts");
+  });
+
   it("rejects template deterministic no-findings reports as weak audit evidence", () => {
     const root = initRepo();
     const text = [

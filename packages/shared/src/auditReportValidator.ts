@@ -1390,6 +1390,16 @@ function classifyReferencedPaths(
     }
     if (sourceReader.pathExists(ref)) {
       existing.push(ref);
+    } else if (!ref.includes("/") && !ref.includes("\\")) {
+      const matchingExistingRefs = refs.filter(
+        (candidate) =>
+          candidate !== ref && candidate.endsWith(`/${ref}`) && sourceReader.pathExists(candidate),
+      );
+      if (matchingExistingRefs.length === 1) {
+        existing.push(matchingExistingRefs[0]);
+      } else {
+        missing.push(ref);
+      }
     } else {
       missing.push(ref);
     }
@@ -1514,6 +1524,26 @@ function firstSubsequentLineReferenceIndex(text: string): number | null {
   return firstIndex;
 }
 
+function isToolOrCommandAssertionCandidate(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (
+    /^(?:read_file|search_files|list_files|run_shell|git_status|validate_audit_report|finalize_audit_report_manifest|compute_audit_report_hash)\s*\(/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /^(?:rg|grep|git|wc|cat|sed|head|tail|find|ls|npm|pnpm|yarn|node|python|pytest|ruff|mypy)\b/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+  return /\b(?:lineCount|path|matches|exit code|stdout|stderr)\s*=/i.test(trimmed);
+}
+
 function collectLineAssertionCandidates(line: string, matchEnd: number): string[] {
   const rawAfter = line.slice(matchEnd).replace(/^\s*["'`]+/, "");
   const nextLineReferenceIndex = firstSubsequentLineReferenceIndex(rawAfter);
@@ -1533,7 +1563,7 @@ function collectLineAssertionCandidates(line: string, matchEnd: number): string[
   if (separated) candidates.push(separated[1] ?? "");
   return [
     ...new Set(candidates.map(normalizeLineAssertionText).filter(isLikelySourceLineAssertion)),
-  ];
+  ].filter((candidate) => !isToolOrCommandAssertionCandidate(candidate));
 }
 
 function sourceRangeContainsLineAssertion(

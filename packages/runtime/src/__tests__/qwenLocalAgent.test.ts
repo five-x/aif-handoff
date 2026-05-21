@@ -1413,6 +1413,61 @@ describe("qwen-local-agent adapter", () => {
     expect(finalizedManifest.findings[0].evidenceRefs).toEqual([fullEvidenceId]);
     expect(finalizedManifest.contentSha256).toBe(computeAuditReportContentSha256(finalizedContent));
   });
+  it("normalizes audit manifest identity from runtime context when finalizing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-identity-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    const body = ["# Architecture Audit", "", "No validated findings.", ""].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId: "task:wrong-task",
+      taskId: "wrong-task",
+      batchId: "wrong-batch",
+      roadmapAlias: "abadapt-strong-typo",
+      artifactPath: "audit/wrong.md",
+      contentSha256: "PLACEHOLDER",
+      evidenceRefs: [],
+    };
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      `${body}\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest)}\n\`\`\`\n`,
+      "utf8",
+    );
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: {
+        allowedWritePaths: ["audit/report.md"],
+        auditReportTaskId: "task-123",
+        auditReportRoadmapBatchId: "batch-456",
+        auditReportRoadmapAlias: "abaudit-strong-20260521-dz",
+        auditReportAuditPlanId: "batch:batch-456:task:task-123",
+        auditReportArtifactPath: "audit/report.md",
+      },
+    });
+
+    const finalized = await executeQwenLocalTool(
+      "finalize_audit_report_manifest",
+      { path: "audit/report.md" },
+      context,
+    );
+
+    expect(finalized.ok).toBe(true);
+    const finalizedContent = await readFile(path.join(root, "audit", "report.md"), "utf8");
+    const manifestMatch = finalizedContent.match(
+      /```audit-report-manifest\s*\r?\n([\s\S]*?)\r?\n```/,
+    );
+    expect(manifestMatch).toBeTruthy();
+    const finalizedManifest = JSON.parse(manifestMatch?.[1] ?? "{}");
+    expect(finalizedManifest).toEqual(
+      expect.objectContaining({
+        auditPlanId: "batch:batch-456:task:task-123",
+        taskId: "task-123",
+        batchId: "batch-456",
+        roadmapAlias: "abaudit-strong-20260521-dz",
+        artifactPath: "audit/report.md",
+        contentSha256: computeAuditReportContentSha256(finalizedContent),
+      }),
+    );
+  });
   it("blocks git_commit when a scoped audit report hash is not finalized", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-commit-guard-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
