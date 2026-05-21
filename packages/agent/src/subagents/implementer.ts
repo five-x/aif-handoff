@@ -48,6 +48,7 @@ import { executeSubagentQuery } from "../subagentQuery.js";
 import { computePendingPlanLayers, computePlanLayers } from "../planLayers.js";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
 import { buildTaskMemoryContext } from "../memoryContext.js";
+import { findRuntimeExecutionError } from "../errorClassifier.js";
 
 const log = logger("implementer");
 const AGENT_NAME = "implement-coordinator";
@@ -950,11 +951,12 @@ function formatAuditEvidenceCommandForPrompt(command: AuditEvidenceUnit["command
 function formatAuditEvidenceLedgerForPrompt(input: {
   taskId: string;
   auditPlanId: string | null;
+  limit?: number;
 }): string {
   const units = listAuditEvidenceEvents({
     taskId: input.taskId,
     auditPlanId: input.auditPlanId ?? undefined,
-    limit: 30,
+    limit: input.limit ?? 30,
   })
     .filter((unit) => unit.evidenceGrade === "substantive")
     .reverse();
@@ -988,6 +990,11 @@ function formatAuditEvidenceLedgerForPrompt(input: {
     );
   }
   return lines.join("\n");
+}
+
+function shouldAttemptAuditLedgerWriterRecovery(error: unknown): boolean {
+  const runtimeError = findRuntimeExecutionError(error);
+  return runtimeError?.category === "timeout" || runtimeError?.category === "context_length";
 }
 
 function formatAuditReportManifestContractForPrompt(input: {
@@ -4750,22 +4757,132 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     },
   });
 
-  const { resultText } = await executeSubagentQuery({
-    taskId,
-    projectRoot,
-    agentName: executionName,
-    prompt,
-    maxBudgetUsd: implementerBudget,
-    agent: useSubagents ? AGENT_NAME : undefined,
-    skipReview: task.skipReview ?? false,
-    profileMode: runtimeWorkflowKind,
-    workflowSpec,
-    workflowKind: runtimeWorkflowKind,
-    fallbackSlashCommand: implementSlashCommand,
-    maxTurns: sourceAuditMaxTurns,
-    repositoryInspectionToolBudget: sourceAuditInspectionToolBudget,
-    runTimeoutMs: sourceAuditRunTimeoutMs,
-  });
+  const runAuditLedgerWriterRecovery = async (error: unknown): Promise<string | null> => {
+    if (!expectedAuditReportArtifactPath || task.reworkRequested) return null;
+    if (!shouldAttemptAuditLedgerWriterRecovery(error)) return null;
+
+    const auditPlanId = resolveAuditPlanId({
+      taskId,
+      roadmapBatchId: roadmapArtifact?.batchId ?? null,
+    });
+    const substantiveEvidenceUnits = listAuditEvidenceEvents({
+      taskId,
+      auditPlanId,
+      limit: 80,
+    }).filter((unit) => unit.evidenceGrade === "substantive");
+    if (substantiveEvidenceUnits.length === 0) return null;
+
+    const recoveryLedger = formatAuditEvidenceLedgerForPrompt({
+      taskId,
+      auditPlanId,
+      limit: 80,
+    });
+    const writerPrompt = `${scopeConstraint}
+
+AUDIT REPORT LEDGER WRITER MODE
+
+The previous source-audit runtime gathered substantive repository evidence but timed out before writing the report artifact. This is a report-writing recovery, not a fresh audit.
+
+Title: ${task.title}
+
+Task description:
+${taskDescriptionForPrompt}
+
+Expected audit report artifact:
+${expectedAuditReportArtifactPath}
+
+Audit evidence ledger captured before the timeout (${substantiveEvidenceUnits.length} substantive entries):
+<<<AUDIT_EVIDENCE_LEDGER
+${recoveryLedger}
+AUDIT_EVIDENCE_LEDGER
+
+${auditReportManifestContractBlock}
+
+Writer rules:
+- Do not call read_file, list_files, search_files, run_shell, or any other repository-inspection tool. Do not read the plan file. Use only the task description and AUDIT_EVIDENCE_LEDGER above.
+- Write ${expectedAuditReportArtifactPath} now. The report may keep a finding only when AUDIT_EVIDENCE_LEDGER previews contain exact existing file:line evidence for that claim.
+- If ledger evidence does not support an actionable technical defect, write a validated_no_findings report with an Evidence Register and risk-by-risk absence reasoning. Cite exact full \`ev_*\` evidence IDs from the ledger in the manifest.
+- Use source_inconclusive only for a specific declared scope root/risk that is not represented by ledger evidence. Do not use source_inconclusive merely because additional exploration might be possible.
+- Every Evidence, Risk, Proposed fix, and Verification entry must be based on observed ledger evidence. Do not invent command output, commit hashes, paths, or line numbers.
+- After writing, call finalize_audit_report_manifest for ${expectedAuditReportArtifactPath}, then validate_audit_report. If validation reports a strict issue, edit the report once using only ledger evidence and finalize/validate once more.
+- Commit only ${expectedAuditReportArtifactPath}, verify with git log -1 --name-only --oneline -- ${expectedAuditReportArtifactPath}, then return a concise result.`;
+    const writerWorkflowSpec = createRuntimeWorkflowSpec({
+      workflowKind: "audit",
+      prompt: writerPrompt,
+      requiredCapabilities: ["supportsRepositoryTools"],
+      fallbackStrategy: "none",
+      sessionReusePolicy: "never",
+      systemPromptAppend: scopeConstraint,
+      metadata: {
+        allowedWritePaths: [expectedAuditReportArtifactPath],
+        auditReportArtifactPath: expectedAuditReportArtifactPath,
+        ledgerWriterRecovery: true,
+      },
+    });
+
+    logActivity(
+      taskId,
+      "Agent",
+      `audit-report-ledger-writer recovery started after runtime timeout with ${substantiveEvidenceUnits.length} substantive evidence entries`,
+    );
+    const writerResult = await executeSubagentQuery({
+      taskId,
+      projectRoot,
+      agentName: "audit-report-ledger-writer",
+      prompt: writerPrompt,
+      maxBudgetUsd: implementerBudget,
+      skipReview: task.skipReview ?? false,
+      profileMode: "audit",
+      workflowSpec: writerWorkflowSpec,
+      workflowKind: "audit",
+      maxTurns: 18,
+      repositoryInspectionToolBudget: 0,
+      runTimeoutMs: 5 * 60 * 1000,
+    });
+    return writerResult.resultText;
+  };
+
+  let resultText: string;
+  try {
+    const queryResult = await executeSubagentQuery({
+      taskId,
+      projectRoot,
+      agentName: executionName,
+      prompt,
+      maxBudgetUsd: implementerBudget,
+      agent: useSubagents ? AGENT_NAME : undefined,
+      skipReview: task.skipReview ?? false,
+      profileMode: runtimeWorkflowKind,
+      workflowSpec,
+      workflowKind: runtimeWorkflowKind,
+      fallbackSlashCommand: implementSlashCommand,
+      maxTurns: sourceAuditMaxTurns,
+      repositoryInspectionToolBudget: sourceAuditInspectionToolBudget,
+      runTimeoutMs: sourceAuditRunTimeoutMs,
+    });
+    resultText = queryResult.resultText;
+  } catch (error) {
+    let recoveredResultText: string | null = null;
+    try {
+      recoveredResultText = await runAuditLedgerWriterRecovery(error);
+    } catch (recoveryError) {
+      log.warn(
+        {
+          taskId,
+          recoveryError:
+            recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+        },
+        "Audit ledger-writer recovery failed after runtime failure",
+      );
+      logActivity(
+        taskId,
+        "Agent",
+        "audit-report-ledger-writer recovery failed after runtime timeout",
+      );
+    }
+    if (!recoveredResultText) throw error;
+    resultText = recoveredResultText;
+  }
 
   // Post-run drift check: if the subagent switched branches during execution
   // (e.g. a rogue skill ran `git checkout` or plan-polisher followed legacy
