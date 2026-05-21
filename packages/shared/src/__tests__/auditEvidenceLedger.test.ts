@@ -111,7 +111,7 @@ describe("auditEvidenceLedger", () => {
     expect(JSON.stringify(payload)).not.toContain("sk-SECRET");
   });
 
-  it("merges context scope and risk ids into final units", () => {
+  it("does not broaden evidence scope or risks from unit identity context", () => {
     const payload = buildAuditEvidencePayload({
       toolName: "Read",
       evidenceKind: "file_read",
@@ -131,8 +131,8 @@ describe("auditEvidenceLedger", () => {
     );
 
     expect(unit.id).toMatch(/^ev_/);
-    expect(unit.scopeIds).toEqual(expect.arrayContaining(["src", "src/config.ts"]));
-    expect(unit.riskHypothesisIds).toEqual(["risk-1", "risk-2"]);
+    expect(unit.scopeIds).toEqual(["src", "src/config.ts"]);
+    expect(unit.riskHypothesisIds).toEqual(["risk-1"]);
   });
 
   it("derives parent scope ids from paths", () => {

@@ -831,6 +831,7 @@ describe("executeSubagentQuery attribution", () => {
     const auditPayload = buildAuditEvidencePayload({
       toolName: "Grep",
       evidenceKind: "search",
+      riskHypothesisIds: ["risk-readme-1"],
       paths: ["README.md"],
       output: "README.md:2:runtime audit evidence\n",
     });

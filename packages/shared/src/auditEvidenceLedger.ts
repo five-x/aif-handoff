@@ -93,6 +93,11 @@ export interface BuildAuditEvidenceUnitContext {
   riskHypothesisIds?: string[];
 }
 
+export interface AuditRiskHypothesisScopeLink {
+  riskId: string;
+  scopeId: string;
+}
+
 export type EvidenceUnitCommandMetadata = AuditEvidenceCommandMetadata;
 export type EvidenceUnitPathRange = AuditEvidencePathRange;
 export type EvidenceUnitParsedSummary = AuditEvidenceParsedSummary;
@@ -191,6 +196,65 @@ export function extractAuditScopeIdsFromText(text: string | null | undefined): s
       .map(normalizeAuditEvidencePath)
       .filter((path) => path.length > 0 && !path.startsWith("..") && !/\s/.test(path)),
   );
+}
+
+function auditTaskDescriptionSection(text: string | null | undefined, startLabel: string): string {
+  if (!text) return "";
+  const match = text.match(new RegExp(`\\b${startLabel}\\s*:\\s*`, "i"));
+  if (!match || match.index == null) return "";
+  const start = match.index + match[0].length;
+  const rest = text.slice(start);
+  return (
+    rest.split(
+      /\b(?:Allowed changes|Report artifact|Acceptance criteria|Evidence requirements|Manifest requirements|Quality bar|No-findings rule|No-findings proof guardrail|Substantive no-findings requirement|Git requirements|Constraint|Verification|Dependencies)\s*:/i,
+    )[0] ?? ""
+  );
+}
+
+export function extractAuditRiskHypothesisScopeLinks(
+  taskDescription: string | null | undefined,
+  scopeIds: string[],
+): AuditRiskHypothesisScopeLink[] {
+  const riskSection = auditTaskDescriptionSection(taskDescription, "Risk hypotheses");
+  if (!riskSection) return [];
+  const matches = [...riskSection.matchAll(/\brisk-[A-Za-z0-9_.-]+\b/gi)];
+  const links: AuditRiskHypothesisScopeLink[] = [];
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const riskId = match[0];
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? riskSection.length;
+    const description = riskSection.slice(start, end);
+    for (const scopeId of scopeIds) {
+      if (description.includes(scopeId)) links.push({ riskId, scopeId });
+    }
+  }
+  return links;
+}
+
+export function auditEvidenceScopeIdsOverlap(left: string, right: string): boolean {
+  const normalizedLeft = normalizeAuditEvidencePath(left);
+  const normalizedRight = normalizeAuditEvidencePath(right);
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.startsWith(`${normalizedRight}/`) ||
+    normalizedRight.startsWith(`${normalizedLeft}/`)
+  );
+}
+
+export function inferAuditEvidenceRiskHypothesisIdsForScopes(input: {
+  riskHypothesisIds?: string[] | null;
+  scopeIds?: string[] | null;
+  riskHypothesesByScopeId?: AuditRiskHypothesisScopeLink[] | null;
+}): string[] {
+  const riskIds = new Set(input.riskHypothesisIds ?? []);
+  const payloadScopeIds = input.scopeIds ?? [];
+  for (const link of input.riskHypothesesByScopeId ?? []) {
+    if (payloadScopeIds.some((scopeId) => auditEvidenceScopeIdsOverlap(scopeId, link.scopeId))) {
+      riskIds.add(link.riskId);
+    }
+  }
+  return normalizeAuditEvidenceIds([...riskIds]);
 }
 
 export function resolveAuditPlanId(input: {
@@ -380,11 +444,8 @@ export function buildAuditEvidenceUnit(
     taskId: context.taskId,
     auditPlanId: context.auditPlanId,
     sourceSnapshotId: context.sourceSnapshotId,
-    scopeIds: normalizeAuditEvidenceIds([...(context.scopeIds ?? []), ...payload.scopeIds]),
-    riskHypothesisIds: normalizeAuditEvidenceIds([
-      ...(context.riskHypothesisIds ?? []),
-      ...payload.riskHypothesisIds,
-    ]),
+    scopeIds: normalizeAuditEvidenceIds(payload.scopeIds),
+    riskHypothesisIds: normalizeAuditEvidenceIds(payload.riskHypothesisIds),
   };
 }
 

@@ -416,6 +416,8 @@ describe("hooks - activity logging", () => {
       expect(events).toHaveLength(1);
       const evidenceId = events[0]?.id;
       expect(evidenceId).toMatch(/^ev_/);
+      expect(events[0]?.scopeIds).toEqual(["README.md"]);
+      expect(events[0]?.riskHypothesisIds).toEqual(["risk-readme-1"]);
       expect(getTaskLog()).toContain(`AuditEvidence ${evidenceId}`);
 
       const artifactPath = "reports/audit.md";

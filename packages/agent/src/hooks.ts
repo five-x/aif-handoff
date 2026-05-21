@@ -9,8 +9,9 @@ import {
   buildAuditEvidencePayload,
   buildAuditEvidenceUnit,
   deriveAuditSourceSnapshotId,
-  extractAuditRiskHypothesisIds,
+  extractAuditRiskHypothesisScopeLinks,
   extractAuditScopeIdsFromText,
+  inferAuditEvidenceRiskHypothesisIdsForScopes,
   logger,
   findMonorepoRootFromUrl,
   getEnv,
@@ -343,12 +344,14 @@ function auditEvidenceContext(taskId: string, projectRoot: string) {
   const task = findTaskById(taskId);
   const artifact = findRoadmapBatchArtifactByTaskId(taskId);
   const taskDescription = task?.description ?? "";
+  const scopeIds = extractAuditScopeIdsFromText(taskDescription);
   return {
     taskId,
     auditPlanId: resolveAuditPlanId({ taskId, roadmapBatchId: artifact?.batchId ?? null }),
     sourceSnapshotId: deriveAuditSourceSnapshotId(projectRoot),
-    scopeIds: extractAuditScopeIdsFromText(taskDescription),
-    riskHypothesisIds: extractAuditRiskHypothesisIds(taskDescription),
+    scopeIds,
+    riskHypothesisIds: [],
+    riskHypothesesByScopeId: extractAuditRiskHypothesisScopeLinks(taskDescription, scopeIds),
   };
 }
 
@@ -360,9 +363,16 @@ export function persistAuditEvidencePayload(
   const parsed = readAuditEvidenceRuntimePayload(payload) ?? null;
   if (!parsed) return null;
   try {
-    const unit = appendAuditEvidenceEvent(
-      buildAuditEvidenceUnit(auditEvidenceContext(taskId, projectRoot), parsed),
-    );
+    const context = auditEvidenceContext(taskId, projectRoot);
+    const parsedWithMappedRisk = {
+      ...parsed,
+      riskHypothesisIds: inferAuditEvidenceRiskHypothesisIdsForScopes({
+        riskHypothesisIds: parsed.riskHypothesisIds,
+        scopeIds: parsed.scopeIds,
+        riskHypothesesByScopeId: context.riskHypothesesByScopeId,
+      }),
+    };
+    const unit = appendAuditEvidenceEvent(buildAuditEvidenceUnit(context, parsedWithMappedRisk));
     appendActivityLogToDb(
       taskId,
       `[${new Date().toISOString()}] Agent: AuditEvidence ${unit.id} ${unit.evidenceKind}/${unit.evidenceGrade} tool=${sanitizeForActivityLog(unit.toolName, 80)} redaction=${unit.redactionStatus}`,

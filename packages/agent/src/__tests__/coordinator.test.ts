@@ -2020,6 +2020,7 @@ describe("coordinator", () => {
           toolName: "rg",
           evidenceKind: "shell_command",
           evidenceGrade: "substantive",
+          riskHypothesisIds: ["risk-1"],
           paths: ["README.md"],
           pathRanges: [{ path: "README.md", startLine: 2, endLine: 2 }],
           command: 'rg -n "runtime audit" README.md',
