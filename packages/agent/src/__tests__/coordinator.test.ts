@@ -2952,6 +2952,93 @@ describe("coordinator", () => {
     );
   });
 
+  it("validates a written audit artifact before blocking post-write context overflows", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-post-write-context-");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "architecture.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "## Finding: Central hub observation",
+        "Evidence: `README.md:1` identifies the fixture repository.",
+        "Risk: The module is a central hub and may become a single point of architectural failure.",
+        "Proposed fix: Document ownership boundaries.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) synthetic audit commit",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "-N", "audit/architecture.md"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-post-write-context",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 1,
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-post-write-context",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-post-write-context"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-post-write-context",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "request exceeds the available context size",
+        undefined,
+        "context_length",
+      ),
+    );
+
+    await pollAndProcess();
+
+    const retrying = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-post-write-context"))
+      .get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.reworkRequested).toBe(true);
+    expect(retrying!.manualReviewRequired).toBe(false);
+    expect(retrying!.retryCount).toBe(1);
+    expect(retrying!.blockedReason).toContain("runtime_context_length_after_audit_artifact_write");
+    expect(retrying!.blockedReason).not.toContain("operator_input_required");
+    expect(retrying!.agentActivityLog).toContain(
+      "Runtime failure after audit artifact write was converted to validation-guided audit recovery",
+    );
+
+    const artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-post-write-context",
+    );
+    expect(artifact?.state).not.toBe("external_blocked");
+    expect(artifact?.failureFamily).not.toBe("external_blocker");
+    const attempts = artifact ? listRoadmapBatchArtifactAttempts(artifact.id) : [];
+    expect(attempts.at(0)?.reworkStatus).toBe("rework_requested");
+  });
+
   it("validates an uncommitted branch audit artifact before transient fallback", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-audit-branch-post-write-transport-");

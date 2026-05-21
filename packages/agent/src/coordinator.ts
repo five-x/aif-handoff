@@ -903,6 +903,7 @@ function recoverWrittenAuditArtifactAfterRuntimeFailure(input: {
   if (!runtimeError) return false;
   if (
     runtimeError.category !== "timeout" &&
+    runtimeError.category !== "context_length" &&
     !AUDIT_REPORT_TRANSIENT_RECOVERY_CATEGORIES.has(runtimeError.category)
   ) {
     return false;
