@@ -2040,6 +2040,58 @@ describe("auditReportValidator", () => {
     );
   });
 
+  it("rejects runtime architecture-report synonyms observed in roadmap audits", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Audit: Architecture and Ownership Boundaries",
+      "",
+      "### F-1: `bot.py` is 1,871 lines - single-file bottleneck for task/workflow routing",
+      "Evidence: `src/config.ts:1` defines the timeout value used by the runtime.",
+      "Risk: A massive file is a single point of architectural failure because routing decisions are scattered throughout this monolith.",
+      "Proposed fix: Extract routing and dispatch logic into a dedicated module.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "### F-2: README documents inbox-first architecture but does not define module ownership boundaries",
+      "Evidence: `README.md:1` documents the app.",
+      "Risk: The README does not map each stage to a responsible module, so a reader cannot determine which module owns the inbox write path.",
+      "Proposed fix: Add a module-to-stage mapping table in README.md.",
+      "",
+      "### F-3: attachments.py has no explicit public API boundary",
+      "Evidence: `src/config.ts:1` defines the timeout value used by the runtime.",
+      "Risk: The module exposes public functions without an `__all__` declaration.",
+      "Proposed fix: Add `__all__` to declare the stable public API.",
+      "",
+      "### F-4: optional dependency has no runtime guard",
+      "Evidence: `src/config.ts:1` defines the timeout value used by the runtime.",
+      "Risk: The ImportError handler silently swallows a missing pyaes dependency with no runtime guard.",
+      "Proposed fix: Wrap encryption functions in an availability check.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "non_actionable_audit_observation",
+        "governance_observation_as_finding",
+      ]),
+    );
+  });
+
   it("rejects zero-match search claims contradicted by cited path-line evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
