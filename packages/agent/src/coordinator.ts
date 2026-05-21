@@ -890,6 +890,67 @@ function handleAuditReportTransientRecovery(input: {
   return true;
 }
 
+function recoverWrittenAuditArtifactAfterRuntimeFailure(input: {
+  task: TaskRow;
+  projectRoot: string;
+  stageLabel: CoordinatorStage;
+  stageInProgress: TaskStatus;
+  title: string;
+  err: unknown;
+}): boolean {
+  if (input.stageLabel !== "implementer") return false;
+  const runtimeError = findRuntimeExecutionError(input.err);
+  if (!runtimeError) return false;
+  if (
+    runtimeError.category !== "timeout" &&
+    !AUDIT_REPORT_TRANSIENT_RECOVERY_CATEGORIES.has(runtimeError.category)
+  ) {
+    return false;
+  }
+  if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
+
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const artifact = findRoadmapBatchArtifactByTaskId(latestTask.id);
+  if (artifact?.role !== "report") return false;
+
+  const artifactRead = readAuditArtifact(input.projectRoot, artifact, {
+    branchName: latestTask.branchName ?? artifact.branchName,
+    worktreePath: latestTask.worktreePath ?? artifact.worktreePath,
+    projectRoot: input.projectRoot,
+  });
+  if (!artifactRead.text?.trim()) return false;
+
+  const blocked = blockTaskForCompletionEvidenceIfNeeded({
+    task: latestTask,
+    projectRoot: input.projectRoot,
+    fromStatus: input.stageInProgress,
+    title: input.title,
+    phase: "completion",
+    extra: {
+      blockedReason:
+        `runtime_${runtimeError.category}_after_audit_artifact_write: ` +
+        "model transport failed after writing an audit report; coordinator used deterministic validation before retrying.",
+    },
+  });
+  if (!blocked) return false;
+
+  appendTaskActivityLog(
+    latestTask.id,
+    `[${new Date().toISOString()}] Runtime failure after audit artifact write was converted to validation-guided audit recovery: category=${runtimeError.category} artifact=${artifact.artifactPath}`,
+  );
+  log.warn(
+    {
+      taskId: latestTask.id,
+      runtimeCategory: runtimeError.category,
+      artifactPath: artifact.artifactPath,
+      artifactSource: artifactRead.source,
+      artifactSha: artifactRead.contentSha,
+    },
+    "Converted post-write audit runtime failure to deterministic artifact validation",
+  );
+  return true;
+}
+
 function appendRuntimeBudgetActivity(task: TaskRow, stage: RuntimeStage): boolean {
   const decision = evaluateRuntimeBudgetGate({ taskId: task.id, projectId: task.projectId, stage });
   if (decision.status === "allow") return false;
@@ -2778,6 +2839,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     }
 
     const runtimeStage = runtimeStageForCoordinatorTask(stage.label, task);
+    if (
+      recoverWrittenAuditArtifactAfterRuntimeFailure({
+        task,
+        projectRoot: executionRoot,
+        stageLabel: stage.label,
+        stageInProgress: stage.inProgress,
+        title: taskTitle,
+        err,
+      })
+    ) {
+      flushActivityQueue(task.id);
+      return false;
+    }
     if (
       handleContextLengthRecovery({
         task,
