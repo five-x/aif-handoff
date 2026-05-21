@@ -2092,6 +2092,44 @@ describe("auditReportValidator", () => {
     );
   });
 
+  it("rejects import-count and partial-unused-code architecture findings", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "### F-1: backup_crypto.py exists in the source tree but is not imported by bot.py - dead code risk",
+      "Evidence: `src/config.ts:1` defines the timeout value used by the runtime.",
+      "Risk: The module is not imported by bot.py and not wired into the application runtime, so backup functionality may be missing.",
+      "Proposed fix: Wire the module into the lifecycle or remove it.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "### F-2: bot.py imports from six distinct modules creating coupling concentration",
+      "Evidence: `src/config.ts:1` defines the timeout value used by the runtime.",
+      "Risk: The entry point imports from six distinct modules; if any public API changes, bot.py becomes a single point of change.",
+      "Proposed fix: Extract a facade or application-layer module that aggregates imports.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("non_actionable_audit_observation");
+  });
+
   it("rejects zero-match search claims contradicted by cited path-line evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
