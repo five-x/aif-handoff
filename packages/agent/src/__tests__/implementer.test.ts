@@ -2282,6 +2282,194 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
   }, 60_000);
 
+  it("uses deterministic repair after a repeated audit report tool loop on readable source scope", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src", "bot_intevra"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "bot_intevra", "bot.py"),
+      [
+        "from bot_intevra.service import NoteService",
+        "",
+        "async def handle_message(message, service: NoteService):",
+        "    return await service.create_note(message.text)",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "src", "bot_intevra", "service.py"),
+      [
+        "class NoteService:",
+        "    async def create_note(self, text: str) -> dict[str, str]:",
+        "        return {'text': text}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      join(projectRoot, "audit", "architecture.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "No validated findings.",
+        "",
+        "### Risk: risk-architecture-1",
+        "Search `from bot_intevra.bot import` skipped large files, so no callers were found.",
+        "",
+        "## Evidence Register",
+        "| Scope | Checked evidence | Verification |",
+        "| --- | --- | --- |",
+        "| `bot.py` | `bot.py:1` | checked |",
+        "",
+        "```audit-report-manifest",
+        JSON.stringify(
+          {
+            version: 1,
+            auditPlanId: "batch:batch-loop:task:task-audit-loop-repair",
+            taskId: "task-audit-loop-repair",
+            batchId: "batch-loop",
+            roadmapAlias: "audit-loop",
+            artifactPath: "audit/architecture.md",
+            sourceSnapshot: {
+              id: "git:placeholder:placeholder",
+              commit: "placeholder",
+              tree: "placeholder",
+            },
+            outcome: "validated_no_findings",
+            scopeCoverage: [],
+            riskHypotheses: [],
+            findings: [],
+            noFindingsClaims: [{ id: "nf-weak", evidenceRefs: [] }],
+            evidenceRefs: [],
+          },
+          null,
+          2,
+        ),
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "src", "audit/architecture.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const description = [
+      "Scope: src/bot_intevra/bot.py, src/bot_intevra/service.py",
+      "Risk hypotheses: risk-architecture-1 src/bot_intevra/bot.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe; risk-architecture-2 src/bot_intevra/service.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe",
+      "Report artifact: audit/architecture.md",
+    ].join("\n");
+    db.insert(tasks)
+      .values({
+        id: "task-audit-loop-repair",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description,
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Repair audit report",
+        reworkRequested: true,
+        useSubagents: true,
+        implementationLog:
+          "Stopped after a repeated finalize_audit_report_manifest tool-call loop. Partial repository changes may exist; coordinator evidence checks must decide whether rework is required.",
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          "- Review Iteration: 1",
+          "- Deterministic Review: audit_report_validation_failed",
+          "",
+          "## Blocking Findings",
+          "- [be3923ce7bed] review_gate | Audit report validator blocked completion (unverified_inspection_claim): Report artifact uses search output that skipped large files as proof of absence/no-wiring.",
+          "- [909710115695] review_gate | Audit report validator blocked completion (contradictory_findings_and_no_findings): Report artifact mixes validated findings with a No Validated Findings claim.",
+          "- [3f58cd1eab89] review_gate | Audit report validator blocked completion (missing_scope_coverage): Report artifact does not cover declared audit scope roots.",
+          "- [e4e74f6140a2] review_gate | Audit report validator blocked completion (missing_substantive_evidence): Report artifact claims No validated findings but only provides inventory evidence.",
+        ].join("\n"),
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 1,
+          findings: [
+            {
+              id: "be3923ce7bed",
+              source: "review_gate",
+              text: "Audit report validator blocked completion (unverified_inspection_claim): skipped large files cannot prove absence.",
+            },
+          ],
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-loop",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-loop-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-loop-repair",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-loop-repair", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const repaired = readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("runtime audit evidence ev_");
+    expect(repaired).toContain("src/bot_intevra/bot.py:3");
+    expect(repaired).toContain("src/bot_intevra/service.py:2");
+    expect(repaired).not.toContain("### Risk:");
+    expect(repaired).not.toContain("skipped large files");
+    expect(repaired).not.toContain("nf-deterministic-repair");
+    expect(repaired).not.toContain("Deterministic repair used scoped source inspections");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-loop-repair");
+    if (!artifact) throw new Error("missing loop repair artifact");
+    const auditPlanId = `batch:${artifact.batchId}:task:task-audit-loop-repair`;
+    const validation = validateAuditReportArtifact({
+      text: repaired,
+      projectRoot,
+      taskId: "task-audit-loop-repair",
+      roadmapBatchId: artifact.batchId,
+      roadmapAlias: "audit-loop",
+      auditPlanId,
+      taskDescription: description,
+      reportArtifactPaths: ["audit/architecture.md"],
+      expectedReportArtifactPath: "audit/architecture.md",
+      requireProposedFix: true,
+      auditEvidenceUnits: listAuditEvidenceEvents({
+        taskId: "task-audit-loop-repair",
+        auditPlanId,
+      }),
+      requireLedgerEvidence: true,
+    });
+    expect(validation.ok, JSON.stringify(validation.issues)).toBe(true);
+    expect(validation.sourceClassification).toBe("validated_no_findings");
+    expect(artifact.state).toBe("valid");
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-audit-loop-repair")).get();
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic audit report repair completed from scoped source evidence and passed strict validation.",
+    );
+    expect(updatedTask?.reworkRequested).toBe(false);
+  }, 60_000);
+
   it("routes first-run readable audit report artifacts to runtime source audit", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });

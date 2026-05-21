@@ -1113,6 +1113,12 @@ function reviewCommentsDeclareNoBlockingFindings(text: string | null | undefined
   return Boolean(section && /^\s*-\s*none\s*$/im.test(section));
 }
 
+function hasRepeatedAuditReportToolLoopSignal(task: Pick<TaskRow, "implementationLog">): boolean {
+  return /\bStopped after a repeated (?:finalize_audit_report_manifest|validate_audit_report|git_commit) tool-call loop\b/i.test(
+    task.implementationLog ?? "",
+  );
+}
+
 function isAuditEvidenceRepairMode(
   task: Pick<TaskRow, "reworkRequested" | "blockedReason" | "reviewComments"> & {
     autoReviewState?: { findings: Array<{ text: string }> } | null;
@@ -1129,7 +1135,7 @@ function isAuditEvidenceRepairMode(
 }
 
 function shouldUseDeterministicAuditReportRepair(
-  task: Pick<TaskRow, "blockedReason" | "reviewComments"> & {
+  task: Pick<TaskRow, "blockedReason" | "implementationLog" | "reviewComments"> & {
     autoReviewState?: { iteration?: number; findings: Array<{ text: string }> } | null;
   },
   currentReportIssueCodes: string[] = [],
@@ -1144,8 +1150,19 @@ function shouldUseDeterministicAuditReportRepair(
     task.autoReviewState?.iteration ?? 0,
     extractReviewIterationFromText(task.reviewComments),
   );
-  void currentReportIssueCodes;
-  return reviewIteration >= 2 && new RegExp(AUDIT_EVIDENCE_REPAIR_MARKER, "i").test(text);
+  const hasRepairMarker = new RegExp(AUDIT_EVIDENCE_REPAIR_MARKER, "i").test(text);
+  if (reviewIteration >= 2 && hasRepairMarker) return true;
+
+  const repeatedAuditToolLoop = hasRepeatedAuditReportToolLoopSignal(task);
+  if (!repeatedAuditToolLoop || !/\bAudit report validator blocked completion\b/i.test(text)) {
+    return false;
+  }
+
+  return currentReportIssueCodes.some((code) =>
+    /\b(?:contradictory_findings_and_no_findings|manifest_outcome_mismatch|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|non_actionable_audit_observation|speculative_audit_claim|unverified_inspection_claim)\b/i.test(
+      code,
+    ),
+  );
 }
 
 function hasAttemptedDeterministicAuditReportRepair(
@@ -1621,20 +1638,47 @@ function shouldUseDeterministicAuditReportFirstRun(
 }
 
 const AUDIT_REPAIR_RISK_STOPWORDS = new Set([
+  "actionable",
+  "architecture",
   "audit",
+  "boundaries",
+  "boundary",
+  "change",
+  "changes",
+  "circular",
+  "concrete",
+  "cross",
+  "cross-module",
+  "defects",
+  "dependencies",
+  "dependency",
+  "encode",
   "evidence",
   "finding",
   "hypothesis",
   "hypotheses",
+  "make",
   "missing",
+  "module",
+  "ownership",
   "product",
   "report",
   "risk",
+  "routing",
+  "runtime",
   "scope",
   "source",
+  "task",
   "technical",
+  "that",
+  "these",
+  "this",
+  "those",
+  "unclear",
+  "unsafe",
   "validated",
   "verification",
+  "would",
 ]);
 
 function deriveAuditRepairRiskTerms(description: string, roots: string[]): string[] {
@@ -1645,8 +1689,12 @@ function deriveAuditRepairRiskTerms(description: string, roots: string[]): strin
         .filter(Boolean),
     ),
   );
+  const descriptionWithoutRoots = roots.reduce(
+    (text, root) => text.replaceAll(root, " "),
+    description,
+  );
   const terms = new Set<string>();
-  for (const match of description.matchAll(/[A-Za-z][A-Za-z0-9_-]{3,}/g)) {
+  for (const match of descriptionWithoutRoots.matchAll(/[A-Za-z][A-Za-z0-9_-]{3,}/g)) {
     const term = match[0].toLowerCase();
     if (term.startsWith("risk-")) continue;
     if (AUDIT_REPAIR_RISK_STOPWORDS.has(term)) continue;
@@ -1665,6 +1713,13 @@ function sanitizeAuditRepairRiskDescription(description: string, fallback: strin
     .replace(/\bconfirmed\s+([^.\n]+?)\s+exists\b/gi, "$1 was inspected")
     .replace(/\s+/g, " ")
     .trim();
+  if (
+    /\b(?:unclear ownership|circular dependencies|cross-module routing|task changes unsafe|ownership boundaries|module ownership|ownership documentation|ownership gap)\b/i.test(
+      sanitized,
+    )
+  ) {
+    return fallback;
+  }
   return sanitized || fallback;
 }
 
@@ -1901,18 +1956,21 @@ function buildAuditReportManifest(input: {
         .filter((id): id is string => Boolean(id)),
     ].sort(),
   }));
+  const noFindingsClaimsForRisk = (risk: AuditRepairRiskHypothesis): Record<string, unknown> => {
+    const riskEvidenceRefs = evidenceRefsForRisk(risk);
+    return {
+      id: `nf-${slugAuditRepairRiskId(risk.id)}`,
+      scopeIds: risk.scopeIds,
+      evidenceRefs: riskEvidenceRefs,
+      riskIds: [risk.id],
+      reasoning: `Scoped source evidence for ${risk.scopeIds.join(
+        ", ",
+      )} was inspected for ${risk.id}; no concrete broken runtime behavior was identified.`,
+    };
+  };
   const noFindingsClaims =
     input.decision.outcome === "validated_no_findings"
-      ? [
-          {
-            id: "nf-deterministic-repair",
-            scopeIds: input.roots,
-            evidenceRefs,
-            riskIds: input.decision.riskHypotheses.map((risk) => risk.id),
-            reasoning:
-              "Deterministic repair used scoped source inspections and removed unvalidated candidate findings.",
-          },
-        ]
+      ? input.decision.riskHypotheses.map(noFindingsClaimsForRisk)
       : [];
   return {
     version: 1,
@@ -2253,7 +2311,8 @@ function buildDeterministicAuditReportRepairContent(input: {
         entry.lineRefs.length > 0
           ? entry.lineRefs.map((ref) => `\`${ref}\``).join(", ")
           : "No tracked file evidence found";
-      return `| \`${entry.root}\` | ${evidence} | Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output, entry.lineRefs)}\` |`;
+      const ledgerEvidence = entry.evidenceUnit ? ` Audit evidence ${entry.evidenceUnit.id}.` : "";
+      return `| \`${entry.root}\` | ${evidence} | Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output, entry.lineRefs)}\`.${ledgerEvidence} |`;
     }),
     ...(decision.outcome === "validated_no_findings"
       ? [
@@ -2265,9 +2324,21 @@ function buildDeterministicAuditReportRepairContent(input: {
               .filter((entry) => risk.scopeIds.includes(entry.root))
               .flatMap((entry) => entry.lineRefs)
               .slice(0, 6);
+            const evidenceIds = [
+              ...evidenceByRoot
+                .filter((entry) => risk.scopeIds.includes(entry.root) && entry.evidenceUnit)
+                .map((entry) => entry.evidenceUnit?.id)
+                .filter((id): id is string => Boolean(id)),
+              ...riskEvidence
+                .filter((entry) => entry.riskId === risk.id && entry.evidenceUnit)
+                .map((entry) => entry.evidenceUnit?.id)
+                .filter((id): id is string => Boolean(id)),
+            ].sort();
             return `- Absence reasoning: ${risk.id} covered ${refs
               .map((ref) => `\`${ref}\``)
-              .join(", ")}; no actionable finding was identified in the scoped inspection.`;
+              .join(", ")} with runtime audit evidence ${evidenceIds.join(
+              ", ",
+            )}; no concrete broken runtime behavior was identified in the scoped inspection.`;
           }),
         ]
       : []),
@@ -2277,7 +2348,7 @@ function buildDeterministicAuditReportRepairContent(input: {
     ...(riskEvidence.length > 0
       ? riskEvidence.map(
           (entry) =>
-            `- ${entry.riskId} / \`${entry.root}\`: Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\``,
+            `- ${entry.riskId} / \`${entry.root}\`: Command \`${entry.command.command}\` output includes \`${firstAuditRepairOutputLine(entry.command.output)}\`. Runtime audit evidence ${entry.evidenceUnit?.id ?? "not captured"}.`,
         )
       : decision.outcome === "validated_no_findings"
         ? ["- Scoped evidence above covers each declared risk hypothesis."]
@@ -4076,6 +4147,75 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
 
   if (
     expectedAuditReportArtifactPath &&
+    localAuditReportScopeRepairable &&
+    task.reworkRequested &&
+    hasRepeatedAuditReportToolLoopSignal(task) &&
+    (auditEvidenceRepairMode ||
+      currentReportNeedsDeterministicRepair ||
+      currentSourceInconclusiveLocalAudit) &&
+    (currentSourceInconclusiveLocalAudit ||
+      shouldUseDeterministicAuditReportRepair(task, currentAuditReportIssueCodes)) &&
+    (!repeatedDeterministicAuditReportRepair || currentSourceInconclusiveLocalAudit)
+  ) {
+    const nowIso = new Date().toISOString();
+    logDeterministicAuditReportRepairActivity({
+      taskId,
+      phase: "started",
+      artifactPath: expectedAuditReportArtifactPath,
+    });
+    const repairResult = runDeterministicAuditReportRepair({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+    });
+    const resultText = repairResult.resultText;
+    const acceptedRepair = repairResult.status === "accepted";
+    setTaskFields(taskId, {
+      implementationLog: resultText,
+      reworkRequested: false,
+      ...(acceptedRepair
+        ? {
+            blockedReason: null,
+            blockedFromStatus: null,
+            retryAfter: null,
+            manualReviewRequired: false,
+          }
+        : {}),
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(
+      taskId,
+      "Agent",
+      repairResult.status === "terminal_source_inconclusive"
+        ? `Deterministic audit report repair terminalized as source_inconclusive: ${repairResult.issueCodes.join(", ") || "unknown"}`
+        : "Deterministic audit report repair complete",
+    );
+    logDeterministicAuditReportRepairActivity({
+      taskId,
+      phase:
+        repairResult.status === "terminal_source_inconclusive"
+          ? "terminal_source_inconclusive"
+          : "complete",
+      artifactPath: expectedAuditReportArtifactPath,
+      issueCodes: repairResult.issueCodes,
+    });
+    log.info(
+      {
+        taskId,
+        artifactPath: expectedAuditReportArtifactPath,
+        issueCodes: repairResult.issueCodes,
+        sourceScopeRepairable: true,
+      },
+      repairResult.status === "terminal_source_inconclusive"
+        ? "Readable-scope audit report rework completed deterministically as source_inconclusive"
+        : "Readable-scope audit report rework completed deterministically",
+    );
+    return;
+  }
+
+  if (
+    expectedAuditReportArtifactPath &&
     !localAuditReportScopeRepairable &&
     (auditEvidenceRepairMode ||
       currentReportNeedsDeterministicRepair ||
@@ -4144,7 +4284,6 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     expectedAuditReportArtifactPath &&
     task.reworkRequested &&
     repeatedDeterministicAuditReportRepair &&
-    !localAuditReportScopeRepairable &&
     !currentSourceInconclusiveLocalAudit &&
     (currentAuditReportValidation == null ||
       !isTrustedValidAuditReportValidation(currentAuditReportValidation))
