@@ -1909,6 +1909,53 @@ describe("auditReportValidator", () => {
     );
   });
 
+  it("rejects zero-match search claims contradicted by cited path-line evidence", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "bot.py"),
+      "from bot_intevra.attachments import SavedAttachment\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/bot_intevra/bot.py"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add bot module", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/bot_intevra/bot.py:1` imports `bot_intevra.attachments`.",
+      "",
+      "Checked commands:",
+      '- Command `search_files(query="from bot_intevra", path="src/bot_intevra/bot.py")` output: `matches=0`',
+      '- Command `search_files(query="from bot_intevra", path="src")` output: `src/bot_intevra/bot.py:1: from bot_intevra.attachments import SavedAttachment`',
+      "",
+      "Conclusion: no internal `from bot_intevra` imports exist in bot.py.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("contradictory_search_evidence");
+  });
+
   it("rejects no-findings manifests without risk hypothesis ids", () => {
     const root = initRepo();
     const snapshot = gitSnapshot(root);

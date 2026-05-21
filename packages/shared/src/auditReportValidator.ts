@@ -51,6 +51,7 @@ export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "audit_evidence_risk_mismatch",
   "audit_evidence_discovery_only",
   "unbacked_runtime_command_evidence",
+  "contradictory_search_evidence",
 ] as const;
 
 export type AuditReportValidationIssueCode = (typeof AUDIT_REPORT_VALIDATION_ISSUE_CODES)[number];
@@ -950,6 +951,71 @@ function reportedCommandAppearsInAllowedArtifact(input: {
     }
   }
   return false;
+}
+
+interface ZeroMatchSearchClaim {
+  line: string;
+  query: string;
+  path: string;
+}
+
+function normalizeSearchQueryTerms(query: string): string[] {
+  return query
+    .replace(/\\([^\w\s])/g, "$1")
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/i)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !["from", "import", "class", "def", "function", "const"].includes(token))
+    .filter((token) => token.length >= 3);
+}
+
+function collectZeroMatchSearchClaims(text: string): ZeroMatchSearchClaim[] {
+  const claims: ZeroMatchSearchClaim[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (
+      !/\b(?:matches\s*=\s*0|0\s+matches|zero\s+matches|returned\s+zero\s+matches)\b/i.test(line)
+    ) {
+      continue;
+    }
+    const query = line.match(/\bquery\s*=\s*["`]([^"`]+)["`]/i)?.[1];
+    const path = line.match(/\bpath\s*=\s*["`]?([A-Za-z0-9_./@-]+\.[A-Za-z0-9_]+)["`]?/i)?.[1];
+    if (!query || !path) continue;
+    claims.push({ line, query, path: normalizeRelativePath(path) });
+  }
+  return claims;
+}
+
+function hasContradictoryPositiveSearchEvidence(
+  text: string,
+  claim: ZeroMatchSearchClaim,
+): boolean {
+  const terms = normalizeSearchQueryTerms(claim.query);
+  if (terms.length === 0) return false;
+  const escapedPath = claim.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pathLinePattern = new RegExp(`${escapedPath}:\\d+`, "i");
+  return text.split(/\r?\n/).some((line) => {
+    if (line === claim.line) return false;
+    if (!pathLinePattern.test(line)) return false;
+    const normalizedLine = line.toLowerCase();
+    return terms.some((term) => normalizedLine.includes(term));
+  });
+}
+
+function validateContradictorySearchEvidence(text: string): AuditReportValidationIssue[] {
+  const contradictions = collectZeroMatchSearchClaims(text).filter((claim) =>
+    hasContradictoryPositiveSearchEvidence(text, claim),
+  );
+  if (contradictions.length === 0) return [];
+  return [
+    issue(
+      "contradictory_search_evidence",
+      `Report artifact claims zero search matches while also citing matching path:line evidence for the same path/query: ${contradictions
+        .slice(0, 5)
+        .map((claim) => `${claim.path} query=${claim.query}`)
+        .join("; ")}.`,
+    ),
+  ];
 }
 
 function formatPathExamples(paths: string[], limit = 8): string {
@@ -2102,6 +2168,7 @@ export function validateAuditReportArtifact(
     for (const { code, pattern, message } of LOW_QUALITY_REPORT_PATTERNS) {
       if (pattern.test(classificationText)) issues.push(issue(code, message));
     }
+    issues.push(...validateContradictorySearchEvidence(classificationText));
   }
 
   const falseMissingPaths = collectFalseMissingPathClaims(classificationText, sourceReader);
