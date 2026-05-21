@@ -33,7 +33,12 @@ function completeAuditDescription(options: { synthesis?: boolean } = {}) {
     synthesis ? "Report artifact: audit/summary.md" : "Report artifact: audit/config-audit.md",
     "Acceptance criteria: inspect the scoped files and record findings or none.",
     "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, Proposed fix:, and Verification: Command rg config src/config.ts output matched.",
+    "Manifest requirements: include a fenced audit-report-manifest JSON block with version 1, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
+    "Evidence ID rule: manifest evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 are never evidenceRefs.",
+    "Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py.",
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
+    "Rejected finding shapes: duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle, and private-method/direct-store/abstraction-bypass smells are not trusted findings.",
+    "Inconclusive rule: a partially inspected source_inconclusive observation is not a finding.",
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
     AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
@@ -164,6 +169,21 @@ describe("auditRoadmapContract", () => {
     expect(result.issueDetails.map((issue) => issue.code)).not.toContain(
       "implementation_shaped_description",
     );
+  });
+
+  it("rejects generated audit cards that omit dynamic audit guardrails", () => {
+    const result = validateGeneratedAuditCard({
+      title: "Audit: architecture and ownership boundaries",
+      description: completeAuditDescription()
+        .replace(/^Manifest requirements:.*\n/m, "")
+        .replace(/^Evidence ID rule:.*\n/m, "")
+        .replace(/^Path rule:.*\n/m, "")
+        .replace(/^Rejected finding shapes:.*\n/m, "")
+        .replace(/^Inconclusive rule:.*\n/m, ""),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issueDetails.map((issue) => issue.code)).toContain("missing_diagnostic_markers");
   });
 
   it("classifies broad repository audit requests as decomposed report batches", () => {

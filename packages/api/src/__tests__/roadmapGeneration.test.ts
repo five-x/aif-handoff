@@ -116,7 +116,12 @@ function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
     `Report artifact: ${reportName}`,
     "Acceptance criteria: inspect the scoped files and record only actionable findings or no validated findings.",
     "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+    "Manifest requirements: include a fenced audit-report-manifest JSON block with version 1, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
+    "Evidence ID rule: manifest evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 are never evidenceRefs.",
+    "Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py.",
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
+    "Rejected finding shapes: line counts, import counts, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle, and private-method/direct-store/abstraction-bypass smells are not trusted findings.",
+    "Inconclusive rule: a partially inspected source_inconclusive observation is not a finding.",
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
     AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
@@ -613,6 +618,40 @@ describe("roadmapGeneration", () => {
       expect(result.content).toContain("Evidence ID rule");
       expect(result.content).toContain("duplicated initialization/DRY/refactor-helper claims");
       expect(result.content).toContain("source_inconclusive");
+    });
+
+    it("should replace generated audit roadmaps that omit dynamic guardrail requirements", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# My App\nA service to audit");
+      mkdirSync(join(tmpDir, "src"), { recursive: true });
+      writeFileSync(join(tmpDir, "src", "config.ts"), "export const debug = false;\n");
+      writeFileSync(join(tmpDir, "src", "index.ts"), "export const app = true;\n");
+      trackFiles(tmpDir, ["src/config.ts", "src/index.ts"]);
+
+      const generatedWithoutDynamicGuardrails = validAuditRoadmapContent()
+        .replace(/^\s+- Manifest requirements:.*\n/gm, "")
+        .replace(/^\s+- Evidence ID rule:.*\n/gm, "")
+        .replace(/^\s+- Path rule:.*\n/gm, "")
+        .replace(/^\s+- Rejected finding shapes:.*\n/gm, "")
+        .replace(/^\s+- Inconclusive rule:.*\n/gm, "");
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: generatedWithoutDynamicGuardrails,
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+        },
+        context: {},
+      });
+
+      const result = await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        vision: "audit current code",
+      });
+
+      expect(result.content).not.toContain("Audit: API entrypoint");
+      expect(result.content).toContain("Evidence ID rule");
+      expect(result.content).toContain("Path rule");
+      expect(result.content).toContain("Inconclusive rule");
     });
 
     it("should build deterministic audit scopes for botIntevra-like projects", async () => {
