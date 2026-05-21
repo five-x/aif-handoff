@@ -273,6 +273,7 @@ describe("roadmapGeneration", () => {
 
       // Prompt must include roadmap generation instructions
       const callArgs = mockRunApiRuntimeOneShot.mock.calls[0][0];
+      expect(callArgs.profileMode).toBe("plan");
       expect(callArgs.prompt).toContain("ROADMAP.md");
     });
 
@@ -744,6 +745,7 @@ describe("roadmapGeneration", () => {
       expect(result.alias).toBe("v1");
       expect(result.tasks).toHaveLength(2);
       expect(result.tasks[0].title).toBe("Task A");
+      expect(mockRunApiRuntimeOneShot.mock.calls[0][0].profileMode).toBe("plan");
     });
 
     it("should reject audit-shaped aliases without audit intent before runtime extraction", async () => {

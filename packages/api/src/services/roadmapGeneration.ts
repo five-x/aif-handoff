@@ -1466,6 +1466,7 @@ export async function generateRoadmapFile(
     const { result } = await runApiRuntimeOneShot({
       projectId,
       projectRoot: project.rootPath,
+      profileMode: "plan",
       prompt: basePrompt,
       workflowKind: "roadmap-generate",
       systemPromptAppend:
@@ -1759,6 +1760,7 @@ export async function generateRoadmapTasks(
       projectId,
       projectRoot: project.rootPath,
       taskId: trackingTaskId ?? null,
+      profileMode: "plan",
       prompt,
       workflowKind: "roadmap-extract",
       modelOverride: lightModel,
