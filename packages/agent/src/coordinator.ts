@@ -257,9 +257,18 @@ function runtimeStageForCoordinatorStage(stage: CoordinatorStage): RuntimeStage 
   return stage;
 }
 
-function fallbackStagesForCoordinatorStage(stage: CoordinatorStage): RuntimeStage[] {
+function runtimeStageForCoordinatorTask(stage: CoordinatorStage, task: TaskRow): RuntimeStage {
+  if (stage === "implementer" && task.taskIntent === "audit") {
+    const artifact = findRoadmapBatchArtifactByTaskId(task.id);
+    if (artifact?.role === "synthesis") return "synthesis";
+    return "audit";
+  }
+  return runtimeStageForCoordinatorStage(stage);
+}
+
+function fallbackStagesForCoordinatorTask(stage: CoordinatorStage, task: TaskRow): RuntimeStage[] {
   if (stage === "reviewer") return ["reviewer", "security"];
-  return [runtimeStageForCoordinatorStage(stage)];
+  return [runtimeStageForCoordinatorTask(stage, task)];
 }
 
 function shouldBlockOnRuntimeLimit(stage: RuntimeStage): boolean {
@@ -2371,7 +2380,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
   try {
     await runStageWithTimeout(stage.runner, task.id, executionRoot, stage.label);
-    clearContextFallbackForTask(task.id, runtimeStageForCoordinatorStage(stage.label));
+    clearContextFallbackForTask(task.id, runtimeStageForCoordinatorTask(stage.label, task));
 
     flushActivityQueue(task.id);
     let latestTask: TaskWithHydratedFields = findTaskById(task.id) ?? task;
@@ -2679,7 +2688,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       return false;
     }
 
-    const runtimeStage = runtimeStageForCoordinatorStage(stage.label);
+    const runtimeStage = runtimeStageForCoordinatorTask(stage.label, task);
     if (
       handleContextLengthRecovery({
         task,
@@ -2694,7 +2703,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       return false;
     }
     if (
-      handleTransientRuntimeFallbackRecovery({
+      handleAuditReportTimeoutRecovery({
         task,
         stage: runtimeStage,
         stageLabel: stage.label,
@@ -2707,7 +2716,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       return false;
     }
     if (
-      handleAuditReportTimeoutRecovery({
+      handleTransientRuntimeFallbackRecovery({
         task,
         stage: runtimeStage,
         stageLabel: stage.label,
@@ -3116,8 +3125,8 @@ export async function pollAndProcess(): Promise<void> {
         continue;
       }
 
-      const runtimeStage = runtimeStageForCoordinatorStage(stage.label);
-      for (const fallbackStage of fallbackStagesForCoordinatorStage(stage.label)) {
+      const runtimeStage = runtimeStageForCoordinatorTask(stage.label, task);
+      for (const fallbackStage of fallbackStagesForCoordinatorTask(stage.label, task)) {
         setRuntimeStageFallbackProfile({
           taskId: task.id,
           stage: fallbackStage,
@@ -3164,7 +3173,7 @@ export async function pollAndProcess(): Promise<void> {
           const fallbackGateDecision = evaluateRuntimeLimitGate(fallbackSelection.profile);
           if (fallbackSelection.profile && !fallbackGateDecision.blocked) {
             const now = new Date().toISOString();
-            for (const fallbackStage of fallbackStagesForCoordinatorStage(stage.label)) {
+            for (const fallbackStage of fallbackStagesForCoordinatorTask(stage.label, task)) {
               setRuntimeStageFallbackProfile({
                 taskId: task.id,
                 stage: fallbackStage,

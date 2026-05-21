@@ -4334,8 +4334,13 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
       "Compacted implementer prompt to stay within input token budget",
     );
   }
+  const runtimeWorkflowKind = expectedSynthesisArtifactPath
+    ? "synthesis"
+    : expectedAuditReportArtifactPath
+      ? "audit"
+      : "implementer";
   const workflowSpec = createRuntimeWorkflowSpec({
-    workflowKind: "implementer",
+    workflowKind: runtimeWorkflowKind,
     prompt,
     requiredCapabilities: useSubagents
       ? ["supportsAgentDefinitions", "supportsRepositoryTools"]
@@ -4369,9 +4374,9 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     maxBudgetUsd: implementerBudget,
     agent: useSubagents ? AGENT_NAME : undefined,
     skipReview: task.skipReview ?? false,
-    profileMode: "implementer",
+    profileMode: runtimeWorkflowKind,
     workflowSpec,
-    workflowKind: "implementer",
+    workflowKind: runtimeWorkflowKind,
     fallbackSlashCommand: implementSlashCommand,
     maxTurns: sourceAuditMaxTurns,
     repositoryInspectionToolBudget: sourceAuditInspectionToolBudget,

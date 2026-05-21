@@ -9,6 +9,7 @@ import {
   roadmapBatchArtifacts,
   taskComments,
   tasks,
+  usageEvents,
   hashAifPlanManifest,
   evaluateTaskCompletionEvidence,
   validateImplementationManifest,
@@ -2357,6 +2358,12 @@ describe("runImplementer rework behavior", () => {
       prompt: string;
       options: { maxTurns?: number };
     };
+    const usage = db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.taskId, "task-audit-first-run-report"))
+      .all();
+    expect(usage.map((event) => event.workflowKind)).toContain("audit");
     expect(implementCall.prompt).toContain("Audit security and configuration controls");
     expect(implementCall.prompt).toContain(
       "A first-run source audit must make a source-specific decision.",

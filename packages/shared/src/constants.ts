@@ -27,8 +27,8 @@ export const WARMUP_TARGETS = [
   { stage: "implementer", workflowKind: "implementer", profileMode: "task" },
   { stage: "reviewer", workflowKind: "reviewer", profileMode: "review" },
   { stage: "security", workflowKind: "review-security", profileMode: "review" },
-  { stage: "audit", workflowKind: "audit", profileMode: "task" },
-  { stage: "synthesis", workflowKind: "synthesis", profileMode: "task" },
+  { stage: "audit", workflowKind: "audit", profileMode: "plan" },
+  { stage: "synthesis", workflowKind: "synthesis", profileMode: "plan" },
 ] as const;
 
 export const WARMUP_WORKFLOW_KINDS = [
@@ -64,8 +64,8 @@ export const RUNTIME_STAGE_PROFILE_MODE: Record<RuntimeStage, RuntimeProfileMode
   reviewer: "review",
   security: "review",
   chat: "chat",
-  audit: "task",
-  synthesis: "task",
+  audit: "plan",
+  synthesis: "plan",
 };
 
 export function isRuntimeProfileMode(value: unknown): value is RuntimeProfileMode {

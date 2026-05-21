@@ -193,10 +193,15 @@ describe("runtime profile resolution", () => {
       profileMode: "review",
       profile: expect.objectContaining({ id: "profile-review" }),
     });
+    expect(resolveEffectiveRuntimeProfile({ taskId: "task-1", mode: "audit" })).toMatchObject({
+      stage: "audit",
+      profileMode: "plan",
+      profile: expect.objectContaining({ id: "profile-plan" }),
+    });
     expect(resolveEffectiveRuntimeProfile({ taskId: "task-1", mode: "synthesis" })).toMatchObject({
       stage: "synthesis",
-      profileMode: "task",
-      profile: expect.objectContaining({ id: "profile-task" }),
+      profileMode: "plan",
+      profile: expect.objectContaining({ id: "profile-plan" }),
     });
   });
 });

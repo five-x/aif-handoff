@@ -2485,6 +2485,69 @@ describe("coordinator", () => {
     expect(task!.runtimeLimitSnapshotJson).toContain('"profileId":"profile-app-task-blocked"');
   });
 
+  it("routes audit implementation through the plan runtime gate instead of a blocked task runtime", async () => {
+    const db = testDb.current;
+    const resetAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    insertRuntimeProfile({
+      id: "profile-audit-task-blocked",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      snapshot: blockedRuntimeSnapshot("profile-audit-task-blocked", resetAt),
+    });
+    insertRuntimeProfile({
+      id: "profile-audit-plan-open",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-audit-task-blocked",
+        defaultPlanRuntimeProfileId: "profile-audit-plan-open",
+        defaultReviewRuntimeProfileId: "profile-audit-plan-open",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-plan-runtime",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        autoMode: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-runtime",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-plan-runtime"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-plan-runtime",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: "/tmp/test",
+        },
+      ],
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-audit-plan-runtime", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-audit-plan-runtime")).get();
+    expect(task!.blockedReason ?? "").not.toContain("Coordinator pre-start runtime gate");
+    expect(task!.runtimeLimitSnapshotJson ?? "").not.toContain(
+      '"profileId":"profile-audit-task-blocked"',
+    );
+  });
+
   it("retries in progress with a durable one-shot fallback after implementer context overflow", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
