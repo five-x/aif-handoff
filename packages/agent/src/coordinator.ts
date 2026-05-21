@@ -600,6 +600,7 @@ function handleContextLengthRecovery(input: {
 
 const TRANSIENT_RUNTIME_FALLBACK_CATEGORIES = new Set(["transport", "stream", "timeout"]);
 const AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES = 3;
+const AUDIT_REPORT_TRANSIENT_RECOVERY_CATEGORIES = new Set(["transport", "stream"]);
 
 function handleTransientRuntimeFallbackRecovery(input: {
   task: TaskRow;
@@ -797,6 +798,94 @@ function handleAuditReportTimeoutRecovery(input: {
       retryCount,
     },
     "Scheduled bounded source-audit retry after runtime timeout",
+  );
+  return true;
+}
+
+function handleAuditReportTransientRecovery(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  stageLabel: CoordinatorStage;
+  stageInProgress: TaskStatus;
+  title: string;
+  err: unknown;
+}): boolean {
+  const runtimeError = findRuntimeExecutionError(input.err);
+  if (!runtimeError || !AUDIT_REPORT_TRANSIENT_RECOVERY_CATEGORIES.has(runtimeError.category)) {
+    return false;
+  }
+  if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
+
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  if (artifact?.role !== "report") return false;
+
+  const nowIso = new Date().toISOString();
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const retryCount = (latestTask.retryCount ?? 0) + 1;
+  if (retryCount > AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES) return false;
+
+  const activeFallback = readContextFallbackRuntimeOption(
+    latestTask.runtimeOptionsJson,
+    input.stage,
+  );
+  const recoveryProfile = selectAuditReportTimeoutRecoveryProfile({
+    task: latestTask,
+    stage: input.stage,
+    activeFallback,
+  });
+  const resolvedSelection = resolveEffectiveRuntimeProfile({
+    taskId: latestTask.id,
+    projectId: latestTask.projectId,
+    mode: input.stage,
+    systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
+  });
+  const runtimeOptionsJson =
+    recoveryProfile && recoveryProfile.id !== resolvedSelection.profile?.id
+      ? setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
+          stage: input.stage,
+          profileId: recoveryProfile.id,
+          previousProfileId:
+            activeFallback?.previousProfileId ?? resolvedSelection.profile?.id ?? null,
+          failedProfileId: resolvedSelection.profile?.id ?? null,
+          reason: "transient_runtime_error",
+          attempt: retryCount,
+          createdAt: nowIso,
+        })
+      : latestTask.runtimeOptionsJson;
+  const boundedReason =
+    `Runtime audit report transient ${runtimeError.category} recovery: ${input.stageLabel} failed while producing ` +
+    `${artifact.artifactPath}; retrying immediately with bounded source-audit scope and evidence budget.`;
+
+  clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
+  updateTaskStatus(
+    latestTask.id,
+    input.stageInProgress,
+    {
+      blockedReason: boundedReason,
+      blockedFromStatus: null,
+      retryAfter: null,
+      retryCount,
+      paused: false,
+      reworkRequested: false,
+      manualReviewRequired: false,
+      runtimeOptionsJson,
+    },
+    { title: input.title, fromStatus: input.stageInProgress },
+  );
+  appendTaskActivityLog(
+    latestTask.id,
+    `[${nowIso}] Audit report transient recovery scheduled immediate bounded retry: category=${runtimeError.category} artifact=${artifact.artifactPath} selectedProfile=${recoveryProfile?.id ?? "current"} retry=${retryCount}/${AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES}`,
+  );
+  log.warn(
+    {
+      taskId: latestTask.id,
+      stage: input.stageLabel,
+      runtimeCategory: runtimeError.category,
+      artifactPath: artifact.artifactPath,
+      selectedProfileId: recoveryProfile?.id ?? null,
+      retryCount,
+    },
+    "Scheduled bounded source-audit retry after transient runtime failure",
   );
   return true;
 }
@@ -2717,6 +2806,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     }
     if (
       handleTransientRuntimeFallbackRecovery({
+        task,
+        stage: runtimeStage,
+        stageLabel: stage.label,
+        stageInProgress: stage.inProgress,
+        title: taskTitle,
+        err,
+      })
+    ) {
+      flushActivityQueue(task.id);
+      return false;
+    }
+    if (
+      handleAuditReportTransientRecovery({
         task,
         stage: runtimeStage,
         stageLabel: stage.label,

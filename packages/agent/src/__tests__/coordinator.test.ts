@@ -2769,6 +2769,96 @@ describe("coordinator", () => {
     );
   });
 
+  it("keeps audit report transport failures in bounded recovery after fallback is active", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-audit-transport",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-audit-transport",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-audit-transport",
+        defaultReviewRuntimeProfileId: "profile-heavy-audit-transport",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-transport-bounded",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 2,
+        runtimeOptionsJson: JSON.stringify({
+          __aifRuntimeRecovery: {
+            contextFallback: {
+              stage: "audit",
+              profileId: "profile-heavy-audit-transport",
+              previousProfileId: "profile-fast-audit-transport",
+              failedProfileId: "profile-fast-audit-transport",
+              reason: "transient_runtime_error",
+              attempt: 1,
+              createdAt: "2026-05-20T00:00:00.000Z",
+            },
+            failedContextProfileIds: {
+              audit: ["profile-fast-audit-transport"],
+            },
+          },
+        }),
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-transport-bounded",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-transport-bounded"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-transport-bounded",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: "/tmp/test",
+        },
+      ],
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("fetch failed", undefined, "transport"),
+    );
+
+    await pollAndProcess();
+
+    const retrying = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-transport-bounded"))
+      .get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.blockedReason).toContain("Runtime audit report transient transport recovery");
+    expect(retrying!.blockedReason).toContain("audit/architecture.md");
+    expect(retrying!.blockedFromStatus).toBeNull();
+    expect(retrying!.retryAfter).toBeNull();
+    expect(retrying!.retryCount).toBe(3);
+    expect(retrying!.manualReviewRequired).toBe(false);
+    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-audit-transport");
+    expect(retrying!.agentActivityLog).toContain(
+      "Audit report transient recovery scheduled immediate bounded retry",
+    );
+  });
+
   it.each([
     {
       name: "other-project",
