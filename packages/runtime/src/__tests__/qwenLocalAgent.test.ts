@@ -431,6 +431,82 @@ describe("qwen-local-agent adapter", () => {
     expect(JSON.stringify(auditEvents)).toContain("[REDACTED]");
     expect(JSON.stringify(auditEvents)).not.toContain("sk-SECRETSECRETSECRETSECRET");
   });
+  it("binds qwen audit evidence scope and risk ids to inspected paths only", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-evidence-scope-"));
+    await mkdir(path.join(root, ".ai-factory", "plans"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, ".ai-factory", "plans", "audit.md"), "Scope plan\n", "utf8");
+    await writeFile(path.join(root, "README.md"), "# Readme\n", "utf8");
+    await writeFile(path.join(root, "src", "config.ts"), "export const value = 1;\n", "utf8");
+    const events = [];
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-evidence-scope",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-plan",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: ".ai-factory/plans/audit.md" }),
+                    },
+                  },
+                  {
+                    id: "call-read-readme",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-evidence-scope-done",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    await runQwenLocalAgentApi(
+      createRunInput(root, {
+        execution: {
+          onEvent: (event) => events.push(event),
+          auditReportTaskId: "task-1",
+          auditReportAuditPlanId: "task:task-1",
+          auditReportTaskDescription: [
+            "Scope: README.md, src/config.ts",
+            "Risk hypotheses: risk-1 README.md may hide ownership ambiguity; risk-2 src/config.ts may hide configuration coupling",
+          ].join("\n"),
+        },
+      }),
+    );
+
+    const evidence = events
+      .filter((event) => event.type === "audit:evidence")
+      .map((event) => event.data.auditEvidence);
+    const planEvidence = evidence.find((entry) =>
+      entry.scopeIds.includes(".ai-factory/plans/audit.md"),
+    );
+    const readmeEvidence = evidence.find((entry) => entry.scopeIds.includes("README.md"));
+
+    expect(planEvidence).toBeTruthy();
+    expect(planEvidence.scopeIds).not.toContain("README.md");
+    expect(planEvidence.riskHypothesisIds).toEqual([]);
+    expect(readmeEvidence).toBeTruthy();
+    expect(readmeEvidence.scopeIds).toEqual(expect.arrayContaining(["README.md"]));
+    expect(readmeEvidence.riskHypothesisIds).toEqual(["risk-1"]);
+  });
   it("denies repository inspection after the configured budget and still allows report finalization", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
@@ -958,6 +1034,55 @@ describe("qwen-local-agent adapter", () => {
     expect(finalizedContent).not.toContain("PLACEHOLDER");
     expect(denied.ok).toBe(false);
     expect(denied.error).toContain("allowed write paths (audit/report.md)");
+  });
+  it("expands unique shortened audit evidence refs when finalizing audit manifests", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-evidence-ref-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    const fullEvidenceId = "ev_abcdef12-3456-4abc-8def-abcdef123456";
+    const shortEvidenceId = "ev_abcdef12";
+    const body = ["# Architecture Audit", "", `Evidence ledger ref: ${shortEvidenceId}`, ""].join(
+      "\n",
+    );
+    const manifest = {
+      version: 1,
+      contentSha256: "PLACEHOLDER",
+      evidenceRefs: [shortEvidenceId],
+      scopeCoverage: [{ root: "src/config.ts", evidenceRefs: [shortEvidenceId] }],
+      findings: [{ id: "finding-1", evidenceRefs: [shortEvidenceId] }],
+    };
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      `${body}\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest)}\n\`\`\`\n`,
+      "utf8",
+    );
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: {
+        allowedWritePaths: ["audit/report.md"],
+        auditReportEvidenceUnits: [{ id: fullEvidenceId }],
+      },
+    });
+
+    const finalized = await executeQwenLocalTool(
+      "finalize_audit_report_manifest",
+      { path: "audit/report.md" },
+      context,
+    );
+
+    expect(finalized.ok).toBe(true);
+    expect(finalized.output).toContain("expanded 4 audit evidence ref prefix(es)");
+    const finalizedContent = await readFile(path.join(root, "audit", "report.md"), "utf8");
+    expect(finalizedContent).toContain(fullEvidenceId);
+    expect(finalizedContent).not.toMatch(/\bev_abcdef12(?!-)/);
+    const manifestMatch = finalizedContent.match(
+      /```audit-report-manifest\s*\r?\n([\s\S]*?)\r?\n```/,
+    );
+    expect(manifestMatch).toBeTruthy();
+    const finalizedManifest = JSON.parse(manifestMatch?.[1] ?? "{}");
+    expect(finalizedManifest.evidenceRefs).toEqual([fullEvidenceId]);
+    expect(finalizedManifest.scopeCoverage[0].evidenceRefs).toEqual([fullEvidenceId]);
+    expect(finalizedManifest.findings[0].evidenceRefs).toEqual([fullEvidenceId]);
+    expect(finalizedManifest.contentSha256).toBe(computeAuditReportContentSha256(finalizedContent));
   });
   it("blocks git_commit when a scoped audit report hash is not finalized", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-commit-guard-"));

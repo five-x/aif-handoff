@@ -9,9 +9,10 @@ import {
   computeAuditReportContentSha256,
   decideShellPermission,
   deriveAuditSourceSnapshotId,
-  extractAuditRiskHypothesisIds,
   extractAuditScopeIdsFromText,
   getPermissionExecutionPolicy,
+  normalizeAuditEvidenceIds,
+  normalizeEvidenceUnitPath,
   redactProviderText,
   resolveAuditPlanId,
   validateAuditReportArtifact,
@@ -696,10 +697,59 @@ function readAuditEvidenceUnits(input) {
   const raw = input.execution?.auditReportEvidenceUnits;
   return Array.isArray(raw) ? raw.filter((entry) => entry && typeof entry === "object") : [];
 }
+function auditTaskDescriptionSection(text, startLabel) {
+  const match = text.match(new RegExp(`\\b${startLabel}\\s*:\\s*`, "i"));
+  if (!match || match.index == null) return "";
+  const start = match.index + match[0].length;
+  const rest = text.slice(start);
+  return (
+    rest.split(
+      /\b(?:Allowed changes|Report artifact|Acceptance criteria|Evidence requirements|Manifest requirements|Quality bar|No-findings rule|No-findings proof guardrail|Substantive no-findings requirement|Git requirements|Constraint|Verification|Dependencies)\s*:/i,
+    )[0] ?? ""
+  );
+}
+function extractAuditRiskHypothesisScopeLinks(taskDescription, scopeIds) {
+  const riskSection = auditTaskDescriptionSection(taskDescription, "Risk hypotheses");
+  if (!riskSection) return [];
+  const matches = [...riskSection.matchAll(/\brisk-[A-Za-z0-9_.-]+\b/gi)];
+  const links = [];
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const riskId = match[0];
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? riskSection.length;
+    const description = riskSection.slice(start, end);
+    for (const scopeId of scopeIds) {
+      if (description.includes(scopeId)) links.push({ riskId, scopeId });
+    }
+  }
+  return links;
+}
+function scopeIdsOverlap(left, right) {
+  if (!left || !right) return false;
+  const normalizedLeft = normalizeEvidenceUnitPath(left);
+  const normalizedRight = normalizeEvidenceUnitPath(right);
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.startsWith(`${normalizedRight}/`) ||
+    normalizedRight.startsWith(`${normalizedLeft}/`)
+  );
+}
+function riskHypothesisIdsForEvidence(unitContext, payload) {
+  const riskIds = new Set(payload.riskHypothesisIds ?? []);
+  const payloadScopeIds = payload.scopeIds ?? [];
+  for (const link of unitContext.riskHypothesesByScopeId ?? []) {
+    if (payloadScopeIds.some((scopeId) => scopeIdsOverlap(scopeId, link.scopeId))) {
+      riskIds.add(link.riskId);
+    }
+  }
+  return normalizeAuditEvidenceIds([...riskIds]);
+}
 function buildAuditEvidenceUnitContext(auditReportValidation, projectRoot) {
   const taskId = auditReportValidation.taskId;
   if (!taskId) return null;
   const taskDescription = auditReportValidation.taskDescription ?? "";
+  const scopeIds = extractAuditScopeIdsFromText(taskDescription);
   return {
     taskId,
     auditPlanId: resolveAuditPlanId({
@@ -708,15 +758,20 @@ function buildAuditEvidenceUnitContext(auditReportValidation, projectRoot) {
       roadmapBatchId: auditReportValidation.roadmapBatchId,
     }),
     sourceSnapshotId: deriveAuditSourceSnapshotId(projectRoot),
-    scopeIds: extractAuditScopeIdsFromText(taskDescription),
-    riskHypothesisIds: extractAuditRiskHypothesisIds(taskDescription),
+    scopeIds: [],
+    riskHypothesisIds: [],
+    riskHypothesesByScopeId: extractAuditRiskHypothesisScopeLinks(taskDescription, scopeIds),
   };
 }
 export function appendQwenAuditEvidenceUnit(context, payload) {
   if (!payload) return null;
   const unitContext = context.auditEvidenceUnitContext;
   if (!unitContext) return payload;
-  const unit = buildAuditEvidenceUnit(unitContext, payload);
+  const payloadWithMappedRisk = {
+    ...payload,
+    riskHypothesisIds: riskHypothesisIdsForEvidence(unitContext, payload),
+  };
+  const unit = buildAuditEvidenceUnit(unitContext, payloadWithMappedRisk);
   const units = context.auditEvidenceUnits ?? [];
   if (!units.some((entry) => entry?.id === unit.id)) {
     units.push(unit);
@@ -1289,8 +1344,57 @@ function isAllowedPathForContext(context, relativePath) {
   if (allowed.length === 0) return true;
   return allowed.includes(normalizePathForPolicy(relativePath));
 }
-function updateAuditReportManifestContentSha256(content, label) {
-  const matches = [...content.matchAll(AUDIT_REPORT_MANIFEST_BLOCK_PATTERN)];
+const MIN_EXPANDABLE_AUDIT_EVIDENCE_REF_LENGTH = "ev_00000000".length;
+
+function buildAuditEvidenceRefExpander(auditEvidenceUnits = []) {
+  const ids = [
+    ...new Set(
+      auditEvidenceUnits
+        .map((unit) => (unit && typeof unit.id === "string" ? unit.id : null))
+        .filter(Boolean),
+    ),
+  ];
+  if (ids.length === 0) return null;
+  const exactIds = new Set(ids);
+  return (ref) => {
+    if (exactIds.has(ref)) return ref;
+    if (ref.length < MIN_EXPANDABLE_AUDIT_EVIDENCE_REF_LENGTH) return ref;
+    const matches = ids.filter((id) => id.startsWith(ref));
+    return matches.length === 1 ? matches[0] : ref;
+  };
+}
+
+function expandAuditEvidenceRefPrefixesInContent(content, expandEvidenceRef) {
+  if (!expandEvidenceRef) return { content, expandedCount: 0 };
+  let expandedCount = 0;
+  const updated = content.replace(/\bev_[A-Za-z0-9][A-Za-z0-9_-]*\b/g, (ref) => {
+    const expanded = expandEvidenceRef(ref);
+    if (expanded !== ref) expandedCount += 1;
+    return expanded;
+  });
+  return { content: updated, expandedCount };
+}
+
+function normalizeAuditManifestEvidenceRefs(value, expandEvidenceRef) {
+  if (!expandEvidenceRef) return value;
+  if (typeof value === "string") return expandEvidenceRef(value);
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeAuditManifestEvidenceRefs(entry, expandEvidenceRef));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      key === "evidenceRefs" ? normalizeAuditManifestEvidenceRefs(entry, expandEvidenceRef) : entry,
+    ]),
+  );
+}
+
+function updateAuditReportManifestContentSha256(content, label, auditEvidenceUnits = []) {
+  const expandEvidenceRef = buildAuditEvidenceRefExpander(auditEvidenceUnits);
+  const expanded = expandAuditEvidenceRefPrefixesInContent(content, expandEvidenceRef);
+  const normalizedContent = expanded.content;
+  const matches = [...normalizedContent.matchAll(AUDIT_REPORT_MANIFEST_BLOCK_PATTERN)];
   if (matches.length !== 1) {
     throw new RuntimeExecutionError(
       matches.length === 0
@@ -1306,6 +1410,7 @@ function updateAuditReportManifestContentSha256(content, label) {
   let manifest;
   try {
     manifest = JSON.parse(manifestText);
+    manifest = normalizeAuditManifestEvidenceRefs(manifest, expandEvidenceRef);
   } catch (error) {
     throw new RuntimeExecutionError(
       `audit report manifest JSON is invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -1313,7 +1418,7 @@ function updateAuditReportManifestContentSha256(content, label) {
       "permission",
     );
   }
-  const contentSha256 = computeAuditReportContentSha256(content);
+  const contentSha256 = computeAuditReportContentSha256(normalizedContent);
   manifest.contentSha256 = contentSha256;
   const replacement = `${prefix}\`\`\`audit-report-manifest\n${JSON.stringify(
     manifest,
@@ -1321,8 +1426,10 @@ function updateAuditReportManifestContentSha256(content, label) {
     2,
   )}\n\`\`\``;
   const updated =
-    content.slice(0, match.index) + replacement + content.slice(match.index + match[0].length);
-  return { updated, contentSha256 };
+    normalizedContent.slice(0, match.index) +
+    replacement +
+    normalizedContent.slice(match.index + match[0].length);
+  return { updated, contentSha256, expandedEvidenceRefCount: expanded.expandedCount };
 }
 async function finalizeAuditReportManifestTool(args, context) {
   assertNotAborted(context.signal, "finalize_audit_report_manifest");
@@ -1340,17 +1447,19 @@ async function finalizeAuditReportManifestTool(args, context) {
     );
   }
   const content = await readFile(target.absolutePath, "utf8");
-  const { updated, contentSha256 } = updateAuditReportManifestContentSha256(
-    content,
-    "audit report finalize path",
-  );
+  const { updated, contentSha256, expandedEvidenceRefCount } =
+    updateAuditReportManifestContentSha256(
+      content,
+      "audit report finalize path",
+      context.auditEvidenceUnits ?? [],
+    );
   assertNotAborted(context.signal, "finalize_audit_report_manifest");
   if (updated !== content) {
     await writeFile(target.absolutePath, updated, "utf8");
   }
   return {
     ok: true,
-    output: `updated contentSha256 ${target.relativePath.replaceAll("\\", "/")} ${contentSha256}`,
+    output: `updated contentSha256 ${target.relativePath.replaceAll("\\", "/")} ${contentSha256}${expandedEvidenceRefCount > 0 ? `; expanded ${expandedEvidenceRefCount} audit evidence ref prefix(es)` : ""}`,
     exitCode: 0,
     touchedFiles: [target.relativePath],
   };

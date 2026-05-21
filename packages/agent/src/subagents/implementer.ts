@@ -956,7 +956,7 @@ function formatAuditEvidenceLedgerForPrompt(input: {
   }
   const lines = [
     "Runtime-captured audit evidence IDs available to cite in `audit-report-manifest.evidenceRefs`:",
-    "Use only these exact `ev_*` IDs when the report relies on the listed evidence. Do not invent evidence IDs.",
+    "Use only these exact full `ev_*` IDs when the report relies on the listed evidence. Copy the complete ID, including every hyphenated UUID segment; do not abbreviate it to an `ev_XXXXXXXX` prefix and do not invent evidence IDs.",
   ];
   for (const unit of units) {
     const preview = (unit.outputPreview ?? "")
@@ -1029,7 +1029,7 @@ function formatAuditReportManifestContractForPrompt(input: {
     "- Never use PLACEHOLDER, COMPUTE_ME, TODO, TBD, <computed_sha256>, all-zero hashes, shortened hashes, or any non-64-hex value. If the hash cannot be finalized, do not claim the report is complete.",
     "- Do not create temporary helper files, scratch scripts, or root-level `tmp_*` files to compute the hash. Use the runtime finalize/hash tool or the one-line command above and write only the expected audit report artifact.",
     "- Use `outcome: validated_findings_present` only when the report body contains at least one accepted technical finding with concrete Evidence, Risk, Proposed fix, and Verification. Otherwise use `validated_no_findings` with substantive noFindingsClaims, or `source_inconclusive` for explicit coverage gaps.",
-    "- When a repository tool result JSON contains `auditEvidence.id`, cite that exact ID in manifest `evidenceRefs`, matching `scopeCoverage[].evidenceRefs`, and each finding or noFindingsClaims entry that relies on it. Do not invent `ev_*` IDs.",
+    "- When a repository tool result JSON contains `auditEvidence.id`, cite that exact full ID in manifest `evidenceRefs`, matching `scopeCoverage[].evidenceRefs`, and each finding or noFindingsClaims entry that relies on it. Copy the complete hyphenated ID; do not shorten it to an `ev_XXXXXXXX` prefix and do not invent `ev_*` IDs.",
     "- Each `scopeCoverage[].root` must be one of the declared scope roots and must be covered in the report body by an existing exact `path:line` or `path:start-end` citation. Verify ranges do not exceed file length.",
     "- Every declared scope root in the task description, including root docs such as `README.md`, `AGENTS.md`, and `pyproject.toml` when listed, must appear in `scopeCoverage` and in the report body with an exact existing path:line citation.",
     "- Do not mention bare filenames, unscoped import-like paths, or guessed module paths in the report body; use project-root-relative paths exactly as they exist, for example `src/bot_intevra/bot.py:123`.",
@@ -4203,7 +4203,7 @@ Rework handling protocol:
 - Edit only the expected audit report artifact: ${expectedAuditReportArtifactPath}. Do not edit source, config, test, dependency, or runtime files.
 - Rebuild the report from observed evidence. Remove speculative claims, placeholder command output, "could not read", "would show", "likely", "may contain", and any fake commit hashes or synthetic tool output.
 - Add an "Evidence Register" section near the top with a markdown table: ID | Claim | Evidence | Verification. Each row must tie one claim to concrete existing repository file references such as \`path/to/file.ext:line\` and/or exact command output you actually observed.
-- Use AUDIT_EVIDENCE_LEDGER as the source of truth for manifest evidence IDs. If it lists \`ev_*\` IDs for evidence you use, cite those exact IDs in \`audit-report-manifest.evidenceRefs\`, \`scopeCoverage[].evidenceRefs\`, and each finding/noFindingsClaims entry. Do not invent evidence IDs.
+- Use AUDIT_EVIDENCE_LEDGER as the source of truth for manifest evidence IDs. If it lists \`ev_*\` IDs for evidence you use, cite those exact full IDs in \`audit-report-manifest.evidenceRefs\`, \`scopeCoverage[].evidenceRefs\`, and each finding/noFindingsClaims entry. Copy every hyphenated UUID segment; do not abbreviate evidence IDs.
 - In \`audit-report-manifest.sourceSnapshot\`, use the source snapshot associated with the cited ledger evidence. This is the audited source snapshot, not necessarily the later report-artifact commit.
 - The fenced manifest must start exactly with three backticks followed by \`audit-report-manifest\` and must end with three backticks. Do not use underscores, tildes, indented fences, or partial/truncated manifest blocks.
 - Every finding kept in the report must include these labels: Evidence:, Risk:, Proposed fix:, Verification:. Evidence must include concrete existing file:line references. Verification must name the exact command or tool used and paste the observed output or a concise exact excerpt.
