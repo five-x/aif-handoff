@@ -26,7 +26,12 @@ const DEFAULT_MAX_TOOL_TURNS = 12;
 const MAX_CONFIGURED_TOOL_TURNS = 400;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
-const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set(["git_commit"]);
+const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set([
+  "finalize_audit_report_manifest",
+  "git_commit",
+  "validate_audit_report",
+]);
+const AUDIT_REPORT_REPEATED_TOOL_CALL_LIMIT = 2;
 const TOOLLESS_WORKFLOWS = new Set(["roadmap-generate", "roadmap-extract"]);
 const READ_ONLY_TOOL_NAMES = new Set([
   "list_files",
@@ -255,6 +260,15 @@ function readRepeatedToolCallLimit(input) {
       : DEFAULT_REPEATED_TOOL_CALL_LIMIT;
   if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_REPEATED_TOOL_CALL_LIMIT;
   return Math.max(2, Math.min(Math.floor(raw), 12));
+}
+function repeatedToolCallLimitForTool(workflowKind, toolName, fallbackLimit) {
+  if (
+    workflowKind === "audit" &&
+    (toolName === "finalize_audit_report_manifest" || toolName === "validate_audit_report")
+  ) {
+    return Math.min(fallbackLimit, AUDIT_REPORT_REPEATED_TOOL_CALL_LIMIT);
+  }
+  return fallbackLimit;
 }
 function parseToolArguments(raw) {
   if (raw == null) return {};
@@ -540,6 +554,11 @@ export async function runQwenLocalAgentApi(input, logger) {
         }
         emitToolUse(input, events, toolCall, args);
         const signature = buildToolCallSignature(toolCall.function.name, args);
+        const effectiveRepeatedToolCallLimit = repeatedToolCallLimitForTool(
+          input.workflowKind,
+          toolCall.function.name,
+          repeatedToolCallLimit,
+        );
         const signatureCount = (toolCallSignatureCounts.get(signature) ?? 0) + 1;
         toolCallSignatureCounts.set(signature, signatureCount);
         if (signature === lastToolCallSignature) {
@@ -551,9 +570,9 @@ export async function runQwenLocalAgentApi(input, logger) {
         }
         const repeatedNonconsecutiveLoop =
           NONCONSECUTIVE_LOOP_PRONE_TOOLS.has(toolCall.function.name) &&
-          signatureCount > repeatedToolCallLimit;
+          signatureCount > effectiveRepeatedToolCallLimit;
         const shouldSuppressRepeatedCall =
-          repeatedToolCallCount > repeatedToolCallLimit || repeatedNonconsecutiveLoop;
+          repeatedToolCallCount > effectiveRepeatedToolCallLimit || repeatedNonconsecutiveLoop;
         const toolAllowed = isQwenToolAllowedForWorkflow(
           input.workflowKind,
           toolCall.function.name,
@@ -571,7 +590,7 @@ export async function runQwenLocalAgentApi(input, logger) {
           ? repeatedToolCallResult(
               toolCall.function.name,
               Math.max(repeatedToolCallCount, signatureCount),
-              repeatedToolCallLimit,
+              effectiveRepeatedToolCallLimit,
             )
           : shouldDenyRepositoryInspection
             ? repositoryInspectionBudgetExhaustedResult(
@@ -643,7 +662,7 @@ export async function runQwenLocalAgentApi(input, logger) {
               profileId: input.profileId ?? null,
               repeatedToolName: safeToolName,
               repeatedToolCallCount,
-              repeatedToolCallLimit,
+              repeatedToolCallLimit: effectiveRepeatedToolCallLimit,
             },
             "Stopped qwen-local-agent after repeated identical tool calls",
           );

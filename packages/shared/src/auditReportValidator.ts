@@ -165,7 +165,7 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "unverified_inspection_claim",
     pattern:
-      /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|bytes\s*>\s*\d+\s*byte limit|could not (?:read|inspect|access)|not visible|would show|should show|expected to show|budget constraints limited full inspection|limited full inspection|remaining \d+ lines were sampled)\b/i,
+      /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|bytes\s*>\s*\d+\s*byte limit|could not (?:read|inspect|access)|not visible|would show|should show|expected to show|direct (?:file )?reads? (?:were )?not completed|direct read not completed|budget constraints|limited full inspection|remaining \d+ lines were sampled)\b/i,
     message: "Report artifact contains unverified inspection claims instead of observed evidence.",
   },
   {
@@ -184,7 +184,7 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "non_actionable_audit_observation",
     pattern:
-      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully|monolithic (?:router|module|file)|single-file router|coupling bottleneck|high fan-in coupling|central hub module|hub file|single file coordinates|single point of (?:architectural fragility|change)|direct import dependency|one-directional coupling|import coupling[^.\n]+single point of change|structural change[^.\n]+require a coordinated change|downstream consumer[^.\n]+internal shape|absolute (?:package |intra-package )?imports?[^.\n]+relative imports?|relative imports are more resilient|package (?:renaming|restructuring|reorganized|moved)|no action needed|module-level consumer|requires editing this entire file|extract handler methods into dedicated route modules)\b/i,
+      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully|monolithic (?:hub|router|module|file)|single-file router|coupling bottleneck|coupling density|high fan-in coupling|central hub module|hub file|single file coordinates|single point of (?:architectural fragility|change)|direct import dependency|directly imports?|imports? (?:data model types|concrete data model types|render functions)|one-directional coupling|import coupling[^.\n]+single point of change|schema change[^.\n]+(?:requires?|breaks?) [^.:\n]*imports?|adding (?:a )?(?:new )?ui output[^.\n]+requires? modifying|structural change[^.\n]+require a coordinated change|downstream consumer[^.\n]+internal shape|absolute (?:package |intra-package )?imports?[^.\n]+relative imports?|relative imports are more resilient|package (?:renaming|restructuring|reorganized|moved)|no action needed|module-level consumer|requires editing this entire file|extract handler methods into dedicated route modules|introduce (?:a )?handlerregistry|depend on interface contracts)\b/i,
     message:
       "Report artifact contains non-actionable audit observations instead of concrete technical-quality findings.",
   },

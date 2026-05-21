@@ -1996,6 +1996,50 @@ describe("auditReportValidator", () => {
     );
   });
 
+  it("rejects import-shape and handler-registry architecture observations as trusted findings", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "### Finding A1 - dispatcher imports data model types from attachments",
+      "Evidence: `src/config.ts:1` exports the timeout value consumed by the runtime.",
+      "Risk: Schema change in attachments.py requires import update in the dispatcher.",
+      "Proposed fix: Depend on interface contracts from attachments.py instead of concrete data model types.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "### Finding A2 - dispatcher imports render functions directly",
+      "Evidence: `src/config.ts:1` exports the timeout value consumed by the runtime.",
+      "Risk: Adding a new UI output requires modifying the hub import block and routing table.",
+      "Proposed fix: Introduce a HandlerRegistry in a dedicated handlers module.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "## Limitations",
+      "",
+      "- Direct file reads were not completed due to budget constraints.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["non_actionable_audit_observation", "unverified_inspection_claim"]),
+    );
+  });
+
   it("rejects zero-match search claims contradicted by cited path-line evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });

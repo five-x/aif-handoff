@@ -755,6 +755,75 @@ describe("qwen-local-agent adapter", () => {
       "Repeated identical git_commit call suppressed",
     );
   }, 15_000);
+
+  it("stops repeated audit report validation loops before stage timeout", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-loop-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      "# Audit\n\nNo validated findings.\n",
+      "utf8",
+    );
+
+    const repeatedValidateCall = {
+      type: "function",
+      function: {
+        name: "validate_audit_report",
+        arguments: JSON.stringify({ path: "audit/report.md" }),
+      },
+    };
+    const statusCall = {
+      type: "function",
+      function: {
+        name: "git_status",
+        arguments: JSON.stringify({}),
+      },
+    };
+    for (const [index, toolCall] of [
+      repeatedValidateCall,
+      statusCall,
+      repeatedValidateCall,
+      statusCall,
+      repeatedValidateCall,
+    ].entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: `call-${index + 1}`, ...toolCall }],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          repeatedToolCallLimit: 6,
+          maxToolTurns: 20,
+        },
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("repeated validate_audit_report tool-call loop");
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(JSON.stringify(result.events)).toContain(
+      "Repeated identical validate_audit_report call suppressed",
+    );
+  });
+
   it("does not log raw provider-supplied unknown tool names or ids", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-unknown-tool-redaction-"));
     const events = [];
