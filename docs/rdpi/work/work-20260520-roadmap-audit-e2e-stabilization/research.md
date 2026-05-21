@@ -56,3 +56,11 @@ Stabilize the live `botIntevra` audit roadmap workflow end to end until two clea
 - Final source reports and synthesis artifact contents with evidence path/line checks and trust classification.
 - Regression tests and deploy evidence for each systemic fix.
 - Runtime hardening evidence: request estimate logs include profileId, baseUrl, estimated input tokens, max output tokens, tool-call count, retry count, duration, and failure class; tests prove budgets, endpoint semaphore, cooldown, bounded retry, payload compaction, and abort propagation.
+
+## Live Evidence: auditstrong20260521oom1
+
+- Fresh UI roadmap alias `auditstrong20260521oom1` created 7 audit tasks after deploy.
+- The first source card, `Audit: architecture and ownership boundaries`, used `8005` and reached the repository-inspection budget at 60 tool calls. Request estimates stayed inside the `8005` budget and the transcript compacted to about 17k input tokens after budget exhaustion.
+- The runtime then denied 3 additional repository-inspection requests and raised controlled `repository_inspection_budget_exhausted` instead of retrying a full repository context or storming between `8003` and `8005`.
+- The compact ledger-writer recovery ran with `repositoryInspectionToolBudget: 0`, but timed out before writing the report artifact. Coordinator terminalized the artifact as `source_inconclusive` and blocked the task with `manual_review_required: repository_inspection_budget_exhausted`.
+- System cause: the safety layer prevented the OOM-prone behavior, but recovery still depended on a model writer to create the report artifact. If that writer timed out, the workflow had no deterministic artifact finalization path and therefore blocked.

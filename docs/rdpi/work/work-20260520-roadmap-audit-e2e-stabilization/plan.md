@@ -87,3 +87,10 @@ Implementation and live probing require independent `PLAN PASS`.
 - Two clean runs: steps 16-18.
 - Audit quality: steps 18-19.
 - Independent gates: steps 20-21.
+
+## Restart Addendum: 2026-05-21 live blocker
+
+23. Patch implementer recovery so a ledger-writer timeout after repository-inspection budget exhaustion falls back to deterministic audit report repair instead of throwing controlled budget exhaustion immediately.
+24. Keep deterministic repair fail-closed for empty or non-line-addressable scopes.
+25. Run `npm.cmd test --workspace=@aif/agent -- --run src/__tests__/implementer.test.ts`.
+26. Run relevant broader validation, commit, push, deploy, cleanup `auditstrong20260521oom1`, and restart from step 11 with a new alias.

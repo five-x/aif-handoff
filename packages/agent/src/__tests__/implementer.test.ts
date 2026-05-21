@@ -2972,6 +2972,17 @@ describe("runImplementer rework behavior", () => {
   it("throws controlled budget exhaustion when timeout recovery has no substantive ledger evidence", async () => {
     const db = testDb.current;
     writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
     db.insert(tasks)
       .values({
         id: "task-audit-timeout-ledger-empty",
@@ -3024,9 +3035,20 @@ describe("runImplementer rework behavior", () => {
       }),
     });
     expect(queryMock).toHaveBeenCalledTimes(1);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-timeout-ledger-empty"))
+      .get();
+    expect(updatedTask?.agentActivityLog).not.toContain(
+      "deterministic audit report repair fallback started after ledger-writer recovery failure",
+    );
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-timeout-ledger-empty");
+    expect(artifact?.state).toBe("expected");
+    expect(existsSync(join(projectRoot, "audit", "architecture.md"))).toBe(false);
   });
 
-  it("throws controlled budget exhaustion when ledger-writer recovery fails", async () => {
+  it("falls back to deterministic repair when ledger-writer recovery fails", async () => {
     const db = testDb.current;
     writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
@@ -3114,18 +3136,27 @@ describe("runImplementer rework behavior", () => {
         throw new Error("ledger writer failed");
       });
 
-    await expect(
-      runImplementer("task-audit-budget-ledger-writer-fail", projectRoot),
-    ).rejects.toMatchObject({
-      category: "context_length",
-      providerMeta: expect.objectContaining({
-        status: "repository_inspection_budget_exhausted",
-        reason: "ledger_writer_recovery_failed",
-      }),
-    });
+    await runImplementer("task-audit-budget-ledger-writer-fail", projectRoot);
+
     expect(queryMock).toHaveBeenCalledTimes(2);
     const writerCall = queryMock.mock.calls[1]?.[0] as { prompt: string };
     expect(writerCall.prompt).toContain("AUDIT REPORT LEDGER WRITER MODE");
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-budget-ledger-writer-fail"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.agentActivityLog).toContain(
+      "deterministic audit report repair fallback started after ledger-writer recovery failure",
+    );
+    const updatedArtifact = findRoadmapBatchArtifactByTaskId(
+      "task-audit-budget-ledger-writer-fail",
+    );
+    expect(updatedArtifact?.state).toBe("valid");
+    expect(readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8")).toContain(
+      "```audit-report-manifest",
+    );
   });
 
   it("terminalizes repeated deterministic audit report repair before runtime rework", async () => {

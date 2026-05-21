@@ -2339,8 +2339,13 @@ function buildDeterministicAuditReportRepairContent(input: {
     decisionReasons.push("No risk hypotheses were parsed from the task description.");
   }
   for (const entry of evidenceByRoot) {
+    const exactLineRefs = entry.lineRefs.filter((ref) => /:\d+$/.test(ref));
     if (entry.files.length === 0 || entry.lineRefs.length === 0) {
       decisionReasons.push(`Scope root ${entry.root} has no readable scoped source line evidence.`);
+      continue;
+    }
+    if (exactLineRefs.length === 0) {
+      decisionReasons.push(`Scope root ${entry.root} has no exact source line evidence.`);
       continue;
     }
     if (!entry.evidenceUnit) {
@@ -2360,12 +2365,6 @@ function buildDeterministicAuditReportRepairContent(input: {
     );
     if (!hasBoundEvidence) {
       decisionReasons.push(`Risk ${risk.id} has no bound scoped source evidence.`);
-    }
-    if (
-      risk.terms.length > 0 &&
-      !riskEvidence.some((entry) => entry.riskId === risk.id && entry.evidenceUnit !== null)
-    ) {
-      decisionReasons.push(`Risk ${risk.id} has no captured risk-specific command evidence.`);
     }
   }
   const decision: AuditReportRepairDecision = {
@@ -4792,6 +4791,7 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
   });
 
   let auditLedgerWriterRecoveryAttempted = false;
+  let auditLedgerWriterRecoveryInvoked = false;
   const runAuditLedgerWriterRecovery = async (error: unknown): Promise<string | null> => {
     if (!expectedAuditReportArtifactPath || task.reworkRequested) return null;
     if (!shouldAttemptAuditLedgerWriterRecovery(error)) return null;
@@ -4864,6 +4864,7 @@ Writer rules:
       "Agent",
       `audit-report-ledger-writer recovery started after runtime timeout with ${substantiveEvidenceUnits.length} substantive evidence entries`,
     );
+    auditLedgerWriterRecoveryInvoked = true;
     const writerResult = await executeSubagentQuery({
       taskId,
       projectRoot,
@@ -4918,7 +4919,40 @@ Writer rules:
         "Agent",
         "audit-report-ledger-writer recovery failed after runtime timeout",
       );
-      if (auditLedgerWriterRecoveryAttempted) {
+      if (auditLedgerWriterRecoveryInvoked && expectedAuditReportArtifactPath) {
+        try {
+          logActivity(
+            taskId,
+            "Agent",
+            "deterministic audit report repair fallback started after ledger-writer recovery failure",
+          );
+          const repairResult = runDeterministicAuditReportRepair({
+            task,
+            projectRoot,
+            artifactPath: expectedAuditReportArtifactPath,
+          });
+          logActivity(
+            taskId,
+            "Agent",
+            repairResult.status === "accepted"
+              ? "deterministic audit report repair fallback accepted the report after ledger-writer recovery failure"
+              : "deterministic audit report repair fallback terminalized source_inconclusive after ledger-writer recovery failure",
+          );
+          recoveredResultText = repairResult.resultText;
+        } catch (deterministicRepairError) {
+          log.warn(
+            {
+              taskId,
+              deterministicRepairError:
+                deterministicRepairError instanceof Error
+                  ? deterministicRepairError.message
+                  : String(deterministicRepairError),
+            },
+            "Deterministic audit report repair fallback failed after ledger-writer recovery failure",
+          );
+        }
+      }
+      if (auditLedgerWriterRecoveryAttempted && !recoveredResultText) {
         throw auditLedgerWriterRecoveryUnavailableError(
           recoveryError,
           "ledger_writer_recovery_failed",

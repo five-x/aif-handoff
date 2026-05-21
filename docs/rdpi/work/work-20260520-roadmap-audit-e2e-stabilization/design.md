@@ -45,10 +45,20 @@ Treat the 192.168.88.62 outage as a runtime safety failure class: the audit work
 - Ensure AIF timeouts abort the active HTTP request and any tool subprocess still owned by the run before coordinator retry/fallback state is written.
 - Log a structured request estimate for every qwen-local-agent chat completion attempt: `profileId`, `baseUrl`, estimated input tokens, max output tokens, tool-call count, retry count, duration, and failure class.
 
+## Recovery Refinement After Live Blocker
+
+The first post-hardening canary proved that compact-or-fail behavior works, but the "compact summary + finalization" path must not rely solely on another model turn. When source audit evidence already exists and the ledger-writer recovery itself times out, the implementer should run deterministic audit report repair:
+
+- write the declared report artifact locally from scoped source evidence and existing audit ledger context;
+- pass strict audit report validation as `validated_no_findings` or `validated_findings_present` when the deterministic evidence is sufficient;
+- otherwise terminalize as non-trusted `source_inconclusive` without re-entering full repository inspection;
+- preserve the existing guard that empty or non-line-addressable scopes remain source-inconclusive.
+
 ## Verification Design
 
 - Runtime unit tests cover request body budgeting, endpoint semaphore keying, compacted tool/evidence/ledger payloads, cooldown and health-check behavior, bounded retry after transport/timeout, and abort propagation to `fetch`.
 - Agent/coordinator tests cover the critical audit failure shape: after repository-inspection budget exhaustion and enough ledger evidence, the system finalizes from compact summary or fails controlled without re-entering full repository inspection.
+- Implementer tests cover ledger-writer timeout falling back to deterministic repair, while empty tracked files still terminalize source-inconclusive.
 - Live E2E runs remain required only after `PLAN PASS` and after local regression coverage passes.
 
 ## Stop Conditions
