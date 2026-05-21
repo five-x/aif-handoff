@@ -765,6 +765,59 @@ describe("qwen-local-agent adapter", () => {
     expect(JSON.stringify(events)).toContain("README.md");
     expect(JSON.stringify(events)).not.toContain("late finalization");
   });
+  it("times out finalization promptly after repository inspection budget is exhausted", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-finalize-timeout-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-finalize-timeout",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-allowed",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockImplementationOnce((_url, init = {}) => {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "TimeoutError"));
+          });
+        });
+      });
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          execution: {
+            repositoryInspectionToolBudget: 1,
+            repositoryInspectionBudgetFinalResponseTimeoutMs: 5,
+            runTimeoutMs: 30_000,
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "timeout",
+      message: expect.stringContaining("Finalization timeout"),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));
     const repeatedToolCall = {

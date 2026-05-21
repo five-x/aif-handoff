@@ -27,6 +27,7 @@ const MAX_CONFIGURED_TOOL_TURNS = 400;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 const REPOSITORY_INSPECTION_BUDGET_FINAL_DENIALS = 3;
+const DEFAULT_REPOSITORY_INSPECTION_BUDGET_FINAL_RESPONSE_TIMEOUT_MS = 3 * 60 * 1000;
 const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set([
   "finalize_audit_report_manifest",
   "git_commit",
@@ -195,6 +196,14 @@ function buildRunTimeoutSignal(input) {
   if (signals.length === 1) return signals[0];
   return AbortSignal.any(signals);
 }
+function buildCombinedTimeoutSignal(baseSignal, timeoutMs) {
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return baseSignal;
+  }
+  const timeoutSignal = AbortSignal.timeout(Math.floor(timeoutMs));
+  if (!baseSignal) return timeoutSignal;
+  return AbortSignal.any([baseSignal, timeoutSignal]);
+}
 function isAbortTimeoutError(error) {
   return (
     error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")
@@ -291,6 +300,17 @@ function readRepositoryInspectionToolBudget(input) {
   if (raw == null) return null;
   if (!Number.isFinite(raw) || raw < 0) return null;
   return Math.max(0, Math.min(Math.floor(raw), MAX_REPOSITORY_INSPECTION_TOOL_BUDGET));
+}
+function readRepositoryInspectionBudgetFinalResponseTimeoutMs(input) {
+  const options = asRecord(input.options);
+  const raw =
+    typeof input.execution?.repositoryInspectionBudgetFinalResponseTimeoutMs === "number"
+      ? input.execution.repositoryInspectionBudgetFinalResponseTimeoutMs
+      : typeof options.repositoryInspectionBudgetFinalResponseTimeoutMs === "number"
+        ? options.repositoryInspectionBudgetFinalResponseTimeoutMs
+        : DEFAULT_REPOSITORY_INSPECTION_BUDGET_FINAL_RESPONSE_TIMEOUT_MS;
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.floor(raw);
 }
 function readRepeatedToolCallLimit(input) {
   const options = asRecord(input.options);
@@ -522,6 +542,8 @@ export async function runQwenLocalAgentApi(input, logger) {
   const events = [];
   const maxTurns = readMaxToolTurns(input);
   const repositoryInspectionToolBudget = readRepositoryInspectionToolBudget(input);
+  const repositoryInspectionBudgetFinalResponseTimeoutMs =
+    readRepositoryInspectionBudgetFinalResponseTimeoutMs(input);
   const repeatedToolCallLimit = readRepeatedToolCallLimit(input);
   const toolContext = createDefaultQwenToolContext({
     projectRoot: input.projectRoot,
@@ -554,7 +576,29 @@ export async function runQwenLocalAgentApi(input, logger) {
   );
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
-      const response = await postChatCompletions(input, messages, signal);
+      const budgetFinalizationTimeoutActive =
+        repositoryInspectionToolBudget != null &&
+        repositoryInspectionToolCalls >= repositoryInspectionToolBudget &&
+        repositoryInspectionBudgetFinalResponseTimeoutMs != null;
+      let response;
+      try {
+        response = await postChatCompletions(
+          input,
+          messages,
+          budgetFinalizationTimeoutActive
+            ? buildCombinedTimeoutSignal(signal, repositoryInspectionBudgetFinalResponseTimeoutMs)
+            : signal,
+        );
+      } catch (error) {
+        if (budgetFinalizationTimeoutActive && isAbortTimeoutError(error)) {
+          throw new RuntimeExecutionError(
+            `Finalization timeout: qwen-local-agent exceeded ${repositoryInspectionBudgetFinalResponseTimeoutMs}ms after repository inspection budget exhaustion (${repositoryInspectionToolBudget} inspection tool call(s)).`,
+            error,
+            "timeout",
+          );
+        }
+        throw error;
+      }
       const rawText = await response.text();
       if (!response.ok) {
         throw classifyQwenLocalAgentRuntimeError(
