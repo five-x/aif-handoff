@@ -10,6 +10,7 @@ import {
   validateGeneratedTaskIntent,
 } from "../taskIntent.js";
 import {
+  AUDIT_ABSENCE_PROOF_REQUIREMENT,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
@@ -40,8 +41,9 @@ function completeAuditDescription(options: { synthesis?: boolean } = {}) {
     "Manifest requirements: include a fenced audit-report-manifest JSON block with version 1, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
     "Evidence ID rule: manifest evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 are never evidenceRefs.",
     "Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py.",
+    AUDIT_ABSENCE_PROOF_REQUIREMENT,
     'Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
-    "Rejected finding shapes: duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle, and private-method/direct-store/abstraction-bypass smells are not trusted findings.",
+    "Rejected finding shapes: duplicated initialization/DRY/refactor-helper, orphan/no-wiring/dead-code, late-import/mixed-import/split-import/cold-start-footprint, import-chain/tight-coupling claims without a real cycle, and private-method/direct-store/abstraction-bypass smells are not trusted findings.",
     "Inconclusive rule: a partially inspected source_inconclusive observation is not a finding.",
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,

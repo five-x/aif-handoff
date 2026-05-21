@@ -157,6 +157,7 @@ export const AUDIT_REQUIRED_GENERATED_CARD_MARKERS = [
   "manifest requirements:",
   "evidence id rule:",
   "path rule:",
+  "absence-proof rule:",
   "rejected finding shapes:",
   "inconclusive rule:",
   "git requirements:",
@@ -176,6 +177,9 @@ export const AUDIT_REQUIRED_GENERATED_CARD_MARKERS = [
 
 export const AUDIT_NO_FINDINGS_PROOF_GUARDRAIL =
   "No-findings proof guardrail: git ls-files, git status, directory listings, file-existence checks, and broad inventory-only observations are not sufficient proof for a no-findings conclusion.";
+
+export const AUDIT_ABSENCE_PROOF_REQUIREMENT =
+  "Absence-proof rule: zero-match searches and search output that skipped large files cannot prove no callers, no wiring, unused code, or orphaned modules; use targeted scoped reads/searches that cover the skipped files, or omit the claim/source_inconclusive.";
 
 export const AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT =
   "Substantive no-findings requirement: support any no-findings conclusion with scoped code/config/test inspection, commands run, observed outputs, and a source-specific explanation of why each declared risk is absent; generic/template no-findings text is not sufficient.";

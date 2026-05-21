@@ -1532,7 +1532,7 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   }
   if (issueCodeSet.has("unverified_inspection_claim")) {
     actions.push(
-      "unverified_inspection_claim => remove claims based on skipped large-file searches, budget limits, 'too large', 'not visible', 'would show', or other unobserved evidence.",
+      "unverified_inspection_claim => remove claims based on skipped large-file searches, budget limits, 'too large', 'not visible', 'would show', or other unobserved evidence; skipped search output cannot prove no-callers/no-wiring/unused-code/orphaned-module claims.",
     );
   }
   if (issueCodeSet.has("missing_scope_coverage")) {
@@ -1556,7 +1556,7 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   }
   if (issueCodeSet.has("irrelevant_audit_evidence")) {
     actions.push(
-      "irrelevant_audit_evidence => do not cite hidden/generated files such as `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs as source evidence unless they are explicitly in the task Scope.",
+      "irrelevant_audit_evidence => remove hidden/generated files such as `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs from every Evidence, limitation, manifest, and rationale field unless they are explicitly in the task Scope.",
     );
   }
   if (issueCodeSet.has("missing_report_file_references")) {
@@ -1571,7 +1571,7 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   }
   if (issueCodeSet.has("low_quality_report_evidence")) {
     actions.push(
-      "low_quality_report_evidence => delete duplicated-initialization/DRY, import-chain/tight-coupling, private-method/direct-store, and partially inspected source_inconclusive findings unless existing ledger evidence proves concrete broken behavior.",
+      "low_quality_report_evidence => delete orphan/no-wiring/dead-code guesses, late-import/mixed-import/split-import/cold-start-footprint observations, duplicated-initialization/DRY, import-chain/tight-coupling, private-method/direct-store, and partially inspected source_inconclusive findings unless existing ledger evidence proves concrete broken behavior.",
     );
   }
   if (issueCodeSet.has("invalid_line_reference")) {
@@ -1654,6 +1654,10 @@ function formatAuditReportRepairDirective(validation, issueCodes, content = "") 
   return [
     "repairDirective=LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED",
     "reviewerRepairBrief=The deterministic reviewer rejected the current trusted-report shape. Treat this as a new report repair brief, not as a request to cosmetically rewrite the same findings.",
+    "rejectedShapeSummary=line-count, central-hub, orphan/no-wiring/dead-code, late-import/mixed-import/split-import/cold-start-footprint, duplicated-initialization/DRY, import-chain/tight-coupling, private-method/direct-store, optional-dependency/runtime-guard, and skipped-large-file absence claims are not trusted findings without concrete broken behavior.",
+    "Absence summary: no-callers/no-wiring/unused-code/orphaned-module claims require targeted scoped evidence that covers skipped files.",
+    "Path summary: replace basename-only paths and future paths with existing repository-relative path:line evidence.",
+    "Do not cite `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs unless explicitly scoped.",
     ...(rejectedFindingHeadings.length > 0
       ? [
           "rejectedFindingCandidates:",
@@ -1668,11 +1672,13 @@ function formatAuditReportRepairDirective(validation, issueCodes, content = "") 
     "Do not spend more source-inspection budget during this repair; use the existing ledger evidence and edit only the audit report artifact, then finalize it again.",
     "If no finding remains after deleting weak observations, rewrite the report as validated_no_findings with an Evidence Register and risk-by-risk no-findings claims tied to observed file:line evidence.",
     "For validated_no_findings, do not create `### Finding` or `### Risk` sections; use a concise checklist/table in the body and manifest noFindingsClaims with matching ledger evidenceRefs.",
+    "For validated_no_findings, every declared scope root must appear in the Evidence Register and manifest scopeCoverage/noFindingsClaims with a real path:line citation from that exact root and matching ev_* ledger evidence.",
     "If existing ledger evidence cannot support either trusted findings or substantive no-findings coverage, set the report outcome to source_inconclusive and state the exact coverage gap instead of looping.",
     "Manifest evidenceRefs arrays must contain actual runtime audit ledger IDs (`ev_*`) only. Do not put finding labels, risk IDs, path names, AOB-style IDs, or invented short tokens in evidenceRefs.",
     "Every repository path in Evidence, Risk, Proposed fix, limitations, and manifest fields must be an existing repository-relative path with concrete lines when used as evidence. Remove basename-only paths and future file names.",
-    "Do not cite `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs as source evidence for trusted outcomes.",
-    "Do not promote line-count, central-hub, monolithic-file, import-count, duplicated-initialization/DRY, import-chain/tight-coupling-without-real-cycle, private-method/direct-store/abstraction-bypass, module-boundary-documentation, __all__, optional-dependency/runtime-guard, source_inconclusive-as-finding, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
+    "Do not cite or mention `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs as source evidence, report limitations, or manifest rationale unless explicitly scoped.",
+    "Zero-match searches and search output that skipped large files cannot prove no callers, no wiring, unused code, or orphaned modules; use targeted scoped reads/searches that cover the skipped files, or omit the claim/source_inconclusive.",
+    "Do not promote line-count, central-hub, monolithic-file, import-count, orphan/no-wiring/dead-code guesses, late-import/mixed-import/split-import/cold-start-footprint observations, duplicated-initialization/DRY, import-chain/tight-coupling-without-real-cycle, private-method/direct-store/abstraction-bypass, module-boundary-documentation, __all__, optional-dependency/runtime-guard, source_inconclusive-as-finding, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
   ].join("\n");
 }
 function runAuditReportValidationForTarget(context, target, content) {

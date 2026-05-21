@@ -962,6 +962,11 @@ describe("qwen-local-agent adapter", () => {
     expect(toolMessage.content).toContain("duplicated-initialization/DRY");
     expect(toolMessage.content).toContain("basename-only paths");
     expect(toolMessage.content).toContain("Do not cite `.ai-factory/*`");
+    expect(toolMessage.content).toContain("no-callers/no-wiring/unused-code/orphaned-module");
+    expect(toolMessage.content).toContain(
+      "late-import/mixed-import/split-import/cold-start-footprint",
+    );
+    expect(toolMessage.content).toContain("every declared scope root");
     expect(toolMessage.content).toContain("source_inconclusive");
     expect(toolMessage.content).toContain("Do not spend more source-inspection budget");
   });

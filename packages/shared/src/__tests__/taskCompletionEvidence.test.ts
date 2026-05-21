@@ -2925,6 +2925,76 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("low_quality_report_evidence");
   });
 
+  it("blocks audit reports made of late-import and no-wiring observations", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "service.py"),
+      "from bot_intevra.backup_crypto import BackupCryptoError\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "src", "bot_intevra", "cli.py"),
+      "def main():\n    from bot_intevra.bot import run_bot\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/bot_intevra/service.py", "src/bot_intevra/cli.py"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add bot modules", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/weak-architecture-audit"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "audit"), { recursive: true });
+    writeFileSync(
+      join(root, "audit", "architecture-audit.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "### Finding AOB-1: service.py module-load import creates a hard runtime dependency",
+        "Evidence: `src/bot_intevra/service.py:1` imports backup crypto symbols.",
+        "Risk: This module load time dependency increases cold-start footprint through a transitive dependency chain.",
+        "Proposed fix: Move the import behind a lazy boundary.",
+        'Verification: Command `rg -n "backup_crypto" src/bot_intevra/service.py` output: `1:from bot_intevra.backup_crypto import BackupCryptoError`',
+        "",
+        "### Finding AOB-2: cli.py late imports create split import responsibility",
+        "Evidence: `src/bot_intevra/cli.py:2` imports run_bot inside main.",
+        "Risk: Late imports and mixed import style create split import responsibility.",
+        "Proposed fix: Move imports to a single boundary module.",
+        'Verification: Command `rg -n "run_bot" src/bot_intevra/cli.py` output: `2:    from bot_intevra.bot import run_bot`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/architecture-audit.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "weak-architecture-audit",
+        title: "Audit architecture quality",
+        description:
+          "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
   it("accepts owner-grade audit reports with no validated findings and checked evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src"), { recursive: true });

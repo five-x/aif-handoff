@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   TASK_INTENT_CONTRACTS,
   TASK_INTENTS,
+  AUDIT_ABSENCE_PROOF_REQUIREMENT,
   AUDIT_NO_TRACKED_SCOPE_SENTINEL,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
@@ -873,8 +874,9 @@ function buildAuditRoadmapItem(
     "  - Manifest requirements: include a fenced `audit-report-manifest` JSON block with version 1, auditPlanId `task:<task-id>` or `batch:<batch-id>:task:<task-id>`, taskId, batchId when assigned, roadmapAlias when assigned, artifactPath, contentSha256 for the markdown body without the manifest block, sourceSnapshot commit/tree/id, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
     "  - Evidence ID rule: manifest evidenceRefs, scopeCoverage[].evidenceRefs, findings[].evidenceRefs, and noFindingsClaims[].evidenceRefs must cite actual runtime audit ledger IDs (`ev_*`) only; finding labels such as AOB-001 or invented IDs are never evidenceRefs.",
     "  - Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as `config.py`, future files such as `cli_context.py`, or generated `.ai-factory/*` files as source evidence.",
+    `  - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}`,
     '  - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
-    "  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, missing facade, missing `__all__`, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.",
+    "  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, orphan/no-wiring/dead-code guesses, late-import/mixed-import/split-import/cold-start-footprint observations, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, missing facade, missing `__all__`, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.",
     "  - Inconclusive rule: a partially inspected or `source_inconclusive` observation is not a finding. Either inspect enough scoped source to validate it, omit it, or set the whole report outcome to `source_inconclusive` with the exact coverage gap.",
     '  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     "  - No-findings shape: do not write `### Finding` or `### Risk` subsections for no-findings claims; use a concise checklist/table and manifest `noFindingsClaims` tied to scoped evidenceRefs.",
@@ -1694,8 +1696,9 @@ ${priorContextLine}  - Allowed changes: only create/update one report artifact.
   - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
   - Evidence ID rule: manifest evidenceRefs, scopeCoverage[].evidenceRefs, findings[].evidenceRefs, and noFindingsClaims[].evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 or invented IDs are never evidenceRefs.
   - Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py, future files such as cli_context.py, or generated .ai-factory/* files as source evidence.
+  - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
   - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.
-  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, missing facade, missing __all__, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.
+  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, orphan/no-wiring/dead-code guesses, late-import/mixed-import/split-import/cold-start-footprint observations, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, missing facade, missing __all__, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.
   - Inconclusive rule: a partially inspected or source_inconclusive observation is not a finding. Either inspect enough scoped source to validate it, omit it, or set the whole report outcome to source_inconclusive with the exact coverage gap.
   - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.
   - No-findings shape: do not write ### Finding or ### Risk subsections for no-findings claims; use a concise checklist/table and manifest noFindingsClaims tied to scoped evidenceRefs.
@@ -1711,6 +1714,7 @@ ${priorContextLine}  - Allowed changes: only create/update audit/${reportDate}-s
   - Report artifact: audit/${reportDate}-summary.md
   - Acceptance criteria: summarize blocking findings, advisory findings, omitted weak findings by source, and remediation backlog.
   - Evidence requirements: every summarized finding must include Evidence: <source repo path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
+  - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
   - Quality bar: do not promote weak source-report observations, inventory notes, speculative risks, or findings without concrete path:line evidence.
   - No-findings rule: if no source finding meets the bar, write "No validated findings" and list source reports inspected with observed commit/output evidence.
   - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
@@ -1952,7 +1956,7 @@ Required output format (JSON only, no markdown fences):
     {
       "title": "Audit: short area name",
       "taskIntent": "audit",
-      "description": "Scope: packages/api/src/services/roadmapGeneration.ts, packages/shared/src/auditRoadmapContract.ts\\nAudit mandate: ...\\nRisk hypotheses: risk-roadmap-1 packages/api/src/services/roadmapGeneration.ts may contain extraction gaps; risk-roadmap-2 packages/shared/src/auditRoadmapContract.ts may contain validation gaps\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\n${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\\n${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+      "description": "Scope: packages/api/src/services/roadmapGeneration.ts, packages/shared/src/auditRoadmapContract.ts\\nAudit mandate: ...\\nRisk hypotheses: risk-roadmap-1 packages/api/src/services/roadmapGeneration.ts may contain extraction gaps; risk-roadmap-2 packages/shared/src/auditRoadmapContract.ts may contain validation gaps\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\n${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\\n${AUDIT_ABSENCE_PROOF_REQUIREMENT}\\n${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
       "phase": 1,
       "phaseName": "Audit",
       "sequence": 1
@@ -1969,6 +1973,7 @@ Rules:
 - Source audit task descriptions must include concrete Scope roots and Risk hypotheses: with risk-* IDs that mention every Scope root; never use Scope: ., ./, *, globs, all files, entire repository, or natural-language-only scope.
 - Synthesis descriptions must keep Scope: all audit/YYYY-MM-DD-*-audit.md reports from this audit batch and report-only allowed changes.
 - Every task description must include: ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
+- Every task description must include: ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
 - Every task description must include: ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
 - Synthesis task descriptions must include: ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}
 - Synthesis task descriptions must include: ${AUDIT_CHILD_REPORT_STATUS_REQUIREMENT}

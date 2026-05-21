@@ -2247,6 +2247,82 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).toContain("non_actionable_audit_observation");
   });
 
+  it("rejects late-import, no-wiring, and cold-start audit observations as trusted findings", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "service.py"),
+      "from bot_intevra.backup_crypto import BackupCryptoError\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "src", "bot_intevra", "cli.py"),
+      "def main():\n    from bot_intevra.bot import run_bot\n    return run_bot()\n",
+      "utf8",
+    );
+    writeFileSync(join(root, "src", "bot_intevra", "company_profile.py"), "NAME = 'x'\n", "utf8");
+    execFileSync(
+      "git",
+      [
+        "add",
+        "src/bot_intevra/service.py",
+        "src/bot_intevra/cli.py",
+        "src/bot_intevra/company_profile.py",
+      ],
+      { cwd: root, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "add bot modules", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "### Finding AOB-001: company_profile.py is an orphaned module with no CLI command exists",
+      "Evidence: `src/bot_intevra/company_profile.py:1` defines a scoped module.",
+      "Risk: The module is not wired into any scoped runtime entry point and is absent from the package's public boundary.",
+      "Proposed fix: Wire it into the runtime lifecycle or remove it.",
+      'Verification: Command `rg -n "NAME" src/bot_intevra/company_profile.py` output: `1:NAME = x`',
+      "",
+      "### Finding AOB-002: service.py imports backup_crypto at module load time, creating a hard runtime dependency",
+      "Evidence: `src/bot_intevra/service.py:1` imports backup crypto symbols.",
+      "Risk: This module load time dependency increases cold-start footprint through a transitive dependency chain.",
+      "Proposed fix: Move the import behind a lazy runtime boundary.",
+      'Verification: Command `rg -n "backup_crypto" src/bot_intevra/service.py` output: `1:from bot_intevra.backup_crypto import BackupCryptoError`',
+      "",
+      "### Finding AOB-003: cli.py late imports bot modules with split import responsibility",
+      "Evidence: `src/bot_intevra/cli.py:2` imports run_bot inside main.",
+      "Risk: Late imports and mixed import style create split import responsibility.",
+      "Proposed fix: Move all imports to one boundary module.",
+      'Verification: Command `rg -n "run_bot" src/bot_intevra/cli.py` output: `2:    from bot_intevra.bot import run_bot`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_findings_present");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "non_actionable_audit_observation",
+        "governance_observation_as_finding",
+      ]),
+    );
+  });
+
   it("rejects cosmetic rewrites of weak roadmap architecture findings", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
