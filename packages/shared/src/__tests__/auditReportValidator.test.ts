@@ -1909,6 +1909,44 @@ describe("auditReportValidator", () => {
     );
   });
 
+  it("rejects ordinary import coupling and docstring contract observations as trusted findings", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "## Finding A-1: One-directional import coupling creates a single point of change",
+      "Evidence: `src/config.ts:1` exports the timeout value consumed by the runtime.",
+      "Risk: One-directional coupling from the consumer module to the config module creates a single point of change; ordinary interface updates may require coordinated edits. The entry point likely constructs the runtime through this dependency chain.",
+      "Proposed fix: Document the contract between the consumer and config module in module docstrings to clarify expected interfaces.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "non_actionable_audit_observation",
+        "governance_observation_as_finding",
+        "speculative_audit_claim",
+      ]),
+    );
+  });
+
   it("rejects zero-match search claims contradicted by cited path-line evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });

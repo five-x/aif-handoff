@@ -178,20 +178,20 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "speculative_audit_claim",
     pattern:
-      /\b(?:may contain|likely used|likely indicates|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
+      /\b(?:may contain|likely used|likely indicates|likely constructs|presumably [^.:\n]+|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
     message: "Report artifact contains speculative audit claims that are not backed by evidence.",
   },
   {
     code: "non_actionable_audit_observation",
     pattern:
-      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully|monolithic (?:router|module|file)|single-file router|coupling bottleneck|high fan-in coupling|requires editing this entire file|extract handler methods into dedicated route modules)\b/i,
+      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully|monolithic (?:router|module|file)|single-file router|coupling bottleneck|high fan-in coupling|central hub module|hub file|single file coordinates|single point of (?:architectural fragility|change)|one-directional coupling[^.\n]+single point of change|import coupling[^.\n]+single point of change|module-level consumer|requires editing this entire file|extract handler methods into dedicated route modules)\b/i,
     message:
       "Report artifact contains non-actionable audit observations instead of concrete technical-quality findings.",
   },
   {
     code: "governance_observation_as_finding",
     pattern:
-      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|missing ownership clarity|incomplete ownership clarity|does not explicitly define ownership|does not explicitly define boundaries|missing dependency documentation|branch naming convention and ownership policy|unclear ownership|orphaned (?:utility|module|code)|undocumented integration|no visible invocation|audit all imports of)\b/i,
+      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|missing ownership clarity|incomplete ownership clarity|does not explicitly define ownership|does not explicitly define boundaries|missing dependency documentation|branch naming convention and ownership policy|unclear ownership|orphaned (?:utility|module|code)|undocumented integration|no visible invocation|audit all imports of|missing __all__|not enforced via __all__|public (?:api|interface) surface|document the contract between|module docstrings?|ownership documentation)\b/i,
     message:
       "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
   },
