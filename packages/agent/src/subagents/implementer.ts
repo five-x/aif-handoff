@@ -61,12 +61,12 @@ const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesi
 const DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS = new Set(["feature", "fix", "docs", "tests"]);
 const SOURCE_AUDIT_FIRST_RUN_MIN_MAX_TURNS = 48;
 const SOURCE_AUDIT_FIRST_RUN_MAX_MAX_TURNS = 96;
-const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_MAX_TURNS = 32;
-const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_MAX_TURNS = 56;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_MAX_TURNS = 18;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_MAX_TURNS = 28;
 const SOURCE_AUDIT_FIRST_RUN_MIN_INSPECTION_TOOL_BUDGET = 32;
 const SOURCE_AUDIT_FIRST_RUN_MAX_INSPECTION_TOOL_BUDGET = 80;
-const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET = 12;
-const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_INSPECTION_TOOL_BUDGET = 32;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET = 3;
+const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_INSPECTION_TOOL_BUDGET = 8;
 const SOURCE_AUDIT_FIRST_RUN_TIMEOUT_MS = 18 * 60 * 1000;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
 const PROMPT_SECTION_LIMITS = {
@@ -1202,7 +1202,7 @@ function computeSourceAuditInspectionToolBudget(input: {
   const rootCount = Math.max(1, input.rootCount);
   if (input.runtimeRecoveryMode) {
     return clampNumber(
-      rootCount * 3 + 6,
+      rootCount + 2,
       SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET,
       SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_INSPECTION_TOOL_BUDGET,
     );
@@ -1220,7 +1220,7 @@ function computeSourceAuditMaxTurns(input: {
 }): number {
   if (input.runtimeRecoveryMode) {
     return clampNumber(
-      input.inspectionToolBudget + 20,
+      input.inspectionToolBudget + 12,
       SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_MAX_TURNS,
       SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_MAX_TURNS,
     );
@@ -4617,10 +4617,11 @@ Rework handling protocol:
     : undefined;
   const sourceAuditRuntimeRecoveryBlock = sourceAuditRuntimeRecoveryMode
     ? `Runtime recovery source-audit budget:
-- This audit report run is retrying after runtime context/timeout recovery. Complete a bounded report; do not keep exploring for perfect coverage.
-- Use no more than ${sourceAuditInspectionToolBudget ?? SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET} additional repository-inspection tool calls before writing ${expectedAuditReportArtifactPath}. Prefer \`rg -n\`, \`git grep -n\`, and focused line snippets over broad repeated reads.
+- This audit report run is retrying after runtime context/timeout/transport recovery. It is not a fresh audit. Use AUDIT_EVIDENCE_LEDGER above as the primary evidence set and write ${expectedAuditReportArtifactPath}; do not restart source discovery.
+- If AUDIT_EVIDENCE_LEDGER already contains substantive \`ev_*\` evidence for the scoped roots/risks, spend zero repository-inspection calls except for at most one targeted path:line verification needed to make the report valid.
+- Use no more than ${sourceAuditInspectionToolBudget ?? SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET} total repository-inspection tool calls in this recovery attempt before writing ${expectedAuditReportArtifactPath}. These calls are only for targeted verification gaps. Do not reread the plan/source roots, recursively search imports, or build a new dependency map.
 - If the scoped evidence is sufficient for no validated findings, write a substantive no-findings report with an Evidence Register and risk-by-risk absence reasoning. If a real finding is supported, keep it with exact path:line evidence.
-- If some scoped area cannot be fully inspected within this bounded retry, record that as an explicit audit limitation or coverage gap in the report; do not leave the task blocked only because more exploratory search is possible.
+- If some scoped area cannot be fully inspected within this bounded retry, still create the report artifact and record that as an explicit audit limitation or \`source_inconclusive\` coverage gap; do not leave the task blocked only because more exploratory search is possible.
 `
     : "";
   const sourceAuditDynamicBudgetBlock = expectedAuditReportArtifactPath
@@ -4629,6 +4630,7 @@ Rework handling protocol:
 - Runtime repository-inspection budget for this run: ${sourceAuditInspectionToolBudget ?? "default"} tool calls; max tool turns: ${sourceAuditMaxTurns ?? "default"}; run timeout: ${sourceAuditRunTimeoutMs ? `${Math.round(sourceAuditRunTimeoutMs / 60000)} minutes` : "default"}.
 - Allocate the budget to coverage before depth: every declared scope root needs at least one substantive exact \`path:line\` citation from that root before a trusted no-findings outcome.
 - If a repository-inspection budget warning appears, stop requesting read/search/list/run_shell repository-inspection tools. Finalize the current report from the existing ledger evidence, or mark the report \`source_inconclusive\` with the exact missing roots instead of looping.
+- In runtime recovery mode, that budget is a total retry budget for targeted verification only. Do not treat it as permission to repeat first-run discovery.
 `
     : "";
 

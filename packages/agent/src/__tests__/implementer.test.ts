@@ -2848,10 +2848,16 @@ describe("runImplementer rework behavior", () => {
       options: { maxTurns?: number; resume?: string };
     };
     expect(implementCall.prompt).toContain("Runtime recovery source-audit budget:");
-    expect(implementCall.prompt).toContain("Use no more than 12 additional");
+    expect(implementCall.prompt).toContain("It is not a fresh audit");
+    expect(implementCall.prompt).toContain(
+      "Use AUDIT_EVIDENCE_LEDGER above as the primary evidence set",
+    );
+    expect(implementCall.prompt).toContain("spend zero repository-inspection calls");
+    expect(implementCall.prompt).toContain("Use no more than 3 total");
+    expect(implementCall.prompt).toContain("targeted verification only");
     expect(implementCall.prompt).toContain("Write audit/architecture.md");
     expect(implementCall.prompt).toContain("Source audit scope discipline:");
-    expect(implementCall.options.maxTurns).toBe(32);
+    expect(implementCall.options.maxTurns).toBe(18);
     expect(implementCall.options.resume).toBeUndefined();
   });
 
