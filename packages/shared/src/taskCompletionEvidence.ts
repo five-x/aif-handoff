@@ -181,13 +181,13 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{ pattern: RegExp; message: string }> =
   },
   {
     pattern:
-      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully)\b/i,
+      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully|monolithic (?:router|module|file)|single-file router|coupling bottleneck|high fan-in coupling|requires editing this entire file|extract handler methods into dedicated route modules)\b/i,
     message:
       "Report artifact contains non-actionable audit observations instead of concrete technical-quality findings.",
   },
   {
     pattern:
-      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|branch naming convention and ownership policy)\b/i,
+      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|branch naming convention and ownership policy|unclear ownership|orphaned (?:utility|module|code)|undocumented integration|no visible invocation|audit all imports of)\b/i,
     message:
       "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
   },

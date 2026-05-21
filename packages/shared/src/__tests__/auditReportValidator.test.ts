@@ -1866,6 +1866,49 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).toContain("unbacked_runtime_command_evidence");
   });
 
+  it("rejects broad architecture smells and orphaned ownership guesses as trusted findings", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "## Finding A-1: Monolithic router creates a coupling bottleneck",
+      "Evidence: `src/config.ts:1` defines the timeout value used by the runtime.",
+      "Risk: The module is a monolithic router with high fan-in coupling, so future changes require editing this entire file.",
+      "Proposed fix: Extract handler methods into dedicated route modules.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "## Finding A-2: Orphaned utility with unclear ownership",
+      "Evidence: `src/config.ts:1` defines the runtime timeout value.",
+      "Risk: No visible invocation proves this is dead code or an undocumented integration.",
+      "Proposed fix: Audit all imports of the utility and add ownership documentation.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "non_actionable_audit_observation",
+        "governance_observation_as_finding",
+      ]),
+    );
+  });
+
   it("rejects no-findings manifests without risk hypothesis ids", () => {
     const root = initRepo();
     const snapshot = gitSnapshot(root);
