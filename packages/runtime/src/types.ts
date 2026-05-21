@@ -241,6 +241,7 @@ export interface RuntimeExecutionIntent {
   auditReportRoadmapBatchId?: string | null;
   auditReportRoadmapAlias?: string | null;
   auditReportAuditPlanId?: string | null;
+  auditReportEvidenceUnits?: unknown[];
   /** JSON Schema for structured output — adapter passes it to the provider if supported. */
   outputSchema?: Record<string, unknown>;
   /** Opaque adapter-specific hooks — passed through to the adapter without interpretation. */

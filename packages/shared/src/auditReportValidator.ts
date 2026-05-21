@@ -162,7 +162,7 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "unverified_inspection_claim",
     pattern:
-      /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|bytes\s*>\s*\d+\s*byte limit|could not (?:read|inspect|access)|not visible|would show|should show|expected to show)\b/i,
+      /\b(?:too large to (?:be )?(?:read|inspect)|reported as too large|file is too large|bytes\s*>\s*\d+\s*byte limit|could not (?:read|inspect|access)|not visible|would show|should show|expected to show|budget constraints limited full inspection|limited full inspection|remaining \d+ lines were sampled)\b/i,
     message: "Report artifact contains unverified inspection claims instead of observed evidence.",
   },
   {
@@ -1101,6 +1101,139 @@ function hasInvalidExistingLineReference(
   return false;
 }
 
+interface LineReferenceMismatch {
+  path: string;
+  line: number;
+  expected: string;
+}
+
+function normalizeLineAssertionText(text: string): string {
+  return text
+    .trim()
+    .replace(/^[-–—:>\s]+/, "")
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isLikelySourceLineAssertion(text: string): boolean {
+  const normalized = normalizeLineAssertionText(text);
+  if (normalized.length < 4) return false;
+  if (
+    /^(?:defines?|documents?|describes?|shows?|indicates?|confirms?|contains?\s+(?:the\s+)?(?:line|value|setting|import)|no matches|matches?=|output\b|risk\b|proposed fix\b|verification\b)/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  return /(?:[=(){}\[\];]|^\s*(?:from|import|class|def|async\s+def|function|const|let|var|export|return|if|for|while|try:|except|with|@|[A-Za-z_][\w.]*\s*=))/.test(
+    normalized,
+  );
+}
+
+function firstSubsequentLineReferenceIndex(text: string): number | null {
+  let firstIndex: number | null = null;
+  const patterns = [SLASH_PATH_TOKEN_PATTERN, ROOT_FILE_TOKEN_PATTERN];
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    for (const match of text.matchAll(pattern)) {
+      if (!extractLineReference(match[0] ?? "")) continue;
+      const index = match.index ?? 0;
+      firstIndex = firstIndex === null ? index : Math.min(firstIndex, index);
+      break;
+    }
+  }
+  return firstIndex;
+}
+
+function collectLineAssertionCandidates(line: string, matchEnd: number): string[] {
+  const rawAfter = line.slice(matchEnd).replace(/^\s*["'`]+/, "");
+  const nextLineReferenceIndex = firstSubsequentLineReferenceIndex(rawAfter);
+  const after =
+    nextLineReferenceIndex === null ? rawAfter : rawAfter.slice(0, nextLineReferenceIndex);
+  const assertionWindow = after;
+  const candidates: string[] = [];
+  for (const match of assertionWindow.matchAll(BACKTICKED_SNIPPET_PATTERN)) {
+    candidates.push(match[1] ?? "");
+  }
+  for (const match of assertionWindow.matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'/g)) {
+    candidates.push(match[1] ?? match[2] ?? "");
+  }
+  const colonOutput = assertionWindow.match(/^\s*:\s*(.+?)\s*$/);
+  if (colonOutput) candidates.push(colonOutput[1] ?? "");
+  const separated = after.match(/^\s*(?:[-–—:]+)\s*(.+?)\s*$/);
+  if (separated) candidates.push(separated[1] ?? "");
+  return [
+    ...new Set(candidates.map(normalizeLineAssertionText).filter(isLikelySourceLineAssertion)),
+  ];
+}
+
+function sourceRangeContainsLineAssertion(
+  sourceReader: AuditReportSourceReader,
+  path: string,
+  reference: LineReference,
+  expected: string,
+): boolean {
+  const normalizedExpected = normalizeLineAssertionText(expected);
+  const end = Math.min(reference.end, reference.start + 25);
+  for (let line = reference.start; line <= end; line += 1) {
+    const sourceLine = sourceReader.fileLine(path, line);
+    if (sourceLine == null) continue;
+    const normalizedSource = normalizeLineAssertionText(sourceLine);
+    if (!normalizedSource) continue;
+    if (
+      normalizedSource.includes(normalizedExpected) ||
+      normalizedExpected.includes(normalizedSource)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectLineReferenceAssertionMismatches(
+  text: string,
+  excludedPaths: Set<string>,
+  sourceReader: AuditReportSourceReader,
+): LineReferenceMismatch[] {
+  const mismatches: LineReferenceMismatch[] = [];
+  const seen = new Set<string>();
+  const patterns = [SLASH_PATH_TOKEN_PATTERN, ROOT_FILE_TOKEN_PATTERN];
+  for (const line of text.split(/\r?\n/)) {
+    for (const pattern of patterns) {
+      pattern.lastIndex = 0;
+      for (const match of line.matchAll(pattern)) {
+        const raw = match[1]?.trim();
+        if (!raw) continue;
+        const reference = extractLineReference(match[0] ?? "");
+        if (!reference) continue;
+        const normalized = normalizeRelativePath(raw);
+        if (excludedPaths.has(normalizePathForComparison(normalized))) continue;
+        const lineCount = sourceReader.fileLineCount(normalized);
+        if (
+          lineCount === null ||
+          reference.start < 1 ||
+          reference.end < reference.start ||
+          reference.end > lineCount
+        ) {
+          continue;
+        }
+        const matchEnd = (match.index ?? 0) + (match[0]?.length ?? 0);
+        for (const expected of collectLineAssertionCandidates(line, matchEnd)) {
+          if (sourceRangeContainsLineAssertion(sourceReader, normalized, reference, expected)) {
+            continue;
+          }
+          const key = `${normalized}:${reference.start}:${expected}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          mismatches.push({ path: normalized, line: reference.start, expected });
+        }
+      }
+    }
+  }
+  return mismatches;
+}
+
 function countReportStructureMarkers(text: string): number {
   REPORT_STRUCTURE_MARKER_PATTERN.lastIndex = 0;
   return [...text.matchAll(REPORT_STRUCTURE_MARKER_PATTERN)].length;
@@ -1828,6 +1961,24 @@ export function validateAuditReportArtifact(
       issue(
         "invalid_line_reference",
         "Report artifact cites an existing path with a line reference outside the file.",
+      ),
+    );
+  }
+
+  const lineReferenceAssertionMismatches = collectLineReferenceAssertionMismatches(
+    classificationText,
+    excludedPaths,
+    sourceReader,
+  );
+  if (lineReferenceAssertionMismatches.length > 0) {
+    const examples = lineReferenceAssertionMismatches
+      .slice(0, 5)
+      .map((entry) => `${entry.path}:${entry.line} expected "${entry.expected}"`);
+    issues.push(
+      issue(
+        "invalid_line_reference",
+        `Report artifact cites source lines with quoted or command-output text that does not match the referenced line: ${examples.join("; ")}.`,
+        lineReferenceAssertionMismatches.map((entry) => entry.path),
       ),
     );
   }

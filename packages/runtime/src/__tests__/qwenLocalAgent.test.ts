@@ -1074,6 +1074,130 @@ describe("qwen-local-agent adapter", () => {
     expect(commit.error).toContain("audit report validation failed before git_commit");
     expect(commit.error).toContain("validate_audit_report");
   });
+  it("blocks git_commit when audit report line evidence quotes text from the wrong source line", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-line-quote-guard-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "t@t.local"]);
+    await expectSpawnOk(root, ["config", "user.name", "T"]);
+    await expectSpawnOk(root, ["add", "src/config.ts"]);
+    await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
+    const commitSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const treeSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD^{tree}"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const body = [
+      "# Audit",
+      "",
+      "### Finding 1",
+      "Evidence: `src/config.ts:1` - `export const retryCount = 3;`",
+      "Risk: a reviewer would trust a source line claim that was not actually present.",
+      "Proposed fix: cite the exact source line that was inspected.",
+      'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId: "task:task-1",
+      taskId: "task-1",
+      artifactPath: "audit/report.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot: {
+        id: `git:${commitSha}:${treeSha}`,
+        commit: commitSha,
+        tree: treeSha,
+        dirty: false,
+      },
+      outcome: "validated_findings_present",
+      scopeCoverage: [{ root: "src/config.ts", evidenceRefs: ["ev_1"] }],
+      riskHypotheses: ["risk-1"],
+      findings: [{ id: "finding-1", evidenceRefs: ["ev_1"] }],
+      noFindingsClaims: [],
+      evidenceRefs: ["ev_1"],
+    };
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest)}\n\`\`\`\n`,
+      "utf8",
+    );
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: {
+        allowedWritePaths: ["audit/report.md"],
+        auditReportArtifactPath: "audit/report.md",
+        auditReportTaskDescription: "Scope: src/config.ts\nRisk hypotheses: risk-1",
+        auditReportTaskId: "task-1",
+        auditReportAuditPlanId: "task:task-1",
+        auditReportEvidenceUnits: [
+          {
+            id: "ev_1",
+            taskId: "task-1",
+            auditPlanId: "task:task-1",
+            sourceSnapshotId: `git:${commitSha}:${treeSha}`,
+            toolName: "search_files",
+            evidenceKind: "search",
+            evidenceGrade: "substantive",
+            scopeIds: ["src", "src/config.ts"],
+            riskHypothesisIds: ["risk-1"],
+            pathHashes: ["0".repeat(64)],
+            pathRangeHashes: [],
+            command: null,
+            exitCode: null,
+            outputSha256: "1".repeat(64),
+            outputPreview: "src/config.ts:1:export const timeoutMs = 1000;",
+            outputPreviewTruncated: false,
+            parsedSummary: {
+              outputBytes: 46,
+              outputLineCount: 1,
+              previewChars: 46,
+              exitCode: null,
+            },
+            redactionStatus: "clean",
+            createdAt: "2026-05-21T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+
+    const validation = await executeQwenLocalTool(
+      "validate_audit_report",
+      { path: "audit/report.md" },
+      context,
+    );
+    const commit = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["audit/report.md"], message: "commit report" },
+      context,
+    );
+
+    expect(validation.ok).toBe(false);
+    expect(validation.output).toContain("invalid_line_reference");
+    expect(commit.ok).toBe(false);
+    expect(commit.error).toContain("audit report validation failed before git_commit");
+    expect(commit.error).toContain("invalid_line_reference");
+  });
   it("applies context search caps and skips binary/cache paths", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-search-cap-"));
     await mkdir(path.join(root, "src"), { recursive: true });

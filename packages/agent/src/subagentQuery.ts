@@ -8,6 +8,7 @@ import {
   getAppDefaultRuntimeProfileId,
   getRuntimeProfileResponseById,
   getTaskSessionId,
+  listAuditEvidenceEvents,
   persistRuntimeProfileLimitSnapshot,
   renewTaskClaim,
   resolveEffectiveRuntimeProfile,
@@ -799,6 +800,10 @@ function buildExecutionIntent(
         ? `batch:${auditArtifact.batchId}:task:${task.id}`
         : `task:${task.id}`
       : null;
+  const auditReportEvidenceUnits =
+    task && auditReportArtifactPath && auditReportAuditPlanId
+      ? listAuditEvidenceEvents({ taskId: task.id, auditPlanId: auditReportAuditPlanId })
+      : [];
   if (bypassPermissions && !task?.agentActivityLog?.includes("[permission-policy:bypass]")) {
     logActivity(
       options.taskId,
@@ -845,6 +850,7 @@ function buildExecutionIntent(
           auditReportRoadmapBatchId: auditArtifact?.batchId ?? null,
           auditReportRoadmapAlias: auditArtifact?.roadmapAlias ?? task.roadmapAlias ?? null,
           auditReportAuditPlanId,
+          auditReportEvidenceUnits,
         }
       : {}),
     environment: {

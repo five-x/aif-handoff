@@ -13,6 +13,7 @@ import {
   QWEN_LOCAL_AGENT_TOOLS,
   createDefaultQwenToolContext,
   executeQwenLocalTool,
+  appendQwenAuditEvidenceUnit,
   qwenToolResultForModel,
   sanitizeQwenToolNameForLog,
   sanitizeToolArguments,
@@ -615,13 +616,24 @@ export async function runQwenLocalAgentApi(input, logger) {
           }
         }
         const auditEvidenceResult = buildAuditEvidenceResultForTool(toolCall, args, result);
+        const auditEvidenceUnit = appendQwenAuditEvidenceUnit(toolContext, auditEvidenceResult);
         emitToolResult(input, events, toolCall, result);
-        emitAuditEvidenceResult(input, events, toolCall, auditEvidenceResult, result);
+        emitAuditEvidenceResult(
+          input,
+          events,
+          toolCall,
+          auditEvidenceUnit ?? auditEvidenceResult,
+          result,
+        );
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,
           name: toolCall.function.name,
-          content: qwenToolResultForModel(result, toolContext.maxOutputChars, auditEvidenceResult),
+          content: qwenToolResultForModel(
+            result,
+            toolContext.maxOutputChars,
+            auditEvidenceUnit ?? auditEvidenceResult,
+          ),
         });
         if (repeatedToolCallSuppressions >= REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS) {
           const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);

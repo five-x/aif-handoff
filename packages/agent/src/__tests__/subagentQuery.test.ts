@@ -56,6 +56,7 @@ const getRuntimeProfileResponseByIdMock = vi.fn<
     | undefined
 >(() => undefined);
 const findRoadmapBatchArtifactByTaskIdMock = vi.fn<(taskId: string) => unknown>(() => undefined);
+const listAuditEvidenceEventsMock = vi.fn<() => AuditEvidenceUnit[]>(() => []);
 const runtimeAdapterOverride = vi.hoisted(() => ({
   current: null as null | { runtimeId: string; adapter: RuntimeAdapter },
 }));
@@ -151,6 +152,7 @@ vi.mock("@aif/data", async (importOriginal) => {
     getAppDefaultRuntimeProfileId: getAppDefaultRuntimeProfileIdMock,
     getRuntimeProfileResponseById: getRuntimeProfileResponseByIdMock,
     findRoadmapBatchArtifactByTaskId: findRoadmapBatchArtifactByTaskIdMock,
+    listAuditEvidenceEvents: listAuditEvidenceEventsMock,
     findTaskById: findTaskByIdMock,
     resolveEffectiveRuntimeProfile: resolveEffectiveRuntimeProfileMock,
   };
@@ -333,6 +335,8 @@ beforeEach(() => {
   getRuntimeProfileResponseByIdMock.mockReturnValue(undefined);
   findRoadmapBatchArtifactByTaskIdMock.mockReset();
   findRoadmapBatchArtifactByTaskIdMock.mockReturnValue(undefined);
+  listAuditEvidenceEventsMock.mockReset();
+  listAuditEvidenceEventsMock.mockReturnValue([]);
 });
 
 function makeDelayedSuccess(delayMs: number, result: string) {
@@ -573,6 +577,33 @@ describe("executeSubagentQuery attribution", () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+    const auditEvidenceUnit: AuditEvidenceUnit = {
+      id: "ev-runtime-1",
+      taskId: "task-audit-report",
+      auditPlanId: "batch:batch-1:task:task-audit-report",
+      sourceSnapshotId: "git:commit:tree",
+      toolName: "search_files",
+      evidenceKind: "search",
+      evidenceGrade: "substantive",
+      scopeIds: ["README.md"],
+      riskHypothesisIds: ["risk-1"],
+      pathHashes: ["0".repeat(64)],
+      pathRangeHashes: [],
+      command: null,
+      exitCode: null,
+      outputSha256: "1".repeat(64),
+      outputPreview: "README.md:1:# audit fixture",
+      outputPreviewTruncated: false,
+      parsedSummary: {
+        outputBytes: 27,
+        outputLineCount: 1,
+        previewChars: 27,
+        exitCode: null,
+      },
+      redactionStatus: "clean",
+      createdAt: "2026-05-21T00:00:00.000Z",
+    };
+    listAuditEvidenceEventsMock.mockReturnValue([auditEvidenceUnit]);
 
     await executeSubagentQuery({
       taskId: "task-audit-report",
@@ -602,9 +633,14 @@ describe("executeSubagentQuery attribution", () => {
           auditReportRoadmapBatchId: "batch-1",
           auditReportRoadmapAlias: "audit-aa",
           auditReportAuditPlanId: "batch:batch-1:task:task-audit-report",
+          auditReportEvidenceUnits: [auditEvidenceUnit],
         }),
       }),
     );
+    expect(listAuditEvidenceEventsMock).toHaveBeenCalledWith({
+      taskId: "task-audit-report",
+      auditPlanId: "batch:batch-1:task:task-audit-report",
+    });
   });
 
   it("passes task-intent permission policy to runtime adapters", async () => {

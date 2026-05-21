@@ -856,6 +856,118 @@ describe("auditReportValidator", () => {
     },
   );
 
+  it("rejects path line evidence when the quoted source text does not match that line", () => {
+    const root = initRepo();
+    const text = [
+      "## Finding",
+      "- Evidence: `src/config.ts:1` - `export const retryCount = 3;`",
+      "Risk: A reviewer would trust a source line claim that was not actually present.",
+      "Proposed fix: Cite the exact source line that was inspected.",
+      '- Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("invalid_line_reference");
+  });
+
+  it("rejects command-output path line evidence when the output text is not on that line", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output:',
+      "```",
+      "src/config.ts:1:export const retryCount = 3;",
+      "```",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("invalid_line_reference");
+  });
+
+  it("does not attach one command-output snippet to sibling path references in the same row", () => {
+    const root = initRepo();
+    writeFileSync(join(root, "src", "beta.ts"), "export const beta = 1;\n", "utf8");
+    writeFileSync(join(root, "src", "gamma.ts"), "export const gamma = 1;\n", "utf8");
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Scope | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      "| `src` | `src/config.ts:1`, `src/beta.ts:1`, `src/gamma.ts:1` | Command `git grep -n timeoutMs -- src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |",
+      "",
+      "## Checked Commands",
+      "",
+      "- Command `git grep -n timeoutMs -- src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(issueCodes(result)).not.toContain("invalid_line_reference");
+  });
+
+  it("rejects reports that admit budget-limited source inspection", () => {
+    const root = initRepo();
+    const text = [
+      "## Finding",
+      "Evidence: `src/config.ts:1` defines the timeout value used by runtime configuration.",
+      "Risk: A future change could bypass the runtime limit guard.",
+      "Proposed fix: Keep timeout validation centralized near this export.",
+      '- Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "## Audit limitations",
+      "Budget constraints limited full inspection of the rest of the file.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("unverified_inspection_claim");
+  });
+
   it("accepts valid findings with path line evidence, risk, proposed fix, and verification", () => {
     const root = initRepo();
     const text = [

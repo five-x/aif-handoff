@@ -5,10 +5,15 @@ import { lstat, mkdtemp, mkdir, readdir, readFile, realpath, writeFile } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  buildAuditEvidenceUnit,
   computeAuditReportContentSha256,
   decideShellPermission,
+  deriveAuditSourceSnapshotId,
+  extractAuditRiskHypothesisIds,
+  extractAuditScopeIdsFromText,
   getPermissionExecutionPolicy,
   redactProviderText,
+  resolveAuditPlanId,
   validateAuditReportArtifact,
 } from "@aif/shared";
 import { RuntimeExecutionError } from "../../errors.js";
@@ -687,6 +692,38 @@ function readAuditReportValidationContext(input, projectRoot) {
     auditPlanId: readOptionalString(execution.auditReportAuditPlanId),
   };
 }
+function readAuditEvidenceUnits(input) {
+  const raw = input.execution?.auditReportEvidenceUnits;
+  return Array.isArray(raw) ? raw.filter((entry) => entry && typeof entry === "object") : [];
+}
+function buildAuditEvidenceUnitContext(auditReportValidation, projectRoot) {
+  const taskId = auditReportValidation.taskId;
+  if (!taskId) return null;
+  const taskDescription = auditReportValidation.taskDescription ?? "";
+  return {
+    taskId,
+    auditPlanId: resolveAuditPlanId({
+      taskId,
+      auditPlanId: auditReportValidation.auditPlanId,
+      roadmapBatchId: auditReportValidation.roadmapBatchId,
+    }),
+    sourceSnapshotId: deriveAuditSourceSnapshotId(projectRoot),
+    scopeIds: extractAuditScopeIdsFromText(taskDescription),
+    riskHypothesisIds: extractAuditRiskHypothesisIds(taskDescription),
+  };
+}
+export function appendQwenAuditEvidenceUnit(context, payload) {
+  if (!payload) return null;
+  const unitContext = context.auditEvidenceUnitContext;
+  if (!unitContext) return payload;
+  const unit = buildAuditEvidenceUnit(unitContext, payload);
+  const units = context.auditEvidenceUnits ?? [];
+  if (!units.some((entry) => entry?.id === unit.id)) {
+    units.push(unit);
+  }
+  context.auditEvidenceUnits = units;
+  return unit;
+}
 function assertWritePathAllowed(context, relativePath, label) {
   const allowed = context.allowedWritePaths ?? [];
   if (allowed.length === 0) return;
@@ -1353,6 +1390,8 @@ function runAuditReportValidationForTarget(context, target, content) {
     reportArtifactPaths: [target.relativePath],
     expectedReportArtifactPath: auditContext.expectedReportArtifactPath ?? target.relativePath,
     requireProposedFix: true,
+    auditEvidenceUnits: context.auditEvidenceUnits ?? [],
+    requireLedgerEvidence: (context.auditEvidenceUnits ?? []).length > 0,
   });
 }
 async function validateAuditReportTool(args, context) {
@@ -1605,6 +1644,7 @@ export function createDefaultQwenToolContext(input) {
   const maxOutputCharsLimit = plannerLike ? PLANNER_MAX_OUTPUT_CHARS : Number.MAX_SAFE_INTEGER;
   const env = { ...process.env, ...(input.environment ?? {}) };
   const projectRootPath = resolveProjectRoot(projectRoot);
+  const auditReportValidation = readAuditReportValidationContext(input, projectRootPath);
   return {
     projectRoot: projectRootPath,
     signal: input.signal,
@@ -1629,7 +1669,9 @@ export function createDefaultQwenToolContext(input) {
     toolTimeoutMs: readPositiveInt(options.toolTimeoutMs, DEFAULT_TOOL_TIMEOUT_MS),
     permissionPolicy: input.execution?.permissionPolicy ?? getPermissionExecutionPolicy("general"),
     allowedWritePaths: readAllowedWritePaths(input, projectRootPath),
-    auditReportValidation: readAuditReportValidationContext(input, projectRootPath),
+    auditReportValidation,
+    auditEvidenceUnits: readAuditEvidenceUnits(input),
+    auditEvidenceUnitContext: buildAuditEvidenceUnitContext(auditReportValidation, projectRootPath),
   };
 }
 export function createTempPathForTests(name) {
