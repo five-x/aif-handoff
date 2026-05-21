@@ -1947,6 +1947,55 @@ describe("auditReportValidator", () => {
     );
   });
 
+  it("rejects ownership-gap and import-style audit observations as trusted findings", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Architecture Audit",
+      "",
+      "### Finding A: direct import dependency establishes a one-directional coupling that is not documented as an ownership boundary",
+      "Evidence: `src/config.ts:1` exports the timeout value consumed by the runtime.",
+      "Risk: This coupling means any structural change to the dependency will require a coordinated change in the consumer. The consumer is a downstream consumer that understands the internal shape of the imported module.",
+      "Proposed fix: Formalize the module boundary with a documented interface contract and add cross-reference documentation in module-level docstrings.",
+      "",
+      "### Finding B: sibling module has no documented owner or integration point",
+      "Evidence: `src/config.ts:1` exists and is read by the audit.",
+      "Risk: If backup_crypto provides backup/restore functionality, no integration point creates an ownership gap.",
+      "Proposed fix: Wire the module into the lifecycle or document that it is intentionally decoupled and owned by a separate subsystem.",
+      "",
+      "### Finding C: absolute package imports should be relative imports",
+      "Evidence: `src/config.ts:1` exists and is read by the audit.",
+      "Risk: Relative imports are more resilient if the package is renamed, restructured, reorganized, or moved.",
+      "Proposed fix: Convert intra-package imports to relative imports.",
+      "",
+      'Manifest contentSha256: "PLACEHOLDER_COMPUTE"',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "fake_or_placeholder_command_output",
+        "non_actionable_audit_observation",
+        "governance_observation_as_finding",
+        "speculative_audit_claim",
+      ]),
+    );
+  });
+
   it("rejects zero-match search claims contradicted by cited path-line evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });

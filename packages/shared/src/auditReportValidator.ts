@@ -148,7 +148,7 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "fake_or_placeholder_command_output",
     pattern:
-      /(?:\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b[^\n]{0,80}\b(?:placeholder|fake|commit|hash)\b|\b(?:commit|hash|sha|git\s+(?:log|show|rev-parse))\b[^\n]{0,80}\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b|^\s*(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)(?:\s+\(|\s+[A-Z])[^\n]*)/im,
+      /(?:\bPLACEHOLDER_[A-Z0-9_]+\b|\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b[^\n]{0,80}\b(?:placeholder|fake|commit|hash)\b|\b(?:commit|hash|sha|git\s+(?:log|show|rev-parse))\b[^\n]{0,80}\b(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)\b|^\s*(?:123abc|abc123|abcdef[0-9a-f]*|deadbeef[0-9a-f]*|cafebabe[0-9a-f]*|1234567890abcdef[0-9a-f]*)(?:\s+\(|\s+[A-Z])[^\n]*)/im,
     message: "Report artifact contains placeholder commit hashes instead of real command output.",
   },
   {
@@ -178,20 +178,20 @@ const LOW_QUALITY_REPORT_PATTERNS: Array<{
   {
     code: "speculative_audit_claim",
     pattern:
-      /\b(?:may contain|likely used|likely indicates|likely constructs|presumably [^.:\n]+|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
+      /\b(?:may contain|likely used|likely indicates|likely constructs|presumably [^.:\n]+|if [\w./-]+ provides|no evidence of sensitive content|confirmed (?:the )?file exists|confirmed .* exists)\b/i,
     message: "Report artifact contains speculative audit claims that are not backed by evidence.",
   },
   {
     code: "non_actionable_audit_observation",
     pattern:
-      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully|monolithic (?:router|module|file)|single-file router|coupling bottleneck|high fan-in coupling|central hub module|hub file|single file coordinates|single point of (?:architectural fragility|change)|one-directional coupling[^.\n]+single point of change|import coupling[^.\n]+single point of change|module-level consumer|requires editing this entire file|extract handler methods into dedicated route modules)\b/i,
+      /\b(?:lacks?\s+multi-user support|limits scalability|auto-generated content may not reflect actual usage|dependencies are defined|specific version constraints may lead to compatibility issues|lack of abstraction could tightly couple|appears to be thorough|hardcoded test data[^.\n]+harder to adapt|bot started successfully|all modules compiled successfully|monolithic (?:router|module|file)|single-file router|coupling bottleneck|high fan-in coupling|central hub module|hub file|single file coordinates|single point of (?:architectural fragility|change)|direct import dependency|one-directional coupling|import coupling[^.\n]+single point of change|structural change[^.\n]+require a coordinated change|downstream consumer[^.\n]+internal shape|absolute (?:package |intra-package )?imports?[^.\n]+relative imports?|relative imports are more resilient|package (?:renaming|restructuring|reorganized|moved)|no action needed|module-level consumer|requires editing this entire file|extract handler methods into dedicated route modules)\b/i,
     message:
       "Report artifact contains non-actionable audit observations instead of concrete technical-quality findings.",
   },
   {
     code: "governance_observation_as_finding",
     pattern:
-      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|missing ownership clarity|incomplete ownership clarity|does not explicitly define ownership|does not explicitly define boundaries|missing dependency documentation|branch naming convention and ownership policy|unclear ownership|orphaned (?:utility|module|code)|undocumented integration|no visible invocation|audit all imports of|missing __all__|not enforced via __all__|public (?:api|interface) surface|document the contract between|module docstrings?|ownership documentation)\b/i,
+      /\b(?:overlap in task\/workflow routing|duplication in responsibilities|distributed configuration|configuration in multiple files|centralized configuration management|missing documentation for submodules|lack of ownership clarity for branches|missing ownership clarity|incomplete ownership clarity|does not explicitly define ownership|does not explicitly define boundaries|missing dependency documentation|branch naming convention and ownership policy|unclear ownership|orphaned (?:utility|module|code)|undocumented integration|no visible invocation|audit all imports of|missing __all__|not enforced via __all__|public (?:api|interface) surface|documented interface contract|documented as an ownership boundary|document the contract between|module docstrings?|module-level docstrings?|ownership documentation|ownership gap|no documented owner|no documented ownership|no integration point|wire [^.:\n]+ into [^.:\n]+ lifecycle|intentionally decoupled[^.\n]+owned by|owned by a separate subsystem|cross-reference documentation)\b/i,
     message:
       "Report artifact contains governance/documentation observations instead of concrete technical-quality findings.",
   },
