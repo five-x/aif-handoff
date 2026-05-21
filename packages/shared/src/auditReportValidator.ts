@@ -790,6 +790,69 @@ function validateManifestEvidenceRefs(input: {
   return issues;
 }
 
+function citedEvidenceUnitsForManifest(
+  manifest: AuditReportManifest | null,
+  evidenceUnits: AuditEvidenceUnit[],
+): AuditEvidenceUnit[] {
+  if (!manifest || manifest.evidenceRefs.length === 0) return [];
+  const byId = new Map(evidenceUnits.map((entry) => [entry.id, entry]));
+  return manifest.evidenceRefs
+    .map((id) => byId.get(id))
+    .filter((entry): entry is AuditEvidenceUnit => Boolean(entry));
+}
+
+function hasLedgerBackedSubstantiveNoFindingsEvidence(input: {
+  text: string;
+  projectRoot: string;
+  manifest: AuditReportManifest | null;
+  evidenceUnits: AuditEvidenceUnit[];
+  excludedPaths: Set<string>;
+  sourceReader: AuditReportSourceReader;
+}): boolean {
+  if (!input.manifest || input.manifest.outcome !== "validated_no_findings") return false;
+  if (input.manifest.noFindingsClaims.length === 0) return false;
+  if (!/\bNo validated findings\b/i.test(input.text)) return false;
+  if (!hasScopedNoFindingsRiskClaim(input.text)) return false;
+  if (hasContradictoryFindings(input.text)) return false;
+  if (LOW_QUALITY_REPORT_PATTERNS.some((entry) => entry.pattern.test(input.text))) {
+    return false;
+  }
+
+  const citedUnits = citedEvidenceUnitsForManifest(input.manifest, input.evidenceUnits);
+  const substantiveInspectionUnits = citedUnits.filter(
+    (unit) =>
+      unit.evidenceGrade === "substantive" &&
+      (unit.evidenceKind === "search" ||
+        unit.evidenceKind === "shell_command" ||
+        unit.toolName === "search_files" ||
+        Boolean(unit.command?.command)),
+  );
+  if (substantiveInspectionUnits.length === 0) return false;
+  const textLines = input.text.split(/\r?\n/);
+  const citesRuntimeLedgerEvidence = substantiveInspectionUnits.some((unit) => {
+    const normalizedToolName = unit.toolName.toLowerCase();
+    return textLines.some((line) => {
+      if (!line.includes(unit.id)) return false;
+      const normalizedLine = line.toLowerCase();
+      return (
+        normalizedLine.includes(normalizedToolName) ||
+        normalizedLine.includes(unit.evidenceKind) ||
+        /\b(?:search_files|read_file|run_shell|runtime ledger|audit evidence)\b/i.test(line)
+      );
+    });
+  });
+  if (!citesRuntimeLedgerEvidence) return false;
+
+  return (
+    collectExistingRefsWithLineNumbers(
+      input.text,
+      input.projectRoot,
+      input.excludedPaths,
+      input.sourceReader,
+    ).length > 0
+  );
+}
+
 interface ReportedAuditCommandClaim {
   command: string;
   evidence: string;
@@ -2024,7 +2087,20 @@ export function validateAuditReportArtifact(
     requireProposedFix: input.requireProposedFix,
     sourceReader,
   });
-  const sourceClassification = sourceEvidenceClassification.classification;
+  const ledgerBackedNoFindingsEvidence = hasLedgerBackedSubstantiveNoFindingsEvidence({
+    text: classificationText,
+    projectRoot: input.projectRoot,
+    manifest,
+    evidenceUnits: input.auditEvidenceUnits ?? [],
+    excludedPaths,
+    sourceReader,
+  });
+  const sourceClassification: AuditSourceClassification =
+    sourceEvidenceClassification.classification === "validated_findings_present"
+      ? sourceEvidenceClassification.classification
+      : ledgerBackedNoFindingsEvidence
+        ? "validated_no_findings"
+        : sourceEvidenceClassification.classification;
   const issues: AuditReportValidationIssue[] = [];
 
   if (
@@ -2399,14 +2475,15 @@ export function validateAuditReportArtifact(
   const substantiveEvidence =
     missing.length === 0 &&
     sourceClassification !== "inventory_only_invalid" &&
-    hasSubstantiveReportEvidenceInternal({
-      text: classificationText,
-      projectRoot: input.projectRoot,
-      excludedReferencedPaths: excludedEvidencePaths,
-      allowedEvidenceArtifactPaths,
-      requireProposedFix: input.requireProposedFix,
-      sourceReader,
-    });
+    (ledgerBackedNoFindingsEvidence ||
+      hasSubstantiveReportEvidenceInternal({
+        text: classificationText,
+        projectRoot: input.projectRoot,
+        excludedReferencedPaths: excludedEvidencePaths,
+        allowedEvidenceArtifactPaths,
+        requireProposedFix: input.requireProposedFix,
+        sourceReader,
+      }));
 
   if (
     classificationText.trim() &&

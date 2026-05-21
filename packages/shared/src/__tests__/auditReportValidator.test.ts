@@ -467,6 +467,55 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).not.toContain("invalid_line_reference");
   });
 
+  it("accepts ledger-backed no-findings when substantive runtime search evidence is cited", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Configuration Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts:1` runtime configuration drift was covered and is absent.",
+      "",
+      "Evidence Register",
+      "",
+      "| Evidence ID | Claim | Evidence | Verification |",
+      "|---|---|---|---|",
+      "| ev-1 | risk-1 configuration drift checked | `src/config.ts:1` declares the only timeout constant | search_files evidence ev-1 returned the scoped `timeoutMs` match under `src/config.ts` |",
+      "",
+      "Absence reasoning: risk-1 was checked against `src/config.ts:1` and substantive runtime ledger search evidence ev-1; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+    const text = withManifest({
+      body,
+      snapshot,
+      scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      riskHypotheses: [{ id: "risk-1", description: "Runtime configuration drift" }],
+      noFindingsClaims: [{ root: "src/config.ts", riskId: "risk-1", evidenceRefs: ["ev-1"] }],
+    });
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [
+        manifestEvidenceUnit({
+          snapshot,
+          scopeIds: ["src/config.ts"],
+          riskHypothesisIds: ["risk-1"],
+        }),
+      ],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.substantiveEvidence).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(issueCodes(result)).not.toContain("missing_substantive_evidence");
+    expect(issueCodes(result)).not.toContain("manifest_outcome_mismatch");
+  });
+
   it("does not treat source fixture tokens in grep output as placeholder hashes or missing root files", () => {
     const root = initRepo();
     mkdirSync(join(root, "tests"), { recursive: true });
