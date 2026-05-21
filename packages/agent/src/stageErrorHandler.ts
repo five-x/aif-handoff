@@ -17,6 +17,7 @@ import {
   findBranchIsolationError,
   isRuntimeCapabilityFailure,
   findRuntimeExecutionError,
+  isRepositoryInspectionBudgetExhaustionError,
   isExternalFailure,
   isFastRetryableFailure,
   truncateReason,
@@ -305,6 +306,29 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
   }
 
   if (isExternalFailure(err)) {
+    if (isRepositoryInspectionBudgetExhaustionError(err)) {
+      const blockedReason =
+        "repository_inspection_budget_exhausted: Repository inspection budget was exhausted and compact finalization did not produce a trusted result. " +
+        "AIF will not retry with full repository context or a larger fallback profile automatically.";
+      logActivity(
+        taskId,
+        "Agent",
+        `coordinator moved to blocked_external from ${sourceStatus} at ${stageLabel}; retryAfter=manual; source=none; reason=${truncateReason(blockedReason)}`,
+      );
+      log.error(
+        { taskId, stage: stageLabel },
+        "Subagent exhausted repository-inspection budget; blocking without automatic retry",
+      );
+      return {
+        kind: "blocked_external",
+        blockedReason,
+        retryAfter: null,
+        retryAfterSource: "none",
+        retryCount: input.retryCount ?? 0,
+        limitSnapshot: null,
+      };
+    }
+
     const { retryAfter, retryAfterSource, backoffMinutes, limitSnapshot } = resolveRetryAfter(
       err,
       input.retryCount ?? 0,

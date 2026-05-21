@@ -8,7 +8,9 @@ import { computeAuditReportContentSha256 } from "@aif/shared";
 import { RuntimeExecutionError } from "../errors.js";
 import {
   buildQwenLocalAgentRequestBody,
+  estimateQwenLocalAgentInputTokens,
   listQwenLocalAgentModels,
+  resetQwenLocalAgentEndpointStateForTests,
   runQwenLocalAgentApi,
   validateQwenLocalAgentApiConnection,
 } from "../adapters/qwenLocalAgent/api.js";
@@ -72,6 +74,7 @@ describe("qwen-local-agent adapter", () => {
   beforeEach(() => {
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
+    resetQwenLocalAgentEndpointStateForTests();
     vi.unstubAllEnvs();
   });
   afterEach(() => {
@@ -111,6 +114,80 @@ describe("qwen-local-agent adapter", () => {
     expect(body.stream).toBe(false);
     expect(body.tool_choice).toBe("auto");
     expect(body.tools).toEqual(QWEN_LOCAL_AGENT_TOOLS);
+  });
+  it("caps local endpoint output tokens by the 8003 profile budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-8003-"));
+    const body = buildQwenLocalAgentRequestBody(
+      createRunInput(root, {
+        options: {
+          baseUrl: "http://192.168.88.62:8003/v1",
+          maxTokens: 99_999,
+        },
+      }),
+    );
+
+    expect(body.max_tokens).toBeLessThanOrEqual(4_000);
+    expect(estimateQwenLocalAgentInputTokens(createRunInput(root))).toBeGreaterThan(0);
+  });
+  it("allows small configured output caps when the endpoint total budget has room", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-small-output-"));
+    const body = buildQwenLocalAgentRequestBody(
+      createRunInput(root, {
+        options: {
+          baseUrl: "http://192.168.88.62:8003/v1",
+          maxTokens: 256,
+        },
+      }),
+    );
+
+    expect(body.max_tokens).toBe(256);
+  });
+  it("fails closed before sending a request that exceeds the 8003 input budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-overflow-"));
+    const hugeMessages = [
+      { role: "system", content: "system" },
+      { role: "user", content: "x".repeat(80_000) },
+    ];
+
+    expect(() =>
+      buildQwenLocalAgentRequestBody(
+        createRunInput(root, {
+          options: { baseUrl: "http://192.168.88.62:8003/v1" },
+        }),
+        hugeMessages,
+      ),
+    ).toThrow(/endpoint input budget/);
+  });
+  it("logs request estimates when endpoint budget rejects before fetch", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-log-reject-"));
+    const warn = vi.fn();
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          systemPrompt: "x".repeat(80_000),
+          options: { baseUrl: "http://192.168.88.62:8003/v1" },
+        }),
+        { warn },
+      ),
+    ).rejects.toMatchObject({
+      category: "context_length",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileId: "profile-qwen",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        estimatedInputTokens: expect.any(Number),
+        maxOutputTokens: expect.any(Number),
+        toolCallCount: 0,
+        retryCount: 0,
+        durationMs: expect.any(Number),
+        failureClass: "endpoint_input_budget_exceeded",
+      }),
+      "qwen-local-agent request estimate",
+    );
   });
   it("limits planner workflows to read-only repository tools", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-readonly-"));
@@ -749,6 +826,11 @@ describe("qwen-local-agent adapter", () => {
       runQwenLocalAgentApi(
         createRunInput(root, {
           workflowKind: "audit",
+          options: {
+            baseUrl: "http://192.168.88.62:8003/v1",
+            toolTimeoutMs: 5_000,
+            maxOutputChars: 4_000,
+          },
           execution: {
             repositoryInspectionToolBudget: 1,
             onEvent: (event) => events.push(event),
@@ -756,11 +838,17 @@ describe("qwen-local-agent adapter", () => {
         }),
       ),
     ).rejects.toMatchObject({
-      category: "timeout",
+      category: "context_length",
       message: expect.stringContaining("did not finalize after repository inspection budget"),
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+      }),
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
+    const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
+    expect(JSON.stringify(secondBody.messages)).toContain("QWEN COMPACT CONTEXT MODE");
+    expect(JSON.stringify(secondBody.messages)).toContain("repository_inspection_budget_exhausted");
     expect(JSON.stringify(events)).toContain("Repository inspection budget exhausted");
     expect(JSON.stringify(events)).toContain("README.md");
     expect(JSON.stringify(events)).not.toContain("late finalization");
@@ -814,9 +902,146 @@ describe("qwen-local-agent adapter", () => {
     ).rejects.toMatchObject({
       category: "timeout",
       message: expect.stringContaining("Finalization timeout"),
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+      }),
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("keeps repository budget exhaustion status when compacted finalization exceeds endpoint input budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-finalize-budget-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    let baseUrlReads = 0;
+    const dynamicOptions = {
+      get baseUrl() {
+        baseUrlReads += 1;
+        return baseUrlReads <= 3 ? "http://qwen.local/v1" : "http://192.168.88.62:8003/v1";
+      },
+      toolTimeoutMs: 5_000,
+      maxOutputChars: 4_000,
+    };
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-inspection-budget-finalize-budget",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call-read-allowed",
+                  type: "function",
+                  function: {
+                    name: "read_file",
+                    arguments: JSON.stringify({ path: "README.md" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          systemPrompt: "x".repeat(80_000),
+          options: dynamicOptions,
+          execution: {
+            repositoryInspectionToolBudget: 1,
+            repositoryInspectionBudgetFinalResponseTimeoutMs: 5_000,
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "context_length",
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it("keeps repository budget exhaustion status when max turns are exhausted after compaction", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-max-turns-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-max-turns",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-allowed",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-max-turns",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-git-status",
+                    type: "function",
+                    function: {
+                      name: "git_status",
+                      arguments: JSON.stringify({}),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://192.168.88.62:8003/v1",
+            maxToolTurns: 2,
+          },
+          execution: {
+            repositoryInspectionToolBudget: 1,
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "context_length",
+      message: expect.stringContaining("after repository inspection budget exhausted"),
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+        reason: "max_tool_turns_after_repository_inspection_budget_exhaustion",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
+    expect(JSON.stringify(secondBody.messages)).toContain("QWEN COMPACT CONTEXT MODE");
   });
   it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));
@@ -2434,6 +2659,132 @@ describe("qwen-local-agent adapter", () => {
       name: "QwenLocalAgentRuntimeAdapterError",
       category: "timeout",
     });
+  });
+  it("serializes concurrent requests to the same protected local endpoint", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-semaphore-"));
+    let active = 0;
+    let maxActive = 0;
+    let releaseFirst: (() => void) | null = null;
+    const firstStarted = new Promise<void>((resolve) => {
+      fetchMock.mockImplementation(async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (fetchMock.mock.calls.length === 1) {
+          resolve();
+          await new Promise<void>((release) => {
+            releaseFirst = release;
+          });
+        }
+        active -= 1;
+        return jsonResponse({
+          id: "chat",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        });
+      });
+    });
+
+    const input = createRunInput(root, {
+      options: { baseUrl: "http://192.168.88.62:8003/v1" },
+    });
+    const first = runQwenLocalAgentApi(input);
+    await firstStarted;
+    const second = runQwenLocalAgentApi(input);
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    releaseFirst?.();
+    await Promise.all([first, second]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(maxActive).toBe(1);
+  });
+  it("cancels a request while it is waiting for the protected endpoint semaphore", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-semaphore-abort-"));
+    let releaseFirst: (() => void) | null = null;
+    const firstStarted = new Promise<void>((resolve) => {
+      fetchMock.mockImplementationOnce(() => {
+        resolve();
+        return new Promise((resolveFetch) => {
+          releaseFirst = () =>
+            resolveFetch(
+              jsonResponse({
+                id: "chat",
+                choices: [{ message: { role: "assistant", content: "done" } }],
+              }),
+            );
+        });
+      });
+    });
+
+    const first = runQwenLocalAgentApi(
+      createRunInput(root, {
+        options: { baseUrl: "http://192.168.88.62:8003/v1" },
+      }),
+    );
+    await firstStarted;
+    const abort = new AbortController();
+    const second = runQwenLocalAgentApi(
+      createRunInput(root, {
+        options: { baseUrl: "http://192.168.88.62:8003/v1" },
+        execution: { abortController: abort },
+      }),
+    );
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    abort.abort(new Error("stage timeout"));
+
+    await expect(second).rejects.toMatchObject({ category: "timeout" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    releaseFirst?.();
+    await expect(first).resolves.toMatchObject({ outputText: "done" });
+  });
+  it("opens endpoint cooldown after a local transport timeout and avoids immediate retry storms", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-cooldown-"));
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8003/v1",
+        endpointCooldownMs: 5_000,
+      },
+    });
+    fetchMock.mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"));
+
+    await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
+      category: "timeout",
+      retryAfterSeconds: expect.any(Number),
+    });
+    await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
+      category: "transport",
+      retryAfterSeconds: expect.any(Number),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it("propagates external aborts to the upstream chat completion request", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-external-abort-"));
+    const abort = new AbortController();
+    let requestSignal: AbortSignal | null = null;
+    const requestStarted = new Promise<void>((resolve) => {
+      fetchMock.mockImplementationOnce((_url, init = {}) => {
+        requestSignal = init.signal ?? null;
+        resolve();
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "AbortError"));
+          });
+        });
+      });
+    });
+
+    const run = runQwenLocalAgentApi(
+      createRunInput(root, {
+        execution: { abortController: abort },
+      }),
+    );
+    await requestStarted;
+    abort.abort(new Error("stage timeout"));
+
+    await expect(run).rejects.toMatchObject({ category: "timeout" });
+    expect(requestSignal?.aborted).toBe(true);
   });
   it("does not write tool files after the run timeout has already fired", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-timeout-before-tool-"));

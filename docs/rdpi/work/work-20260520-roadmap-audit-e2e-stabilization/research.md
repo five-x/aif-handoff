@@ -31,6 +31,9 @@ Stabilize the live `botIntevra` audit roadmap workflow end to end until two clea
 - Strict weak-audit behavior is covered across shared and agent tests, including source inconclusive and generic-evidence repair cases in `packages/agent/src/__tests__/implementer.test.ts:3090` and `packages/agent/src/__tests__/implementer.test.ts:3522`.
 - Current local code has mixed source-inconclusive terminalization paths: operator-input variants use `manualReviewRequired=false`, while some terminal source-inconclusive tests still expect `manualReviewRequired=true`. The live run must determine whether any such state is valid missing user data or a false system blocker.
 - Older Plan B runbook guidance preserved/superseded old audit cards, while the latest hardening result and this task require deletion plus stale metadata cleanup. The live cleanup evidence must follow the current task acceptance criteria.
+- Follow-up operator evidence for the 192.168.88.62 outage says the root cause was OOM, not network: between 2026-05-20 18:20 UTC and 2026-05-21 02:05 UTC the kernel killed `llama-server` on port `8003` 9 times, with adjacent `NVRM NV_ERR_NO_MEMORY`.
+- The AIF audit workload during the outage sent long-context audit requests, about 60 inspection tool calls, retries/fallbacks, and large ledger/tool-call payloads. The runtime hardening scope must therefore prevent repeated full-context requests from retry-storming `8003`/`8005` after budget exhaustion or transport/timeout failures.
+- Required runtime protections are now first-class acceptance scope: per-profile request budgets for `8003` and `8005`, per-endpoint concurrency 1, bounded tool/evidence/ledger payloads, compact-or-fail behavior after repository-inspection budget exhaustion, circuit breaker with cooldown/health check/bounded retry, upstream request cancellation on AIF timeout, and request-estimate logging.
 
 ## Risk Hypotheses
 
@@ -40,6 +43,9 @@ Stabilize the live `botIntevra` audit roadmap workflow end to end until two clea
 - A source card can validly become inconclusive when required project data/access is absent, but false `manualReviewRequired`, `source_inconclusive`, `rework_required`, or retry-loop states are system defects for this task.
 - Synthesis can pass lifecycle gates while still being weak if child artifact trust state is misread or weak/discarded findings are promoted as trusted evidence.
 - Existing tests include a terminal `source_inconclusive` path with `manualReviewRequired=true`; the live acceptance target requires distinguishing valid user-input blockers from false manual-review/system blockers.
+- Without endpoint-level throttling and cooldown, fallback between `8003` and `8005` can amplify transient timeout/transport failures into repeated GPU memory pressure.
+- Without request-size estimation and payload compaction, a successful source-inspection loop can still fail finalization by sending the model a larger context than the endpoint can safely handle.
+- Without cancellation propagation, AIF stage timeout can leave an upstream llama.cpp request running after the coordinator has already scheduled retry or fallback work.
 
 ## Evidence Needed After PLAN PASS
 
@@ -49,3 +55,4 @@ Stabilize the live `botIntevra` audit roadmap workflow end to end until two clea
 - Per-card status timeline, blocked reason, manualReviewRequired, retryAfter, reworkRequested, artifact state, failure family, validation details, branch/worktree/commit evidence, and activity-log snippets when a card stalls or blocks.
 - Final source reports and synthesis artifact contents with evidence path/line checks and trust classification.
 - Regression tests and deploy evidence for each systemic fix.
+- Runtime hardening evidence: request estimate logs include profileId, baseUrl, estimated input tokens, max output tokens, tool-call count, retry count, duration, and failure class; tests prove budgets, endpoint semaphore, cooldown, bounded retry, payload compaction, and abort propagation.

@@ -42,7 +42,7 @@ import {
   type AuditPublicReportOutcome,
   type AuditReportSourceSnapshot,
 } from "@aif/shared";
-import { createRuntimeWorkflowSpec } from "@aif/runtime";
+import { createRuntimeWorkflowSpec, RuntimeExecutionError } from "@aif/runtime";
 import { flushActivityQueue, logActivity, persistAuditEvidencePayload } from "../hooks.js";
 import { executeSubagentQuery } from "../subagentQuery.js";
 import { computePendingPlanLayers, computePlanLayers } from "../planLayers.js";
@@ -952,6 +952,7 @@ function formatAuditEvidenceLedgerForPrompt(input: {
   taskId: string;
   auditPlanId: string | null;
   limit?: number;
+  maxPreviewChars?: number;
 }): string {
   const units = listAuditEvidenceEvents({
     taskId: input.taskId,
@@ -968,12 +969,16 @@ function formatAuditEvidenceLedgerForPrompt(input: {
     "Use only these exact full `ev_*` IDs when the report relies on the listed evidence. Copy the complete ID, including every hyphenated UUID segment; do not abbreviate it to an `ev_XXXXXXXX` prefix and do not invent evidence IDs.",
   ];
   for (const unit of units) {
-    const preview = (unit.outputPreview ?? "")
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, 3)
-      .join(" / ");
+    const preview = compactTextForPrompt(
+      "AUDIT_EVIDENCE_LEDGER_PREVIEW",
+      (unit.outputPreview ?? "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+        .join(" / "),
+      input.maxPreviewChars ?? 360,
+    ).replace(/\s+/g, " ");
     lines.push(
       [
         `- ${unit.id}`,
@@ -995,6 +1000,35 @@ function formatAuditEvidenceLedgerForPrompt(input: {
 function shouldAttemptAuditLedgerWriterRecovery(error: unknown): boolean {
   const runtimeError = findRuntimeExecutionError(error);
   return runtimeError?.category === "timeout" || runtimeError?.category === "context_length";
+}
+
+function isRepositoryInspectionBudgetExhaustionStatus(error: unknown): boolean {
+  const runtimeError = findRuntimeExecutionError(error);
+  return runtimeError?.providerMeta?.status === "repository_inspection_budget_exhausted";
+}
+
+function auditLedgerWriterRecoveryUnavailableError(
+  error: unknown,
+  reason: "zero_substantive_ledger_evidence" | "ledger_writer_recovery_failed",
+): RuntimeExecutionError {
+  if (isRepositoryInspectionBudgetExhaustionStatus(error)) {
+    const runtimeError = findRuntimeExecutionError(error);
+    if (runtimeError) return runtimeError;
+  }
+  const runtimeError = findRuntimeExecutionError(error);
+  return new RuntimeExecutionError(
+    `audit ledger-writer recovery unavailable: ${reason}`,
+    error,
+    "context_length",
+    {
+      providerMeta: {
+        ...(runtimeError?.providerMeta ?? {}),
+        status: "repository_inspection_budget_exhausted",
+        category: "context_length",
+        reason,
+      },
+    },
+  );
 }
 
 function formatAuditReportManifestContractForPrompt(input: {
@@ -4757,9 +4791,11 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
     },
   });
 
+  let auditLedgerWriterRecoveryAttempted = false;
   const runAuditLedgerWriterRecovery = async (error: unknown): Promise<string | null> => {
     if (!expectedAuditReportArtifactPath || task.reworkRequested) return null;
     if (!shouldAttemptAuditLedgerWriterRecovery(error)) return null;
+    auditLedgerWriterRecoveryAttempted = true;
 
     const auditPlanId = resolveAuditPlanId({
       taskId,
@@ -4770,12 +4806,15 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
       auditPlanId,
       limit: 80,
     }).filter((unit) => unit.evidenceGrade === "substantive");
-    if (substantiveEvidenceUnits.length === 0) return null;
+    if (substantiveEvidenceUnits.length === 0) {
+      throw auditLedgerWriterRecoveryUnavailableError(error, "zero_substantive_ledger_evidence");
+    }
 
     const recoveryLedger = formatAuditEvidenceLedgerForPrompt({
       taskId,
       auditPlanId,
-      limit: 80,
+      limit: 50,
+      maxPreviewChars: 240,
     });
     const writerPrompt = `${scopeConstraint}
 
@@ -4879,6 +4918,12 @@ Writer rules:
         "Agent",
         "audit-report-ledger-writer recovery failed after runtime timeout",
       );
+      if (auditLedgerWriterRecoveryAttempted) {
+        throw auditLedgerWriterRecoveryUnavailableError(
+          recoveryError,
+          "ledger_writer_recovery_failed",
+        );
+      }
     }
     if (!recoveredResultText) throw error;
     resultText = recoveredResultText;

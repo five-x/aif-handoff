@@ -2969,6 +2969,165 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain("Ledger writer done");
   });
 
+  it("throws controlled budget exhaustion when timeout recovery has no substantive ledger evidence", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    db.insert(tasks)
+      .values({
+        id: "task-audit-timeout-ledger-empty",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: [
+          "Scope: README.md",
+          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Allowed changes: only create/update audit/architecture.md.",
+          "Report artifact: audit/architecture.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Inspect scoped files and write the audit report.",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-timeout-ledger-empty",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-timeout-ledger-empty"],
+      artifacts: [
+        {
+          taskId: "task-audit-timeout-ledger-empty",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+    queryMock.mockImplementationOnce(() => {
+      throw new RuntimeExecutionError(
+        "Run timeout: qwen-local-agent exceeded 180000ms limit",
+        undefined,
+        "timeout",
+      );
+    });
+
+    await expect(
+      runImplementer("task-audit-timeout-ledger-empty", projectRoot),
+    ).rejects.toMatchObject({
+      category: "context_length",
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+        reason: "zero_substantive_ledger_evidence",
+      }),
+    });
+    expect(queryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws controlled budget exhaustion when ledger-writer recovery fails", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    }).trim();
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-budget-ledger-writer-fail",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: [
+          "Scope: README.md",
+          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Allowed changes: only create/update audit/architecture.md.",
+          "Report artifact: audit/architecture.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Inspect scoped files and write the audit report.",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-budget-ledger-writer-fail",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-budget-ledger-writer-fail"],
+      artifacts: [
+        {
+          taskId: "task-audit-budget-ledger-writer-fail",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-budget-ledger-writer-fail");
+    if (!artifact) throw new Error("missing report artifact");
+    appendAuditEvidenceEvent({
+      id: "ev_budget_writer_00000000-0000-4000-8000-000000000001",
+      taskId: "task-audit-budget-ledger-writer-fail",
+      auditPlanId: `batch:${artifact.batchId}:task:task-audit-budget-ledger-writer-fail`,
+      sourceSnapshotId: `git:${head}:tree`,
+      toolName: "read_file",
+      evidenceKind: "file_read",
+      evidenceGrade: "substantive",
+      scopeIds: ["README.md"],
+      riskHypothesisIds: ["risk-architecture-1"],
+      pathHashes: [],
+      pathRangeHashes: [],
+      command: null,
+      exitCode: null,
+      outputSha256: "b".repeat(64),
+      outputPreview: "[read_file README.md lines 1-2 of 2]\n# Project\nArchitecture notes.",
+      outputPreviewTruncated: false,
+      parsedSummary: { outputBytes: 64, outputLineCount: 3, previewChars: 64, exitCode: null },
+      redactionStatus: "clean",
+      createdAt: "2026-05-21T00:00:00.000Z",
+    });
+    queryMock
+      .mockImplementationOnce(() => {
+        throw new RuntimeExecutionError(
+          "Run timeout: qwen-local-agent exceeded 180000ms limit",
+          undefined,
+          "timeout",
+        );
+      })
+      .mockImplementationOnce(() => {
+        throw new Error("ledger writer failed");
+      });
+
+    await expect(
+      runImplementer("task-audit-budget-ledger-writer-fail", projectRoot),
+    ).rejects.toMatchObject({
+      category: "context_length",
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+        reason: "ledger_writer_recovery_failed",
+      }),
+    });
+    expect(queryMock).toHaveBeenCalledTimes(2);
+    const writerCall = queryMock.mock.calls[1]?.[0] as { prompt: string };
+    expect(writerCall.prompt).toContain("AUDIT REPORT LEDGER WRITER MODE");
+  });
+
   it("terminalizes repeated deterministic audit report repair before runtime rework", async () => {
     const db = testDb.current;
     mkdirSync(join(projectRoot, "audit"), { recursive: true });

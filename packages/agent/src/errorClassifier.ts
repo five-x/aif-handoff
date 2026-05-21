@@ -47,6 +47,17 @@ export function findRuntimeExecutionError(err: unknown): RuntimeExecutionError |
   return null;
 }
 
+export function isRepositoryInspectionBudgetExhaustionError(err: unknown): boolean {
+  const runtimeError = findRuntimeExecutionError(err);
+  if (!runtimeError) return false;
+  const status =
+    runtimeError.providerMeta && typeof runtimeError.providerMeta.status === "string"
+      ? runtimeError.providerMeta.status
+      : null;
+  if (status === "repository_inspection_budget_exhausted") return true;
+  return /repository inspection budget exhausted/i.test(runtimeError.message);
+}
+
 export function findRuntimeCapabilityError(err: unknown): RuntimeCapabilityError | null {
   if (err instanceof RuntimeCapabilityError) {
     return err;

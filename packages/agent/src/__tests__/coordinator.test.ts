@@ -202,6 +202,7 @@ describe("coordinator", () => {
     runtimeId?: string;
     providerId?: string;
     transport?: string | null;
+    baseUrl?: string | null;
     enabled?: boolean;
     options?: Record<string, unknown>;
     snapshot?: Record<string, unknown> | null;
@@ -216,6 +217,7 @@ describe("coordinator", () => {
         runtimeId: input.runtimeId ?? "claude",
         providerId: input.providerId ?? "anthropic",
         transport: input.transport ?? null,
+        baseUrl: input.baseUrl ?? null,
         enabled: input.enabled ?? true,
         optionsJson: input.options ? JSON.stringify(input.options) : "{}",
         runtimeLimitSnapshotJson: input.snapshot ? JSON.stringify(input.snapshot) : null,
@@ -2617,6 +2619,172 @@ describe("coordinator", () => {
     expect(done!.runtimeOptionsJson).toContain("profile-fast-32k");
   });
 
+  it("terminalizes audit reports after repository-inspection budget exhaustion without context fallback", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("aif-audit-budget-exhausted-");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    insertRuntimeProfile({
+      id: "profile-fast-32k-budget",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-80k-budget",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-32k-budget",
+        defaultReviewRuntimeProfileId: "profile-heavy-80k-budget",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-budget-exhausted",
+        projectId: "test-project",
+        title: "Audit budget exhausted",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        roadmapAlias: "audit-budget-exhausted",
+        status: "implementing",
+        retryCount: 2,
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-budget-exhausted",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-budget-exhausted"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-budget-exhausted",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "qwen-local-agent did not finalize after repository inspection budget exhausted (1 inspection tool call(s)); denied 3 additional repository-inspection request(s).",
+        undefined,
+        "context_length",
+        {
+          providerMeta: {
+            status: "repository_inspection_budget_exhausted",
+            category: "context_length",
+          },
+        },
+      ),
+    );
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledTimes(1);
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-budget-exhausted"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toContain("repository_inspection_budget_exhausted");
+    expect(blocked!.blockedReason).not.toContain("Runtime context limit recovery");
+    expect(blocked!.runtimeOptionsJson ?? "").not.toContain("profile-heavy-80k-budget");
+    expect(blocked!.retryCount).toBe(2);
+
+    const artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-budget-exhausted",
+    );
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
+    const attempts = listRoadmapBatchArtifactAttempts(artifact!.id);
+    expect(attempts.at(-1)?.classification).toBe("source_inconclusive");
+    expect(attempts.at(-1)?.validationDetailsJson).toContain(
+      "repository_inspection_budget_exhausted",
+    );
+  });
+
+  it("blocks repository-inspection budget exhaustion without fallback when no report artifact exists", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-budget-no-artifact",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-budget-no-artifact",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-budget-no-artifact",
+        defaultReviewRuntimeProfileId: "profile-heavy-budget-no-artifact",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-budget-no-artifact",
+        projectId: "test-project",
+        title: "Audit budget no artifact",
+        description: "Scope: README.md\nReport artifact: audit/missing-contract.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 1,
+      })
+      .run();
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "qwen-local-agent exceeded max tool turns after repository inspection budget exhausted",
+        undefined,
+        "timeout",
+        {
+          providerMeta: {
+            status: "repository_inspection_budget_exhausted",
+            category: "timeout",
+          },
+        },
+      ),
+    );
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledTimes(1);
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-budget-no-artifact"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toContain("repository_inspection_budget_exhausted");
+    expect(blocked!.blockedReason).not.toContain("Runtime transient");
+    expect(blocked!.blockedReason).not.toContain("bounded source-audit scope");
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(1);
+    expect(blocked!.manualReviewRequired).toBe(true);
+    expect(blocked!.runtimeOptionsJson ?? "").not.toContain("profile-heavy-budget-no-artifact");
+    expect(blocked!.agentActivityLog).toContain(
+      "Repository inspection budget exhaustion blocked without runtime fallback",
+    );
+  });
+
   it("retries in progress with a durable one-shot fallback after transient implementer transport failure", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
@@ -2767,6 +2935,66 @@ describe("coordinator", () => {
     expect(retrying!.agentActivityLog).toContain(
       "Audit report timeout scheduled immediate bounded retry",
     );
+  });
+
+  it("blocks audit report timeout on endpoint cooldown instead of immediate fallback retry", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-audit-timeout-cooldown",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
+      options: { n_ctx: 32768 },
+    });
+    db.update(projects)
+      .set({ defaultTaskRuntimeProfileId: "profile-audit-timeout-cooldown" })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-timeout-cooldown",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-timeout-cooldown",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-timeout-cooldown"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-timeout-cooldown",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: "/tmp/test",
+        },
+      ],
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("endpoint cooling down", undefined, "timeout", {
+        retryAfterSeconds: 30,
+      }),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-timeout-cooldown"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toContain("Runtime request timed out");
+    expect(blocked!.blockedReason).not.toContain("Runtime audit report timeout recovery");
+    expect(blocked!.retryAfter).not.toBeNull();
+    expect(blocked!.retryCount).toBe(1);
   });
 
   it("keeps audit report transport failures in bounded recovery after fallback is active", async () => {
@@ -5091,6 +5319,60 @@ describe("coordinator", () => {
     const qwenCalls = vi
       .mocked(runImplementer)
       .mock.calls.filter(([taskId]) => String(taskId).startsWith("qwen-task-"));
+    expect(qwenCalls).toHaveLength(1);
+  });
+
+  it("serializes parallel qwen tasks across different profiles on the same 8005 endpoint", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-qwen-8005-a",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: { n_ctx: 65536, maxConcurrent: 3 },
+    });
+    insertRuntimeProfile({
+      id: "profile-qwen-8005-b",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: { n_ctx: 65536, maxConcurrent: 3 },
+    });
+    db.insert(projects)
+      .values({
+        id: "parallel-qwen-endpoint-proj",
+        name: "Parallel Qwen Endpoint",
+        rootPath: "/tmp/parallel-qwen-endpoint",
+        parallelEnabled: true,
+        defaultTaskRuntimeProfileId: "profile-qwen-8005-a",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "qwen-endpoint-task-1",
+        projectId: "parallel-qwen-endpoint-proj",
+        title: "Q1",
+        status: "implementing",
+        runtimeProfileId: "profile-qwen-8005-a",
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "qwen-endpoint-task-2",
+        projectId: "parallel-qwen-endpoint-proj",
+        title: "Q2",
+        status: "implementing",
+        runtimeProfileId: "profile-qwen-8005-b",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    const qwenCalls = vi
+      .mocked(runImplementer)
+      .mock.calls.filter(([taskId]) => String(taskId).startsWith("qwen-endpoint-task-"));
     expect(qwenCalls).toHaveLength(1);
   });
 

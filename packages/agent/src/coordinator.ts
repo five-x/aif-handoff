@@ -87,7 +87,11 @@ import {
 } from "./notifier.js";
 import { handleAutoReviewGate, type ReviewGateOutcome } from "./autoReviewHandler.js";
 import { classifyStageError } from "./stageErrorHandler.js";
-import { findRuntimeExecutionError, truncateReason } from "./errorClassifier.js";
+import {
+  findRuntimeExecutionError,
+  isRepositoryInspectionBudgetExhaustionError,
+  truncateReason,
+} from "./errorClassifier.js";
 import { setActiveStageAbortController } from "./stageAbort.js";
 import { setCoordinatorId, setRuntimeStageFallbackProfile } from "./subagentQuery.js";
 import {
@@ -205,6 +209,7 @@ export function getCoordinatorRuntimeCounters(): Readonly<typeof runtimeCounters
 
 export function resetCoordinatorRuntimeCountersForTests(): void {
   runtimeCounters.fastRetryStreamInterruptions = 0;
+  runtimeProfileSemaphore.reset();
 }
 
 export function getStageSemaphore(): StageSemaphore {
@@ -302,6 +307,7 @@ function readRuntimeProfileConcurrency(
 ): number {
   const globalMax = env.COORDINATOR_MAX_CONCURRENT_TASKS;
   if (!profile) return globalMax;
+  if (isProtectedLocalLlmEndpoint(profile)) return 1;
 
   const options = profile.options ?? {};
   const stageConcurrency =
@@ -318,7 +324,29 @@ function readRuntimeProfileConcurrency(
   return globalMax;
 }
 
+function protectedLocalLlmEndpoint(profile: RuntimeProfile | null | undefined): string | null {
+  const rawBaseUrl =
+    profile?.baseUrl ??
+    (typeof profile?.options?.baseUrl === "string" ? profile.options.baseUrl : null);
+  if (!rawBaseUrl) return null;
+  try {
+    const url = new URL(rawBaseUrl);
+    const port =
+      url.port || (url.protocol === "https:" ? "443" : url.protocol === "http:" ? "80" : "");
+    if (port !== "8003" && port !== "8005") return null;
+    return `${url.protocol}//${url.hostname}:${port}`;
+  } catch {
+    return null;
+  }
+}
+
+function isProtectedLocalLlmEndpoint(profile: RuntimeProfile | null | undefined): boolean {
+  return protectedLocalLlmEndpoint(profile) !== null;
+}
+
 function runtimeProfileSemaphoreKey(profile: RuntimeProfile | null | undefined): string | null {
+  const endpoint = protectedLocalLlmEndpoint(profile);
+  if (endpoint) return `runtime-endpoint:${endpoint}`;
   return profile?.id ? `runtime-profile:${profile.id}` : null;
 }
 
@@ -470,6 +498,85 @@ function clearContextFallbackForTask(taskId: string, stage: RuntimeStage): void 
   setRuntimeStageFallbackProfile({ taskId, stage, profileId: null });
 }
 
+function handleRepositoryInspectionBudgetExhaustion(input: {
+  task: TaskWithHydratedFields;
+  projectRoot: string;
+  stageLabel: CoordinatorStage;
+  stageInProgress: TaskStatus;
+  title: string;
+  err: unknown;
+}): boolean {
+  if (!isRepositoryInspectionBudgetExhaustionError(input.err)) return false;
+  const runtimeError = findRuntimeExecutionError(input.err);
+  const latestTask = (findTaskById(input.task.id) ?? input.task) as TaskWithHydratedFields;
+  const blockedReason =
+    "manual_review_required: repository_inspection_budget_exhausted; " +
+    "repository inspection budget was exhausted and compact finalization did not produce a trusted report. " +
+    "AIF will not retry with a full repository context or a larger fallback profile for this audit card.";
+  const handled = terminalizeRoadmapSourceReportAsInconclusive({
+    task: latestTask,
+    projectRoot: input.projectRoot,
+    fromStatus: input.stageInProgress,
+    title: input.title,
+    reason: "repository_inspection_budget_exhausted",
+    blockedReason,
+    reviewIterationCount: latestTask.reviewIterationCount ?? 0,
+    autoReviewState: latestTask.autoReviewState,
+    validationDetails: {
+      runtimeFailure: {
+        category: runtimeError?.category ?? null,
+        providerMeta: runtimeError?.providerMeta ?? null,
+        message: runtimeError ? truncateReason(runtimeError.message, 500) : null,
+      },
+    },
+  });
+  if (!handled) {
+    const nowIso = new Date().toISOString();
+    clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
+    updateTaskStatus(
+      latestTask.id,
+      "blocked_external",
+      {
+        blockedReason,
+        blockedFromStatus: input.stageInProgress,
+        retryAfter: null,
+        retryCount: latestTask.retryCount ?? 0,
+        reworkRequested: false,
+        manualReviewRequired: true,
+        runtimeOptionsJson: clearContextFallbackRuntimeOption(
+          latestTask.runtimeOptionsJson,
+          runtimeStageForCoordinatorTask(input.stageLabel, latestTask),
+        ),
+      },
+      { title: input.title, fromStatus: input.stageInProgress },
+    );
+    appendTaskActivityLog(
+      latestTask.id,
+      `[${nowIso}] Repository inspection budget exhaustion blocked without runtime fallback: ${truncateReason(blockedReason)}`,
+    );
+    log.warn(
+      {
+        taskId: latestTask.id,
+        stage: input.stageLabel,
+        runtimeCategory: runtimeError?.category ?? null,
+        providerMeta: runtimeError?.providerMeta ?? null,
+      },
+      "Blocked task after repository-inspection budget exhaustion without report artifact",
+    );
+    return true;
+  }
+  log.warn(
+    {
+      taskId: latestTask.id,
+      stage: input.stageLabel,
+      runtimeCategory: runtimeError?.category ?? null,
+      providerMeta: runtimeError?.providerMeta ?? null,
+    },
+    "Terminalized audit report after repository-inspection budget exhaustion",
+  );
+  return true;
+}
+
 function handleContextLengthRecovery(input: {
   task: TaskRow;
   stage: RuntimeStage;
@@ -480,6 +587,7 @@ function handleContextLengthRecovery(input: {
 }): boolean {
   const runtimeError = findRuntimeExecutionError(input.err);
   if (runtimeError?.category !== "context_length") return false;
+  if (isRepositoryInspectionBudgetExhaustionError(input.err)) return false;
 
   const nowIso = new Date().toISOString();
   const latestTask = findTaskById(input.task.id) ?? input.task;
@@ -614,6 +722,7 @@ function handleTransientRuntimeFallbackRecovery(input: {
   if (!runtimeError || !TRANSIENT_RUNTIME_FALLBACK_CATEGORIES.has(runtimeError.category)) {
     return false;
   }
+  if (isRepositoryInspectionBudgetExhaustionError(input.err)) return false;
   if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
 
   const nowIso = new Date().toISOString();
@@ -729,6 +838,8 @@ function handleAuditReportTimeoutRecovery(input: {
 }): boolean {
   const runtimeError = findRuntimeExecutionError(input.err);
   if (runtimeError?.category !== "timeout") return false;
+  if (isRepositoryInspectionBudgetExhaustionError(input.err)) return false;
+  if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   if (artifact?.role !== "report") return false;
 
@@ -1632,7 +1743,11 @@ function terminalizeRoadmapSourceReportAsInconclusive(input: {
   projectRoot: string;
   fromStatus: TaskStatus;
   title: string;
-  reason: "stalled_rework_loop" | "no_substantive_rework_delta" | "plan_quality_exhausted";
+  reason:
+    | "stalled_rework_loop"
+    | "no_substantive_rework_delta"
+    | "plan_quality_exhausted"
+    | "repository_inspection_budget_exhausted";
   blockedReason: string;
   reviewIterationCount: number;
   autoReviewState?: TaskWithHydratedFields["autoReviewState"];
@@ -2866,6 +2981,19 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     if (
       recoverWrittenAuditArtifactAfterRuntimeFailure({
         task,
+        projectRoot: executionRoot,
+        stageLabel: stage.label,
+        stageInProgress: stage.inProgress,
+        title: taskTitle,
+        err,
+      })
+    ) {
+      flushActivityQueue(task.id);
+      return false;
+    }
+    if (
+      handleRepositoryInspectionBudgetExhaustion({
+        task: (findTaskById(task.id) ?? task) as TaskWithHydratedFields,
         projectRoot: executionRoot,
         stageLabel: stage.label,
         stageInProgress: stage.inProgress,

@@ -28,6 +28,35 @@ const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 const REPOSITORY_INSPECTION_BUDGET_FINAL_DENIALS = 3;
 const DEFAULT_REPOSITORY_INSPECTION_BUDGET_FINAL_RESPONSE_TIMEOUT_MS = 3 * 60 * 1000;
+const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3;
+const MIN_FINALIZATION_OUTPUT_TOKENS = 512;
+const DEFAULT_ENDPOINT_COOLDOWN_MS = 30_000;
+const DEFAULT_ENDPOINT_HEALTH_TIMEOUT_MS = 5_000;
+const REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS = "repository_inspection_budget_exhausted";
+const LOCAL_ENDPOINT_BUDGETS = new Map([
+  [
+    "8003",
+    {
+      maxInputTokens: 20_000,
+      compactTargetInputTokens: 16_000,
+      maxOutputTokens: 4_000,
+      totalTokens: 24_000,
+      toolResultMaxChars: 1_500,
+      ledgerPreviewMaxChars: 320,
+    },
+  ],
+  [
+    "8005",
+    {
+      maxInputTokens: 60_000,
+      compactTargetInputTokens: 48_000,
+      maxOutputTokens: 8_000,
+      totalTokens: 68_000,
+      toolResultMaxChars: 3_000,
+      ledgerPreviewMaxChars: 480,
+    },
+  ],
+]);
 const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set([
   "finalize_audit_report_manifest",
   "git_commit",
@@ -50,6 +79,8 @@ const REPOSITORY_INSPECTION_TOOL_NAMES = new Set([
 ]);
 const AUDIT_ARTIFACT_MAINTENANCE_TOOL_NAMES = new Set(["list_files", "read_file"]);
 const MAX_REPOSITORY_INSPECTION_TOOL_BUDGET = 200;
+const endpointSemaphores = new Map();
+const endpointCircuitBreakers = new Map();
 const READ_ONLY_WORKFLOWS = new Set([
   "planner",
   "plan-checker",
@@ -133,6 +164,34 @@ function resolveBaseUrl(input) {
   }
   return baseUrl.replace(/\/+$/, "");
 }
+function parseEndpoint(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    const port =
+      url.port || (url.protocol === "https:" ? "443" : url.protocol === "http:" ? "80" : "");
+    if (!port) return null;
+    return {
+      key: `${url.protocol}//${url.hostname}:${port}`,
+      port,
+      label: `${url.hostname}:${port}`,
+    };
+  } catch {
+    return null;
+  }
+}
+function resolveEndpointPolicy(input) {
+  const baseUrl = resolveBaseUrl(input);
+  const endpoint = parseEndpoint(baseUrl);
+  const budget = endpoint ? (LOCAL_ENDPOINT_BUDGETS.get(endpoint.port) ?? null) : null;
+  return { baseUrl, endpoint, budget };
+}
+export function resetQwenLocalAgentEndpointStateForTests() {
+  endpointSemaphores.clear();
+  endpointCircuitBreakers.clear();
+}
+export function getQwenLocalAgentEndpointPolicyForTests(input) {
+  return resolveEndpointPolicy(input);
+}
 function resolveApiKeyEnvVar(input) {
   const options = asRecord(input.options);
   return (
@@ -209,6 +268,130 @@ function isAbortTimeoutError(error) {
     error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")
   );
 }
+function abortError(message) {
+  return new DOMException(message, "AbortError");
+}
+function truncateTextForRequest(value, maxChars) {
+  const text = String(value ?? "");
+  if (!Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) return text;
+  const note = `\n[... compacted ${text.length - maxChars} chars for local endpoint budget ...]\n`;
+  const available = Math.max(0, maxChars - note.length);
+  if (available <= 0) return "[... compacted for local endpoint budget ...]";
+  const head = Math.ceil(available * 0.65);
+  const tail = available - head;
+  return `${text.slice(0, head).trimEnd()}${note}${text.slice(text.length - tail).trimStart()}`;
+}
+function estimateMessagesInputTokens(input, messages) {
+  const options = asRecord(input.options);
+  const tools =
+    options.toolsEnabled !== false ? resolveQwenToolsForWorkflow(input.workflowKind) : [];
+  const serialized = JSON.stringify({
+    messages,
+    ...(tools.length > 0 ? { tools, tool_choice: "auto" } : {}),
+  });
+  return Math.ceil(serialized.length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+}
+export function estimateQwenLocalAgentInputTokens(input, messages = buildMessages(input)) {
+  return estimateMessagesInputTokens(input, messages);
+}
+function countToolCallsInMessages(messages) {
+  return messages.reduce((count, message) => {
+    const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls.length : 0;
+    return count + toolCalls;
+  }, 0);
+}
+function buildCompactAuditEvidenceLedger(toolContext, maxPreviewChars) {
+  const units = Array.isArray(toolContext?.auditEvidenceUnits)
+    ? toolContext.auditEvidenceUnits
+    : [];
+  if (units.length === 0) {
+    return "No runtime audit evidence units are available in this compacted transcript.";
+  }
+  const visible = units.slice(-40);
+  const omitted = Math.max(0, units.length - visible.length);
+  return [
+    `Runtime audit evidence units available: ${units.length}${omitted > 0 ? ` (${omitted} earlier unit(s) omitted)` : ""}.`,
+    "Use exact ev_* IDs only; do not invent or abbreviate evidence IDs.",
+    ...visible.map((unit) => {
+      const preview = truncateTextForRequest(
+        (unit.outputPreview ?? "")
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .slice(0, 3)
+          .join(" / "),
+        maxPreviewChars,
+      );
+      return [
+        `- ${unit.id}`,
+        `kind=${unit.evidenceKind}/${unit.evidenceGrade}`,
+        `tool=${unit.toolName}`,
+        `scope=${Array.isArray(unit.scopeIds) ? unit.scopeIds.join(",") : "none"}`,
+        `risks=${
+          Array.isArray(unit.riskHypothesisIds) ? unit.riskHypothesisIds.join(",") : "none"
+        }`,
+        preview ? `preview=${preview}` : null,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+    }),
+  ].join("\n");
+}
+function compactMessagesForEndpointBudget(input, messages, toolContext, reason, budget) {
+  const systemMessage = messages.find((message) => message?.role === "system") ?? messages[0];
+  const firstUser = messages.find((message) => message?.role === "user");
+  const allowedWritePaths = input.execution?.allowedWritePaths ?? [];
+  const auditArtifactPath = input.execution?.auditReportArtifactPath ?? null;
+  const taskPrompt = truncateTextForRequest(
+    typeof firstUser?.content === "string" ? firstUser.content : input.prompt,
+    budget.compactTargetInputTokens * TOKEN_ESTIMATE_CHARS_PER_TOKEN * 0.35,
+  );
+  const ledger = buildCompactAuditEvidenceLedger(toolContext, budget.ledgerPreviewMaxChars);
+  const compactUser = [
+    "QWEN COMPACT CONTEXT MODE",
+    `reason=${reason}`,
+    "The prior transcript was compacted to protect the local endpoint context and memory budget.",
+    "Do not request broad repository inspection. Use existing evidence and write/finalize the requested artifact, or produce a controlled source_inconclusive result with exact coverage gaps.",
+    auditArtifactPath ? `Expected audit report artifact: ${auditArtifactPath}` : null,
+    allowedWritePaths.length > 0 ? `Allowed write paths: ${allowedWritePaths.join(", ")}` : null,
+    "",
+    "Original task prompt (compacted):",
+    taskPrompt,
+    "",
+    "Compact audit evidence ledger:",
+    ledger,
+  ]
+    .filter((entry) => entry !== null)
+    .join("\n");
+  return [
+    systemMessage,
+    {
+      role: "user",
+      content: compactUser,
+    },
+  ].filter(Boolean);
+}
+function maxOutputTokensForBudget(options, budget, estimatedInputTokens) {
+  const configured = readNumber(options.maxTokens);
+  if (!budget) return configured;
+  const endpointCap = Math.min(
+    budget.maxOutputTokens,
+    Math.max(0, budget.totalTokens - estimatedInputTokens),
+  );
+  const requested = configured == null ? budget.maxOutputTokens : configured;
+  return Math.min(requested, endpointCap);
+}
+function remainingEndpointOutputBudget(budget, estimatedInputTokens) {
+  if (!budget) return null;
+  return Math.min(budget.maxOutputTokens, Math.max(0, budget.totalTokens - estimatedInputTokens));
+}
+function requestEstimateFailureClass(error) {
+  if (error instanceof RuntimeExecutionError) {
+    const status = asRecord(error.providerMeta).status;
+    return typeof status === "string" ? status : error.category;
+  }
+  return endpointFailureCategory(error);
+}
 function buildMessages(input) {
   const messages = [];
   const baseSystem =
@@ -250,6 +433,21 @@ function addUsage(left, right) {
 }
 export function buildQwenLocalAgentRequestBody(input, messages = buildMessages(input)) {
   const options = asRecord(input.options);
+  const { budget } = resolveEndpointPolicy(input);
+  const estimatedInputTokens = estimateMessagesInputTokens(input, messages);
+  if (budget && estimatedInputTokens > budget.maxInputTokens) {
+    throw new RuntimeExecutionError(
+      `qwen-local-agent request estimate ${estimatedInputTokens} input token(s) exceeds endpoint input budget ${budget.maxInputTokens}`,
+      undefined,
+      "context_length",
+      {
+        providerMeta: {
+          status: "endpoint_input_budget_exceeded",
+          category: "context_length",
+        },
+      },
+    );
+  }
   const body = {
     model: resolveModel(input),
     messages,
@@ -261,10 +459,26 @@ export function buildQwenLocalAgentRequestBody(input, messages = buildMessages(i
     body.tool_choice = "auto";
   }
   const temperature = readNumber(options.temperature);
-  const maxTokens = readNumber(options.maxTokens);
+  const maxTokens = maxOutputTokensForBudget(options, budget, estimatedInputTokens);
   const topP = readNumber(options.topP);
   if (temperature != null) body.temperature = temperature;
-  if (maxTokens != null) body.max_tokens = maxTokens;
+  if (maxTokens != null) {
+    const remainingOutputBudget = remainingEndpointOutputBudget(budget, estimatedInputTokens);
+    if (remainingOutputBudget != null && remainingOutputBudget < MIN_FINALIZATION_OUTPUT_TOKENS) {
+      throw new RuntimeExecutionError(
+        `qwen-local-agent request estimate ${estimatedInputTokens} input token(s) leaves only ${remainingOutputBudget} output token(s), below minimum ${MIN_FINALIZATION_OUTPUT_TOKENS}`,
+        undefined,
+        "context_length",
+        {
+          providerMeta: {
+            status: "endpoint_total_budget_exceeded",
+            category: "context_length",
+          },
+        },
+      );
+    }
+    body.max_tokens = Math.floor(maxTokens);
+  }
   if (topP != null) body.top_p = topP;
   return body;
 }
@@ -526,19 +740,285 @@ function isLowQualityAuditReportRepairValidationResult(toolName, result) {
     result.output.includes("repairDirective=LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED")
   );
 }
-async function postChatCompletions(input, messages, signal) {
-  const baseUrl = resolveBaseUrl(input);
-  return fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
+function readEndpointCooldownMs(input) {
+  const options = asRecord(input.options);
+  const raw = readNumber(options.endpointCooldownMs);
+  if (raw == null || raw <= 0) return DEFAULT_ENDPOINT_COOLDOWN_MS;
+  return Math.max(1_000, Math.floor(raw));
+}
+function readEndpointHealthTimeoutMs(input) {
+  const options = asRecord(input.options);
+  const raw = readNumber(options.endpointHealthTimeoutMs);
+  if (raw == null || raw <= 0) return DEFAULT_ENDPOINT_HEALTH_TIMEOUT_MS;
+  return Math.max(1_000, Math.floor(raw));
+}
+function endpointFailureCategory(error) {
+  if (error instanceof RuntimeExecutionError) return error.category;
+  if (isAbortTimeoutError(error)) return "timeout";
+  return classifyQwenLocalAgentRuntimeError(error).category;
+}
+function shouldTripEndpointCircuit(error) {
+  return ["transport", "stream", "timeout"].includes(endpointFailureCategory(error));
+}
+function endpointRetryAfterSeconds(state) {
+  if (!state?.cooldownUntilMs) return null;
+  const remainingMs = state.cooldownUntilMs - Date.now();
+  if (remainingMs <= 0) return null;
+  return Math.max(1, Math.ceil(remainingMs / 1000));
+}
+function isEndpointCooldownRuntimeError(error) {
+  return (
+    error instanceof RuntimeExecutionError &&
+    asRecord(error.providerMeta).status === "endpoint_cooldown"
+  );
+}
+function withEndpointCooldown(error, retryAfterSeconds) {
+  return new RuntimeExecutionError(
+    error instanceof Error ? error.message : String(error),
+    error,
+    endpointFailureCategory(error),
+    {
+      retryAfterSeconds,
+      providerMeta: {
+        status: "endpoint_cooldown",
+        category: endpointFailureCategory(error),
+        retryAfterSeconds,
+      },
+    },
+  );
+}
+function withRepositoryInspectionBudgetStatus(error, categoryOverride) {
+  const category = categoryOverride ?? endpointFailureCategory(error);
+  return new RuntimeExecutionError(
+    error instanceof Error ? error.message : String(error),
+    error,
+    category,
+    {
+      retryAfterSeconds: error instanceof RuntimeExecutionError ? error.retryAfterSeconds : null,
+      providerMeta: {
+        ...(error instanceof RuntimeExecutionError ? (error.providerMeta ?? {}) : {}),
+        status: REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS,
+        category,
+      },
+    },
+  );
+}
+function buildEndpointCircuitError(endpoint, retryAfterSeconds, cause) {
+  return new RuntimeExecutionError(
+    `qwen-local-agent endpoint ${endpoint.label} is cooling down after transport/timeout failure`,
+    cause,
+    "transport",
+    {
+      retryAfterSeconds,
+      providerMeta: {
+        status: "endpoint_cooldown",
+        category: "transport",
+        retryAfterSeconds,
+      },
+    },
+  );
+}
+async function checkEndpointHealth(input, baseUrl, signal) {
+  const timeoutSignal = buildCombinedTimeoutSignal(signal, readEndpointHealthTimeoutMs(input));
+  const response = await fetch(`${baseUrl}/models`, {
+    method: "GET",
     headers: buildHeaders(input),
-    body: JSON.stringify(buildQwenLocalAgentRequestBody(input, messages)),
-    ...(signal ? { signal } : {}),
+    ...(timeoutSignal ? { signal: timeoutSignal } : {}),
   });
+  if (!response.ok) {
+    throw classifyQwenLocalAgentRuntimeError(
+      new Error(`Qwen local endpoint health check failed with status ${response.status}`),
+      response.status,
+    );
+  }
+}
+async function assertEndpointCircuitAllowsRequest(input, policy, signal, logger) {
+  if (!policy.endpoint || !policy.budget) return;
+  const state = endpointCircuitBreakers.get(policy.endpoint.key);
+  if (!state) return;
+  const remainingSeconds = endpointRetryAfterSeconds(state);
+  if (remainingSeconds && remainingSeconds > 0) {
+    throw buildEndpointCircuitError(policy.endpoint, remainingSeconds);
+  }
+  try {
+    await checkEndpointHealth(input, policy.baseUrl, signal);
+    endpointCircuitBreakers.delete(policy.endpoint.key);
+    logger?.info?.(
+      {
+        runtimeId: input.runtimeId,
+        profileId: input.profileId ?? null,
+        baseUrl: policy.baseUrl,
+        endpointKey: policy.endpoint.key,
+      },
+      "Qwen local endpoint circuit closed after health check",
+    );
+  } catch (error) {
+    const cooldownMs = readEndpointCooldownMs(input);
+    const failures = (state.failures ?? 0) + 1;
+    endpointCircuitBreakers.set(policy.endpoint.key, {
+      failures,
+      cooldownUntilMs: Date.now() + cooldownMs,
+    });
+    throw buildEndpointCircuitError(
+      policy.endpoint,
+      Math.ceil(cooldownMs / 1000),
+      classifyQwenLocalAgentRuntimeError(error),
+    );
+  }
+}
+function recordEndpointFailure(input, policy, error, logger) {
+  if (isEndpointCooldownRuntimeError(error)) return null;
+  if (!policy.endpoint || !policy.budget || !shouldTripEndpointCircuit(error)) return null;
+  const previous = endpointCircuitBreakers.get(policy.endpoint.key);
+  const cooldownMs = readEndpointCooldownMs(input);
+  const failures = (previous?.failures ?? 0) + 1;
+  const multiplier = Math.min(failures, 4);
+  const retryAfterSeconds = Math.ceil((cooldownMs * multiplier) / 1000);
+  endpointCircuitBreakers.set(policy.endpoint.key, {
+    failures,
+    cooldownUntilMs: Date.now() + retryAfterSeconds * 1000,
+  });
+  logger?.warn?.(
+    {
+      runtimeId: input.runtimeId,
+      profileId: input.profileId ?? null,
+      baseUrl: policy.baseUrl,
+      endpointKey: policy.endpoint.key,
+      endpointFailureCategory: endpointFailureCategory(error),
+      failures,
+      retryAfterSeconds,
+    },
+    "Opened qwen-local-agent endpoint circuit after runtime failure",
+  );
+  return retryAfterSeconds;
+}
+async function acquireEndpointSemaphore(policy, signal) {
+  if (!policy.endpoint || !policy.budget) return () => {};
+  let state = endpointSemaphores.get(policy.endpoint.key);
+  if (!state) {
+    state = { active: false, queue: [] };
+    endpointSemaphores.set(policy.endpoint.key, state);
+  }
+  if (signal?.aborted) {
+    throw abortError("qwen-local-agent endpoint semaphore wait aborted");
+  }
+  if (state.active) {
+    await new Promise((resolve, reject) => {
+      const entry = {
+        resolve: () => {
+          cleanup();
+          resolve();
+        },
+        reject,
+        onAbort: () => {
+          const index = state.queue.indexOf(entry);
+          if (index >= 0) state.queue.splice(index, 1);
+          cleanup();
+          reject(abortError("qwen-local-agent endpoint semaphore wait aborted"));
+        },
+      };
+      const cleanup = () => {
+        signal?.removeEventListener?.("abort", entry.onAbort);
+      };
+      signal?.addEventListener?.("abort", entry.onAbort, { once: true });
+      state.queue.push(entry);
+    });
+  }
+  state.active = true;
+  return () => {
+    const next = state.queue.shift();
+    if (next) {
+      next.resolve();
+    } else {
+      state.active = false;
+    }
+  };
+}
+async function withEndpointSemaphore(policy, signal, fn) {
+  if (!policy.endpoint || !policy.budget) return fn();
+  const release = await acquireEndpointSemaphore(policy, signal);
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+async function postChatCompletions(input, messages, signal, requestMeta, logger) {
+  const policy = resolveEndpointPolicy(input);
+  const estimatedInputTokens = estimateMessagesInputTokens(input, messages);
+  let body;
+  const projectedMaxOutputTokens = maxOutputTokensForBudget(
+    asRecord(input.options),
+    policy.budget,
+    estimatedInputTokens,
+  );
+  const startedAt = Date.now();
+  const logContext = {
+    runtimeId: input.runtimeId,
+    profileId: input.profileId ?? null,
+    baseUrl: policy.baseUrl,
+    estimatedInputTokens,
+    maxOutputTokens:
+      typeof projectedMaxOutputTokens === "number" ? Math.floor(projectedMaxOutputTokens) : null,
+    toolCallCount: requestMeta?.toolCallCount ?? countToolCallsInMessages(messages),
+    retryCount: requestMeta?.retryCount ?? 0,
+    turn: requestMeta?.turn ?? null,
+  };
+  try {
+    body = buildQwenLocalAgentRequestBody(input, messages);
+    logContext.maxOutputTokens =
+      typeof body.max_tokens === "number" ? body.max_tokens : logContext.maxOutputTokens;
+    await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
+    const response = await withEndpointSemaphore(policy, signal, () =>
+      fetch(`${policy.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: buildHeaders(input),
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
+      }),
+    );
+    logger?.info?.(
+      {
+        ...logContext,
+        durationMs: Date.now() - startedAt,
+        failureClass: response.ok ? null : `http_${response.status}`,
+      },
+      "qwen-local-agent request estimate",
+    );
+    if (response.ok) {
+      if (policy.endpoint) endpointCircuitBreakers.delete(policy.endpoint.key);
+    } else {
+      const httpError = classifyQwenLocalAgentRuntimeError(
+        new Error(`Qwen local agent request failed with status ${response.status}`),
+        response.status,
+      );
+      const retryAfterSeconds = recordEndpointFailure(input, policy, httpError, logger);
+      if (retryAfterSeconds != null) {
+        throw withEndpointCooldown(httpError, retryAfterSeconds);
+      }
+    }
+    return response;
+  } catch (error) {
+    const retryAfterSeconds = recordEndpointFailure(input, policy, error, logger);
+    logger?.warn?.(
+      {
+        ...logContext,
+        durationMs: Date.now() - startedAt,
+        failureClass: requestEstimateFailureClass(error),
+        retryAfterSeconds,
+      },
+      "qwen-local-agent request estimate",
+    );
+    if (retryAfterSeconds != null) {
+      throw withEndpointCooldown(error, retryAfterSeconds);
+    }
+    throw error;
+  }
 }
 export async function runQwenLocalAgentApi(input, logger) {
   assertQwenLocalAgentApiTransport(input);
   const signal = buildRunTimeoutSignal(input);
-  const messages = buildMessages(input);
+  let messages = buildMessages(input);
   const events = [];
   const maxTurns = readMaxToolTurns(input);
   const repositoryInspectionToolBudget = readRepositoryInspectionToolBudget(input);
@@ -562,6 +1042,8 @@ export async function runQwenLocalAgentApi(input, logger) {
   let repeatedToolCallSuppressions = 0;
   let repositoryInspectionToolCalls = 0;
   let repositoryInspectionBudgetWarnings = 0;
+  let repositoryInspectionBudgetCompacted = false;
+  let toolCallCount = 0;
   let auditLowQualityRepairLock = false;
   const toolCallSignatureCounts = new Map();
   logger?.info?.(
@@ -576,10 +1058,44 @@ export async function runQwenLocalAgentApi(input, logger) {
   );
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
-      const budgetFinalizationTimeoutActive =
+      const repositoryInspectionBudgetExhausted =
         repositoryInspectionToolBudget != null &&
-        repositoryInspectionToolCalls >= repositoryInspectionToolBudget &&
+        repositoryInspectionToolCalls >= repositoryInspectionToolBudget;
+      const budgetFinalizationTimeoutActive =
+        repositoryInspectionBudgetExhausted &&
         repositoryInspectionBudgetFinalResponseTimeoutMs != null;
+      const policy = resolveEndpointPolicy(input);
+      const estimatedBeforeCompaction = estimateMessagesInputTokens(input, messages);
+      const shouldCompactForEndpointBudget =
+        policy.budget &&
+        (estimatedBeforeCompaction > policy.budget.maxInputTokens ||
+          (budgetFinalizationTimeoutActive && !repositoryInspectionBudgetCompacted));
+      if (shouldCompactForEndpointBudget) {
+        messages = compactMessagesForEndpointBudget(
+          input,
+          messages,
+          toolContext,
+          budgetFinalizationTimeoutActive
+            ? "repository_inspection_budget_exhausted"
+            : "endpoint_input_budget",
+          policy.budget,
+        );
+        repositoryInspectionBudgetCompacted = true;
+        logger?.warn?.(
+          {
+            runtimeId: input.runtimeId,
+            profileId: input.profileId ?? null,
+            baseUrl: policy.baseUrl,
+            turn,
+            estimatedInputTokensBefore: estimatedBeforeCompaction,
+            estimatedInputTokensAfter: estimateMessagesInputTokens(input, messages),
+            maxInputTokens: policy.budget.maxInputTokens,
+            repositoryInspectionToolCalls,
+            repositoryInspectionToolBudget,
+          },
+          "Compacted qwen-local-agent transcript before local endpoint request",
+        );
+      }
       let response;
       try {
         response = await postChatCompletions(
@@ -588,13 +1104,34 @@ export async function runQwenLocalAgentApi(input, logger) {
           budgetFinalizationTimeoutActive
             ? buildCombinedTimeoutSignal(signal, repositoryInspectionBudgetFinalResponseTimeoutMs)
             : signal,
+          { turn, toolCallCount, retryCount: turn },
+          logger,
         );
       } catch (error) {
-        if (budgetFinalizationTimeoutActive && isAbortTimeoutError(error)) {
+        const finalizationFailureCategory = endpointFailureCategory(error);
+        if (
+          repositoryInspectionBudgetExhausted &&
+          finalizationFailureCategory === "context_length"
+        ) {
+          throw withRepositoryInspectionBudgetStatus(error, "context_length");
+        }
+        if (
+          budgetFinalizationTimeoutActive &&
+          (isAbortTimeoutError(error) || finalizationFailureCategory === "timeout")
+        ) {
+          const runtimeError = error instanceof RuntimeExecutionError ? error : null;
           throw new RuntimeExecutionError(
             `Finalization timeout: qwen-local-agent exceeded ${repositoryInspectionBudgetFinalResponseTimeoutMs}ms after repository inspection budget exhaustion (${repositoryInspectionToolBudget} inspection tool call(s)).`,
             error,
             "timeout",
+            {
+              retryAfterSeconds: runtimeError?.retryAfterSeconds ?? null,
+              providerMeta: {
+                ...(runtimeError?.providerMeta ?? {}),
+                status: REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS,
+                category: "timeout",
+              },
+            },
           );
         }
         throw error;
@@ -616,6 +1153,7 @@ export async function runQwenLocalAgentApi(input, logger) {
       const message = asRecord(choice.message);
       const content = typeof message.content === "string" ? message.content : "";
       const toolCalls = normalizeToolCalls(message.tool_calls);
+      toolCallCount += toolCalls.length;
       if (toolCalls.length === 0) {
         logger?.debug?.(
           {
@@ -785,7 +1323,10 @@ export async function runQwenLocalAgentApi(input, logger) {
           name: toolCall.function.name,
           content: qwenToolResultForModel(
             result,
-            toolContext.maxOutputChars,
+            Math.min(
+              toolContext.maxOutputChars,
+              resolveEndpointPolicy(input).budget?.toolResultMaxChars ?? toolContext.maxOutputChars,
+            ),
             auditEvidenceUnit ?? auditEvidenceResult,
           ),
         });
@@ -828,10 +1369,62 @@ export async function runQwenLocalAgentApi(input, logger) {
           throw new RuntimeExecutionError(
             `qwen-local-agent did not finalize after repository inspection budget exhausted (${repositoryInspectionToolBudget} inspection tool call(s)); denied ${repositoryInspectionBudgetWarnings} additional repository-inspection request(s).`,
             undefined,
-            "timeout",
+            "context_length",
+            {
+              providerMeta: {
+                status: REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS,
+                category: "context_length",
+                reason: "repeated_repository_inspection_after_budget_exhaustion",
+              },
+            },
           );
         }
       }
+      if (
+        repositoryInspectionToolBudget != null &&
+        repositoryInspectionToolCalls >= repositoryInspectionToolBudget &&
+        !repositoryInspectionBudgetCompacted
+      ) {
+        const policyAfterTools = resolveEndpointPolicy(input);
+        if (policyAfterTools.budget) {
+          messages = compactMessagesForEndpointBudget(
+            input,
+            messages,
+            toolContext,
+            "repository_inspection_budget_exhausted",
+            policyAfterTools.budget,
+          );
+          repositoryInspectionBudgetCompacted = true;
+          logger?.warn?.(
+            {
+              runtimeId: input.runtimeId,
+              profileId: input.profileId ?? null,
+              baseUrl: policyAfterTools.baseUrl,
+              repositoryInspectionToolCalls,
+              repositoryInspectionToolBudget,
+              estimatedInputTokensAfter: estimateMessagesInputTokens(input, messages),
+            },
+            "Compacted qwen-local-agent transcript after repository inspection budget exhaustion",
+          );
+        }
+      }
+    }
+    if (
+      repositoryInspectionToolBudget != null &&
+      repositoryInspectionToolCalls >= repositoryInspectionToolBudget
+    ) {
+      throw new RuntimeExecutionError(
+        `qwen-local-agent exceeded max tool turns (${maxTurns}) after repository inspection budget exhausted (${repositoryInspectionToolBudget} inspection tool call(s)).`,
+        undefined,
+        "context_length",
+        {
+          providerMeta: {
+            status: REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS,
+            category: "context_length",
+            reason: "max_tool_turns_after_repository_inspection_budget_exhaustion",
+          },
+        },
+      );
     }
     throw new RuntimeExecutionError(
       `qwen-local-agent exceeded max tool turns (${maxTurns})`,
