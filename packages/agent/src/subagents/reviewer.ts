@@ -487,6 +487,53 @@ function buildDeterministicAuditReportInvalidReviewComments(input: {
   ].join("\n");
 }
 
+function buildDeterministicAuditArtifactMissingReviewComments(input: {
+  strategy: AutoReviewStrategy;
+  iteration: number;
+  artifactPath: string;
+  role: "report" | "synthesis";
+  previousFindings: AutoReviewFinding[];
+}): string {
+  const issueCode =
+    input.role === "synthesis" ? "missing_synthesis_artifact" : "missing_report_artifact";
+  const issueText = `Expected audit ${input.role} artifact \`${input.artifactPath}\` was not found in the task checkout. Rework must create the exact declared artifact before reviewer sidecars can be trusted.`;
+  const previousFindingLines =
+    input.previousFindings.length > 0
+      ? input.previousFindings.map(
+          (finding) =>
+            `- [${finding.id}] ${finding.source} | still_blocking | The expected artifact \`${input.artifactPath}\` is still missing, so closure evidence is unavailable.`,
+        )
+      : ["- none"];
+
+  return [
+    "## Auto Review Metadata",
+    `- Strategy: ${input.strategy}`,
+    `- Review Iteration: ${input.iteration}`,
+    "- Deterministic Review: audit_artifact_missing",
+    "",
+    "## Previous Findings",
+    ...previousFindingLines,
+    "",
+    "## Blocking Findings",
+    `- [${createAutoReviewFindingId("review_gate", issueText)}] review_gate | Audit report validator blocked completion (${issueCode}): ${issueText}`,
+    "",
+    "## Advisories",
+    `- review_gate | Sidecar review was skipped because \`${input.artifactPath}\` is missing; running broad repository review would hide the artifact-production failure and risk budget exhaustion.`,
+    "",
+    "## Security Coverage",
+    "- secret_leaks | not_checked | Audit artifact is missing, so report-backed security evidence cannot be trusted.",
+    "- permissions_sandbox | not_checked | Audit artifact is missing, so permission and sandbox claims cannot be verified.",
+    "- unsafe_shell_network_file | not_checked | Audit artifact is missing, so shell, network, and file-operation claims cannot be verified.",
+    "- dependency_config | not_checked | Audit artifact is missing, so dependency/configuration claims cannot be verified.",
+    "",
+    "## Raw Code Review",
+    `Deterministic review-gate rejected ${input.artifactPath}: ${issueText}`,
+    "",
+    "## Raw Security Audit",
+    `Security sidecar skipped because deterministic audit artifact validation already produced ${issueCode}.`,
+  ].join("\n");
+}
+
 function buildDeterministicAuditSynthesisInconclusiveReviewComments(input: {
   strategy: AutoReviewStrategy;
   iteration: number;
@@ -603,6 +650,16 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
         artifact: roadmapArtifact,
       })
     : null;
+  const missingReviewArtifact =
+    roadmapArtifact && (roadmapArtifact.role === "report" || roadmapArtifact.role === "synthesis")
+      ? (() => {
+          const resolvedArtifact = resolveSafeArtifactPath(
+            projectRoot,
+            roadmapArtifact.artifactPath,
+          );
+          return !resolvedArtifact || !existsSync(resolvedArtifact.absolutePath);
+        })()
+      : false;
   const canUseDeterministicAuditReportReview =
     roadmapArtifact &&
     deterministicReviewValidation &&
@@ -697,6 +754,36 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
         issueCodes: auditReportValidationIssueCodes(deterministicReviewValidation),
       },
       "Review stage completed deterministically for invalid audit report artifact",
+    );
+    return;
+  }
+
+  if (
+    missingReviewArtifact &&
+    roadmapArtifact &&
+    (roadmapArtifact.role === "report" || roadmapArtifact.role === "synthesis")
+  ) {
+    recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
+    const combinedReview = buildDeterministicAuditArtifactMissingReviewComments({
+      strategy,
+      iteration: reviewIteration,
+      artifactPath: roadmapArtifact.artifactPath,
+      role: roadmapArtifact.role,
+      previousFindings,
+    });
+    setTaskFields(taskId, {
+      reviewComments: combinedReview,
+      updatedAt: new Date().toISOString(),
+    });
+    logActivity(taskId, "Agent", "review stage blocked deterministically (audit artifact missing)");
+    flushActivityQueue(taskId);
+    log.info(
+      {
+        taskId,
+        artifactPath: roadmapArtifact.artifactPath,
+        role: roadmapArtifact.role,
+      },
+      "Review stage completed deterministically for missing audit artifact",
     );
     return;
   }

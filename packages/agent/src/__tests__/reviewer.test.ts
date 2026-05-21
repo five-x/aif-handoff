@@ -396,6 +396,63 @@ describe("runReviewer", () => {
     );
   });
 
+  it("uses deterministic blocker output when the expected audit report artifact is missing", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-missing-audit-report-"));
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-missing-audit-reviewer",
+        name: "Missing Audit Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-missing-audit-reviewer",
+        projectId: "project-missing-audit-reviewer",
+        title: "Audit runtime configuration",
+        description: "Scope: src\nReport artifact: audit/runtime.md",
+        taskIntent: "audit",
+        status: "review",
+        useSubagents: true,
+        implementationLog: "Runtime moved to review without creating audit/runtime.md.",
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-missing-audit-reviewer",
+      roadmapAlias: "audit-missing-reviewer",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-missing-audit-reviewer"],
+      artifacts: [
+        {
+          taskId: "task-missing-audit-reviewer",
+          role: "report",
+          artifactPath: "audit/runtime.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runReviewer("task-missing-audit-reviewer", projectRoot);
+
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-missing-audit-reviewer"))
+      .get();
+    expect(storedTask?.reviewComments).toContain("- Deterministic Review: audit_artifact_missing");
+    expect(storedTask?.reviewComments).toContain("missing_report_artifact");
+    expect(storedTask?.reviewComments).toContain(
+      "Sidecar review was skipped because `audit/runtime.md` is missing",
+    );
+    expect(storedTask?.agentActivityLog).toContain(
+      "Agent: review stage blocked deterministically (audit artifact missing)",
+    );
+    expect(storedTask?.agentActivityLog).toContain("Tool: read_file audit/runtime.md");
+  });
+
   it("accepts synthesis references to validated source report artifacts outside the current checkout", async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-synthesis-report-"));
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
