@@ -26,6 +26,7 @@ const DEFAULT_MAX_TOOL_TURNS = 12;
 const MAX_CONFIGURED_TOOL_TURNS = 400;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
+const REPOSITORY_INSPECTION_BUDGET_FINAL_DENIALS = 3;
 const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set([
   "finalize_audit_report_manifest",
   "git_commit",
@@ -765,6 +766,26 @@ export async function runQwenLocalAgentApi(input, logger) {
             events,
             raw,
           };
+        }
+        if (
+          shouldDenyRepositoryInspection &&
+          repositoryInspectionBudgetWarnings >= REPOSITORY_INSPECTION_BUDGET_FINAL_DENIALS
+        ) {
+          logger?.warn?.(
+            {
+              runtimeId: input.runtimeId,
+              profileId: input.profileId ?? null,
+              repositoryInspectionToolBudget,
+              repositoryInspectionBudgetWarnings,
+              deniedToolName: sanitizeQwenToolNameForLog(toolCall.function.name),
+            },
+            "Stopped qwen-local-agent after repeated repository-inspection budget denials",
+          );
+          throw new RuntimeExecutionError(
+            `qwen-local-agent did not finalize after repository inspection budget exhausted (${repositoryInspectionToolBudget} inspection tool call(s)); denied ${repositoryInspectionBudgetWarnings} additional repository-inspection request(s).`,
+            undefined,
+            "timeout",
+          );
         }
       }
     }

@@ -639,6 +639,132 @@ describe("qwen-local-agent adapter", () => {
     expect(JSON.stringify(auditEvents)).not.toContain("AGENTS.md");
     expect(JSON.stringify(auditEvents)).not.toContain("audit/architecture.md");
   });
+  it("stops instead of hanging when repository inspection continues after budget exhaustion", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-loop-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    await writeFile(path.join(root, "src", "app.ts"), "export const app = true;\n", "utf8");
+    const events = [];
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-allowed",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-denied",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "src/app.ts" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-search-denied",
+                    type: "function",
+                    function: {
+                      name: "search_files",
+                      arguments: JSON.stringify({ path: "src", pattern: "app" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-list-denied",
+                    type: "function",
+                    function: {
+                      name: "list_files",
+                      arguments: JSON.stringify({ path: "src" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-inspection-budget-loop",
+          choices: [{ message: { role: "assistant", content: "late finalization" } }],
+        }),
+      );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          execution: {
+            repositoryInspectionToolBudget: 1,
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "timeout",
+      message: expect.stringContaining("did not finalize after repository inspection budget"),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(events)).toContain("Repository inspection budget exhausted");
+    expect(JSON.stringify(events)).toContain("README.md");
+    expect(JSON.stringify(events)).not.toContain("late finalization");
+  });
   it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));
     const repeatedToolCall = {
