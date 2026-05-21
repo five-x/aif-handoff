@@ -949,6 +949,130 @@ describe("qwen-local-agent adapter", () => {
     expect(toolMessage.content).toContain("Do not spend more source-inspection budget");
   });
 
+  it("blocks source inspection after a low-quality audit report repair directive", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-repair-lock-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    const body = [
+      "# Audit",
+      "",
+      "### Finding AOB-1: bot.py is a monolithic hub file with cross-module responsibilities",
+      "Evidence: `src/config.ts:1` defines the runtime timeout.",
+      "Risk: The file contains 1871 lines and serves as the central hub, creating a single point of architectural failure.",
+      "Proposed fix: Extract handlers.",
+      "",
+    ].join("\n");
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(
+        {
+          version: 1,
+          auditPlanId: "task:task-audit",
+          taskId: "task-audit",
+          artifactPath: "audit/report.md",
+          contentSha256: computeAuditReportContentSha256(body),
+          sourceSnapshot: { id: "git:abc:def", commit: "abc", tree: "def", dirty: false },
+          outcome: "validated_findings_present",
+          scopeCoverage: [{ root: "src/config.ts", evidenceRefs: ["ev-1"] }],
+          riskHypotheses: [{ id: "risk-1", description: "weak architecture", status: "covered" }],
+          findings: [{ id: "AOB-1", evidenceRefs: ["ev-1"] }],
+          noFindingsClaims: [],
+          evidenceRefs: ["ev-1"],
+        },
+        null,
+        2,
+      )}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-repair-lock-validate",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-1",
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-repair-lock-source-read",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-2",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "src/config.ts" }),
+                    },
+                  },
+                  {
+                    id: "call-3",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-repair-lock-final",
+          choices: [{ message: { role: "assistant", content: "stopped for repair" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+          auditReportTaskId: "task-audit",
+        },
+      }),
+    );
+
+    const thirdRequest = JSON.parse(fetchMock.mock.calls[2][1].body);
+    const toolMessages = thirdRequest.messages.filter((message) => message.role === "tool");
+    const deniedSourceRead = toolMessages.find((message) => message.tool_call_id === "call-2");
+    const allowedArtifactRead = toolMessages.find((message) => message.tool_call_id === "call-3");
+    expect(deniedSourceRead.content).toContain("low-quality repair lock is active");
+    expect(deniedSourceRead.content).toContain("Use the existing ledger evidence");
+    expect(allowedArtifactRead.content).toContain("# Audit");
+    expect(JSON.stringify(result.events)).not.toContain("read_file audit evidence captured");
+  });
+
   it("does not log raw provider-supplied unknown tool names or ids", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-unknown-tool-redaction-"));
     const events = [];

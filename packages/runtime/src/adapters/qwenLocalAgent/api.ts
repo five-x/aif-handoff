@@ -390,6 +390,7 @@ function emitToolResult(input, events, toolCall, result) {
 }
 function buildAuditEvidenceResultForTool(input, toolContext, toolCall, args, result) {
   if (result.repositoryInspectionBudgetExhausted === true) return;
+  if (result.auditReportRepairInspectionDenied === true) return;
   const toolName = sanitizeQwenToolNameForLog(toolCall.function.name);
   if (isAuditArtifactMaintenanceToolCall(input, toolContext, toolName, args)) return;
   let evidenceKind = null;
@@ -480,6 +481,30 @@ function repositoryInspectionBudgetExhaustedResult(toolName, budget) {
     repositoryInspectionBudgetExhausted: true,
   };
 }
+function auditReportRepairInspectionDeniedResult(toolName) {
+  const safeToolName = sanitizeQwenToolNameForLog(toolName);
+  return {
+    ok: false,
+    output: "",
+    error: [
+      `Audit report low-quality repair lock is active; ${safeToolName} cannot inspect source files during this repair.`,
+      "Use the existing ledger evidence and edit only the audit report artifact.",
+      "If the rejected findings cannot be made concrete from existing evidence, delete them and rewrite the report as validated_no_findings or source_inconclusive as appropriate.",
+      "Then call finalize_audit_report_manifest and validate_audit_report again.",
+    ].join(" "),
+    exitCode: null,
+    touchedFiles: [],
+    auditReportRepairInspectionDenied: true,
+  };
+}
+function isLowQualityAuditReportRepairValidationResult(toolName, result) {
+  return (
+    toolName === "validate_audit_report" &&
+    result?.ok === false &&
+    typeof result.output === "string" &&
+    result.output.includes("repairDirective=LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED")
+  );
+}
 async function postChatCompletions(input, messages, signal) {
   const baseUrl = resolveBaseUrl(input);
   return fetch(`${baseUrl}/chat/completions`, {
@@ -514,6 +539,7 @@ export async function runQwenLocalAgentApi(input, logger) {
   let repeatedToolCallSuppressions = 0;
   let repositoryInspectionToolCalls = 0;
   let repositoryInspectionBudgetWarnings = 0;
+  let auditLowQualityRepairLock = false;
   const toolCallSignatureCounts = new Map();
   logger?.info?.(
     {
@@ -629,32 +655,47 @@ export async function runQwenLocalAgentApi(input, logger) {
           repositoryInspectionToolBudget != null &&
           isRepositoryInspectionTool &&
           repositoryInspectionToolCalls >= repositoryInspectionToolBudget;
+        const shouldDenyAuditRepairInspection =
+          toolAllowed &&
+          !shouldSuppressRepeatedCall &&
+          auditLowQualityRepairLock &&
+          isRepositoryInspectionTool;
         const result = shouldSuppressRepeatedCall
           ? repeatedToolCallResult(
               toolCall.function.name,
               Math.max(repeatedToolCallCount, signatureCount),
               effectiveRepeatedToolCallLimit,
             )
-          : shouldDenyRepositoryInspection
-            ? repositoryInspectionBudgetExhaustedResult(
-                toolCall.function.name,
-                repositoryInspectionToolBudget,
-              )
-            : !toolAllowed
-              ? {
-                  ok: false,
-                  output: "",
-                  error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
-                  exitCode: null,
-                  touchedFiles: [],
-                }
-              : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+          : shouldDenyAuditRepairInspection
+            ? auditReportRepairInspectionDeniedResult(toolCall.function.name)
+            : shouldDenyRepositoryInspection
+              ? repositoryInspectionBudgetExhaustedResult(
+                  toolCall.function.name,
+                  repositoryInspectionToolBudget,
+                )
+              : !toolAllowed
+                ? {
+                    ok: false,
+                    output: "",
+                    error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
+                    exitCode: null,
+                    touchedFiles: [],
+                  }
+                : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+        if (
+          toolAllowed &&
+          !shouldSuppressRepeatedCall &&
+          isLowQualityAuditReportRepairValidationResult(toolCall.function.name, result)
+        ) {
+          auditLowQualityRepairLock = true;
+        }
         if (
           toolAllowed &&
           !shouldSuppressRepeatedCall &&
           repositoryInspectionToolBudget != null &&
           isRepositoryInspectionTool &&
-          !shouldDenyRepositoryInspection
+          !shouldDenyRepositoryInspection &&
+          !shouldDenyAuditRepairInspection
         ) {
           repositoryInspectionToolCalls += 1;
         }
