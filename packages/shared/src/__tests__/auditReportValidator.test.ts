@@ -2257,6 +2257,75 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).toContain("contradictory_search_evidence");
   });
 
+  it("rejects absence claims based on search output that skipped large files", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "backup_crypto.py"),
+      "def encrypt_directory():\n    pass\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "src", "bot_intevra", "service.py"),
+      "from bot_intevra.backup_crypto import encrypt_directory\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/bot_intevra"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add backup wiring", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const skippedOutput =
+      '[search_files query="backup_crypto" path=src/bot_intevra files=25 matches=0]\n\n[skipped 1 large files]';
+    const body = [
+      "# Architecture Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked commands:",
+      '- Command `search_files query="backup_crypto" path=src/bot_intevra` output: `matches=0`',
+      "",
+      "Conclusion: no `backup_crypto` references exist in `src/bot_intevra`; the module is unused.",
+      "",
+    ].join("\n");
+    const evidenceUnit: AuditEvidenceUnit = {
+      ...manifestEvidenceUnit({
+        snapshot,
+        scopeIds: ["src/bot_intevra"],
+        riskHypothesisIds: ["risk-1"],
+      }),
+      toolName: "search_files",
+      outputPreview: skippedOutput,
+      parsedSummary: {
+        outputBytes: skippedOutput.length,
+        outputLineCount: skippedOutput.split(/\r?\n/).length,
+        previewChars: skippedOutput.length,
+        exitCode: 0,
+      },
+    };
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        scopeCoverage: [{ root: "src/bot_intevra", covered: true, evidenceRefs: ["ev-1"] }],
+        noFindingsClaims: [{ id: "nf-1", scopeIds: ["src/bot_intevra"], evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toContain("unverified_inspection_claim");
+  });
+
   it("rejects no-findings manifests without risk hypothesis ids", () => {
     const root = initRepo();
     const snapshot = gitSnapshot(root);

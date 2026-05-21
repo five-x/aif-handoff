@@ -932,6 +932,80 @@ function validateReportedRuntimeCommandClaims(input: {
   ];
 }
 
+interface SkippedSearchEvidence {
+  id: string;
+  query: string;
+  path: string;
+}
+
+function searchEvidenceUnitsForValidation(input: {
+  manifest: AuditReportManifest | null;
+  evidenceUnits: AuditEvidenceUnit[];
+}): AuditEvidenceUnit[] {
+  if (!input.manifest || input.manifest.evidenceRefs.length === 0) return input.evidenceUnits;
+  const byId = new Map(input.evidenceUnits.map((entry) => [entry.id, entry]));
+  return input.manifest.evidenceRefs
+    .map((id) => byId.get(id))
+    .filter((entry): entry is AuditEvidenceUnit => Boolean(entry));
+}
+
+function collectSkippedSearchEvidence(input: {
+  manifest: AuditReportManifest | null;
+  evidenceUnits: AuditEvidenceUnit[];
+}): SkippedSearchEvidence[] {
+  const skipped: SkippedSearchEvidence[] = [];
+  for (const unit of searchEvidenceUnitsForValidation(input)) {
+    if (unit.toolName !== "search_files") continue;
+    const output = unit.outputPreview ?? "";
+    if (!/\[skipped\s+\d+\s+large files?\]/i.test(output)) continue;
+    const firstLine = output.split(/\r?\n/)[0] ?? "";
+    const query = firstLine.match(/\bquery\s*=\s*["`]([^"`]+)["`]/i)?.[1];
+    const path = firstLine.match(/\bpath\s*=\s*([^\s\]]+)/i)?.[1];
+    if (!query || !path) continue;
+    skipped.push({ id: unit.id, query, path: normalizeRelativePath(path) });
+  }
+  return skipped;
+}
+
+function textMakesAbsenceClaimFromSkippedSearch(
+  text: string,
+  evidence: SkippedSearchEvidence,
+): boolean {
+  const terms = normalizeSearchQueryTerms(evidence.query);
+  if (terms.length === 0) return false;
+  const absencePattern =
+    /\b(?:zero\s+matches|0\s+matches|no\s+matches|returned\s+zero\s+matches|not\s+imported|not\s+wired|no\s+(?:imports?|references?|callers?|wired\s+caller|path\s+to|declared\s+caller)|orphaned|dead\s+code|unused)\b/i;
+  for (const line of text.split(/\r?\n/)) {
+    if (!absencePattern.test(line)) continue;
+    const normalizedLine = line.toLowerCase();
+    if (terms.some((term) => normalizedLine.includes(term))) return true;
+  }
+  return false;
+}
+
+function validateSkippedSearchAbsenceClaims(input: {
+  text: string;
+  manifest: AuditReportManifest | null;
+  evidenceUnits: AuditEvidenceUnit[];
+  requireLedgerEvidence: boolean;
+}): AuditReportValidationIssue[] {
+  if (!input.requireLedgerEvidence) return [];
+  const unsupportedClaims = collectSkippedSearchEvidence(input).filter((entry) =>
+    textMakesAbsenceClaimFromSkippedSearch(input.text, entry),
+  );
+  if (unsupportedClaims.length === 0) return [];
+  return [
+    issue(
+      "unverified_inspection_claim",
+      `Report artifact uses search output that skipped large files as proof of absence/no-wiring: ${unsupportedClaims
+        .slice(0, 5)
+        .map((entry) => `${entry.path} query=${entry.query} evidence=${entry.id}`)
+        .join("; ")}.`,
+      unsupportedClaims.map((entry) => entry.path),
+    ),
+  ];
+}
+
 function reportedCommandAppearsInAllowedArtifact(input: {
   claim: ReportedAuditCommandClaim;
   projectRoot: string;
@@ -2134,6 +2208,14 @@ export function validateAuditReportArtifact(
         manifest,
         evidenceUnits: input.auditEvidenceUnits ?? [],
         allowedEvidenceArtifactPaths,
+        requireLedgerEvidence: input.requireLedgerEvidence ?? false,
+      }),
+    );
+    issues.push(
+      ...validateSkippedSearchAbsenceClaims({
+        text: classificationText,
+        manifest,
+        evidenceUnits: input.auditEvidenceUnits ?? [],
         requireLedgerEvidence: input.requireLedgerEvidence ?? false,
       }),
     );
