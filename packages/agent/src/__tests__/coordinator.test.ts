@@ -2952,6 +2952,120 @@ describe("coordinator", () => {
     );
   });
 
+  it("validates an uncommitted branch audit artifact before transient fallback", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-branch-post-write-transport-");
+    const branchName = "feature/audit-branch-post-write";
+    execFileSync("git", ["checkout", "-b", branchName], { cwd: rootPath, stdio: "ignore" });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "architecture.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "## Finding: Central hub observation",
+        "Evidence: `README.md:1` identifies the fixture repository.",
+        "Risk: The module is a central hub and may become a single point of architectural failure.",
+        "Proposed fix: Document ownership boundaries.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) synthetic audit commit",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "-N", "audit/architecture.md"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    insertRuntimeProfile({
+      id: "profile-current-post-write",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: {},
+    });
+    insertRuntimeProfile({
+      id: "profile-fallback-post-write",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: {},
+    });
+    db.update(projects)
+      .set({
+        rootPath,
+        defaultTaskRuntimeProfileId: "profile-current-post-write",
+        defaultReviewRuntimeProfileId: "profile-fallback-post-write",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    const runtimeOptionsJson = JSON.stringify({
+      __aifRuntimeSelection: {
+        audit: { profileId: "profile-current-post-write", source: "project_default" },
+      },
+    });
+    db.insert(tasks)
+      .values({
+        id: "task-audit-branch-post-write-transport",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 0,
+        branchName,
+        runtimeOptionsJson,
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-branch-post-write-transport",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-branch-post-write-transport"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-branch-post-write-transport",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: rootPath,
+          branchName,
+        },
+      ],
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("fetch failed", undefined, "transport"),
+    );
+
+    await pollAndProcess();
+
+    const retrying = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-branch-post-write-transport"))
+      .get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.reworkRequested).toBe(true);
+    expect(retrying!.manualReviewRequired).toBe(false);
+    expect(retrying!.retryCount).toBe(0);
+    expect(retrying!.blockedReason).toContain("runtime_transport_after_audit_artifact_write");
+    expect(retrying!.blockedReason).not.toContain("Runtime transient transport recovery");
+    expect(retrying!.runtimeOptionsJson).not.toContain("profile-fallback-post-write");
+    expect(retrying!.agentActivityLog).toContain(
+      "Runtime failure after audit artifact write was converted to validation-guided audit recovery",
+    );
+
+    const artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-branch-post-write-transport",
+    );
+    expect(artifact?.state).not.toBe("external_blocked");
+    const attempts = artifact ? listRoadmapBatchArtifactAttempts(artifact.id) : [];
+    expect(attempts.at(0)?.reworkStatus).toBe("rework_requested");
+  });
+
   it.each([
     {
       name: "other-project",

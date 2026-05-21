@@ -913,15 +913,29 @@ function recoverWrittenAuditArtifactAfterRuntimeFailure(input: {
   const artifact = findRoadmapBatchArtifactByTaskId(latestTask.id);
   if (artifact?.role !== "report") return false;
 
-  const artifactRead = readAuditArtifact(input.projectRoot, artifact, {
-    branchName: latestTask.branchName ?? artifact.branchName,
+  let artifactRead = readAuditArtifact(input.projectRoot, artifact, {
+    // A post-write runtime failure can happen before the agent commits the
+    // report. Prefer the live checkout/worktree here; branch reads only see
+    // committed content and would incorrectly route to generic runtime fallback.
+    branchName: null,
     worktreePath: latestTask.worktreePath ?? artifact.worktreePath,
     projectRoot: input.projectRoot,
   });
+  if (!artifactRead.text?.trim() && (latestTask.branchName || artifact.branchName)) {
+    artifactRead = readAuditArtifact(input.projectRoot, artifact, {
+      branchName: latestTask.branchName ?? artifact.branchName,
+      worktreePath: latestTask.worktreePath ?? artifact.worktreePath,
+      projectRoot: input.projectRoot,
+    });
+  }
   if (!artifactRead.text?.trim()) return false;
 
+  const validationTask =
+    artifactRead.source === "project_root"
+      ? { ...latestTask, branchName: null, worktreePath: null }
+      : latestTask;
   const blocked = blockTaskForCompletionEvidenceIfNeeded({
-    task: latestTask,
+    task: validationTask,
     projectRoot: input.projectRoot,
     fromStatus: input.stageInProgress,
     title: input.title,
@@ -1428,9 +1442,18 @@ function readAuditArtifact(
     };
   }
 
-  const artifactRoot = overrides?.projectRoot ?? artifact.projectRoot ?? projectRoot;
-  const branchName = overrides?.branchName ?? artifact.branchName ?? null;
-  const worktreePath = overrides?.worktreePath ?? artifact.worktreePath ?? null;
+  const artifactRoot =
+    overrides && "projectRoot" in overrides
+      ? (overrides.projectRoot ?? projectRoot)
+      : (artifact.projectRoot ?? projectRoot);
+  const branchName =
+    overrides && "branchName" in overrides
+      ? (overrides.branchName ?? null)
+      : (artifact.branchName ?? null);
+  const worktreePath =
+    overrides && "worktreePath" in overrides
+      ? (overrides.worktreePath ?? null)
+      : (artifact.worktreePath ?? null);
   const gitPath = normalizeArtifactGitPath(artifact.artifactPath);
 
   if (!gitPath || !isSafeRelativeArtifactPath(artifact.artifactPath)) {
