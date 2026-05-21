@@ -824,6 +824,101 @@ describe("qwen-local-agent adapter", () => {
     );
   });
 
+  it("directs low-quality audit report repairs to delete weak findings", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-low-quality-repair-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    const body = [
+      "# Audit",
+      "",
+      "### Finding AOB-1: bot.py is a monolithic hub file with cross-module responsibilities",
+      "Evidence: `src/config.ts:1` defines the runtime timeout.",
+      "Risk: The file contains 1871 lines and serves as the central hub that imports and coordinates submodules, creating a single point of architectural failure.",
+      "Proposed fix: Extract a dispatcher and add `__all__` declarations.",
+      "",
+      "### Finding AOB-2: optional dependency without runtime guard",
+      "Evidence: `src/config.ts:1` defines the runtime timeout.",
+      "Risk: The optional dependency guard creates a latent runtime failure.",
+      "Proposed fix: Add a runtime guard.",
+      "",
+    ].join("\n");
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(
+        {
+          version: 1,
+          auditPlanId: "task:task-audit",
+          taskId: "task-audit",
+          artifactPath: "audit/report.md",
+          contentSha256: computeAuditReportContentSha256(body),
+          sourceSnapshot: { id: "git:abc:def", commit: "abc", tree: "def", dirty: false },
+          outcome: "validated_findings_present",
+          scopeCoverage: [{ root: "src/config.ts", evidenceRefs: ["ev-1"] }],
+          riskHypotheses: [{ id: "risk-1", description: "weak architecture", status: "covered" }],
+          findings: [{ id: "AOB-1", evidenceRefs: ["ev-1"] }],
+          noFindingsClaims: [],
+          evidenceRefs: ["ev-1"],
+        },
+        null,
+        2,
+      )}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-low-quality-validate",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-1",
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-low-quality-final",
+          choices: [{ message: { role: "assistant", content: "stopped for repair" } }],
+        }),
+      );
+
+    await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+          auditReportTaskId: "task-audit",
+        },
+      }),
+    );
+
+    const secondRequest = JSON.parse(fetchMock.mock.calls[1][1].body);
+    const toolMessage = secondRequest.messages.find((message) => message.role === "tool");
+    expect(toolMessage.content).toContain("LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED");
+    expect(toolMessage.content).toContain("Delete every finding");
+    expect(toolMessage.content).toContain("do not rephrase");
+  });
+
   it("does not log raw provider-supplied unknown tool names or ids", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-unknown-tool-redaction-"));
     const events = [];

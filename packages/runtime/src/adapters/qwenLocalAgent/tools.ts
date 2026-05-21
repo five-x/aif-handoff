@@ -522,7 +522,7 @@ function truncateForModel(value, maxChars) {
   return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
 }
 function safeModelText(value, maxChars) {
-  return truncateForModel(redactProviderText(value), maxChars);
+  return truncateForModel(redactProviderText(value, { maxLength: null }), maxChars);
 }
 const TOOL_ARGUMENT_KEYS = {
   list_files: new Set(["path", "maxEntries"]),
@@ -1481,9 +1481,37 @@ function formatAuditReportValidationResult(validation) {
     `sourceClassification=${validation.sourceClassification}`,
     `manifestStatus=${validation.manifestStatus}`,
     `issueCodes=${issueCodes.length > 0 ? issueCodes.join(",") : "none"}`,
+    formatAuditReportRepairDirective(validation, issueCodes),
     `referencedPaths=${validation.referencedPaths.length}`,
     `missingReferencedPaths=${validation.missingReferencedPaths.length}`,
     issueLines ? `issues:\n${issueLines}${suffix}` : "issues: none",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+function formatAuditReportRepairDirective(validation, issueCodes) {
+  const issueCodeSet = new Set(issueCodes);
+  const lowQualityCodes = [
+    "fake_or_placeholder_command_output",
+    "future_tense_git_verification",
+    "governance_observation_as_finding",
+    "non_actionable_audit_observation",
+    "speculative_audit_claim",
+    "synthetic_git_output",
+    "unverified_inspection_claim",
+  ];
+  const lowQualityIssuePresent = lowQualityCodes.some((code) => issueCodeSet.has(code));
+  const invalidTrustedOutcome =
+    issueCodeSet.has("manifest_outcome_mismatch") &&
+    ["insufficient_substantive_evidence", "inventory_only_invalid", "source_inconclusive"].includes(
+      validation.sourceClassification,
+    );
+  if (!lowQualityIssuePresent && !invalidTrustedOutcome) return "";
+  return [
+    "repairDirective=LOW_QUALITY_AUDIT_REPORT_REPAIR_REQUIRED",
+    "Delete every finding that depends on the rejected observation; do not rephrase it as another trusted finding.",
+    "If no finding remains after deleting weak observations, rewrite the report as validated_no_findings with an Evidence Register and risk-by-risk no-findings claims tied to observed file:line evidence.",
+    "Do not promote line-count, central-hub, monolithic-file, import-count, module-boundary-documentation, __all__, optional-dependency/runtime-guard, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
   ].join("\n");
 }
 function runAuditReportValidationForTarget(context, target, content) {

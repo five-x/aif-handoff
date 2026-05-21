@@ -278,6 +278,7 @@ function isFiniteNonNegative(value: unknown): value is number {
 
 interface RedactProviderTextOptions {
   redactEmailsAndUrls?: boolean;
+  maxLength?: number | null;
 }
 
 interface RedactProviderTextWithPatternsOptions {
@@ -324,7 +325,7 @@ function redactProviderTextWithPatterns(
 export function redactProviderText(raw: string, options: RedactProviderTextOptions = {}): string {
   const patterns =
     options.redactEmailsAndUrls === false ? SECRET_VALUE_PATTERNS : STRICT_TOKEN_PATTERNS;
-  return redactProviderTextWithPatterns(raw, patterns);
+  return redactProviderTextWithPatterns(raw, patterns, { maxLength: options.maxLength });
 }
 
 /**

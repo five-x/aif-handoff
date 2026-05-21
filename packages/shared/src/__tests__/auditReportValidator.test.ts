@@ -2130,6 +2130,86 @@ describe("auditReportValidator", () => {
     expect(issueCodes(result)).toContain("non_actionable_audit_observation");
   });
 
+  it("rejects cosmetic rewrites of weak roadmap architecture findings", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "bot_intevra", "bot.py"),
+      "from bot_intevra.attachments import SavedAttachment\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "src", "bot_intevra", "attachments.py"),
+      "class SavedAttachment:\n    pass\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "src", "bot_intevra", "backup_crypto.py"),
+      "try:\n    import pyaes\nexcept ImportError:\n    pyaes = None\n\ndef _require_crypto():\n    if pyaes is None:\n        raise RuntimeError('pyaes is required')\n",
+      "utf8",
+    );
+    writeFileSync(join(root, "AGENTS.md"), "<!-- Managed by codex-platform -->\n", "utf8");
+    writeFileSync(join(root, "pyproject.toml"), '[project]\nname = "bot-intevra"\n', "utf8");
+    execFileSync(
+      "git",
+      [
+        "add",
+        "AGENTS.md",
+        "pyproject.toml",
+        "src/bot_intevra/bot.py",
+        "src/bot_intevra/attachments.py",
+        "src/bot_intevra/backup_crypto.py",
+      ],
+      { cwd: root, stdio: "ignore" },
+    );
+    execFileSync("git", ["commit", "-m", "bot fixture", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Audit: Architecture and Ownership Boundaries",
+      "",
+      "### Finding AOB-1: bot.py is a monolithic hub file with cross-module responsibilities",
+      "Evidence: `src/bot_intevra/bot.py:1` imports from attachments.",
+      "Risk: The file contains 1871 lines and serves as the central hub that imports and coordinates attachments.py and backup_crypto.py, creating a single point of architectural failure and a broad responsibility set.",
+      "Proposed fix: Extract a dispatcher and define explicit interfaces with `__all__` declarations.",
+      "",
+      "### Finding AOB-2: backup_crypto.py has a conditional dependency on pyaes without runtime guard",
+      "Evidence: `src/bot_intevra/backup_crypto.py:1` starts the optional import block.",
+      "Risk: The optional dependency guard allows module import but creates a latent runtime failure and a NameError on pyaes.AESCBCEncrypt when encryption is called.",
+      "Proposed fix: Add a PYAES_AVAILABLE flag.",
+      "",
+      "### Finding AOB-3: README.md documents architecture but does not map these layers to actual module paths",
+      "Evidence: `README.md:1` documents the project.",
+      "Risk: Missing module-to-layer mapping creates ownership ambiguity.",
+      "Proposed fix: Add module-path mappings to README.md.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        taskId: "task-audit",
+        snapshot,
+        outcome: "validated_findings_present",
+      }),
+      projectRoot: root,
+      taskId: "task-audit",
+      expectedReportArtifactPath: "audit/runtime-audit.md",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining([
+        "non_actionable_audit_observation",
+        "governance_observation_as_finding",
+      ]),
+    );
+  });
+
   it("rejects zero-match search claims contradicted by cited path-line evidence", () => {
     const root = initRepo();
     mkdirSync(join(root, "src", "bot_intevra"), { recursive: true });
