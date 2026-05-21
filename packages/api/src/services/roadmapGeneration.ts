@@ -247,11 +247,25 @@ function isAuditOnlyRoadmapVision(vision: string | null | undefined): boolean {
 }
 
 function cleanPriorAuditContextFragment(value: string): string {
-  return value
+  let cleaned = value
     .replace(/^\s*(?:[-*]\s+|\[[ xX]\]\s+|#+\s*|>\s*)+/g, "")
-    .replace(/^prior audit context\s*:\s*/i, "")
+    .replace(
+      /\b(?:prior audit context|roadmap context|project description|architecture|roadmap alias|vision)\s*:\s*/gi,
+      "",
+    )
     .replace(/\s+/g, " ")
     .trim();
+  for (let previous = ""; previous !== cleaned; ) {
+    previous = cleaned;
+    cleaned = cleaned
+      .replace(
+        /^\s*(?:prior audit context|roadmap context|project description|architecture|roadmap alias|vision)\s*:\s*/i,
+        "",
+      )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  return cleaned;
 }
 
 function mentionsPriorInconclusiveAudit(value: string): boolean {
@@ -289,6 +303,24 @@ function extractPriorInconclusiveAuditContext(input: {
 
 function formatPriorAuditContextLine(priorContext: string): string {
   return `Prior audit context: ${priorContext}`;
+}
+
+function normalizeRoadmapPriorAuditContextLines(
+  roadmapContent: string,
+  priorContext: string | null,
+): string {
+  const expected = priorContext ? normalizeAuditContextText(priorContext) : null;
+  return roadmapContent
+    .split(/\r?\n/)
+    .filter((line) => {
+      const match = line.match(/^(\s*[-*]\s+)prior audit context\s*:\s*(.+?)\s*$/i);
+      if (!match) return true;
+      if (!expected) return false;
+      const cleaned = cleanPriorAuditContextFragment(match[2] ?? "");
+      if (normalizeAuditContextText(cleaned) !== expected) return false;
+      return true;
+    })
+    .join("\n");
 }
 
 function normalizeAuditContextText(value: string): string {
@@ -820,7 +852,9 @@ function buildAuditRoadmapItem(
     "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
     "  - Manifest requirements: include a fenced `audit-report-manifest` JSON block with version 1, auditPlanId `task:<task-id>` or `batch:<batch-id>:task:<task-id>`, taskId, batchId when assigned, roadmapAlias when assigned, artifactPath, contentSha256 for the markdown body without the manifest block, sourceSnapshot commit/tree/id, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
     '  - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.',
+    "  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, missing facade, missing `__all__`, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.",
     '  - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
+    "  - No-findings shape: do not write `### Finding` or `### Risk` subsections for no-findings claims; use a concise checklist/table and manifest `noFindingsClaims` tied to scoped evidenceRefs.",
     `  - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}`,
     `  - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}`,
     ...(role === "synthesis"
@@ -1056,7 +1090,45 @@ function scopeText(projectRoot: string, candidates: string[], fallback: string[]
   return concreteRootFallbackPaths.length > 0 ? concreteRootFallbackPaths.join(", ") : "README.md";
 }
 
-function buildAuditAreasForProject(projectRoot: string): AuditArea[] {
+function isCodeOnlyAuditRequest(input: {
+  vision?: string | null;
+  description?: string | null;
+  architecture?: string | null;
+}): boolean {
+  const text = [input.vision, input.description, input.architecture].filter(Boolean).join("\n");
+  return (
+    /\b(?:code\s+only|source\s+only|source\s+code\s+only|repo\s+code\s+only)\b/i.test(text) ||
+    /(?:только|лишь)\s+(?:код|исходн(?:ый|ики|ого)?\s+код)/i.test(text)
+  );
+}
+
+function auditRoadmapHasCodeOnlyScopeViolation(roadmapContent: string): boolean {
+  for (const item of extractAuditRoadmapItems(roadmapContent)) {
+    if (isAuditSynthesisTitle(item.title)) continue;
+    const scopeMatch = item.text.match(/^\s*[-*]\s+scope\s*:\s*(.+)$/im);
+    if (!scopeMatch) continue;
+    const scope = scopeMatch[1] ?? "";
+    const paths = extractAuditPathTokens(scope);
+    if (paths.some((path) => filterCodeOnlyAuditScopeCandidates([path]).length === 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function filterCodeOnlyAuditScopeCandidates(candidates: string[]): string[] {
+  return candidates.filter(
+    (path) =>
+      !/^(?:readme(?:\.md)?|agents\.md|docs(?:\/|$)|\.ai-factory(?:\/|$)|\.agents(?:\/|$)|\.codex(?:\/|$)|\.github(?:\/|$)|audit(?:\/|$)|pyproject\.toml|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|turbo\.json|docker-compose(?:\.[\w-]+)?\.ya?ml|scripts(?:\/|$)|\.env)/i.test(
+        path,
+      ),
+  );
+}
+
+function buildAuditAreasForProject(
+  projectRoot: string,
+  options: { codeOnly?: boolean } = {},
+): AuditArea[] {
   const srcChildren = listScopedChildren(projectRoot, "src", 6);
   const packageChildren = listScopedChildren(projectRoot, "packages", 6);
   const testChildren = [
@@ -1067,132 +1139,136 @@ function buildAuditAreasForProject(projectRoot: string): AuditArea[] {
     ...listScopedChildren(projectRoot, "docs/ops", 5),
     ...listScopedChildren(projectRoot, "docs", 5),
   ];
-  const fallback = [
-    "README.md",
-    "AGENTS.md",
-    "pyproject.toml",
-    "package.json",
-    "packages",
-    "apps",
-    "lib",
-    "server",
-    "src",
-    "tests",
-    ".ai-factory/config.yaml",
-  ];
+  const fallback = options.codeOnly
+    ? ["src", "packages", "apps", "lib", "server", "tests", "test"]
+    : [
+        "README.md",
+        "AGENTS.md",
+        "pyproject.toml",
+        "package.json",
+        "packages",
+        "apps",
+        "lib",
+        "server",
+        "src",
+        "tests",
+        ".ai-factory/config.yaml",
+      ];
+  const architectureScopeCandidates = options.codeOnly
+    ? [
+        "src/bot_intevra/bot.py",
+        "src/bot_intevra/service.py",
+        "src/bot_intevra/attachments.py",
+        "src/bot_intevra/backup_crypto.py",
+        "src",
+        ...srcChildren.slice(0, 4),
+        ...packageChildren.slice(0, 2),
+      ]
+    : [
+        "README.md",
+        "AGENTS.md",
+        "pyproject.toml",
+        "package.json",
+        "turbo.json",
+        ".ai-factory/config.yaml",
+        "src",
+        ...srcChildren.slice(0, 2),
+        ...packageChildren.slice(0, 2),
+      ];
+  const scopeFor = (candidates: string[]): string => {
+    const raw = scopeText(
+      projectRoot,
+      options.codeOnly ? filterCodeOnlyAuditScopeCandidates(candidates) : candidates,
+      fallback,
+    );
+    if (!options.codeOnly) return raw;
+    const filtered = filterCodeOnlyAuditScopeCandidates(
+      raw
+        .split(/\s*,\s*/)
+        .map((path) => path.trim())
+        .filter(Boolean),
+    );
+    return filtered.length > 0 ? filtered.join(", ") : raw;
+  };
 
   return [
     {
       title: "Audit: architecture and ownership boundaries",
-      scope: scopeText(
-        projectRoot,
-        [
-          "README.md",
-          "AGENTS.md",
-          "pyproject.toml",
-          "package.json",
-          "turbo.json",
-          ".ai-factory/config.yaml",
-          "src",
-          ...srcChildren.slice(0, 2),
-          ...packageChildren.slice(0, 2),
-        ],
-        fallback,
-      ),
+      scope: scopeFor(architectureScopeCandidates),
       mandate:
-        "Act as the architecture owner; verify module boundaries, task/workflow routing, ownership clarity, and coupling risks that would make future changes unsafe.",
+        "Act as the architecture owner; verify concrete runtime module-boundary failures such as circular imports, import-time side effects, duplicated state transitions, bypassed shared services, and error propagation gaps. Do not treat line count, central hub shape, missing facade, missing __all__, or ownership documentation as findings by themselves.",
     },
     {
       title: "Audit: security and configuration controls",
-      scope: scopeText(
-        projectRoot,
-        [
-          ".env.example",
-          ".ai-factory/config.yaml",
-          "src/bot_intevra/config.py",
-          "src/bot_intevra/secret_scan.py",
-          "src",
-          "docs/ops",
-          ...docsOpsChildren.slice(0, 2),
-        ],
-        fallback,
-      ),
+      scope: scopeFor([
+        ".env.example",
+        ".ai-factory/config.yaml",
+        "src/bot_intevra/config.py",
+        "src/bot_intevra/secret_scan.py",
+        "src",
+        "docs/ops",
+        ...docsOpsChildren.slice(0, 2),
+      ]),
       mandate:
         "Act as the security owner; verify secrets handling, configuration defaults, unsafe local endpoints, shell/file boundaries, and deployment-time security assumptions.",
     },
     {
       title: "Audit: performance and runtime behavior",
-      scope: scopeText(
-        projectRoot,
-        [
-          "src",
-          "src/bot_intevra/service.py",
-          "src/bot_intevra/bot.py",
-          "src/bot_intevra/llm_client.py",
-          "src/bot_intevra/status_server.py",
-          "pyproject.toml",
-          ...srcChildren.slice(0, 3),
-        ],
-        fallback,
-      ),
+      scope: scopeFor([
+        "src",
+        "src/bot_intevra/service.py",
+        "src/bot_intevra/bot.py",
+        "src/bot_intevra/llm_client.py",
+        "src/bot_intevra/status_server.py",
+        "pyproject.toml",
+        ...srcChildren.slice(0, 3),
+      ]),
       mandate:
         "Act as the runtime owner; verify slow paths, timeout behavior, repeated work, resource growth, and failure modes under realistic production usage.",
     },
     {
       title: "Audit: persistence and data safety",
-      scope: scopeText(
-        projectRoot,
-        [
-          "src/bot_intevra/db.py",
-          "src/bot_intevra/models.py",
-          "data",
-          "migrations",
-          "src",
-          "pyproject.toml",
-          ...srcChildren.slice(0, 3),
-        ],
-        fallback,
-      ),
+      scope: scopeFor([
+        "src/bot_intevra/db.py",
+        "src/bot_intevra/models.py",
+        "data",
+        "migrations",
+        "src",
+        "pyproject.toml",
+        ...srcChildren.slice(0, 3),
+      ]),
       mandate:
         "Act as the data owner; verify migrations, transactions, backup/restore, concurrent writes, data loss risks, and irreversible operations.",
     },
     {
       title: "Audit: integration and orchestration boundaries",
-      scope: scopeText(
-        projectRoot,
-        [
-          "src",
-          "src/bot_intevra/cli.py",
-          "src/bot_intevra/bot.py",
-          "src/bot_intevra/service.py",
-          "src/bot_intevra/memory_client.py",
-          "src/bot_intevra/transcription_client.py",
-          ...srcChildren.slice(0, 3),
-        ],
-        fallback,
-      ),
+      scope: scopeFor([
+        "src",
+        "src/bot_intevra/cli.py",
+        "src/bot_intevra/bot.py",
+        "src/bot_intevra/service.py",
+        "src/bot_intevra/memory_client.py",
+        "src/bot_intevra/transcription_client.py",
+        ...srcChildren.slice(0, 3),
+      ]),
       mandate:
         "Act as the integration owner; verify external-service contracts, retries, idempotency, error propagation, and boundary assumptions between subsystems.",
     },
     {
       title: "Audit: test and operations readiness",
-      scope: scopeText(
-        projectRoot,
-        [
-          "tests",
-          "test",
-          "pyproject.toml",
-          "package.json",
-          "docker-compose.yml",
-          "docker-compose.production.yml",
-          "docs/ops",
-          "scripts",
-          ...packageChildren.slice(0, 2),
-          ...testChildren.slice(0, 3),
-          ...docsOpsChildren.slice(0, 2),
-        ],
-        fallback,
-      ),
+      scope: scopeFor([
+        "tests",
+        "test",
+        "pyproject.toml",
+        "package.json",
+        "docker-compose.yml",
+        "docker-compose.production.yml",
+        "docs/ops",
+        "scripts",
+        ...packageChildren.slice(0, 2),
+        ...testChildren.slice(0, 3),
+        ...docsOpsChildren.slice(0, 2),
+      ]),
       mandate:
         "Act as the QA and operations owner; verify tests prove critical behavior, release commands are executable, runbooks are actionable, and smoke checks cover production risks.",
     },
@@ -1210,7 +1286,8 @@ function buildDeterministicAuditRoadmapContent(ctx: {
   const goal =
     ctx.vision?.trim().replace(/\s+/g, " ").slice(0, 180) ||
     "Audit the project for security, performance, correctness, and operational readiness";
-  const areas = buildAuditAreasForProject(ctx.projectRoot);
+  const codeOnly = isCodeOnlyAuditRequest(ctx);
+  const areas = buildAuditAreasForProject(ctx.projectRoot, { codeOnly });
   const priorContext = extractPriorInconclusiveAuditContext(ctx);
 
   const tasks = areas.map((area) =>
@@ -1254,12 +1331,16 @@ function ensureGeneratedAuditRoadmapContent(
   },
   source: "file" | "output",
 ): string {
-  const priorContext = extractPriorInconclusiveAuditContext({
-    ...ctx,
-    roadmapContent: content,
-  });
-  const contentWithContext = applyPriorAuditContextToRoadmapContent(content, priorContext);
+  const priorContext = extractPriorInconclusiveAuditContext(ctx);
+  const sanitizedContent = normalizeRoadmapPriorAuditContextLines(content, priorContext);
+  const contentWithContext = applyPriorAuditContextToRoadmapContent(sanitizedContent, priorContext);
   try {
+    if (isCodeOnlyAuditRequest(ctx) && auditRoadmapHasCodeOnlyScopeViolation(contentWithContext)) {
+      throw new RoadmapGenerationError(
+        "VALIDATION_ERROR",
+        "code-only audit roadmap included documentation, governance, generated, or prior audit paths in source scopes",
+      );
+    }
     validateAuditRoadmapSource(contentWithContext, ctx.projectRoot);
     return contentWithContext;
   } catch (err) {
@@ -1365,8 +1446,12 @@ const auditRoadmapHooks: RoadmapWorkflowHooks = Object.freeze({
     return ensureGeneratedAuditRoadmapContent(input.content, input.context, input.source);
   },
   convertRoadmapContentToTasks(input) {
-    const auditRoadmapContent = applyPriorAuditContextToRoadmapContent(
+    const sanitizedRoadmapContent = normalizeRoadmapPriorAuditContextLines(
       input.roadmapContent,
+      input.priorContext ?? null,
+    );
+    const auditRoadmapContent = applyPriorAuditContextToRoadmapContent(
+      sanitizedRoadmapContent,
       input.priorContext ?? null,
     );
     validateAuditRoadmapSource(auditRoadmapContent);
@@ -1547,6 +1632,9 @@ function buildAuditRoadmapGenerationPrompt(ctx: RoadmapGenerationPromptContext):
     ? `- Preserve this prior context in every audit and synthesis card: ${formatPriorAuditContextLine(priorContext)}`
     : "- If the alias, vision, description, or roadmap context mentions a prior inconclusive audit, preserve that context in every report and synthesis card as `Prior audit context: ...`.";
   const priorContextLine = priorContext ? `  - ${formatPriorAuditContextLine(priorContext)}\n` : "";
+  const codeOnlyRule = isCodeOnlyAuditRequest(ctx)
+    ? "Code-only audit requested: source report scopes must exclude README, AGENTS, docs, generated planning paths, prior audit artifacts, and governance-only metadata unless the user explicitly names one of those files."
+    : "If the user asks for code-only/source-only audit, keep source report scopes to code, tests, and runtime config files; exclude README, AGENTS, docs, generated planning paths, and prior audit artifacts.";
   const decompositionRule = ctx.auditDecomposition
     ? `Request decomposition mode: ${ctx.auditDecomposition.mode}; requires decomposition: ${
         ctx.auditDecomposition.requiresDecomposition ? "yes" : "no"
@@ -1562,6 +1650,7 @@ Operating model:
 - Decompose the audit into owner-area checks; the user should not need to provide detailed audit instructions.
 - Each owner area must produce actionable findings or a rigorous "No validated findings" report.
 - A weak area report should be rejected later, so encode the quality bar directly in every card.
+- ${codeOnlyRule}
 ${priorContextRule}
 
 Generate a ROADMAP.md file with the following format:
@@ -1581,7 +1670,9 @@ ${priorContextLine}  - Allowed changes: only create/update one report artifact.
   - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.
   - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
   - Quality bar: inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, and speculative may/might/could claims are not findings.
+  - Rejected finding shapes: line counts, import counts, central-hub/monolithic-file claims, missing facade, missing __all__, optional-dependency grouping, README/AGENTS ownership notes, and generated planning artifacts are not trusted findings unless tied to a concrete broken runtime behavior proven by scoped source evidence.
   - No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.
+  - No-findings shape: do not write ### Finding or ### Risk subsections for no-findings claims; use a concise checklist/table and manifest noFindingsClaims tied to scoped evidenceRefs.
   - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
   - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
   - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.

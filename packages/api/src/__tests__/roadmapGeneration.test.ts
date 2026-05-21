@@ -513,6 +513,104 @@ describe("roadmapGeneration", () => {
       expect(readFileSync(result.roadmapPath, "utf8")).toBe(result.content);
     });
 
+    it("should remove stale generated prior audit context when the current request has none", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# My App\nA service to audit");
+      mkdirSync(join(tmpDir, "src"), { recursive: true });
+      writeFileSync(join(tmpDir, "src", "config.ts"), "export const debug = false;\n");
+      writeFileSync(join(tmpDir, "src", "index.ts"), "export const app = true;\n");
+      trackFiles(tmpDir, ["src/config.ts", "src/index.ts"]);
+
+      const staleContextRoadmap = validAuditRoadmapContent().replace(
+        "  - Allowed changes:",
+        "  - Prior audit context: roadmap context: roadmap context: source backed diagnostic audit only and mark inconclusive if child reports are weak\n  - Allowed changes:",
+      );
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: staleContextRoadmap,
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+        },
+        context: {},
+      });
+
+      const result = await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit-current",
+        taskIntent: "audit",
+        vision: "audit current code",
+      });
+
+      expect(result.content).not.toContain("Prior audit context:");
+      expect(result.content).not.toContain("roadmap context: roadmap context");
+    });
+
+    it("should enforce code-only audit scopes instead of trusting generated docs/governance scopes", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# botIntevra\nTelegram bot");
+      mkdirSync(join(tmpDir, "src", "bot_intevra"), { recursive: true });
+      mkdirSync(join(tmpDir, "tests"), { recursive: true });
+      writeFileSync(join(tmpDir, "README.md"), "# botIntevra\nArchitecture notes\n");
+      writeFileSync(join(tmpDir, "AGENTS.md"), "# Agent rules\n");
+      writeFileSync(join(tmpDir, "pyproject.toml"), "[project]\nname='bot-intevra'\n");
+      writeFileSync(
+        join(tmpDir, "src", "bot_intevra", "bot.py"),
+        "def handle():\n    return True\n",
+      );
+      writeFileSync(
+        join(tmpDir, "src", "bot_intevra", "attachments.py"),
+        "def save():\n    return True\n",
+      );
+      writeFileSync(
+        join(tmpDir, "src", "bot_intevra", "backup_crypto.py"),
+        "def encrypt():\n    return True\n",
+      );
+      writeFileSync(
+        join(tmpDir, "src", "bot_intevra", "service.py"),
+        "def run():\n    return True\n",
+      );
+      writeFileSync(join(tmpDir, "tests", "test_bot.py"), "def test_bot():\n    assert True\n");
+      trackFiles(tmpDir, [
+        "README.md",
+        "AGENTS.md",
+        "pyproject.toml",
+        "src/bot_intevra/bot.py",
+        "src/bot_intevra/attachments.py",
+        "src/bot_intevra/backup_crypto.py",
+        "src/bot_intevra/service.py",
+        "tests/test_bot.py",
+      ]);
+
+      const generatedWithDocsScope = validAuditRoadmapContent().replace(
+        "Scope: src/config.ts, src/index.ts",
+        "Scope: README.md, AGENTS.md, src/bot_intevra/bot.py",
+      );
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: generatedWithDocsScope,
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+        },
+        context: {},
+      });
+
+      const result = await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit-code-only",
+        taskIntent: "audit",
+        vision: "audit botIntevra code only with source evidence",
+      });
+
+      const sourceScopeLines = result.content
+        .split(/\r?\n/)
+        .filter((line) => /^\s+- Scope: /.test(line))
+        .filter((line) => !line.includes("all audit/"));
+      expect(sourceScopeLines.length).toBeGreaterThan(0);
+      expect(sourceScopeLines.join("\n")).not.toMatch(
+        /\b(?:README(?:\.md)?|AGENTS\.md|docs\/|\.ai-factory\/|pyproject\.toml|package\.json)/i,
+      );
+      expect(sourceScopeLines.join("\n")).toContain("src/bot_intevra/bot.py");
+      expect(mockRunApiRuntimeOneShot.mock.calls[0][0].prompt).toContain(
+        "Code-only audit requested",
+      );
+    });
+
     it("should build deterministic audit scopes for botIntevra-like projects", async () => {
       const { projectId, tmpDir } = createProjectWithDescription("# botIntevra\nTelegram bot");
       mkdirSync(join(tmpDir, "src", "bot_intevra"), { recursive: true });

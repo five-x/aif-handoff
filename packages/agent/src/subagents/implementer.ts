@@ -3436,6 +3436,11 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
       "- Delete those candidates unless you can replace them with a concrete broken behavior, unsafe boundary, data-loss path, or security/control failure proven by exact ledger-backed evidence.",
     );
   }
+  if (input.validation.sourceClassification === "inventory_only_invalid") {
+    lines.push(
+      "- inventory_only_invalid: discard the current report body shape and rebuild from scoped source evidence; inventory, file lists, generated plans, and path existence cannot support trusted findings or no-findings.",
+    );
+  }
   if (issueCodeSet.has("non_actionable_audit_observation")) {
     lines.push(
       "- non_actionable_audit_observation: broad maintainability, line-count, central-hub, coupling-smell, and ownership-smell observations are not trusted findings.",
@@ -3460,6 +3465,21 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
       `- missing_scope_coverage: add exact existing path:line or path:start-end citations for every declared scope root${uncovered.length > 0 ? ` (${uncovered.join(", ")})` : ""}; cite substantive lines, not line 1 when it is only a heading, import, comment, docstring, blank line, brace, or metadata.`,
     );
   }
+  if (issueCodeSet.has("audit_evidence_scope_mismatch")) {
+    lines.push(
+      "- audit_evidence_scope_mismatch: every manifest scopeCoverage, finding, and noFindingsClaims evidenceRefs entry must cite ledger IDs whose scopeIds cover that exact declared scope root.",
+    );
+  }
+  if (issueCodeSet.has("audit_evidence_risk_mismatch")) {
+    lines.push(
+      "- audit_evidence_risk_mismatch: every manifest finding and noFindingsClaims entry must cite ledger IDs whose riskHypothesisIds match the claimed risk ID; do not reuse unrelated evidence IDs.",
+    );
+  }
+  if (issueCodeSet.has("irrelevant_audit_evidence")) {
+    lines.push(
+      "- irrelevant_audit_evidence: do not cite hidden/generated files such as `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs as source evidence unless they are explicitly in the task Scope.",
+    );
+  }
   if (issueCodeSet.has("missing_report_file_references")) {
     lines.push(
       "- missing_report_file_references: replace bare basenames such as `bot.py`, `backup_crypto.py`, or `attachments.py` with full repository-relative paths in every heading, table, limitation, and manifest rationale.",
@@ -3478,6 +3498,16 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
   if (issueCodeSet.has("manifest_outcome_mismatch")) {
     lines.push(
       "- manifest_outcome_mismatch: after repair, set manifest outcome to the actual report outcome.",
+    );
+  }
+  if (issueCodeSet.has("missing_report_manifest_fields")) {
+    lines.push(
+      "- missing_report_manifest_fields: if the outcome is `validated_no_findings`, the manifest must include non-empty `noFindingsClaims` with riskId/root/evidenceRefs; if trusted findings exist, do not also claim no-findings.",
+    );
+  }
+  if (issueCodeSet.has("contradictory_findings_and_no_findings")) {
+    lines.push(
+      "- contradictory_findings_and_no_findings: choose exactly one trusted outcome shape. Do not mix `### Finding` or `### Risk` sections with `No validated findings`; use a checklist/table for no-findings claims instead.",
     );
   }
   if (issueCodeSet.has("manifest_identity_mismatch")) {

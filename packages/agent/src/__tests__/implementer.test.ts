@@ -2262,6 +2262,7 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain("finalize_audit_report_manifest");
     expect(implementCall.prompt).toContain("substantive lines");
     expect(implementCall.prompt).toContain("line 1");
+    expect(implementCall.prompt).toContain("noFindingsClaims");
     const repaired = readFileSync(join(projectRoot, "audit", "security.md"), "utf8");
     expect(repaired).toContain("No validated findings.");
     expect(repaired).toContain("Candidate");

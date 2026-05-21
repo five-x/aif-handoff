@@ -1515,6 +1515,11 @@ function extractAuditFindingHeadings(content) {
 function formatAuditReportIssueActions(validation, issueCodes) {
   const issueCodeSet = new Set(issueCodes);
   const actions = [];
+  if (validation.sourceClassification === "inventory_only_invalid") {
+    actions.push(
+      "inventory_only_invalid => discard the current report body shape and rebuild from scoped source evidence; inventory, file lists, generated plans, and path existence cannot support trusted findings or no-findings.",
+    );
+  }
   if (issueCodeSet.has("non_actionable_audit_observation")) {
     actions.push(
       "non_actionable_audit_observation => delete broad architecture/maintainability-smell findings unless the report proves a concrete broken behavior, unsafe runtime boundary, data-loss path, or security/control failure.",
@@ -1539,6 +1544,21 @@ function formatAuditReportIssueActions(validation, issueCodes) {
       `missing_scope_coverage => cover every declared scope root${uncovered.length ? ` (${uncovered.join(", ")})` : ""} with exact existing path:line or path:start-end citations to substantive lines; do not use line 1 when it is only a heading, import, comment, docstring, blank line, brace, or metadata.`,
     );
   }
+  if (issueCodeSet.has("audit_evidence_scope_mismatch")) {
+    actions.push(
+      "audit_evidence_scope_mismatch => every manifest scopeCoverage, finding, and noFindingsClaims evidenceRefs entry must cite ledger IDs whose scopeIds cover that exact declared scope root.",
+    );
+  }
+  if (issueCodeSet.has("audit_evidence_risk_mismatch")) {
+    actions.push(
+      "audit_evidence_risk_mismatch => every manifest finding and noFindingsClaims entry must cite ledger IDs whose riskHypothesisIds match the claimed risk ID; do not reuse unrelated evidence IDs.",
+    );
+  }
+  if (issueCodeSet.has("irrelevant_audit_evidence")) {
+    actions.push(
+      "irrelevant_audit_evidence => do not cite hidden/generated files such as `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs as source evidence unless they are explicitly in the task Scope.",
+    );
+  }
   if (issueCodeSet.has("missing_report_file_references")) {
     actions.push(
       "missing_report_file_references => replace bare basenames like `bot.py` or `backup_crypto.py` with full repository-relative paths everywhere, including headings, tables, and limitations.",
@@ -1557,6 +1577,16 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   if (issueCodeSet.has("manifest_outcome_mismatch")) {
     actions.push(
       `manifest_outcome_mismatch => set manifest outcome to match the repaired report. Validator currently classifies the report as ${validation.sourceClassification}.`,
+    );
+  }
+  if (issueCodeSet.has("missing_report_manifest_fields")) {
+    actions.push(
+      "missing_report_manifest_fields => if outcome is validated_no_findings, include non-empty noFindingsClaims with riskId/root/evidenceRefs; if trusted findings exist, do not also claim no-findings.",
+    );
+  }
+  if (issueCodeSet.has("contradictory_findings_and_no_findings")) {
+    actions.push(
+      "contradictory_findings_and_no_findings => choose exactly one trusted outcome shape; do not mix ### Finding or ### Risk sections with No validated findings; use a checklist/table for no-findings claims instead.",
     );
   }
   if (issueCodeSet.has("manifest_identity_mismatch")) {
@@ -1627,7 +1657,9 @@ function formatAuditReportRepairDirective(validation, issueCodes, content = "") 
     "Delete every finding that depends on the rejected observation; do not rephrase it as another trusted finding.",
     "Do not spend more source-inspection budget during this repair; use the existing ledger evidence and edit only the audit report artifact, then finalize it again.",
     "If no finding remains after deleting weak observations, rewrite the report as validated_no_findings with an Evidence Register and risk-by-risk no-findings claims tied to observed file:line evidence.",
+    "For validated_no_findings, do not create `### Finding` or `### Risk` sections; use a concise checklist/table in the body and manifest noFindingsClaims with matching ledger evidenceRefs.",
     "If existing ledger evidence cannot support either trusted findings or substantive no-findings coverage, set the report outcome to source_inconclusive and state the exact coverage gap instead of looping.",
+    "Do not cite `.ai-factory/*`, generated plans, prior audit artifacts, or unscoped docs as source evidence for trusted outcomes.",
     "Do not promote line-count, central-hub, monolithic-file, import-count, module-boundary-documentation, __all__, optional-dependency/runtime-guard, or missing-doc mapping observations unless a concrete broken behavior is proven by ledger-backed evidence.",
   ].join("\n");
 }
