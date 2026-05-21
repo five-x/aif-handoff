@@ -1193,6 +1193,9 @@ describe("roadmapGeneration", () => {
       expect(result.tasks[0].description).toContain(
         "Report artifact: audit/2026-05-09-config-audit.md",
       );
+      expect(result.tasks.every((task) => task.description.includes("Prior audit context:"))).toBe(
+        false,
+      );
       expect(result.tasks[1]).toMatchObject({
         title: "Synthesize audit findings",
         taskIntent: "audit",

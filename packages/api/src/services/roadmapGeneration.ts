@@ -270,6 +270,16 @@ function cleanPriorAuditContextFragment(value: string): string {
 
 function mentionsPriorInconclusiveAudit(value: string): boolean {
   const normalized = value.toLowerCase();
+  if (
+    normalized.includes("synthesis outcome requirement") ||
+    normalized.includes("classify the final audit") ||
+    normalized.includes("validated no-findings") ||
+    normalized.includes("validated findings present") ||
+    normalized.includes("source reports are weak") ||
+    normalized.includes("weak, missing, or inventory-only")
+  ) {
+    return false;
+  }
   return /\baudit[\w.-]*\b/.test(normalized) && /\binconclusive\b/.test(normalized);
 }
 
@@ -1630,7 +1640,7 @@ function buildAuditRoadmapGenerationPrompt(ctx: RoadmapGenerationPromptContext):
   const priorContext = extractPriorInconclusiveAuditContext(ctx);
   const priorContextRule = priorContext
     ? `- Preserve this prior context in every audit and synthesis card: ${formatPriorAuditContextLine(priorContext)}`
-    : "- If the alias, vision, description, or roadmap context mentions a prior inconclusive audit, preserve that context in every report and synthesis card as `Prior audit context: ...`.";
+    : "- Do not add `Prior audit context:` unless the alias, vision, or project description explicitly names a previous/prior/follow-up inconclusive audit.";
   const priorContextLine = priorContext ? `  - ${formatPriorAuditContextLine(priorContext)}\n` : "";
   const codeOnlyRule = isCodeOnlyAuditRequest(ctx)
     ? "Code-only audit requested: source report scopes must exclude README, AGENTS, docs, generated planning paths, prior audit artifacts, and governance-only metadata unless the user explicitly names one of those files."
@@ -1904,7 +1914,7 @@ function buildAuditExtractionPrompt(roadmapContent: string, alias: string): stri
   });
   const priorContextRule = priorContext
     ? `- Preserve this prior context in every task description: ${formatPriorAuditContextLine(priorContext)}`
-    : "- Preserve any prior inconclusive audit context from the roadmap in every task description as `Prior audit context: ...`.";
+    : "- Do not add `Prior audit context:` unless the roadmap explicitly names a previous/prior/follow-up inconclusive audit.";
   return `You are converting a diagnostic audit roadmap markdown into structured JSON for task creation.
 
 ROADMAP CONTENT:
