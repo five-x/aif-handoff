@@ -129,6 +129,53 @@ describe("qwen-local-agent adapter", () => {
     expect(body.max_tokens).toBeLessThanOrEqual(4_000);
     expect(estimateQwenLocalAgentInputTokens(createRunInput(root))).toBeGreaterThan(0);
   });
+  it("reduces 8003 output tokens at the soft high-input budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-8003-high-input-"));
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8003/v1",
+        maxTokens: 4_000,
+      },
+    });
+    const messages = [
+      { role: "system", content: "system" },
+      { role: "user", content: "x".repeat(45_000) },
+    ];
+    const estimate = estimateQwenLocalAgentInputTokens(input, messages);
+
+    expect(estimate).toBeGreaterThanOrEqual(16_000);
+    expect(estimate).toBeLessThanOrEqual(20_000);
+    expect(buildQwenLocalAgentRequestBody(input, messages).max_tokens).toBe(2_000);
+  });
+  it("reduces 8005 output tokens at the soft high-input budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-8005-high-input-"));
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8005/v1",
+        maxTokens: 8_000,
+      },
+    });
+    const messages = [
+      { role: "system", content: "system" },
+      { role: "user", content: "x".repeat(140_000) },
+    ];
+    const estimate = estimateQwenLocalAgentInputTokens(input, messages);
+
+    expect(estimate).toBeGreaterThanOrEqual(48_000);
+    expect(estimate).toBeLessThanOrEqual(60_000);
+    expect(buildQwenLocalAgentRequestBody(input, messages).max_tokens).toBe(4_000);
+  });
+  it("keeps the full 8005 output cap below the soft high-input budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-8005-low-input-"));
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8005/v1",
+        maxTokens: 99_999,
+      },
+    });
+
+    expect(buildQwenLocalAgentRequestBody(input).max_tokens).toBe(8_000);
+  });
   it("allows small configured output caps when the endpoint total budget has room", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-small-output-"));
     const body = buildQwenLocalAgentRequestBody(
@@ -245,6 +292,314 @@ describe("qwen-local-agent adapter", () => {
         retryCount: 0,
         failureClass: null,
       }),
+    );
+  });
+  it("compacts audit transcripts before sending requests above the 8005 soft input budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-soft-compact-8005-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nRuntime notes.\n", "utf8");
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-soft-compact-1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "evidence ".repeat(17_000),
+                tool_calls: [
+                  {
+                    id: "call-read-readme",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-soft-compact-2",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://192.168.88.62:8005/v1",
+          maxTokens: 8_000,
+          toolTimeoutMs: 5_000,
+          maxOutputChars: 4_000,
+        },
+        execution: {
+          allowedWritePaths: ["audit/integration.md"],
+          auditReportArtifactPath: "audit/integration.md",
+          repositoryInspectionToolBudget: 60,
+        },
+      }),
+      logger,
+    );
+
+    expect(result.outputText).toBe("done");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+    const compactUserMessage = secondBody.messages.find((message) => message.role === "user");
+
+    expect(compactUserMessage.content).toContain("QWEN COMPACT CONTEXT MODE");
+    expect(compactUserMessage.content).toContain("reason=endpoint_input_soft_budget");
+    expect(compactUserMessage.content).toContain("Compact audit evidence ledger:");
+    expect(compactUserMessage.content).not.toContain("evidence ".repeat(1_000));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: "http://192.168.88.62:8005/v1",
+        compactionReason: "endpoint_input_soft_budget",
+        estimatedInputTokensBefore: expect.any(Number),
+        estimatedInputTokensAfter: expect.any(Number),
+        maxInputTokens: 60_000,
+        compactTargetInputTokens: 48_000,
+        repositoryInspectionToolCalls: 1,
+        repositoryInspectionToolBudget: 60,
+      }),
+      "Compacted qwen-local-agent transcript before local endpoint request",
+    );
+  });
+  it("compacts audit transcripts again when they regrow above the 8005 soft input budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-soft-recompact-8005-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nRuntime notes.\n", "utf8");
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const runInput = createRunInput(root, {
+      workflowKind: "audit",
+      options: {
+        baseUrl: "http://192.168.88.62:8005/v1",
+        maxTokens: 8_000,
+        toolTimeoutMs: 5_000,
+        maxOutputChars: 4_000,
+      },
+      execution: {
+        allowedWritePaths: ["audit/integration.md"],
+        auditReportArtifactPath: "audit/integration.md",
+        repositoryInspectionToolBudget: 60,
+      },
+    });
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-soft-recompact-1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "first evidence ".repeat(10_000),
+                tool_calls: [
+                  {
+                    id: "call-read-readme-1",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-soft-recompact-2",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "second evidence ".repeat(9_000),
+                tool_calls: [
+                  {
+                    id: "call-read-readme-2",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-soft-recompact-3",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(runInput, logger);
+
+    expect(result.outputText).toBe("done");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const requestBodies = fetchMock.mock.calls.map((call) => JSON.parse(call[1].body));
+    const secondBody = requestBodies[1];
+    const thirdBody = requestBodies[2];
+    const secondUserMessage = secondBody.messages.find((message) => message.role === "user");
+    const thirdUserMessage = thirdBody.messages.find((message) => message.role === "user");
+
+    expect(secondUserMessage.content).toContain("reason=endpoint_input_soft_budget");
+    expect(thirdUserMessage.content).toContain("reason=endpoint_input_soft_budget");
+    expect(secondUserMessage.content).not.toContain("first evidence ".repeat(1_000));
+    expect(thirdUserMessage.content).not.toContain("second evidence ".repeat(1_000));
+    for (const body of requestBodies.slice(1)) {
+      expect(estimateQwenLocalAgentInputTokens(runInput, body.messages)).toBeLessThanOrEqual(
+        48_000,
+      );
+    }
+    const softCompactionLogs = logger.warn.mock.calls.filter(
+      ([context, message]) =>
+        message === "Compacted qwen-local-agent transcript before local endpoint request" &&
+        context?.compactionReason === "endpoint_input_soft_budget",
+    );
+    expect(softCompactionLogs).toHaveLength(2);
+  });
+  it("compacts audit transcripts above the 8005 soft input budget without an inspection budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-soft-compact-no-budget-8005-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nRuntime notes.\n", "utf8");
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-soft-no-budget-1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "budgetless evidence ".repeat(8_000),
+                tool_calls: [
+                  {
+                    id: "call-read-readme-no-budget",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-soft-no-budget-2",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://192.168.88.62:8005/v1",
+          maxTokens: 8_000,
+          toolTimeoutMs: 5_000,
+          maxOutputChars: 4_000,
+        },
+        execution: {
+          allowedWritePaths: ["audit/integration.md"],
+          auditReportArtifactPath: "audit/integration.md",
+        },
+      }),
+      logger,
+    );
+
+    expect(result.outputText).toBe("done");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+    const secondUserMessage = secondBody.messages.find((message) => message.role === "user");
+
+    expect(secondUserMessage.content).toContain("reason=endpoint_input_soft_budget");
+    expect(secondUserMessage.content).not.toContain("budgetless evidence ".repeat(1_000));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: "http://192.168.88.62:8005/v1",
+        compactionReason: "endpoint_input_soft_budget",
+        repositoryInspectionToolCalls: 1,
+        repositoryInspectionToolBudget: null,
+      }),
+      "Compacted qwen-local-agent transcript before local endpoint request",
+    );
+  });
+  it("logs hard endpoint budget compaction before soft budget compaction", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-hard-before-soft-8005-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nRuntime notes.\n", "utf8");
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-hard-before-soft-1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "hard evidence ".repeat(16_000),
+                tool_calls: [
+                  {
+                    id: "call-read-readme-hard",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-hard-before-soft-2",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://192.168.88.62:8005/v1",
+          maxTokens: 8_000,
+          toolTimeoutMs: 5_000,
+          maxOutputChars: 4_000,
+        },
+        execution: {
+          allowedWritePaths: ["audit/integration.md"],
+          auditReportArtifactPath: "audit/integration.md",
+        },
+      }),
+      logger,
+    );
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: "http://192.168.88.62:8005/v1",
+        compactionReason: "endpoint_input_budget",
+        estimatedInputTokensBefore: expect.any(Number),
+        maxInputTokens: 60_000,
+        compactTargetInputTokens: 48_000,
+        repositoryInspectionToolCalls: 1,
+        repositoryInspectionToolBudget: null,
+      }),
+      "Compacted qwen-local-agent transcript before local endpoint request",
     );
   });
   it("limits planner workflows to read-only repository tools", async () => {

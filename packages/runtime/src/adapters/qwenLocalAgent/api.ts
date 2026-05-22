@@ -41,6 +41,7 @@ const LOCAL_ENDPOINT_BUDGETS = new Map([
       maxInputTokens: 20_000,
       compactTargetInputTokens: 16_000,
       maxOutputTokens: 4_000,
+      highInputMaxOutputTokens: 2_000,
       totalTokens: 24_000,
       toolResultMaxChars: 1_500,
       ledgerPreviewMaxChars: 320,
@@ -52,6 +53,7 @@ const LOCAL_ENDPOINT_BUDGETS = new Map([
       maxInputTokens: 60_000,
       compactTargetInputTokens: 48_000,
       maxOutputTokens: 8_000,
+      highInputMaxOutputTokens: 4_000,
       totalTokens: 68_000,
       toolResultMaxChars: 3_000,
       ledgerPreviewMaxChars: 480,
@@ -353,8 +355,14 @@ function compactMessagesForEndpointBudget(input, messages, toolContext, reason, 
   const firstUser = messages.find((message) => message?.role === "user");
   const allowedWritePaths = input.execution?.allowedWritePaths ?? [];
   const auditArtifactPath = input.execution?.auditReportArtifactPath ?? null;
+  const originalPrompt =
+    typeof input.prompt === "string" && input.prompt.trim().length > 0
+      ? input.prompt
+      : typeof firstUser?.content === "string"
+        ? firstUser.content
+        : "";
   const taskPrompt = truncateTextForRequest(
-    typeof firstUser?.content === "string" ? firstUser.content : input.prompt,
+    originalPrompt,
     budget.compactTargetInputTokens * TOKEN_ESTIMATE_CHARS_PER_TOKEN * 0.35,
   );
   const ledger = buildCompactAuditEvidenceLedger(toolContext, budget.ledgerPreviewMaxChars);
@@ -382,19 +390,35 @@ function compactMessagesForEndpointBudget(input, messages, toolContext, reason, 
     },
   ].filter(Boolean);
 }
+function endpointMaxOutputTokensForInput(budget, estimatedInputTokens) {
+  const endpointMax =
+    estimatedInputTokens >= budget.compactTargetInputTokens
+      ? Math.min(budget.maxOutputTokens, budget.highInputMaxOutputTokens)
+      : budget.maxOutputTokens;
+  return Math.min(endpointMax, Math.max(0, budget.totalTokens - estimatedInputTokens));
+}
 function maxOutputTokensForBudget(options, budget, estimatedInputTokens) {
   const configured = readNumber(options.maxTokens);
   if (!budget) return configured;
-  const endpointCap = Math.min(
-    budget.maxOutputTokens,
-    Math.max(0, budget.totalTokens - estimatedInputTokens),
-  );
+  const endpointCap = endpointMaxOutputTokensForInput(budget, estimatedInputTokens);
   const requested = configured == null ? budget.maxOutputTokens : configured;
   return Math.min(requested, endpointCap);
 }
 function remainingEndpointOutputBudget(budget, estimatedInputTokens) {
   if (!budget) return null;
   return Math.min(budget.maxOutputTokens, Math.max(0, budget.totalTokens - estimatedInputTokens));
+}
+function shouldCompactAuditTranscriptForSoftEndpointBudget(
+  input,
+  repositoryInspectionToolCalls,
+  estimatedInputTokens,
+  budget,
+) {
+  return (
+    input.workflowKind === "audit" &&
+    repositoryInspectionToolCalls > 0 &&
+    estimatedInputTokens > budget.compactTargetInputTokens
+  );
 }
 function requestEstimateFailureClass(error) {
   if (error instanceof RuntimeExecutionError) {
@@ -1169,30 +1193,55 @@ export async function runQwenLocalAgentApi(input, logger) {
         repositoryInspectionBudgetFinalResponseTimeoutMs != null;
       const policy = resolveEndpointPolicy(input);
       const estimatedBeforeCompaction = estimateMessagesInputTokens(input, messages);
-      const shouldCompactForEndpointBudget =
+      const shouldCompactForHardEndpointBudget = Boolean(
+        policy.budget && estimatedBeforeCompaction > policy.budget.maxInputTokens,
+      );
+      const shouldCompactForRepositoryInspectionBudget = Boolean(
+        policy.budget && budgetFinalizationTimeoutActive && !repositoryInspectionBudgetCompacted,
+      );
+      const shouldCompactForSoftEndpointBudget = Boolean(
         policy.budget &&
-        (estimatedBeforeCompaction > policy.budget.maxInputTokens ||
-          (budgetFinalizationTimeoutActive && !repositoryInspectionBudgetCompacted));
+        !shouldCompactForRepositoryInspectionBudget &&
+        shouldCompactAuditTranscriptForSoftEndpointBudget(
+          input,
+          repositoryInspectionToolCalls,
+          estimatedBeforeCompaction,
+          policy.budget,
+        ),
+      );
+      const shouldCompactForEndpointBudget = Boolean(
+        policy.budget &&
+        (shouldCompactForHardEndpointBudget ||
+          shouldCompactForSoftEndpointBudget ||
+          shouldCompactForRepositoryInspectionBudget),
+      );
       if (shouldCompactForEndpointBudget) {
+        const compactionReason = shouldCompactForRepositoryInspectionBudget
+          ? "repository_inspection_budget_exhausted"
+          : shouldCompactForHardEndpointBudget
+            ? "endpoint_input_budget"
+            : "endpoint_input_soft_budget";
         messages = compactMessagesForEndpointBudget(
           input,
           messages,
           toolContext,
-          budgetFinalizationTimeoutActive
-            ? "repository_inspection_budget_exhausted"
-            : "endpoint_input_budget",
+          compactionReason,
           policy.budget,
         );
-        repositoryInspectionBudgetCompacted = true;
+        if (shouldCompactForRepositoryInspectionBudget) {
+          repositoryInspectionBudgetCompacted = true;
+        }
         logger?.warn?.(
           {
             runtimeId: input.runtimeId,
             profileId: input.profileId ?? null,
             baseUrl: policy.baseUrl,
             turn,
+            compactionReason,
             estimatedInputTokensBefore: estimatedBeforeCompaction,
             estimatedInputTokensAfter: estimateMessagesInputTokens(input, messages),
             maxInputTokens: policy.budget.maxInputTokens,
+            compactTargetInputTokens: policy.budget.compactTargetInputTokens,
             repositoryInspectionToolCalls,
             repositoryInspectionToolBudget,
           },
@@ -1378,7 +1427,6 @@ export async function runQwenLocalAgentApi(input, logger) {
         if (
           toolAllowed &&
           !shouldSuppressRepeatedCall &&
-          repositoryInspectionToolBudget != null &&
           isRepositoryInspectionTool &&
           !shouldDenyRepositoryInspection &&
           !shouldDenyAuditRepairInspection
