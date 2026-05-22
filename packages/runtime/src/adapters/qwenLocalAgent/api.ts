@@ -1207,7 +1207,7 @@ export async function runQwenLocalAgentApi(input, logger) {
           budgetFinalizationTimeoutActive
             ? buildCombinedTimeoutSignal(signal, repositoryInspectionBudgetFinalResponseTimeoutMs)
             : signal,
-          { turn, toolCallCount, retryCount: turn },
+          { turn, toolCallCount, retryCount: 0 },
           logger,
         );
       } catch (error) {

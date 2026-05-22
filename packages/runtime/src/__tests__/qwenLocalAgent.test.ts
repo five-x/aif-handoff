@@ -189,6 +189,64 @@ describe("qwen-local-agent adapter", () => {
       "qwen-local-agent request estimate",
     );
   });
+  it("logs retryCount independently from successful tool turns", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-retry-count-turns-"));
+    await writeFile(path.join(root, "README.md"), "test\n", "utf8");
+    const logger = { info: vi.fn() };
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-retry-count-1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-list",
+                    type: "function",
+                    function: {
+                      name: "list_files",
+                      arguments: JSON.stringify({ path: "." }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-retry-count-2",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    await runQwenLocalAgentApi(createRunInput(root), logger);
+
+    const estimateCalls = logger.info.mock.calls
+      .filter(([, message]) => message === "qwen-local-agent request estimate")
+      .map(([context]) => context);
+    expect(estimateCalls).toHaveLength(2);
+    expect(estimateCalls[0]).toEqual(
+      expect.objectContaining({
+        turn: 0,
+        toolCallCount: 0,
+        retryCount: 0,
+        failureClass: null,
+      }),
+    );
+    expect(estimateCalls[1]).toEqual(
+      expect.objectContaining({
+        turn: 1,
+        toolCallCount: 1,
+        retryCount: 0,
+        failureClass: null,
+      }),
+    );
+  });
   it("limits planner workflows to read-only repository tools", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-readonly-"));
     const body = buildQwenLocalAgentRequestBody(createRunInput(root, { workflowKind: "planner" }));
