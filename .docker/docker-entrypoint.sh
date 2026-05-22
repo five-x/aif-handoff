@@ -10,6 +10,13 @@ if [ "$(id -u)" = "0" ]; then
   fi
   if command -v git >/dev/null 2>&1; then
     projects_mount="${PROJECTS_MOUNT:-/home/www}"
+    if [ "${AIF_REPAIR_PROJECT_GIT_OWNERSHIP:-true}" != "false" ]; then
+      for project_git_dir in "$projects_mount"/.git "$projects_mount"/*/.git; do
+        [ -d "$project_git_dir" ] || continue
+        find "$project_git_dir" -maxdepth 3 \( -user 0 -o -group 0 \) \
+          -exec chown node:node {} + 2>/dev/null || true
+      done
+    fi
     for projects_safe_dir in "$projects_mount/botIntevra" "$projects_mount/*"; do
       if ! gosu node git config --global --get-all safe.directory 2>/dev/null | grep -Fx "$projects_safe_dir" >/dev/null 2>&1; then
         gosu node git config --global --add safe.directory "$projects_safe_dir" 2>/dev/null || true
