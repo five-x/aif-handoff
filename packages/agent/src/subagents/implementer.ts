@@ -1245,10 +1245,12 @@ function shouldUseDeterministicAuditReportRepair(
     return false;
   }
 
-  return currentReportIssueCodes.some((code) =>
-    /\b(?:contradictory_findings_and_no_findings|manifest_outcome_mismatch|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|non_actionable_audit_observation|speculative_audit_claim|unverified_inspection_claim)\b/i.test(
-      code,
-    ),
+  return currentReportIssueCodes.some(isDeterministicAuditReportRepairIssueCode);
+}
+
+function isDeterministicAuditReportRepairIssueCode(code: string): boolean {
+  return /\b(?:audit_evidence_discovery_only|audit_evidence_identity_mismatch|audit_evidence_risk_mismatch|audit_evidence_scope_mismatch|audit_evidence_source_snapshot_mismatch|contradictory_findings_and_no_findings|governance_observation_as_finding|invalid_line_reference|invalid_report_manifest|irrelevant_audit_evidence|manifest_content_hash_mismatch|manifest_identity_mismatch|manifest_outcome_mismatch|manifest_source_snapshot_mismatch|missing_audit_evidence_ref|missing_declared_scope_root|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|non_actionable_audit_observation|speculative_audit_claim|unsupported_report_manifest_version|unverified_inspection_claim)\b/i.test(
+    code,
   );
 }
 
@@ -3842,9 +3844,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         })
       : "";
   const currentReportNeedsDeterministicRepair = currentAuditReportIssueCodes.some((code) =>
-    /\b(?:audit_evidence_discovery_only|audit_evidence_identity_mismatch|audit_evidence_risk_mismatch|audit_evidence_scope_mismatch|audit_evidence_source_snapshot_mismatch|contradictory_findings_and_no_findings|governance_observation_as_finding|invalid_line_reference|invalid_report_manifest|manifest_content_hash_mismatch|manifest_identity_mismatch|manifest_outcome_mismatch|manifest_source_snapshot_mismatch|missing_audit_evidence_ref|missing_declared_scope_root|missing_report_file_references|missing_report_manifest|missing_report_manifest_fields|missing_scope_coverage|missing_substantive_evidence|non_actionable_audit_observation|unsupported_report_manifest_version|unverified_inspection_claim)\b/i.test(
-      code,
-    ),
+    isDeterministicAuditReportRepairIssueCode(code),
   );
   const auditScopeRepairability = expectedAuditReportArtifactPath
     ? diagnoseDeclaredAuditScopeRepairability(projectRoot, task.description)
@@ -5007,6 +5007,59 @@ Writer rules:
 
   if (isBlockedImplementationResult(resultText)) {
     throw new Error("Implementer blocked by permissions");
+  }
+
+  if (expectedAuditReportArtifactPath && !task.reworkRequested) {
+    const postRunAuditReportValidation = validateAuditReportArtifactWithTaskContext({
+      task,
+      projectRoot,
+      artifactPath: expectedAuditReportArtifactPath,
+      requireLedgerEvidence: true,
+    });
+    const postRunAuditReportMissing = postRunAuditReportValidation === null;
+    const postRunAuditIssueCodes = postRunAuditReportValidation
+      ? auditReportValidationIssueCodes(postRunAuditReportValidation)
+      : ["missing_report_artifact"];
+    const postRunAuditReportInvalid =
+      postRunAuditReportValidation !== null &&
+      !isTrustedValidAuditReportValidation(postRunAuditReportValidation);
+    const shouldRepairPostRunAuditReport =
+      localAuditReportScopeRepairable &&
+      (postRunAuditReportMissing ||
+        (postRunAuditReportInvalid &&
+          postRunAuditIssueCodes.some(isDeterministicAuditReportRepairIssueCode)));
+    if (shouldRepairPostRunAuditReport) {
+      try {
+        const repairedResultText = runDeterministicAuditReportRepairFallback(
+          "deterministic audit report repair fallback started after post-run validation failure",
+          "deterministic audit report repair fallback accepted the report after post-run validation failure",
+          "deterministic audit report repair fallback terminalized source_inconclusive after post-run validation failure",
+        );
+        if (repairedResultText) {
+          finalResultText = repairedResultText;
+        }
+      } catch (deterministicRepairError) {
+        log.warn(
+          {
+            taskId,
+            artifactPath: expectedAuditReportArtifactPath,
+            issueCodes: postRunAuditIssueCodes,
+            deterministicRepairError:
+              deterministicRepairError instanceof Error
+                ? deterministicRepairError.message
+                : String(deterministicRepairError),
+          },
+          "Deterministic audit report repair fallback failed after post-run validation failure",
+        );
+        throw new Error(
+          `Post-run deterministic audit report repair failed for ${expectedAuditReportArtifactPath}: ${
+            deterministicRepairError instanceof Error
+              ? deterministicRepairError.message
+              : String(deterministicRepairError)
+          }`,
+        );
+      }
+    }
   }
 
   let syncedPlan = readCanonicalPlan(task, projectRoot) ?? task.plan;

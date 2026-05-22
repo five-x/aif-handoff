@@ -478,14 +478,291 @@ describe("runImplementer rework behavior", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-legacy-generated-audit"))
       .get();
-    expect(updatedTask?.implementationLog).toContain("Implementation done");
-    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
-    expect(updatedTask?.blockedReason).toBeNull();
-    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.implementationLog).not.toContain("Implementation done");
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive:");
+    expect(updatedTask?.manualReviewRequired).toBe(true);
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-legacy-generated-audit");
+    expect(artifact?.state).toBe("source_inconclusive");
+    expect(artifact?.failureFamily).toBe("source_inconclusive");
+  });
+
+  it("repairs invalid first-run audit reports before review handoff", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "app.ts"),
+      [
+        "export function startRuntime() {",
+        "  return { status: 'ok', cancellation: true };",
+        "}",
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/app.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed source", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    queryMock.mockImplementationOnce(() => {
+      mkdirSync(join(projectRoot, "audit"), { recursive: true });
+      writeFileSync(
+        join(projectRoot, "audit", "post-run.md"),
+        [
+          "# Audit runtime",
+          "",
+          "No validated findings.",
+          "",
+          "## Findings",
+          "",
+          "### Runtime concern",
+          "",
+          "Evidence: `src/app.ts:1`",
+          "Risk: Generic runtime concern without validated behavior.",
+          "Proposed fix: Rework the runtime.",
+          "Verification: Not run.",
+        ].join("\n"),
+        "utf8",
+      );
+      return streamSuccess("Implementation done");
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-post-run-self-repair",
+        projectId: "project-1",
+        title: "Audit runtime self repair",
+        description: [
+          "Scope: src",
+          "Audit mandate: Review runtime behavior.",
+          "Risk hypotheses: risk-runtime src runtime entrypoint may mishandle cancellation.",
+          "Allowed changes: only create/update audit/post-run.md.",
+          "Report artifact: audit/post-run.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\nProduce audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-post-run-self-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-post-run-self-repair"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-post-run-self-repair",
+          role: "report",
+          artifactPath: "audit/post-run.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-post-run-self-repair", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const repaired = readFileSync(join(projectRoot, "audit", "post-run.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("```audit-report-manifest");
+    expect(repaired).not.toContain("### Runtime concern");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-post-run-self-repair");
+    if (!artifact) throw new Error("missing post-run self-repair artifact");
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
+    const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    expect(attempts.at(-1)?.state).toBe("valid");
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-post-run-self-repair"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.implementationLog).not.toContain("Implementation done");
+    expect(updatedTask?.agentActivityLog).toContain("post-run validation failure");
+  });
+
+  it("repairs missing first-run audit reports before review handoff", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "service.ts"),
+      "export const serviceReady = true;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/service.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed service", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    queryMock.mockReturnValueOnce(streamSuccess("Implementation done without writing report"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-post-run-missing-repair",
+        projectId: "project-1",
+        title: "Audit missing report self repair",
+        description: [
+          "Scope: src",
+          "Audit mandate: Review service behavior.",
+          "Risk hypotheses: risk-service src service setup may miss readiness checks.",
+          "Allowed changes: only create/update audit/missing-post-run.md.",
+          "Report artifact: audit/missing-post-run.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\nProduce audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-post-run-missing-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-post-run-missing-repair"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-post-run-missing-repair",
+          role: "report",
+          artifactPath: "audit/missing-post-run.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-post-run-missing-repair", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const repaired = readFileSync(join(projectRoot, "audit", "missing-post-run.md"), "utf8");
+    expect(repaired).toContain("No validated findings.");
+    expect(repaired).toContain("```audit-report-manifest");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-post-run-missing-repair");
+    if (!artifact) throw new Error("missing repaired missing-report artifact");
+    expect(artifact.state).toBe("valid");
+    expect(artifact.failureFamily).toBeNull();
+    expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(1);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-post-run-missing-repair"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.implementationLog).not.toContain(
+      "Implementation done without writing report",
+    );
+    expect(updatedTask?.agentActivityLog).toContain("post-run validation failure");
+  });
+
+  it("fails closed when post-run audit report repair throws", async () => {
+    const db = testDb.current;
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "service.ts"),
+      "export const serviceReady = true;\n",
+      "utf8",
+    );
+    queryMock.mockImplementationOnce(() => {
+      writeFileSync(
+        join(projectRoot, "audit", "repair-failure.md"),
+        [
+          "# Audit repair failure",
+          "",
+          "No validated findings.",
+          "",
+          "## Findings",
+          "",
+          "### Generic concern",
+          "",
+          "Evidence: `src/service.ts:1`",
+          "Risk: Generic concern without verification.",
+          "Proposed fix: Rework service.",
+          "Verification: Not run.",
+        ].join("\n"),
+        "utf8",
+      );
+      return streamSuccess("Implementation done with invalid report");
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-post-run-repair-failure",
+        projectId: "project-1",
+        title: "Audit repair failure",
+        description: [
+          "Scope: src",
+          "Audit mandate: Review service behavior.",
+          "Risk hypotheses: risk-service src service setup may miss readiness checks.",
+          "Allowed changes: only create/update audit/repair-failure.md.",
+          "Report artifact: audit/repair-failure.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\nProduce audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-post-run-repair-failure",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-post-run-repair-failure"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-post-run-repair-failure",
+          role: "report",
+          artifactPath: "audit/repair-failure.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await expect(runImplementer("task-audit-post-run-repair-failure", projectRoot)).rejects.toThrow(
+      "Post-run deterministic audit report repair failed for audit/repair-failure.md",
+    );
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-post-run-repair-failure"))
+      .get();
+    expect(updatedTask?.implementationLog ?? "").not.toContain(
+      "Implementation done with invalid report",
+    );
+    expect(updatedTask?.agentActivityLog).toContain("post-run validation failure");
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-post-run-repair-failure");
     expect(artifact?.state).toBe("expected");
-    expect(artifact?.failureFamily).toBeNull();
   });
 
   it("routes retried readable source-inconclusive legacy audit cards through runtime", async () => {
@@ -596,18 +873,17 @@ describe("runImplementer rework behavior", () => {
       .where(eq(tasks.id, "task-legacy-generated-audit-retry"))
       .get();
     expect(queryMock).toHaveBeenCalled();
-    expect(updatedTask?.implementationLog).toContain("Implementation done");
-    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.implementationLog).not.toContain("Implementation done");
     expect(updatedTask?.implementationLog).not.toContain(
       "non-repairable declared scope; terminalized as source_inconclusive before runtime prompt construction",
     );
-    expect(updatedTask?.blockedReason).toBeNull();
+    expect(updatedTask?.blockedReason).toContain("source_inconclusive:");
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-legacy-generated-audit-retry");
     expect(artifact?.state).toBe("source_inconclusive");
     const attempts = listRoadmapBatchArtifactAttempts(initialArtifact!.id);
-    expect(attempts).toHaveLength(1);
-    expect(attempts[0]?.reworkStatus).toBe("terminal_inconclusive");
+    expect(attempts.some((attempt) => attempt.reworkStatus === "terminal_inconclusive")).toBe(true);
   });
 
   it("uses the final deterministic guard instead of runtime for unmatched audit report rework", async () => {
@@ -2779,21 +3055,21 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.prompt).toContain("Report artifact: audit/security-controls.md");
     expect(implementCall.options.maxTurns).toBe(84);
     const reportPath = join(projectRoot, "audit", "security-controls.md");
-    expect(existsSync(reportPath)).toBe(false);
+    expect(existsSync(reportPath)).toBe(true);
 
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-first-run-report");
     if (!artifact) throw new Error("missing first-run report artifact");
-    expect(artifact.state).toBe("expected");
+    expect(artifact.state).toBe("valid");
     expect(artifact.failureFamily).toBeNull();
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-first-run-report"))
       .get();
-    expect(updatedTask?.implementationLog).toContain("Implementation done");
-    expect(updatedTask?.implementationLog).not.toContain("Deterministic audit report repair");
-    expect(updatedTask?.agentActivityLog).not.toContain(
-      "Agent: implement-coordinator started (deterministic audit report repair)",
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.implementationLog).not.toContain("Implementation done");
+    expect(updatedTask?.agentActivityLog).toContain(
+      "Agent: deterministic audit report repair fallback started after post-run validation failure",
     );
   }, 60_000);
 
