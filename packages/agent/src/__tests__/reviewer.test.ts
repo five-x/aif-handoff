@@ -57,6 +57,268 @@ function sidecarOutput(previousFindingId: string): string {
   ].join("\n");
 }
 
+function passingSidecarOutput(previousFindingIds: string[] = []): string {
+  return [
+    "## Blocking Findings",
+    "- none",
+    "",
+    "## Advisories",
+    "- review.ts:1 was inspected for this reviewer regression.",
+    "",
+    "## Previous Findings",
+    ...(previousFindingIds.length > 0
+      ? previousFindingIds.map(
+          (findingId) =>
+            `- [${findingId}] resolved | Current artifact review inspected the synthesis output and found no remaining blocker.`,
+        )
+      : ["- none"]),
+    "",
+    "## Security Coverage",
+    "- secret_leaks | covered | Checked review output for raw secret disclosure.",
+    "- permissions_sandbox | covered | Checked deterministic review fallback boundaries.",
+    "- unsafe_shell_network_file | covered | Checked read-only review behavior.",
+    "- dependency_config | not_applicable | No dependency or configuration change was introduced.",
+  ].join("\n");
+}
+
+type FixtureSourceClassification = "validated_no_findings" | "validated_findings_present";
+
+function seedTrustedSynthesisReviewerFixture(input: {
+  idSuffix: string;
+  includeManifest?: boolean;
+  sourceClassifications?: [FixtureSourceClassification, FixtureSourceClassification];
+  previousFindings?: Array<Record<string, unknown>>;
+}) {
+  const includeManifest = input.includeManifest ?? true;
+  const sourceClassifications: [FixtureSourceClassification, FixtureSourceClassification] =
+    input.sourceClassifications ?? ["validated_no_findings", "validated_no_findings"];
+  const projectRoot = mkdtempSync(join(tmpdir(), `aif-reviewer-synthesis-${input.idSuffix}-`));
+  execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], {
+    cwd: projectRoot,
+    stdio: "ignore",
+  });
+  execFileSync("git", ["config", "user.name", "Test User"], {
+    cwd: projectRoot,
+    stdio: "ignore",
+  });
+  mkdirSync(join(projectRoot, "src"), { recursive: true });
+  mkdirSync(join(projectRoot, "audit"), { recursive: true });
+  writeFileSync(join(projectRoot, "src", "config.ts"), "export const retries = 2;\n", "utf8");
+  execFileSync("git", ["add", "src/config.ts"], { cwd: projectRoot, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+    cwd: projectRoot,
+    stdio: "ignore",
+  });
+
+  const db = testDb.current;
+  const projectId = `project-synthesis-${input.idSuffix}`;
+  const sourceTaskA = `task-source-a-${input.idSuffix}`;
+  const sourceTaskB = `task-source-b-${input.idSuffix}`;
+  const synthesisTaskId = `task-synthesis-${input.idSuffix}`;
+  const roadmapAlias = `audit-synthesis-${input.idSuffix}`;
+  db.insert(projects)
+    .values({
+      id: projectId,
+      name: `Trusted Synthesis ${input.idSuffix}`,
+      rootPath: projectRoot,
+    })
+    .run();
+  db.insert(tasks)
+    .values([
+      {
+        id: sourceTaskA,
+        projectId,
+        title: "Audit source A",
+        description: "Scope: src/config.ts\nReport artifact: audit/source-a.md",
+        taskIntent: "audit",
+        status: "done",
+        useSubagents: true,
+      },
+      {
+        id: sourceTaskB,
+        projectId,
+        title: "Audit source B",
+        description: "Scope: src/config.ts\nReport artifact: audit/source-b.md",
+        taskIntent: "audit",
+        status: "done",
+        useSubagents: true,
+      },
+      {
+        id: synthesisTaskId,
+        projectId,
+        title: "Synthesize audit findings",
+        description: "Scope: src/config.ts\nReport artifact: audit/summary.md",
+        taskIntent: "audit",
+        status: "review",
+        useSubagents: true,
+        implementationLog:
+          "Deterministic audit synthesis completed from validated report artifacts on producer branches.",
+        ...(input.previousFindings
+          ? {
+              autoReviewStateJson: JSON.stringify({
+                strategy: "full_re_review",
+                iteration: 1,
+                findings: input.previousFindings,
+              }),
+            }
+          : {}),
+      },
+    ])
+    .run();
+  const batch = createRoadmapBatchContract({
+    projectId,
+    roadmapAlias,
+    taskIntent: "audit",
+    executionPolicy: "serialized_shared_checkout",
+    createdTaskIds: [sourceTaskA, sourceTaskB, synthesisTaskId],
+    artifacts: [
+      { taskId: sourceTaskA, role: "report", artifactPath: "audit/source-a.md" },
+      { taskId: sourceTaskB, role: "report", artifactPath: "audit/source-b.md" },
+      { taskId: synthesisTaskId, role: "synthesis", artifactPath: "audit/summary.md" },
+    ],
+  });
+  [sourceTaskA, sourceTaskB].forEach((taskId, index) => {
+    const classification = sourceClassifications[index]!;
+    updateRoadmapBatchArtifactState({
+      taskId,
+      state: "valid",
+      failureFamily: null,
+      classification,
+      validationDetails: {
+        auditReportValidation: {
+          manifestStatus: "valid",
+          sourceClassification: classification,
+        },
+      },
+    });
+  });
+
+  const auditPlanId = resolveAuditPlanId({
+    taskId: synthesisTaskId,
+    roadmapBatchId: batch.batchId,
+  });
+  const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+  appendAuditEvidenceEvent(
+    buildAuditEvidenceUnit(
+      {
+        taskId: synthesisTaskId,
+        auditPlanId,
+        sourceSnapshotId,
+        scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+        riskHypothesisIds: ["risk-deterministic-synthesis-no-findings"],
+      },
+      buildAuditEvidencePayload({
+        id: `ev-synthesis-${input.idSuffix}`,
+        toolName: "deterministic_audit_synthesis",
+        evidenceKind: "shell_command",
+        evidenceGrade: "substantive",
+        scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+        riskHypothesisIds: ["risk-deterministic-synthesis-no-findings"],
+        paths: ["audit/source-a.md", "audit/source-b.md"],
+        command: "deterministic-audit-synthesis --artifact audit/summary.md",
+        exitCode: 0,
+        output: "summaryArtifact=audit/summary.md\nsourceReportCount=2\nweakOrInvalidReportCount=0",
+      }),
+    ),
+  );
+  const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+  const sourceSnapshot = {
+    id: sourceSnapshotId,
+    commit: snapshotKind === "git" ? snapshotCommit : null,
+    tree: snapshotKind === "git" ? snapshotTree : null,
+    dirty: false,
+  };
+  const body = [
+    "# Audit Summary",
+    "",
+    formatAuditSynthesisOutcomeForArtifact({
+      kind: "validated_no_findings",
+      reason:
+        "No findings survived validation and all source reports included substantive no-findings evidence.",
+      sourceReportCount: 2,
+      validatedFindingCount: 0,
+      substantiveNoFindingsReportCount: 2,
+      inventoryOnlyNoFindingsReportCount: 0,
+      weakReportCount: 0,
+    }),
+    "",
+    "No validated findings.",
+    "Audit outcome: Validated no-findings with substantive audit evidence.",
+    "Absence reasoning: trusted source reports `audit/source-a.md`, `audit/source-b.md` were each classified as validated_no_findings with substantive child evidence.",
+    "",
+    "## Evidence Register",
+    "",
+    "| Source report | Checked evidence | Verification |",
+    "| --- | --- | --- |",
+    "| `audit/source-a.md` | `src/config.ts:1` | - Command `git grep -n . -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
+    "| `audit/source-b.md` | `src/config.ts:1` | - Command `git grep -n retries -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
+    "",
+    "## Checked Files",
+    "",
+    "- `src/config.ts:1`",
+    "",
+    "## Checked Commands",
+    "",
+    "- Command `git grep -n . -- src/config.ts` output:",
+    "```",
+    "src/config.ts:1:export const retries = 2;",
+    "```",
+  ].join("\n");
+  const manifest = {
+    version: 1,
+    auditPlanId,
+    taskId: synthesisTaskId,
+    batchId: batch.batchId,
+    roadmapAlias,
+    artifactPath: "audit/summary.md",
+    contentSha256: computeAuditReportContentSha256(body),
+    sourceSnapshot,
+    outcome: "validated_no_findings",
+    scopeCoverage: [
+      {
+        root: "audit/source-a.md",
+        covered: true,
+        evidenceRefs: [`ev-synthesis-${input.idSuffix}`],
+      },
+      {
+        root: "audit/source-b.md",
+        covered: true,
+        evidenceRefs: [`ev-synthesis-${input.idSuffix}`],
+      },
+    ],
+    riskHypotheses: [
+      {
+        id: "risk-deterministic-synthesis-no-findings",
+        description:
+          "Trusted source audit reports contain no validated findings that survived deterministic synthesis.",
+        scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+        status: "covered",
+        evidenceRefs: [`ev-synthesis-${input.idSuffix}`],
+      },
+    ],
+    findings: [],
+    noFindingsClaims: [
+      {
+        id: "nf-deterministic-synthesis",
+        scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+        riskIds: ["risk-deterministic-synthesis-no-findings"],
+        evidenceRefs: [`ev-synthesis-${input.idSuffix}`],
+      },
+    ],
+    evidenceRefs: [`ev-synthesis-${input.idSuffix}`],
+  };
+  writeFileSync(
+    join(projectRoot, "audit", "summary.md"),
+    includeManifest
+      ? `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`
+      : `${body}\n`,
+    "utf8",
+  );
+
+  return { db, projectRoot, synthesisTaskId, batchId: batch.batchId };
+}
+
 describe("runReviewer", () => {
   beforeEach(() => {
     testDb.current = createTestDb();
@@ -572,6 +834,16 @@ describe("runReviewer", () => {
     const body = [
       "# Audit Summary",
       "",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "validated_no_findings",
+        reason: "No findings survived validation across trusted source reports.",
+        sourceReportCount: 1,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 1,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 0,
+      }),
+      "",
       "No validated findings.",
       "Risk hypotheses: risk-1 for `src/config.ts` was covered and is absent.",
       "",
@@ -637,7 +909,509 @@ describe("runReviewer", () => {
     expect(storedTask?.reviewComments).toContain("## Blocking Findings");
     expect(storedTask?.reviewComments).toContain("- none");
     expect(storedTask?.reviewComments).toContain(
-      "review_gate | audit report validation accepted `audit/summary.md`",
+      "- Deterministic Review: audit_synthesis_validation",
+    );
+  });
+
+  it("does not let generic synthesis validation bypass persisted source classification mismatch", async () => {
+    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-synthesis-generic-bypass-"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-synthesis-generic-bypass",
+        name: "Synthesis Generic Bypass",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-source-report-generic-bypass",
+          projectId: "project-synthesis-generic-bypass",
+          title: "Audit source",
+          description: "Scope: src/config.ts\nReport artifact: audit/source-audit.md",
+          taskIntent: "audit",
+          status: "done",
+          useSubagents: true,
+        },
+        {
+          id: "task-synthesis-generic-bypass",
+          projectId: "project-synthesis-generic-bypass",
+          title: "Synthesize audit findings",
+          description: "Scope: src/config.ts\nReport artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "review",
+          useSubagents: true,
+          implementationLog:
+            "Deterministic audit synthesis completed from validated report artifacts.",
+        },
+      ])
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "project-synthesis-generic-bypass",
+      roadmapAlias: "audit-synthesis-generic-bypass",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-report-generic-bypass", "task-synthesis-generic-bypass"],
+      artifacts: [
+        {
+          taskId: "task-source-report-generic-bypass",
+          role: "report",
+          artifactPath: "audit/source-audit.md",
+        },
+        {
+          taskId: "task-synthesis-generic-bypass",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-report-generic-bypass",
+      state: "valid",
+      failureFamily: null,
+      classification: "validated_findings_present",
+      validationDetails: {
+        auditReportValidation: {
+          manifestStatus: "valid",
+          sourceClassification: "validated_findings_present",
+        },
+      },
+    });
+
+    const auditPlanId = resolveAuditPlanId({
+      taskId: "task-synthesis-generic-bypass",
+      roadmapBatchId: batch.batchId,
+    });
+    const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+    appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId: "task-synthesis-generic-bypass",
+          auditPlanId,
+          sourceSnapshotId,
+          scopeIds: ["src/config.ts"],
+          riskHypothesisIds: ["risk-1"],
+        },
+        buildAuditEvidencePayload({
+          id: "ev-synthesis-generic-bypass",
+          toolName: "rg",
+          evidenceKind: "search",
+          evidenceGrade: "substantive",
+          scopeIds: ["src/config.ts"],
+          riskHypothesisIds: ["risk-1"],
+          paths: ["src/config.ts"],
+          command: 'rg -n "timeoutMs" src/config.ts',
+          exitCode: 0,
+          output: "src/config.ts:1:export const timeoutMs = 1000;",
+        }),
+      ),
+    );
+
+    const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+    const sourceSnapshot = {
+      id: sourceSnapshotId,
+      commit: snapshotKind === "git" ? snapshotCommit : null,
+      tree: snapshotKind === "git" ? snapshotTree : null,
+      dirty: false,
+    };
+    const body = [
+      "# Audit Summary",
+      "",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "validated_no_findings",
+        reason: "No findings survived validation across trusted source reports.",
+        sourceReportCount: 1,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 1,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 0,
+      }),
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` was covered and is absent.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Scope | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      '| `src/config.ts` | `src/config.ts:1`, source report `audit/source-audit.md` | Command `rg -n "timeoutMs" src/config.ts` output includes `src/config.ts:1:export const timeoutMs = 1000;` |',
+      "",
+      "## Checked Files",
+      "",
+      "- `src/config.ts:1`",
+      "- Source report provenance: `audit/source-audit.md`",
+      "",
+      "## Checked Commands",
+      "",
+      '- Command `rg -n "timeoutMs" src/config.ts` output:',
+      "```",
+      "src/config.ts:1:export const timeoutMs = 1000;",
+      "```",
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId,
+      taskId: "task-synthesis-generic-bypass",
+      batchId: batch.batchId,
+      roadmapAlias: "audit-synthesis-generic-bypass",
+      artifactPath: "audit/summary.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot,
+      outcome: "validated_no_findings",
+      scopeCoverage: [
+        { root: "src/config.ts", covered: true, evidenceRefs: ["ev-synthesis-generic-bypass"] },
+      ],
+      riskHypotheses: [
+        {
+          id: "risk-1",
+          description: "Synthesis source report coverage",
+          scopeIds: ["src/config.ts"],
+          status: "covered",
+          evidenceRefs: ["ev-synthesis-generic-bypass"],
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        {
+          id: "nf-1",
+          scopeIds: ["src/config.ts"],
+          riskIds: ["risk-1"],
+          evidenceRefs: ["ev-synthesis-generic-bypass"],
+        },
+      ],
+      evidenceRefs: ["ev-synthesis-generic-bypass"],
+    };
+    writeFileSync(
+      join(projectRoot, "audit", "summary.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    await runReviewer("task-synthesis-generic-bypass", projectRoot);
+
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-synthesis-generic-bypass"))
+      .get();
+    expect(storedTask?.reviewComments).not.toContain(
+      "- Deterministic Review: audit_synthesis_validation",
+    );
+    expect(storedTask?.reviewComments).not.toContain(
+      "- Deterministic Review: audit_report_validation",
+    );
+  });
+
+  it("accepts trusted deterministic synthesis when source report command evidence lives outside the checkout", async () => {
+    executeSubagentQueryMock.mockRejectedValue(new Error("sidecar should not run"));
+
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-synthesis-trusted-"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "config.ts"), "export const retries = 2;\n", "utf8");
+    execFileSync("git", ["add", "src/config.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-synthesis-trusted-reviewer",
+        name: "Trusted Synthesis Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-source-a",
+          projectId: "project-synthesis-trusted-reviewer",
+          title: "Audit source A",
+          description: "Scope: src/config.ts\nReport artifact: audit/source-a.md",
+          taskIntent: "audit",
+          status: "done",
+          useSubagents: true,
+        },
+        {
+          id: "task-source-b",
+          projectId: "project-synthesis-trusted-reviewer",
+          title: "Audit source B",
+          description: "Scope: src/config.ts\nReport artifact: audit/source-b.md",
+          taskIntent: "audit",
+          status: "done",
+          useSubagents: true,
+        },
+        {
+          id: "task-synthesis-trusted-reviewer",
+          projectId: "project-synthesis-trusted-reviewer",
+          title: "Synthesize audit findings",
+          description: "Scope: src/config.ts\nReport artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "review",
+          useSubagents: true,
+          implementationLog:
+            "Deterministic audit synthesis completed from validated report artifacts on producer branches.",
+        },
+      ])
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "project-synthesis-trusted-reviewer",
+      roadmapAlias: "audit-synthesis-trusted-reviewer",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-a", "task-source-b", "task-synthesis-trusted-reviewer"],
+      artifacts: [
+        { taskId: "task-source-a", role: "report", artifactPath: "audit/source-a.md" },
+        { taskId: "task-source-b", role: "report", artifactPath: "audit/source-b.md" },
+        {
+          taskId: "task-synthesis-trusted-reviewer",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+        },
+      ],
+    });
+    for (const taskId of ["task-source-a", "task-source-b"]) {
+      updateRoadmapBatchArtifactState({
+        taskId,
+        state: "valid",
+        failureFamily: null,
+        classification: "validated_no_findings",
+        validationDetails: {
+          auditReportValidation: {
+            manifestStatus: "valid",
+            sourceClassification: "validated_no_findings",
+          },
+        },
+      });
+    }
+
+    const auditPlanId = resolveAuditPlanId({
+      taskId: "task-synthesis-trusted-reviewer",
+      roadmapBatchId: batch.batchId,
+    });
+    const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+    appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId: "task-synthesis-trusted-reviewer",
+          auditPlanId,
+          sourceSnapshotId,
+          scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+          riskHypothesisIds: ["risk-deterministic-synthesis-no-findings"],
+        },
+        buildAuditEvidencePayload({
+          id: "ev-synthesis-trusted",
+          toolName: "deterministic_audit_synthesis",
+          evidenceKind: "shell_command",
+          evidenceGrade: "substantive",
+          scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+          riskHypothesisIds: ["risk-deterministic-synthesis-no-findings"],
+          paths: ["audit/source-a.md", "audit/source-b.md"],
+          command: "deterministic-audit-synthesis --artifact audit/summary.md",
+          exitCode: 0,
+          output:
+            "summaryArtifact=audit/summary.md\nsourceReportCount=2\nweakOrInvalidReportCount=0",
+        }),
+      ),
+    );
+
+    const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+    const sourceSnapshot = {
+      id: sourceSnapshotId,
+      commit: snapshotKind === "git" ? snapshotCommit : null,
+      tree: snapshotKind === "git" ? snapshotTree : null,
+      dirty: false,
+    };
+    const body = [
+      "# Audit Summary",
+      "",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "validated_no_findings",
+        reason:
+          "No findings survived validation and all source reports included substantive no-findings evidence.",
+        sourceReportCount: 2,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 2,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 0,
+      }),
+      "",
+      "No validated findings.",
+      "Audit outcome: Validated no-findings with substantive audit evidence.",
+      "Absence reasoning: trusted source reports `audit/source-a.md`, `audit/source-b.md` were each classified as validated_no_findings with substantive child evidence.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Source report | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      "| `audit/source-a.md` | `src/config.ts:1` | - Command `git grep -n . -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
+      "| `audit/source-b.md` | `src/config.ts:1` | - Command `git grep -n retries -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
+      "",
+      "## Checked Files",
+      "",
+      "- `src/config.ts:1`",
+      "",
+      "## Checked Commands",
+      "",
+      "- Command `git grep -n . -- src/config.ts` output:",
+      "```",
+      "src/config.ts:1:export const retries = 2;",
+      "```",
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId,
+      taskId: "task-synthesis-trusted-reviewer",
+      batchId: batch.batchId,
+      roadmapAlias: "audit-synthesis-trusted-reviewer",
+      artifactPath: "audit/summary.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot,
+      outcome: "validated_no_findings",
+      scopeCoverage: [
+        { root: "audit/source-a.md", covered: true, evidenceRefs: ["ev-synthesis-trusted"] },
+        { root: "audit/source-b.md", covered: true, evidenceRefs: ["ev-synthesis-trusted"] },
+      ],
+      riskHypotheses: [
+        {
+          id: "risk-deterministic-synthesis-no-findings",
+          description:
+            "Trusted source audit reports contain no validated findings that survived deterministic synthesis.",
+          scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+          status: "covered",
+          evidenceRefs: ["ev-synthesis-trusted"],
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        {
+          id: "nf-deterministic-synthesis",
+          scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+          riskIds: ["risk-deterministic-synthesis-no-findings"],
+          evidenceRefs: ["ev-synthesis-trusted"],
+        },
+      ],
+      evidenceRefs: ["ev-synthesis-trusted"],
+    };
+    writeFileSync(
+      join(projectRoot, "audit", "summary.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    await runReviewer("task-synthesis-trusted-reviewer", projectRoot);
+
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-synthesis-trusted-reviewer"))
+      .get();
+    expect(storedTask?.reviewComments).toContain(
+      "- Deterministic Review: audit_synthesis_validation",
+    );
+    expect(storedTask?.reviewComments).toContain(
+      "weak or untrusted source reports were not promoted",
+    );
+    expect(storedTask?.agentActivityLog).toContain(
+      "Agent: review stage complete (deterministic audit synthesis)",
+    );
+  });
+
+  it("falls back to sidecars when synthesis outcome metadata lacks a valid manifest", async () => {
+    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+
+    const { db, projectRoot, synthesisTaskId } = seedTrustedSynthesisReviewerFixture({
+      idSuffix: "missing-manifest",
+      includeManifest: false,
+    });
+
+    await runReviewer(synthesisTaskId, projectRoot);
+
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
+    expect(storedTask?.reviewComments).not.toContain(
+      "- Deterministic Review: audit_synthesis_validation",
+    );
+  });
+
+  it("falls back to sidecars when prior sidecar blockers exist for trusted synthesis", async () => {
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
+      resultText: passingSidecarOutput(input.agentName.includes("security") ? ["sec-prior"] : []),
+    }));
+
+    const { db, projectRoot, synthesisTaskId } = seedTrustedSynthesisReviewerFixture({
+      idSuffix: "prior-sidecar",
+      previousFindings: [
+        {
+          id: "sec-prior",
+          source: "security_audit",
+          text: "Prior security review blocker must not be closed by deterministic synthesis alone.",
+        },
+      ],
+    });
+
+    await runReviewer(synthesisTaskId, projectRoot);
+
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
+    expect(storedTask?.reviewComments).not.toContain(
+      "- Deterministic Review: audit_synthesis_validation",
+    );
+    expect(storedTask?.reviewComments).toContain("[sec-prior] security_audit | resolved");
+  });
+
+  it("falls back to sidecars when source classifications contradict no-findings synthesis", async () => {
+    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+
+    const { db, projectRoot, synthesisTaskId } = seedTrustedSynthesisReviewerFixture({
+      idSuffix: "classification-mismatch",
+      sourceClassifications: ["validated_findings_present", "validated_no_findings"],
+    });
+
+    await runReviewer(synthesisTaskId, projectRoot);
+
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
+    expect(storedTask?.reviewComments).not.toContain(
+      "- Deterministic Review: audit_synthesis_validation",
     );
   });
 
@@ -695,7 +1469,7 @@ describe("runReviewer", () => {
             findings: [
               {
                 id: "review-1",
-                source: "code_review",
+                source: "review_gate",
                 text: "Prior model review claimed the synthesis needed source validation.",
               },
             ],
@@ -723,37 +1497,100 @@ describe("runReviewer", () => {
       state: "source_inconclusive",
       failureFamily: "source_inconclusive",
       classification: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
       validationDetails: {
         sourceClassification: "source_inconclusive",
       },
     });
 
+    const auditPlanId = resolveAuditPlanId({
+      taskId: "task-synthesis-inconclusive-reviewer",
+      roadmapBatchId: batch.batchId,
+    });
+    const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+    appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId: "task-synthesis-inconclusive-reviewer",
+          auditPlanId,
+          sourceSnapshotId,
+          scopeIds: ["audit/source.md"],
+          riskHypothesisIds: ["risk-inconclusive"],
+        },
+        buildAuditEvidencePayload({
+          id: "ev-synthesis-inconclusive",
+          toolName: "deterministic_audit_synthesis",
+          evidenceKind: "shell_command",
+          evidenceGrade: "substantive",
+          scopeIds: ["audit/source.md"],
+          riskHypothesisIds: ["risk-inconclusive"],
+          paths: ["audit/source.md"],
+          command: "deterministic-audit-synthesis --artifact audit/summary.md",
+          exitCode: 0,
+          output: "summaryArtifact=audit/summary.md\nsourceReportCount=0\nweakReportCount=1",
+        }),
+      ),
+    );
+    const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+    const sourceSnapshot = {
+      id: sourceSnapshotId,
+      commit: snapshotKind === "git" ? snapshotCommit : null,
+      tree: snapshotKind === "git" ? snapshotTree : null,
+      dirty: false,
+    };
+    const body = [
+      "# Audit Inconclusive",
+      "",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "source_inconclusive",
+        reason: "Audit inconclusive: source reports are terminal non-trusted.",
+        sourceReportCount: 0,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 0,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 1,
+      }),
+      "",
+      "Audit outcome: Audit inconclusive",
+      "",
+      "## Child Report Status",
+      "",
+      "| Source report | Task | Status | Notes |",
+      "| --- | --- | --- | --- |",
+      "| `audit/source.md` | `task-source-inconclusive` | source_inconclusive | terminal non-trusted |",
+      "",
+      "## Checked Files",
+      "- `README.md:1`",
+    ].join("\n");
+    const manifest = {
+      version: 2,
+      auditPlanId,
+      taskId: "task-synthesis-inconclusive-reviewer",
+      batchId: batch.batchId,
+      roadmapAlias: "audit-inconclusive-reviewer",
+      artifactPath: "audit/summary.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot,
+      outcome: "source_inconclusive",
+      scopeCoverage: [
+        { root: "audit/source.md", covered: true, evidenceRefs: ["ev-synthesis-inconclusive"] },
+      ],
+      riskHypotheses: [
+        {
+          id: "risk-inconclusive",
+          description: "Source report was terminal non-trusted.",
+          scopeIds: ["audit/source.md"],
+          status: "covered",
+          evidenceRefs: ["ev-synthesis-inconclusive"],
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [],
+      evidenceRefs: ["ev-synthesis-inconclusive"],
+    };
     writeFileSync(
       join(projectRoot, "audit", "summary.md"),
-      [
-        "# Audit Inconclusive",
-        "",
-        formatAuditSynthesisOutcomeForArtifact({
-          kind: "source_inconclusive",
-          reason: "Audit inconclusive: source reports are terminal non-trusted.",
-          sourceReportCount: 1,
-          validatedFindingCount: 0,
-          substantiveNoFindingsReportCount: 0,
-          inventoryOnlyNoFindingsReportCount: 0,
-          weakReportCount: 1,
-        }),
-        "",
-        "Audit outcome: Audit inconclusive",
-        "",
-        "## Child Report Status",
-        "",
-        "| Source report | Task | Status | Notes |",
-        "| --- | --- | --- | --- |",
-        "| `audit/source.md` | `task-source-inconclusive` | source_inconclusive | terminal non-trusted |",
-        "",
-        "## Checked Files",
-        "- `README.md:1`",
-      ].join("\n"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
       "utf8",
     );
 
@@ -770,8 +1607,318 @@ describe("runReviewer", () => {
     );
     expect(storedTask?.reviewComments).toContain("## Blocking Findings");
     expect(storedTask?.reviewComments).toContain("- none");
-    expect(storedTask?.reviewComments).toContain("[review-1] code_review | resolved");
+    expect(storedTask?.reviewComments).toContain("[review-1] review_gate | resolved");
     expect(storedTask?.reviewComments).toContain("terminal audit inconclusive");
     expect(batch.batchId).toBeTruthy();
+  });
+
+  it("falls back to sidecars when inconclusive synthesis contradicts trusted source reports", async () => {
+    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+
+    const { db, projectRoot, synthesisTaskId, batchId } = seedTrustedSynthesisReviewerFixture({
+      idSuffix: "inconclusive-source-mismatch",
+    });
+    const auditPlanId = resolveAuditPlanId({
+      taskId: synthesisTaskId,
+      roadmapBatchId: batchId,
+    });
+    const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+    const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+    const sourceSnapshot = {
+      id: sourceSnapshotId,
+      commit: snapshotKind === "git" ? snapshotCommit : null,
+      tree: snapshotKind === "git" ? snapshotTree : null,
+      dirty: false,
+    };
+    const evidenceId = "ev-synthesis-inconclusive-source-mismatch";
+    const body = [
+      "# Audit Inconclusive",
+      "",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "source_inconclusive",
+        reason: "Audit inconclusive: source reports are terminal non-trusted.",
+        sourceReportCount: 2,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 0,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 0,
+      }),
+      "",
+      "Audit outcome: Audit inconclusive",
+      "",
+      "## Child Report Status",
+      "",
+      "| Source report | Task | Status | Notes |",
+      "| --- | --- | --- | --- |",
+      "| `audit/source-a.md` | source A | source_inconclusive | stale synthesis claim |",
+      "| `audit/source-b.md` | source B | source_inconclusive | stale synthesis claim |",
+    ].join("\n");
+    const manifest = {
+      version: 2,
+      auditPlanId,
+      taskId: synthesisTaskId,
+      batchId,
+      roadmapAlias: "audit-synthesis-inconclusive-source-mismatch",
+      artifactPath: "audit/summary.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot,
+      outcome: "source_inconclusive",
+      scopeCoverage: [
+        { root: "audit/source-a.md", covered: true, evidenceRefs: [evidenceId] },
+        { root: "audit/source-b.md", covered: true, evidenceRefs: [evidenceId] },
+      ],
+      riskHypotheses: [
+        {
+          id: "risk-inconclusive-source-mismatch",
+          description: "Stale synthesis claims trusted source reports were terminal.",
+          scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+          status: "covered",
+          evidenceRefs: [evidenceId],
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [],
+      evidenceRefs: [evidenceId],
+    };
+    appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId: synthesisTaskId,
+          auditPlanId,
+          sourceSnapshotId,
+          scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+          riskHypothesisIds: ["risk-inconclusive-source-mismatch"],
+        },
+        buildAuditEvidencePayload({
+          id: evidenceId,
+          toolName: "deterministic_audit_synthesis",
+          evidenceKind: "shell_command",
+          evidenceGrade: "substantive",
+          scopeIds: ["audit/source-a.md", "audit/source-b.md"],
+          riskHypothesisIds: ["risk-inconclusive-source-mismatch"],
+          paths: ["audit/source-a.md", "audit/source-b.md"],
+          command: "deterministic-audit-synthesis --artifact audit/summary.md",
+          exitCode: 0,
+          output: "summaryArtifact=audit/summary.md\nsourceReportCount=2\nweakReportCount=0",
+        }),
+      ),
+    );
+    writeFileSync(
+      join(projectRoot, "audit", "summary.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    await runReviewer(synthesisTaskId, projectRoot);
+
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
+    expect(storedTask?.reviewComments).not.toContain(
+      "- Deterministic Review: audit_synthesis_inconclusive",
+    );
+  });
+
+  it("falls back to sidecars for inconclusive synthesis with prior sidecar blockers", async () => {
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
+      resultText: passingSidecarOutput(
+        input.agentName.includes("security") ? ["sec-inconclusive"] : [],
+      ),
+    }));
+
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-inconclusive-sidecar-"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# test\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-inconclusive-sidecar",
+        name: "Inconclusive Sidecar Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-source-inconclusive-sidecar",
+          projectId: "project-inconclusive-sidecar",
+          title: "Audit source inconclusive",
+          description: "Report artifact: audit/source.md",
+          taskIntent: "audit",
+          status: "done",
+          useSubagents: true,
+        },
+        {
+          id: "task-synthesis-inconclusive-sidecar",
+          projectId: "project-inconclusive-sidecar",
+          title: "Synthesize audit findings",
+          description: "Report artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "review",
+          useSubagents: true,
+          implementationLog:
+            "Deterministic audit synthesis completed as terminal source_inconclusive.",
+          autoReviewStateJson: JSON.stringify({
+            strategy: "full_re_review",
+            iteration: 2,
+            findings: [
+              {
+                id: "sec-inconclusive",
+                source: "security_audit",
+                text: "Prior security blocker must be reviewed by the security sidecar.",
+              },
+            ],
+          }),
+        },
+      ])
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "project-inconclusive-sidecar",
+      roadmapAlias: "audit-inconclusive-sidecar",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-inconclusive-sidecar", "task-synthesis-inconclusive-sidecar"],
+      artifacts: [
+        {
+          taskId: "task-source-inconclusive-sidecar",
+          role: "report",
+          artifactPath: "audit/source.md",
+        },
+        {
+          taskId: "task-synthesis-inconclusive-sidecar",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-inconclusive-sidecar",
+      state: "source_inconclusive",
+      failureFamily: "source_inconclusive",
+      classification: "source_inconclusive",
+      reworkStatus: "terminal_inconclusive",
+      validationDetails: {
+        sourceClassification: "source_inconclusive",
+      },
+    });
+
+    const auditPlanId = resolveAuditPlanId({
+      taskId: "task-synthesis-inconclusive-sidecar",
+      roadmapBatchId: batch.batchId,
+    });
+    const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+    appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId: "task-synthesis-inconclusive-sidecar",
+          auditPlanId,
+          sourceSnapshotId,
+          scopeIds: ["audit/source.md"],
+          riskHypothesisIds: ["risk-inconclusive"],
+        },
+        buildAuditEvidencePayload({
+          id: "ev-synthesis-inconclusive-sidecar",
+          toolName: "deterministic_audit_synthesis",
+          evidenceKind: "shell_command",
+          evidenceGrade: "substantive",
+          scopeIds: ["audit/source.md"],
+          riskHypothesisIds: ["risk-inconclusive"],
+          paths: ["audit/source.md"],
+          command: "deterministic-audit-synthesis --artifact audit/summary.md",
+          exitCode: 0,
+          output: "summaryArtifact=audit/summary.md\nsourceReportCount=0\nweakReportCount=1",
+        }),
+      ),
+    );
+    const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+    const sourceSnapshot = {
+      id: sourceSnapshotId,
+      commit: snapshotKind === "git" ? snapshotCommit : null,
+      tree: snapshotKind === "git" ? snapshotTree : null,
+      dirty: false,
+    };
+    const body = [
+      "# Audit Inconclusive",
+      "",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "source_inconclusive",
+        reason: "Audit inconclusive: source reports are terminal non-trusted.",
+        sourceReportCount: 0,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 0,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 1,
+      }),
+      "",
+      "Audit outcome: Audit inconclusive",
+      "",
+      "## Child Report Status",
+      "",
+      "| Source report | Task | Status | Notes |",
+      "| --- | --- | --- | --- |",
+      "| `audit/source.md` | `task-source-inconclusive-sidecar` | source_inconclusive | terminal non-trusted |",
+    ].join("\n");
+    const manifest = {
+      version: 2,
+      auditPlanId,
+      taskId: "task-synthesis-inconclusive-sidecar",
+      batchId: batch.batchId,
+      roadmapAlias: "audit-inconclusive-sidecar",
+      artifactPath: "audit/summary.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot,
+      outcome: "source_inconclusive",
+      scopeCoverage: [
+        {
+          root: "audit/source.md",
+          covered: true,
+          evidenceRefs: ["ev-synthesis-inconclusive-sidecar"],
+        },
+      ],
+      riskHypotheses: [
+        {
+          id: "risk-inconclusive",
+          description: "Source report was terminal non-trusted.",
+          scopeIds: ["audit/source.md"],
+          status: "covered",
+          evidenceRefs: ["ev-synthesis-inconclusive-sidecar"],
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [],
+      evidenceRefs: ["ev-synthesis-inconclusive-sidecar"],
+    };
+    writeFileSync(
+      join(projectRoot, "audit", "summary.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    await runReviewer("task-synthesis-inconclusive-sidecar", projectRoot);
+
+    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-synthesis-inconclusive-sidecar"))
+      .get();
+    expect(storedTask?.reviewComments).not.toContain(
+      "- Deterministic Review: audit_synthesis_inconclusive",
+    );
+    expect(storedTask?.reviewComments).toContain("[sec-inconclusive] security_audit | resolved");
   });
 });

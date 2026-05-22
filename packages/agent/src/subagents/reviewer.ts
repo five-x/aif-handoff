@@ -343,6 +343,50 @@ function auditReportValidationIssueCodes(
   return [...new Set(validation.issues.map((issue) => issue.code))].sort();
 }
 
+type TrustedAuditSourceClassification = "validated_no_findings" | "validated_findings_present";
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseValidationDetailsJson(value: string | null): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function readAuditSourceClassification(value: unknown): string | null {
+  if (!isObjectRecord(value)) return null;
+  const direct = value.sourceClassification;
+  if (typeof direct === "string") return direct;
+  const auditReportValidation = value.auditReportValidation;
+  if (isObjectRecord(auditReportValidation)) {
+    const nested = auditReportValidation.sourceClassification;
+    if (typeof nested === "string") return nested;
+  }
+  const evidence = value.evidence;
+  if (isObjectRecord(evidence)) return readAuditSourceClassification(evidence);
+  return null;
+}
+
+function toTrustedAuditSourceClassification(
+  value: string | null | undefined,
+): TrustedAuditSourceClassification | null {
+  if (value === "validated_no_findings" || value === "validated_findings_present") return value;
+  return null;
+}
+
+function readPersistedTrustedAuditSourceClassification(
+  artifact: ReturnType<typeof listRoadmapReportArtifactsForSynthesis>[number],
+): TrustedAuditSourceClassification | null {
+  return toTrustedAuditSourceClassification(
+    readAuditSourceClassification(parseValidationDetailsJson(artifact.validationDetailsJson)),
+  );
+}
+
 function formatAuditArtifactReviewScopeBlock(input: {
   artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>> | null;
   validation: ReturnType<typeof validateAuditReportArtifact> | null;
@@ -578,6 +622,159 @@ function buildDeterministicAuditSynthesisInconclusiveReviewComments(input: {
   ].join("\n");
 }
 
+function isTrustedDeterministicAuditSynthesisOutcome(input: {
+  outcome: NonNullable<ReturnType<typeof classifyAuditSynthesisOutput>>;
+  sourceReports: ReturnType<typeof listRoadmapReportArtifactsForSynthesis>;
+}): boolean {
+  if (
+    input.outcome.kind !== "validated_no_findings" &&
+    input.outcome.kind !== "validated_findings_present"
+  ) {
+    return false;
+  }
+  if (input.sourceReports.length === 0) return false;
+  if (input.outcome.sourceReportCount !== input.sourceReports.length) return false;
+  if (input.outcome.weakReportCount !== 0) return false;
+  if (!input.sourceReports.every((artifact) => artifact.state === "valid")) return false;
+  const sourceClassifications = input.sourceReports
+    .map(readPersistedTrustedAuditSourceClassification)
+    .filter((classification): classification is TrustedAuditSourceClassification =>
+      Boolean(classification),
+    );
+  if (sourceClassifications.length !== input.sourceReports.length) return false;
+
+  if (input.outcome.kind === "validated_no_findings") {
+    return (
+      input.outcome.validatedFindingCount === 0 &&
+      input.outcome.inventoryOnlyNoFindingsReportCount === 0 &&
+      input.outcome.substantiveNoFindingsReportCount === input.sourceReports.length &&
+      sourceClassifications.every((classification) => classification === "validated_no_findings")
+    );
+  }
+
+  return (
+    input.outcome.validatedFindingCount > 0 &&
+    sourceClassifications.some((classification) => classification === "validated_findings_present")
+  );
+}
+
+const TERMINAL_NON_TRUSTED_SOURCE_STATES = new Set([
+  "invalid",
+  "missing",
+  "source_inconclusive",
+  "terminal_inconclusive",
+  "manual_exception",
+]);
+
+const TERMINAL_NON_TRUSTED_FAILURE_FAMILIES = new Set([
+  "invalid_artifact_content",
+  "invalid_artifact_contract",
+  "invalid_artifact_integrity",
+  "invalid_inventory_only",
+  "insufficient_substantive_evidence",
+  "source_inconclusive",
+  "manual_exception",
+  "missing_artifact",
+  "missing_tool_evidence",
+  "rework_needed",
+  "inconclusive_batch_evidence",
+  "manual_review_required",
+]);
+
+function isTerminalNonTrustedSourceReport(
+  artifact: ReturnType<typeof listRoadmapReportArtifactsForSynthesis>[number],
+): boolean {
+  if (artifact.state === "valid") return false;
+  if (readPersistedTrustedAuditSourceClassification(artifact)) return false;
+  if (!TERMINAL_NON_TRUSTED_SOURCE_STATES.has(artifact.state)) return false;
+  return (
+    artifact.failureFamily === null ||
+    TERMINAL_NON_TRUSTED_FAILURE_FAMILIES.has(artifact.failureFamily)
+  );
+}
+
+function isTrustedDeterministicAuditSynthesisInconclusiveOutcome(input: {
+  outcome: NonNullable<ReturnType<typeof classifyAuditSynthesisOutput>>;
+  sourceReports: ReturnType<typeof listRoadmapReportArtifactsForSynthesis>;
+}): boolean {
+  if (
+    input.outcome.kind !== "source_inconclusive" &&
+    input.outcome.kind !== "inconclusive_batch_evidence"
+  ) {
+    return false;
+  }
+  if (input.sourceReports.length === 0) return false;
+  const validReports = input.sourceReports.filter((artifact) => artifact.state === "valid");
+  const weakReports = input.sourceReports.filter((artifact) => artifact.state !== "valid");
+  if (weakReports.length === 0) return false;
+  if (input.outcome.sourceReportCount !== validReports.length) return false;
+  if (input.outcome.weakReportCount !== weakReports.length) return false;
+  if (input.outcome.validatedFindingCount !== 0) return false;
+  if (input.outcome.inventoryOnlyNoFindingsReportCount > validReports.length) return false;
+  if (
+    input.outcome.substantiveNoFindingsReportCount +
+      input.outcome.inventoryOnlyNoFindingsReportCount >
+    validReports.length
+  ) {
+    return false;
+  }
+  return (
+    validReports.every(
+      (artifact) =>
+        readPersistedTrustedAuditSourceClassification(artifact) === "validated_no_findings",
+    ) && weakReports.every(isTerminalNonTrustedSourceReport)
+  );
+}
+
+function buildDeterministicAuditSynthesisTrustedReviewComments(input: {
+  strategy: AutoReviewStrategy;
+  iteration: number;
+  artifactPath: string;
+  outcomeKind: "validated_no_findings" | "validated_findings_present";
+  sourceReportCount: number;
+  validatedFindingCount: number;
+  previousFindings: AutoReviewFinding[];
+}): string {
+  const closureEvidence =
+    input.outcomeKind === "validated_no_findings"
+      ? `Deterministic review-gate accepted \`${input.artifactPath}\` as validated no-findings from ${input.sourceReportCount} trusted source audit reports; weak or untrusted source reports were not promoted.`
+      : `Deterministic review-gate accepted \`${input.artifactPath}\` with ${input.validatedFindingCount} validated finding(s) from ${input.sourceReportCount} trusted source audit reports; weak or untrusted source reports were not promoted.`;
+  const previousFindingLines =
+    input.previousFindings.length > 0
+      ? input.previousFindings.map(
+          (finding) => `- [${finding.id}] ${finding.source} | resolved | ${closureEvidence}`,
+        )
+      : ["- none"];
+
+  return [
+    "## Auto Review Metadata",
+    `- Strategy: ${input.strategy}`,
+    `- Review Iteration: ${input.iteration}`,
+    "- Deterministic Review: audit_synthesis_validation",
+    "",
+    "## Previous Findings",
+    ...previousFindingLines,
+    "",
+    "## Blocking Findings",
+    "- none",
+    "",
+    "## Advisories",
+    `- review_gate | ${closureEvidence}`,
+    "",
+    "## Security Coverage",
+    "- secret_leaks | covered | Deterministic review inspected synthesis outcome metadata and persisted trusted source artifact states without exposing secret values.",
+    "- permissions_sandbox | covered | Deterministic review used read-only artifact validation and did not require additional write access.",
+    "- unsafe_shell_network_file | covered | Deterministic review did not run shell, network, or file mutation operations beyond reading the synthesis artifact.",
+    "- dependency_config | not_applicable | No dependency or runtime configuration change is introduced by deterministic audit synthesis output.",
+    "",
+    "## Raw Code Review",
+    `Deterministic review-gate accepted ${input.artifactPath}. ${closureEvidence}`,
+    "",
+    "## Raw Security Audit",
+    `Deterministic security review accepted ${input.artifactPath} as read-only audit synthesis output backed by persisted source artifact trust state.`,
+  ].join("\n");
+}
+
 function recordDeterministicAuditReportReviewActivity(taskId: string, artifactPath: string): void {
   logActivity(taskId, "Agent", "review-gate started (deterministic audit report validation)");
   logActivity(taskId, "Tool", `read_file ${artifactPath}`);
@@ -662,6 +859,7 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
       : false;
   const canUseDeterministicAuditReportReview =
     roadmapArtifact &&
+    roadmapArtifact.role === "report" &&
     deterministicReviewValidation &&
     isTrustedValidAuditReportValidation(deterministicReviewValidation) &&
     previousFindings.every((finding) => finding.source === "review_gate");
@@ -686,11 +884,30 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
           });
         })()
       : null;
+  const synthesisSourceReports =
+    roadmapArtifact?.role === "synthesis"
+      ? listRoadmapReportArtifactsForSynthesis(roadmapArtifact.batchId)
+      : [];
+  const canUseDeterministicAuditSynthesisTrustedReview =
+    roadmapArtifact?.role === "synthesis" &&
+    deterministicReviewValidation?.manifestStatus === "valid" &&
+    deterministicSynthesisOutcome &&
+    previousFindings.every((finding) => finding.source === "review_gate") &&
+    isTrustedDeterministicAuditSynthesisOutcome({
+      outcome: deterministicSynthesisOutcome,
+      sourceReports: synthesisSourceReports,
+    });
   const canUseDeterministicAuditSynthesisInconclusiveReview =
     roadmapArtifact?.role === "synthesis" &&
+    deterministicReviewValidation?.manifestStatus === "valid" &&
     deterministicSynthesisOutcome &&
+    previousFindings.every((finding) => finding.source === "review_gate") &&
     (deterministicSynthesisOutcome.kind === "source_inconclusive" ||
-      deterministicSynthesisOutcome.kind === "inconclusive_batch_evidence");
+      deterministicSynthesisOutcome.kind === "inconclusive_batch_evidence") &&
+    isTrustedDeterministicAuditSynthesisInconclusiveOutcome({
+      outcome: deterministicSynthesisOutcome,
+      sourceReports: synthesisSourceReports,
+    });
   const auditArtifactReviewScopeBlock = formatAuditArtifactReviewScopeBlock({
     artifact: roadmapArtifact ?? null,
     validation: deterministicReviewValidation,
@@ -754,6 +971,38 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
         issueCodes: auditReportValidationIssueCodes(deterministicReviewValidation),
       },
       "Review stage completed deterministically for invalid audit report artifact",
+    );
+    return;
+  }
+
+  if (canUseDeterministicAuditSynthesisTrustedReview) {
+    recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
+    const combinedReview = buildDeterministicAuditSynthesisTrustedReviewComments({
+      strategy,
+      iteration: reviewIteration,
+      artifactPath: roadmapArtifact.artifactPath,
+      outcomeKind:
+        deterministicSynthesisOutcome.kind === "validated_findings_present"
+          ? "validated_findings_present"
+          : "validated_no_findings",
+      sourceReportCount: deterministicSynthesisOutcome.sourceReportCount,
+      validatedFindingCount: deterministicSynthesisOutcome.validatedFindingCount,
+      previousFindings,
+    });
+    setTaskFields(taskId, {
+      reviewComments: combinedReview,
+      updatedAt: new Date().toISOString(),
+    });
+    logActivity(taskId, "Agent", "review stage complete (deterministic audit synthesis)");
+    flushActivityQueue(taskId);
+    log.info(
+      {
+        taskId,
+        artifactPath: roadmapArtifact.artifactPath,
+        synthesisOutcome: deterministicSynthesisOutcome.kind,
+        sourceReportCount: deterministicSynthesisOutcome.sourceReportCount,
+      },
+      "Review stage completed deterministically for trusted audit synthesis artifact",
     );
     return;
   }
