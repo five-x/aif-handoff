@@ -997,7 +997,7 @@ describe("qwen-local-agent adapter", () => {
     expect(readmeEvidence.scopeIds).toEqual(expect.arrayContaining(["README.md"]));
     expect(readmeEvidence.riskHypothesisIds).toEqual(["risk-1"]);
   });
-  it("disables repository-inspection tools after the configured budget and still allows report finalization", async () => {
+  it("terminalizes after the configured repository-inspection budget without another model request", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
     await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
@@ -1030,33 +1030,7 @@ describe("qwen-local-agent adapter", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           id: "chat-inspection-budget",
-          choices: [
-            {
-              message: {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                  {
-                    id: "call-write-report",
-                    type: "function",
-                    function: {
-                      name: "write_file",
-                      arguments: JSON.stringify({
-                        path: "audit/architecture.md",
-                        content: "# Audit\n\nNo validated findings.\n",
-                      }),
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          id: "chat-inspection-budget",
-          choices: [{ message: { role: "assistant", content: "done" } }],
+          choices: [{ message: { role: "assistant", content: "late finalization" } }],
         }),
       );
 
@@ -1077,26 +1051,11 @@ describe("qwen-local-agent adapter", () => {
       }),
     );
 
-    expect(result.outputText).toBe("done");
-    expect(await readFile(path.join(root, "audit", "architecture.md"), "utf8")).toContain(
-      "No validated findings",
-    );
+    expect(result.outputText).toContain("no further LLM finalization request was made");
+    expect(result.outputText).not.toContain("late finalization");
+    expect(await readFile(path.join(root, "audit", "architecture.md"), "utf8")).toContain("Draft.");
     expect(JSON.stringify(result.events)).toContain("read_file ok");
-    const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
-    const secondToolNames = secondBody.tools?.map((tool) => tool.function.name);
-    expect(JSON.stringify(secondBody.messages)).toContain("repository_inspection_budget_exhausted");
-    expect(secondToolNames).toEqual([
-      "write_file",
-      "apply_patch",
-      "git_status",
-      "compute_audit_report_hash",
-      "finalize_audit_report_manifest",
-      "validate_audit_report",
-      "git_commit",
-    ]);
-    expect(secondToolNames).not.toEqual(
-      expect.arrayContaining(["list_files", "read_file", "search_files", "run_shell"]),
-    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     const auditEvents = events.filter((event) => event.type === "audit:evidence");
     expect(auditEvents).toHaveLength(1);
     expect(JSON.stringify(auditEvents)).not.toContain("audit/architecture.md");
@@ -1207,46 +1166,80 @@ describe("qwen-local-agent adapter", () => {
         }),
       );
 
-    await expect(
-      runQwenLocalAgentApi(
-        createRunInput(root, {
-          workflowKind: "audit",
-          options: {
-            baseUrl: "http://192.168.88.62:8003/v1",
-            toolTimeoutMs: 5_000,
-            maxOutputChars: 4_000,
-          },
-          execution: {
-            repositoryInspectionToolBudget: 1,
-            onEvent: (event) => events.push(event),
-          },
-        }),
-      ),
-    ).rejects.toMatchObject({
-      category: "context_length",
-      message: expect.stringContaining("did not finalize after repository inspection budget"),
-      providerMeta: expect.objectContaining({
-        status: "repository_inspection_budget_exhausted",
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://192.168.88.62:8003/v1",
+          toolTimeoutMs: 5_000,
+          maxOutputChars: 4_000,
+        },
+        execution: {
+          repositoryInspectionToolBudget: 1,
+          onEvent: (event) => events.push(event),
+        },
       }),
-    });
+    );
 
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
-    const secondToolNames = secondBody.tools?.map((tool) => tool.function.name);
-    expect(JSON.stringify(secondBody.messages)).toContain("QWEN COMPACT CONTEXT MODE");
-    expect(JSON.stringify(secondBody.messages)).toContain("repository_inspection_budget_exhausted");
-    expect(secondToolNames).toEqual([
-      "write_file",
-      "apply_patch",
-      "git_status",
-      "compute_audit_report_hash",
-      "finalize_audit_report_manifest",
-      "validate_audit_report",
-      "git_commit",
-    ]);
-    expect(JSON.stringify(events)).toContain("Repository inspection budget exhausted");
+    expect(result.outputText).toContain("no further LLM finalization request was made");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.outputText).toContain("repositoryInspectionToolBudget=1");
     expect(JSON.stringify(events)).toContain("README.md");
     expect(JSON.stringify(events)).not.toContain("late finalization");
+  });
+  it("stops before emitting repository-inspection denials for batched calls after budget exhaustion", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-batched-stop-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    await writeFile(path.join(root, "src", "app.ts"), "export const app = true;\n", "utf8");
+    const events = [];
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-inspection-budget-batched-stop",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call-read-allowed",
+                  type: "function",
+                  function: {
+                    name: "read_file",
+                    arguments: JSON.stringify({ path: "README.md" }),
+                  },
+                },
+                {
+                  id: "call-search-skipped",
+                  type: "function",
+                  function: {
+                    name: "search_files",
+                    arguments: JSON.stringify({ path: "src", pattern: "app" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        execution: {
+          repositoryInspectionToolBudget: 1,
+          onEvent: (event) => events.push(event),
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("no further LLM finalization request was made");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(events)).toContain("read_file ok");
+    expect(JSON.stringify(events)).not.toContain("search_files");
+    expect(JSON.stringify(events)).not.toContain("Repository inspection budget exhausted");
   });
   it("auto-commits and completes after audit validation passes during budget finalization", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-validated-"));
@@ -1425,7 +1418,7 @@ describe("qwen-local-agent adapter", () => {
 
     expect(result.outputText).toContain("Automatic bounded report-only git_commit completed");
     expect(result.outputText).not.toContain("late finalization");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(result.events)).toContain("git_commit ok");
     const gitLog = await spawnProcess({
       command: "git",
@@ -1457,6 +1450,184 @@ describe("qwen-local-agent adapter", () => {
     });
     expect(stagedAfterCommit.ok).toBe(true);
     expect(stagedAfterCommit.output).toContain("src/unrelated.ts");
+  });
+  it("rejects when aborted before automatic budget finalization commit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-commit-abort-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "config.ts"), "export const timeoutMs = 1000;\n");
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.com"]);
+    await expectSpawnOk(root, ["config", "user.name", "Test User"]);
+    await expectSpawnOk(root, ["add", "src/config.ts"]);
+    await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
+    const commitSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const treeSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD^{tree}"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const evidenceId = "ev_22222222-2222-4222-8222-222222222222";
+    const reportBody = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+    const reportManifest = {
+      version: 1,
+      auditPlanId: "task:task-1",
+      taskId: "task-1",
+      artifactPath: "audit/report.md",
+      contentSha256: computeAuditReportContentSha256(reportBody),
+      sourceSnapshot: {
+        id: `git:${commitSha}:${treeSha}`,
+        commit: commitSha,
+        tree: treeSha,
+        dirty: false,
+      },
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "src/config.ts", evidenceRefs: [evidenceId] }],
+      riskHypotheses: [
+        { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        { id: "nf-1", root: "src/config.ts", riskId: "risk-1", evidenceRefs: [evidenceId] },
+      ],
+      evidenceRefs: [evidenceId],
+    };
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      `${reportBody}\n\`\`\`audit-report-manifest\n${JSON.stringify(reportManifest)}\n\`\`\`\n`,
+      "utf8",
+    );
+    const abort = new AbortController();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-inspection-budget-commit-abort",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call-read",
+                  type: "function",
+                  function: {
+                    name: "read_file",
+                    arguments: JSON.stringify({ path: "src/config.ts" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://192.168.88.62:8003/v1",
+            maxToolTurns: 8,
+          },
+          execution: {
+            abortController: abort,
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+            auditReportTaskDescription:
+              "Scope: src/config.ts\nRisk hypotheses: risk-1 Runtime configuration drift",
+            auditReportTaskId: "task-1",
+            auditReportAuditPlanId: "task:task-1",
+            auditReportEvidenceUnits: [
+              {
+                id: evidenceId,
+                taskId: "task-1",
+                auditPlanId: "task:task-1",
+                sourceSnapshotId: `git:${commitSha}:${treeSha}`,
+                toolName: "Grep",
+                evidenceKind: "search",
+                evidenceGrade: "substantive",
+                scopeIds: ["src/config.ts"],
+                riskHypothesisIds: ["risk-1"],
+                pathHashes: [],
+                pathRangeHashes: [],
+                command: { command: 'rg -n "timeoutMs" src/config.ts', args: [], cwd: null },
+                exitCode: 0,
+                outputSha256: "2".repeat(64),
+                outputPreview: "src/config.ts:1:export const timeoutMs = 1000;",
+                outputPreviewTruncated: false,
+                parsedSummary: {
+                  outputBytes: 46,
+                  outputLineCount: 1,
+                  previewChars: 46,
+                  exitCode: null,
+                },
+                redactionStatus: "clean",
+                createdAt: "2026-05-22T00:00:00.000Z",
+              },
+            ],
+            repositoryInspectionToolBudget: 1,
+            runTimeoutMs: 30_000,
+            onEvent: (event) => {
+              if (event.type === "tool:use" && event.data?.name === "git_commit") {
+                abort.abort(new DOMException("The operation was aborted", "AbortError"));
+              }
+            },
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "timeout",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const headAfterAbort = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    expect(headAfterAbort).toBe(commitSha);
+    const reportLog = await spawnProcess({
+      command: "git",
+      args: ["log", "-1", "--name-only", "--format=", "--", "audit/report.md"],
+      cwd: root,
+      env: buildSanitizedToolEnv(process.env),
+      timeoutMs: 10_000,
+      maxOutputChars: 4_000,
+    });
+    expect(reportLog.ok).toBe(true);
+    expect(reportLog.output.trim()).toBe("");
   });
   it("returns bounded validation failure after budget finalization instead of waiting for another LLM turn", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-invalid-report-"));
@@ -1537,7 +1708,7 @@ describe("qwen-local-agent adapter", () => {
     );
     expect(result.outputText).toContain("validate_audit_report output");
     expect(result.outputText).not.toContain("late finalization");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
   it("returns bounded validation failure when a batched inspection call exhausts budget before validation", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-batched-validate-"));
@@ -1604,7 +1775,7 @@ describe("qwen-local-agent adapter", () => {
     expect(result.outputText).not.toContain("late finalization");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-  it("times out finalization promptly after repository inspection budget is exhausted", async () => {
+  it("skips the finalization model request after repository inspection budget is exhausted", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-finalize-timeout-"));
     await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
     fetchMock
@@ -1639,26 +1810,112 @@ describe("qwen-local-agent adapter", () => {
         });
       });
 
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        execution: {
+          repositoryInspectionToolBudget: 1,
+          repositoryInspectionBudgetFinalResponseTimeoutMs: 5,
+          runTimeoutMs: 30_000,
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("no further LLM finalization request was made");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it("rejects when aborted before local budget finalization can mutate an audit report", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-finalize-abort-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    const reportPath = path.join(root, "audit", "report.md");
+    const reportBefore = [
+      "# Audit",
+      "",
+      "No validated findings.",
+      "```audit-report-manifest",
+      JSON.stringify({
+        version: 1,
+        auditPlanId: "task:task-1",
+        taskId: "task-1",
+        artifactPath: "audit/report.md",
+        contentSha256: "0".repeat(64),
+        outcome: "validated_no_findings",
+        scopeCoverage: [],
+        riskHypotheses: [],
+        findings: [],
+        noFindingsClaims: [],
+        evidenceRefs: [],
+      }),
+      "```",
+      "",
+    ].join("\n");
+    await writeFile(reportPath, reportBefore, "utf8");
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.com"]);
+    await expectSpawnOk(root, ["config", "user.name", "Test User"]);
+    await expectSpawnOk(root, ["add", "README.md", "audit/report.md"]);
+    await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
+    const abort = new AbortController();
+    fetchMock.mockImplementationOnce(() => {
+      abort.abort(new DOMException("The operation was aborted", "AbortError"));
+      return Promise.resolve(
+        jsonResponse({
+          id: "chat-inspection-budget-finalize-abort",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-read-allowed",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    });
+
     await expect(
       runQwenLocalAgentApi(
         createRunInput(root, {
           workflowKind: "audit",
           execution: {
+            abortController: abort,
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
             repositoryInspectionToolBudget: 1,
-            repositoryInspectionBudgetFinalResponseTimeoutMs: 5,
             runTimeoutMs: 30_000,
           },
         }),
       ),
     ).rejects.toMatchObject({
       category: "timeout",
-      message: expect.stringContaining("Finalization timeout"),
-      providerMeta: expect.objectContaining({
-        status: "repository_inspection_budget_exhausted",
-      }),
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await readFile(reportPath, "utf8")).toBe(reportBefore);
+    const committedFiles = await spawnProcess({
+      command: "git",
+      args: ["show", "--name-only", "--format=", "HEAD"],
+      cwd: root,
+      env: buildSanitizedToolEnv(process.env),
+      timeoutMs: 10_000,
+      maxOutputChars: 4_000,
+    });
+    expect(committedFiles.ok).toBe(true);
+    expect(committedFiles.output.split(/\r?\n/).filter(Boolean)).toEqual([
+      "README.md",
+      "audit/report.md",
+    ]);
   });
   it("can controlled-fail instead of posting finalization after repository inspection budget exhaustion", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-controlled-failure-"));
@@ -1715,7 +1972,7 @@ describe("qwen-local-agent adapter", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-  it("keeps repository budget exhaustion status when compacted finalization exceeds endpoint input budget", async () => {
+  it("returns bounded budget exhaustion text without compacted finalization when endpoint input is large", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-finalize-budget-"));
     await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
     let baseUrlReads = 0;
@@ -1751,28 +2008,23 @@ describe("qwen-local-agent adapter", () => {
       }),
     );
 
-    await expect(
-      runQwenLocalAgentApi(
-        createRunInput(root, {
-          workflowKind: "audit",
-          systemPrompt: "x".repeat(80_000),
-          options: dynamicOptions,
-          execution: {
-            repositoryInspectionToolBudget: 1,
-            repositoryInspectionBudgetFinalResponseTimeoutMs: 5_000,
-          },
-        }),
-      ),
-    ).rejects.toMatchObject({
-      category: "context_length",
-      providerMeta: expect.objectContaining({
-        status: "repository_inspection_budget_exhausted",
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        systemPrompt: "x".repeat(80_000),
+        options: dynamicOptions,
+        execution: {
+          repositoryInspectionToolBudget: 1,
+          repositoryInspectionBudgetFinalResponseTimeoutMs: 5_000,
+        },
       }),
-    });
+    );
 
+    expect(result.outputText).toContain("no further LLM finalization request was made");
+    expect(result.outputText).toContain("repositoryInspectionToolBudget=1");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-  it("keeps repository budget exhaustion status when max turns are exhausted after compaction", async () => {
+  it("returns bounded budget exhaustion text before max turns can run after compaction", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-max-turns-"));
     await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
     fetchMock
@@ -1823,31 +2075,22 @@ describe("qwen-local-agent adapter", () => {
         }),
       );
 
-    await expect(
-      runQwenLocalAgentApi(
-        createRunInput(root, {
-          workflowKind: "audit",
-          options: {
-            baseUrl: "http://192.168.88.62:8003/v1",
-            maxToolTurns: 2,
-          },
-          execution: {
-            repositoryInspectionToolBudget: 1,
-          },
-        }),
-      ),
-    ).rejects.toMatchObject({
-      category: "context_length",
-      message: expect.stringContaining("after repository inspection budget exhausted"),
-      providerMeta: expect.objectContaining({
-        status: "repository_inspection_budget_exhausted",
-        reason: "max_tool_turns_after_repository_inspection_budget_exhaustion",
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://192.168.88.62:8003/v1",
+          maxToolTurns: 2,
+        },
+        execution: {
+          repositoryInspectionToolBudget: 1,
+        },
       }),
-    });
+    );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
-    expect(JSON.stringify(secondBody.messages)).toContain("QWEN COMPACT CONTEXT MODE");
+    expect(result.outputText).toContain("no further LLM finalization request was made");
+    expect(result.outputText).toContain("repositoryInspectionToolBudget=1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
   it("stops repeated identical tool calls before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-repeated-tool-loop-"));

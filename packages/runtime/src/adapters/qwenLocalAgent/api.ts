@@ -295,6 +295,12 @@ function localWaitAbortError(message) {
 function isLocalWaitAbortError(error) {
   return Boolean(error && typeof error === "object" && error[LOCAL_WAIT_ABORT]);
 }
+function assertNotAbortedForBudgetFinalization(signal) {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof DOMException
+    ? signal.reason
+    : abortError("qwen-local-agent budget finalization aborted");
+}
 function truncateTextForRequest(value, maxChars) {
   const text = String(value ?? "");
   if (!Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) return text;
@@ -858,8 +864,11 @@ async function completeBudgetFinalizedAuditReport(
       arguments: JSON.stringify(commitArgs),
     },
   };
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
   emitToolUse(input, events, commitToolCall, commitArgs);
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
   const commitResult = await executeQwenLocalTool("git_commit", commitArgs, toolContext);
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
   emitToolResult(input, events, commitToolCall, commitResult);
   if (!commitResult.ok) {
     return {
@@ -893,6 +902,116 @@ function budgetFinalizationValidationFailedText(args, result) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+function budgetFinalizationStoppedText({
+  artifactPath,
+  repositoryInspectionToolCalls,
+  repositoryInspectionToolBudget,
+  finalizeResult,
+  validationResult,
+}) {
+  return [
+    `Repository-inspection budget exhausted after ${repositoryInspectionToolCalls} inspection tool call(s); no further LLM finalization request was made.`,
+    `repositoryInspectionToolBudget=${repositoryInspectionToolBudget}`,
+    artifactPath ? `Audit report artifact: ${artifactPath}` : null,
+    "Coordinator post-run validation/repair must use the bounded audit evidence ledger.",
+    finalizeResult?.error ? `finalize_audit_report_manifest error: ${finalizeResult.error}` : null,
+    finalizeResult?.output
+      ? `finalize_audit_report_manifest output:\n${finalizeResult.output}`
+      : null,
+    validationResult?.error ? `validate_audit_report error: ${validationResult.error}` : null,
+    validationResult?.output ? `validate_audit_report output:\n${validationResult.output}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+function buildBudgetFinalizationToolCall(name, args, suffix) {
+  return {
+    id: `repository-inspection-budget-${suffix}`,
+    type: "function",
+    function: {
+      name,
+      arguments: JSON.stringify(args),
+    },
+  };
+}
+async function completeBudgetFinalizationFromExistingAuditReport({
+  input,
+  events,
+  toolContext,
+  repositoryInspectionToolCalls,
+  repositoryInspectionToolBudget,
+}) {
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
+  const artifactPath = normalizeRepositoryBudgetPath(input.execution?.auditReportArtifactPath);
+  if (!artifactPath) {
+    return {
+      outputText: budgetFinalizationStoppedText({
+        artifactPath: null,
+        repositoryInspectionToolCalls,
+        repositoryInspectionToolBudget,
+      }),
+    };
+  }
+
+  const finalizeArgs = { path: artifactPath };
+  const finalizeToolCall = buildBudgetFinalizationToolCall(
+    "finalize_audit_report_manifest",
+    finalizeArgs,
+    "finalize-audit-report-manifest",
+  );
+  emitToolUse(input, events, finalizeToolCall, finalizeArgs);
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
+  const finalizeResult = await executeQwenLocalTool(
+    "finalize_audit_report_manifest",
+    finalizeArgs,
+    toolContext,
+  );
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
+  emitToolResult(input, events, finalizeToolCall, finalizeResult);
+
+  const validateArgs = { path: artifactPath };
+  const validateToolCall = buildBudgetFinalizationToolCall(
+    "validate_audit_report",
+    validateArgs,
+    "validate-audit-report",
+  );
+  emitToolUse(input, events, validateToolCall, validateArgs);
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
+  const validationResult = await executeQwenLocalTool(
+    "validate_audit_report",
+    validateArgs,
+    toolContext,
+  );
+  assertNotAbortedForBudgetFinalization(toolContext.signal);
+  emitToolResult(input, events, validateToolCall, validationResult);
+
+  if (validationResult.ok) {
+    return completeBudgetFinalizedAuditReport(
+      input,
+      events,
+      toolContext,
+      validateToolCall,
+      validateArgs,
+    );
+  }
+
+  return {
+    outputText: [
+      budgetFinalizationValidationFailedText(validateArgs, validationResult),
+      finalizeResult.ok
+        ? null
+        : budgetFinalizationStoppedText({
+            artifactPath,
+            repositoryInspectionToolCalls,
+            repositoryInspectionToolBudget,
+            finalizeResult,
+            validationResult,
+          }),
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  };
 }
 function auditReportRepairInspectionDeniedResult(toolName) {
   const safeToolName = sanitizeQwenToolNameForLog(toolName);
@@ -1327,6 +1446,31 @@ export async function runQwenLocalAgentApi(input, logger) {
   let toolCallCount = 0;
   let auditLowQualityRepairLock = false;
   const toolCallSignatureCounts = new Map();
+  const completeAfterRepositoryInspectionBudgetExhaustion = async () => {
+    logger?.warn?.(
+      {
+        runtimeId: input.runtimeId,
+        profileId: input.profileId ?? null,
+        repositoryInspectionToolCalls,
+        repositoryInspectionToolBudget,
+      },
+      "Stopped qwen-local-agent before final LLM request after repository inspection budget exhaustion",
+    );
+    const completion = await completeBudgetFinalizationFromExistingAuditReport({
+      input,
+      events,
+      toolContext,
+      repositoryInspectionToolCalls,
+      repositoryInspectionToolBudget,
+    });
+    return {
+      outputText: completion.outputText,
+      sessionId,
+      usage,
+      events,
+      raw,
+    };
+  };
   logger?.info?.(
     {
       runtimeId: input.runtimeId,
@@ -1360,6 +1504,12 @@ export async function runQwenLocalAgentApi(input, logger) {
           repositoryInspectionToolCalls,
           repositoryInspectionToolBudget,
         );
+      }
+      if (
+        repositoryInspectionBudgetExhausted &&
+        repositoryInspectionBudgetFinalizationMode === "compact_final_response"
+      ) {
+        return await completeAfterRepositoryInspectionBudgetExhaustion();
       }
       const budgetFinalizationTimeoutActive =
         repositoryInspectionBudgetExhausted &&
@@ -1533,6 +1683,25 @@ export async function runQwenLocalAgentApi(input, logger) {
           });
           continue;
         }
+        const toolAllowed = isQwenToolAllowedForWorkflow(
+          input.workflowKind,
+          toolCall.function.name,
+        );
+        const isRepositoryInspectionTool = isRepositoryInspectionToolCall(
+          input,
+          toolContext,
+          toolCall.function.name,
+          args,
+        );
+        if (
+          toolAllowed &&
+          repositoryInspectionBudgetFinalizationMode === "compact_final_response" &&
+          repositoryInspectionToolBudget != null &&
+          isRepositoryInspectionTool &&
+          repositoryInspectionToolCalls >= repositoryInspectionToolBudget
+        ) {
+          return await completeAfterRepositoryInspectionBudgetExhaustion();
+        }
         emitToolUse(input, events, toolCall, args);
         const signature = buildToolCallSignature(toolCall.function.name, args);
         const effectiveRepeatedToolCallLimit = repeatedToolCallLimitForTool(
@@ -1554,16 +1723,6 @@ export async function runQwenLocalAgentApi(input, logger) {
           signatureCount > effectiveRepeatedToolCallLimit;
         const shouldSuppressRepeatedCall =
           repeatedToolCallCount > effectiveRepeatedToolCallLimit || repeatedNonconsecutiveLoop;
-        const toolAllowed = isQwenToolAllowedForWorkflow(
-          input.workflowKind,
-          toolCall.function.name,
-        );
-        const isRepositoryInspectionTool = isRepositoryInspectionToolCall(
-          input,
-          toolContext,
-          toolCall.function.name,
-          args,
-        );
         const shouldDenyRepositoryInspection =
           toolAllowed &&
           !shouldSuppressRepeatedCall &&
@@ -1750,30 +1909,9 @@ export async function runQwenLocalAgentApi(input, logger) {
       if (
         repositoryInspectionToolBudget != null &&
         repositoryInspectionToolCalls >= repositoryInspectionToolBudget &&
-        !repositoryInspectionBudgetCompacted
+        repositoryInspectionBudgetFinalizationMode === "compact_final_response"
       ) {
-        const policyAfterTools = resolveEndpointPolicy(input);
-        if (policyAfterTools.budget) {
-          messages = compactMessagesForEndpointBudget(
-            input,
-            messages,
-            toolContext,
-            "repository_inspection_budget_exhausted",
-            policyAfterTools.budget,
-          );
-          repositoryInspectionBudgetCompacted = true;
-          logger?.warn?.(
-            {
-              runtimeId: input.runtimeId,
-              profileId: input.profileId ?? null,
-              baseUrl: policyAfterTools.baseUrl,
-              repositoryInspectionToolCalls,
-              repositoryInspectionToolBudget,
-              estimatedInputTokensAfter: estimateMessagesInputTokens(input, messages),
-            },
-            "Compacted qwen-local-agent transcript after repository inspection budget exhaustion",
-          );
-        }
+        return await completeAfterRepositoryInspectionBudgetExhaustion();
       }
     }
     if (
