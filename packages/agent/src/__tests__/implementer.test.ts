@@ -2789,6 +2789,188 @@ describe("runImplementer rework behavior", () => {
     );
   }, 60_000);
 
+  it("uses deterministic repair immediately after repository-inspection budget exhaustion", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-budget-direct-repair",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: [
+          "Scope: README.md",
+          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Allowed changes: only create/update audit/architecture.md.",
+          "Report artifact: audit/architecture.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Inspect scoped files and write the audit report.",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-budget-direct-repair",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-budget-direct-repair"],
+      artifacts: [
+        {
+          taskId: "task-audit-budget-direct-repair",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+    queryMock.mockImplementationOnce(() => {
+      throw new RuntimeExecutionError(
+        "qwen-local-agent did not finalize after repository inspection budget exhausted (60 inspection tool call(s)); denied 3 additional repository-inspection request(s).",
+        undefined,
+        "context_length",
+        {
+          providerMeta: {
+            status: "repository_inspection_budget_exhausted",
+            category: "context_length",
+          },
+        },
+      );
+    });
+
+    await runImplementer("task-audit-budget-direct-repair", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-budget-direct-repair"))
+      .get();
+    expect(updatedTask?.agentActivityLog).toContain(
+      "deterministic audit report repair fallback started after repository inspection budget exhaustion",
+    );
+    expect(updatedTask?.agentActivityLog).not.toContain(
+      "audit-report-ledger-writer recovery started",
+    );
+    const updatedArtifact = findRoadmapBatchArtifactByTaskId("task-audit-budget-direct-repair");
+    expect(updatedArtifact?.state).toBe("valid");
+    expect(readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8")).toContain(
+      "```audit-report-manifest",
+    );
+  });
+
+  it("does not invoke ledger-writer when budget-exhaustion deterministic repair fails", async () => {
+    const db = testDb.current;
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-budget-direct-repair-fails",
+        projectId: "project-1",
+        title: "Audit architecture",
+        description: [
+          "Scope: README.md",
+          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Allowed changes: only create/update audit/architecture.md.",
+          "Report artifact: audit/architecture.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Inspect scoped files and write the audit report.",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-budget-direct-repair-fails",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-budget-direct-repair-fails"],
+      artifacts: [
+        {
+          taskId: "task-audit-budget-direct-repair-fails",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot,
+        },
+      ],
+    });
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-budget-direct-repair-fails");
+    if (!artifact) throw new Error("missing budget exhaustion repair-failure artifact");
+    appendAuditEvidenceEvent({
+      id: "ev_budget_direct_00000000-0000-4000-8000-000000000001",
+      taskId: "task-audit-budget-direct-repair-fails",
+      auditPlanId: `batch:${artifact.batchId}:task:task-audit-budget-direct-repair-fails`,
+      sourceSnapshotId: "workspace:budget-direct-repair-fails",
+      toolName: "read_file",
+      evidenceKind: "file_read",
+      evidenceGrade: "substantive",
+      scopeIds: ["README.md"],
+      riskHypothesisIds: ["risk-architecture-1"],
+      pathHashes: [],
+      pathRangeHashes: [],
+      command: null,
+      exitCode: null,
+      outputSha256: "c".repeat(64),
+      outputPreview: "[read_file README.md lines 1-2 of 2]\n# Project\nArchitecture notes.",
+      outputPreviewTruncated: false,
+      parsedSummary: { outputBytes: 64, outputLineCount: 3, previewChars: 64, exitCode: null },
+      redactionStatus: "clean",
+      createdAt: "2026-05-21T00:00:00.000Z",
+    });
+    queryMock.mockImplementationOnce(() => {
+      throw new RuntimeExecutionError(
+        "qwen-local-agent did not finalize after repository inspection budget exhausted (60 inspection tool call(s)); denied 3 additional repository-inspection request(s).",
+        undefined,
+        "context_length",
+        {
+          providerMeta: {
+            status: "repository_inspection_budget_exhausted",
+            category: "context_length",
+          },
+        },
+      );
+    });
+
+    await expect(
+      runImplementer("task-audit-budget-direct-repair-fails", projectRoot),
+    ).rejects.toMatchObject({
+      category: "context_length",
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+      }),
+    });
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-budget-direct-repair-fails"))
+      .get();
+    expect(updatedTask?.agentActivityLog).toContain(
+      "deterministic audit report repair fallback started after repository inspection budget exhaustion",
+    );
+    expect(updatedTask?.agentActivityLog).not.toContain(
+      "audit-report-ledger-writer recovery started",
+    );
+  });
+
   it("adds bounded source-audit instructions after runtime recovery", async () => {
     const db = testDb.current;
     writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
@@ -2954,7 +3136,11 @@ describe("runImplementer rework behavior", () => {
     expect(queryMock).toHaveBeenCalledTimes(2);
     const writerCall = queryMock.mock.calls[1]?.[0] as {
       prompt: string;
-      options: { maxTurns?: number };
+      options: {
+        maxTurns?: number;
+        maxTokens?: number;
+        repositoryInspectionBudgetFinalResponseTimeoutMs?: number;
+      };
     };
     expect(writerCall.prompt).toContain("AUDIT REPORT LEDGER WRITER MODE");
     expect(writerCall.prompt).toContain("Do not call read_file, list_files, search_files");

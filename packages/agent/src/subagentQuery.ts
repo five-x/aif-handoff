@@ -448,6 +448,8 @@ export interface SubagentQueryOptions {
   repositoryInspectionToolBudget?: number;
   /** Optional per-invocation run timeout. Defaults to the global stage timeout. */
   runTimeoutMs?: number;
+  /** Optional adapter option overrides for one invocation. */
+  adapterOptions?: Record<string, unknown>;
 }
 
 export interface SubagentQueryResult {
@@ -754,6 +756,7 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
     headers: resolved.headers,
     options: {
       ...resolved.options,
+      ...(options.adapterOptions ?? {}),
       ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
       ...(resolved.apiKeyEnvVar ? { apiKeyEnvVar: resolved.apiKeyEnvVar } : {}),
       projectRoot: options.projectRoot,
