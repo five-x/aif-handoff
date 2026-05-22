@@ -997,7 +997,7 @@ describe("qwen-local-agent adapter", () => {
     expect(readmeEvidence.scopeIds).toEqual(expect.arrayContaining(["README.md"]));
     expect(readmeEvidence.riskHypothesisIds).toEqual(["risk-1"]);
   });
-  it("denies repository inspection after the configured budget and still allows report finalization", async () => {
+  it("disables repository-inspection tools after the configured budget and still allows report finalization", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
     await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
@@ -1019,52 +1019,6 @@ describe("qwen-local-agent adapter", () => {
                     function: {
                       name: "read_file",
                       arguments: JSON.stringify({ path: "README.md" }),
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          id: "chat-inspection-budget",
-          choices: [
-            {
-              message: {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                  {
-                    id: "call-read-report",
-                    type: "function",
-                    function: {
-                      name: "read_file",
-                      arguments: JSON.stringify({ path: "audit/architecture.md" }),
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          id: "chat-inspection-budget",
-          choices: [
-            {
-              message: {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                  {
-                    id: "call-read-2",
-                    type: "function",
-                    function: {
-                      name: "read_file",
-                      arguments: JSON.stringify({ path: "AGENTS.md" }),
                     },
                   },
                 ],
@@ -1109,6 +1063,11 @@ describe("qwen-local-agent adapter", () => {
     const result = await runQwenLocalAgentApi(
       createRunInput(root, {
         workflowKind: "audit",
+        options: {
+          baseUrl: "http://192.168.88.62:8003/v1",
+          toolTimeoutMs: 5_000,
+          maxOutputChars: 4_000,
+        },
         execution: {
           allowedWritePaths: ["audit/architecture.md"],
           auditReportArtifactPath: "audit/architecture.md",
@@ -1122,11 +1081,24 @@ describe("qwen-local-agent adapter", () => {
     expect(await readFile(path.join(root, "audit", "architecture.md"), "utf8")).toContain(
       "No validated findings",
     );
-    expect(JSON.stringify(result.events)).toContain("Repository inspection budget exhausted");
     expect(JSON.stringify(result.events)).toContain("read_file ok");
+    const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
+    const secondToolNames = secondBody.tools?.map((tool) => tool.function.name);
+    expect(JSON.stringify(secondBody.messages)).toContain("repository_inspection_budget_exhausted");
+    expect(secondToolNames).toEqual([
+      "write_file",
+      "apply_patch",
+      "git_status",
+      "compute_audit_report_hash",
+      "finalize_audit_report_manifest",
+      "validate_audit_report",
+      "git_commit",
+    ]);
+    expect(secondToolNames).not.toEqual(
+      expect.arrayContaining(["list_files", "read_file", "search_files", "run_shell"]),
+    );
     const auditEvents = events.filter((event) => event.type === "audit:evidence");
     expect(auditEvents).toHaveLength(1);
-    expect(JSON.stringify(auditEvents)).not.toContain("AGENTS.md");
     expect(JSON.stringify(auditEvents)).not.toContain("audit/architecture.md");
   });
   it("stops instead of hanging when repository inspection continues after budget exhaustion", async () => {
@@ -1260,8 +1232,18 @@ describe("qwen-local-agent adapter", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
     const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
+    const secondToolNames = secondBody.tools?.map((tool) => tool.function.name);
     expect(JSON.stringify(secondBody.messages)).toContain("QWEN COMPACT CONTEXT MODE");
     expect(JSON.stringify(secondBody.messages)).toContain("repository_inspection_budget_exhausted");
+    expect(secondToolNames).toEqual([
+      "write_file",
+      "apply_patch",
+      "git_status",
+      "compute_audit_report_hash",
+      "finalize_audit_report_manifest",
+      "validate_audit_report",
+      "git_commit",
+    ]);
     expect(JSON.stringify(events)).toContain("Repository inspection budget exhausted");
     expect(JSON.stringify(events)).toContain("README.md");
     expect(JSON.stringify(events)).not.toContain("late finalization");

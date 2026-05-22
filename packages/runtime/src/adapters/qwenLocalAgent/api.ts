@@ -82,6 +82,15 @@ const REPOSITORY_INSPECTION_TOOL_NAMES = new Set([
   "search_files",
   "run_shell",
 ]);
+const REPOSITORY_INSPECTION_BUDGET_FINALIZATION_TOOL_NAMES = new Set([
+  "write_file",
+  "apply_patch",
+  "git_status",
+  "compute_audit_report_hash",
+  "finalize_audit_report_manifest",
+  "validate_audit_report",
+  "git_commit",
+]);
 const AUDIT_ARTIFACT_MAINTENANCE_TOOL_NAMES = new Set(["list_files", "read_file"]);
 const MAX_REPOSITORY_INSPECTION_TOOL_BUDGET = 200;
 const REPOSITORY_INSPECTION_BUDGET_FINALIZATION_CONTROLLED_FAILURE = "controlled_failure";
@@ -296,10 +305,17 @@ function truncateTextForRequest(value, maxChars) {
   const tail = available - head;
   return `${text.slice(0, head).trimEnd()}${note}${text.slice(text.length - tail).trimStart()}`;
 }
-function estimateMessagesInputTokens(input, messages) {
+function resolveQwenToolsForRequest(input, requestOptions = {}) {
+  const tools = resolveQwenToolsForWorkflow(input.workflowKind);
+  if (requestOptions.disableRepositoryInspectionTools !== true) return tools;
+  return tools.filter((tool) =>
+    REPOSITORY_INSPECTION_BUDGET_FINALIZATION_TOOL_NAMES.has(tool.function.name),
+  );
+}
+function estimateMessagesInputTokens(input, messages, requestOptions = {}) {
   const options = asRecord(input.options);
   const tools =
-    options.toolsEnabled !== false ? resolveQwenToolsForWorkflow(input.workflowKind) : [];
+    options.toolsEnabled !== false ? resolveQwenToolsForRequest(input, requestOptions) : [];
   const serialized = JSON.stringify({
     messages,
     ...(tools.length > 0 ? { tools, tool_choice: "auto" } : {}),
@@ -373,6 +389,9 @@ function compactMessagesForEndpointBudget(input, messages, toolContext, reason, 
     `reason=${reason}`,
     "The prior transcript was compacted to protect the local endpoint context and memory budget.",
     "Do not request broad repository inspection. Use existing evidence and write/finalize the requested artifact, or produce a controlled source_inconclusive result with exact coverage gaps.",
+    reason === "repository_inspection_budget_exhausted"
+      ? "Repository-inspection tools are disabled for this finalization request; use only artifact write/finalize/validate/commit tools or finish with final text."
+      : null,
     auditArtifactPath ? `Expected audit report artifact: ${auditArtifactPath}` : null,
     allowedWritePaths.length > 0 ? `Allowed write paths: ${allowedWritePaths.join(", ")}` : null,
     "",
@@ -468,10 +487,14 @@ function addUsage(left, right) {
         : undefined,
   };
 }
-export function buildQwenLocalAgentRequestBody(input, messages = buildMessages(input)) {
+export function buildQwenLocalAgentRequestBody(
+  input,
+  messages = buildMessages(input),
+  requestOptions = {},
+) {
   const options = asRecord(input.options);
   const { budget } = resolveEndpointPolicy(input);
-  const estimatedInputTokens = estimateMessagesInputTokens(input, messages);
+  const estimatedInputTokens = estimateMessagesInputTokens(input, messages, requestOptions);
   if (budget && estimatedInputTokens > budget.maxInputTokens) {
     throw new RuntimeExecutionError(
       `qwen-local-agent request estimate ${estimatedInputTokens} input token(s) exceeds endpoint input budget ${budget.maxInputTokens}`,
@@ -490,7 +513,7 @@ export function buildQwenLocalAgentRequestBody(input, messages = buildMessages(i
     messages,
     stream: false,
   };
-  const tools = resolveQwenToolsForWorkflow(input.workflowKind);
+  const tools = resolveQwenToolsForRequest(input, requestOptions);
   if (options.toolsEnabled !== false && tools.length > 0) {
     body.tools = tools;
     body.tool_choice = "auto";
@@ -1068,7 +1091,10 @@ async function withEndpointSemaphore(policy, signal, fn) {
 }
 async function postChatCompletions(input, messages, signal, requestMeta, logger) {
   const policy = resolveEndpointPolicy(input);
-  const estimatedInputTokens = estimateMessagesInputTokens(input, messages);
+  const requestOptions = {
+    disableRepositoryInspectionTools: requestMeta?.disableRepositoryInspectionTools === true,
+  };
+  const estimatedInputTokens = estimateMessagesInputTokens(input, messages, requestOptions);
   let body;
   const projectedMaxOutputTokens = maxOutputTokensForBudget(
     asRecord(input.options),
@@ -1086,11 +1112,12 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
       typeof projectedMaxOutputTokens === "number" ? Math.floor(projectedMaxOutputTokens) : null,
     toolCallCount: requestMeta?.toolCallCount ?? countToolCallsInMessages(messages),
     turn: requestMeta?.turn ?? null,
+    repositoryInspectionToolsDisabled: requestOptions.disableRepositoryInspectionTools === true,
   };
   let attempt = 0;
   const buildStartedAt = Date.now();
   try {
-    body = buildQwenLocalAgentRequestBody(input, messages);
+    body = buildQwenLocalAgentRequestBody(input, messages, requestOptions);
   } catch (error) {
     logger?.warn?.(
       {
@@ -1312,7 +1339,14 @@ export async function runQwenLocalAgentApi(input, logger) {
           budgetFinalizationTimeoutActive
             ? buildCombinedTimeoutSignal(signal, repositoryInspectionBudgetFinalResponseTimeoutMs)
             : signal,
-          { turn, toolCallCount, retryCount: 0 },
+          {
+            turn,
+            toolCallCount,
+            retryCount: 0,
+            disableRepositoryInspectionTools:
+              repositoryInspectionBudgetExhausted &&
+              repositoryInspectionBudgetFinalizationMode === "compact_final_response",
+          },
           logger,
         );
       } catch (error) {
