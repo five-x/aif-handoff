@@ -30,7 +30,6 @@ import {
   classifyAuditSourceEvidence,
   classifyAuditSynthesisSourceReports,
   computeAuditReportContentSha256,
-  extractAuditSynthesisCommandEvidence,
   formatAuditSynthesisOutcomeForArtifact,
   hashAifPlanManifest,
   isLowSignalAuditEvidenceLine,
@@ -2686,18 +2685,6 @@ function isIgnoredSynthesisEvidencePath(path: string): boolean {
   return normalizedPath.split("/").some((part) => SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS.has(part));
 }
 
-function containsIgnoredSynthesisEvidencePath(text: string): boolean {
-  const normalizedText = text.replaceAll("\\", "/");
-  for (const part of SYNTHESIS_IGNORED_EVIDENCE_PATH_PARTS) {
-    if (!part.startsWith(".")) continue;
-    if (normalizedText.includes(`${part}/`) || normalizedText.includes(`${part}:`)) return true;
-  }
-  for (const match of text.matchAll(SYNTHESIS_LINE_EVIDENCE_REF_PATTERN)) {
-    if (isIgnoredSynthesisEvidencePath(match[1] ?? "")) return true;
-  }
-  return false;
-}
-
 function pathFromLineEvidenceRef(ref: string): string {
   return ref.replace(/:\d+(?::\d+)?$/, "");
 }
@@ -2736,23 +2723,6 @@ function collectSynthesisNoFindingsEvidence(input: {
   return refsByArtifact;
 }
 
-function collectSynthesisNoFindingsCommandEvidence(
-  artifacts: ValidatedAuditArtifactContent[],
-): Map<string, string[]> {
-  const commandsByArtifact = new Map<string, string[]>();
-  for (const artifact of artifacts) {
-    commandsByArtifact.set(
-      artifact.artifactPath,
-      extractAuditSynthesisCommandEvidence(artifact.content).filter(
-        (evidence) =>
-          !containsIgnoredSynthesisEvidencePath(evidence) &&
-          !isLowQualitySynthesisCommandEvidence(evidence),
-      ),
-    );
-  }
-  return commandsByArtifact;
-}
-
 function formatTrustedSourceReportAbsenceReasoning(artifacts: ValidatedAuditArtifactContent[]) {
   const paths = [...new Set(artifacts.map((artifact) => artifact.artifactPath).filter(Boolean))]
     .sort()
@@ -2767,48 +2737,8 @@ function formatTrustedSourceReportAbsenceReasoning(artifacts: ValidatedAuditArti
   )} ${statusLabel} as validated_no_findings with substantive child evidence; synthesis preserved those child outcomes and did not promote unsupported findings.`;
 }
 
-function isLowQualitySynthesisCommandEvidence(evidence: string): boolean {
-  return (
-    /\bgit\s+grep\s+-n\s+-m\s+1\s+\.\s+--\s+/i.test(evidence) ||
-    /\bgit\s+ls-files\s+--\s+/i.test(evidence) ||
-    /\bgit\s+grep\s+-n\s+-m\s+1\s+-E\b[^`'\n"]*[`'"]?[^`'\n"]*(?:owner-area|defects|that|produce)[^`'\n"]*[`'"]?/i.test(
-      evidence,
-    )
-  );
-}
-
-function firstOutputLine(text: string): string {
-  return text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "<empty>";
-}
-
-function lineNumberFromLineEvidenceRef(ref: string): number | null {
-  const match = ref.match(/:(\d+)(?::\d+)?$/);
-  if (!match) return null;
-  const line = Number.parseInt(match[1], 10);
-  return Number.isFinite(line) && line > 0 ? line : null;
-}
-
-function readLineEvidenceOutput(projectRoot: string, ref: string): string {
-  const evidencePath = pathFromLineEvidenceRef(ref);
-  const lineNumber = lineNumberFromLineEvidenceRef(ref);
-  if (!lineNumber) return "<missing line reference>";
-  const absolutePath = resolve(projectRoot, evidencePath);
-  if (!existsSync(absolutePath)) return "<missing file>";
-  const lines = readFileSync(absolutePath, "utf8").split(/\r?\n/);
-  const line = lines[lineNumber - 1];
-  return line === undefined ? "<missing line>" : line;
-}
-
-function formatSynthesisCheckedLineCommand(projectRoot: string, ref: string): string[] {
-  const evidencePath = pathFromLineEvidenceRef(ref);
-  const lineNumber = lineNumberFromLineEvidenceRef(ref);
-  const output = readLineEvidenceOutput(projectRoot, ref);
-  return [
-    `- Command \`sed -n '${lineNumber ?? 1}p' -- ${evidencePath}\` output:`,
-    "```",
-    output || "<empty>",
-    "```",
-  ];
+function deterministicAuditSynthesisCommand(artifactPath: string): string {
+  return `node deterministic-audit-synthesis --artifact ${artifactPath}`;
 }
 
 function summarizeValidatedAuditArtifactsForSynthesis(
@@ -2879,6 +2809,7 @@ function buildDeterministicAuditSynthesisContent(
   artifacts: ValidatedAuditArtifactContent[],
   weakArtifacts: WeakAuditArtifactSummary[] = [],
   projectRoot: string,
+  artifactPath = "audit/summary.md",
 ): string {
   const sourceOutcome = classifyAuditSynthesisSourceReports({
     projectRoot,
@@ -2997,7 +2928,6 @@ function buildDeterministicAuditSynthesisContent(
 
   if (totalIncluded === 0) {
     const refsByArtifact = collectSynthesisNoFindingsEvidence({ artifacts, projectRoot });
-    const commandsByArtifact = collectSynthesisNoFindingsCommandEvidence(artifacts);
     const checkedRefs = [
       ...new Set(
         [...refsByArtifact.values()].flatMap((refs) => refs).filter((ref) => ref.length > 0),
@@ -3043,16 +2973,10 @@ function buildDeterministicAuditSynthesisContent(
           refs.length > 0
             ? refs.map((ref) => `\`${ref}\``).join(", ")
             : "No concrete line evidence was available in this source report.";
-        const firstEvidencePath = refs.length > 0 ? pathFromLineEvidenceRef(refs[0]) : null;
-        const commands = commandsByArtifact.get(summary.artifact.artifactPath) ?? [];
         const verification =
-          commands.length > 0
-            ? commands[0].replace(/\s+/g, " ")
-            : firstEvidencePath
-              ? `Command \`sed -n '${lineNumberFromLineEvidenceRef(refs[0]) ?? 1}p' -- ${firstEvidencePath}\` output includes \`${firstOutputLine(
-                  readLineEvidenceOutput(projectRoot, refs[0]),
-                )}\``
-              : "Source report provided no concrete repository line evidence to carry forward.";
+          refs.length > 0
+            ? `Trusted child report \`${summary.artifact.artifactPath}\` carried this line evidence; synthesis ledger records the source artifact membership.`
+            : "Trusted child report provided no concrete repository line evidence to carry forward.";
         return `| \`${summary.artifact.artifactPath}\` | ${evidence} | ${verification} |`;
       }),
       "",
@@ -3062,13 +2986,11 @@ function buildDeterministicAuditSynthesisContent(
         ? checkedRefs.map((ref) => `- \`${ref}\``)
         : ["- No checked repository files were available from the validated source reports."]),
       "",
-      "## Checked Commands",
+      "## Synthesis Runtime Verification",
       "",
-      ...([...commandsByArtifact.values()].flat().length > 0
-        ? [...commandsByArtifact.values()].flat()
-        : checkedRefs.length > 0
-          ? checkedRefs.flatMap((ref) => formatSynthesisCheckedLineCommand(projectRoot, ref))
-          : ["- No repository command outputs were available from the validated source reports."]),
+      `- Command \`${deterministicAuditSynthesisCommand(
+        artifactPath,
+      )}\` output includes \`sourceReportCount=${artifacts.length}\` and \`weakOrInvalidReportCount=${weakArtifacts.length}\`.`,
       "",
       "## Weak Or Invalid Reports",
       "",
@@ -3142,7 +3064,7 @@ function buildDeterministicAuditSynthesisContent(
       lines.push(`Evidence: \`${summary.artifact.artifactPath}\` was a validated source report.`);
       lines.push("Risk: Source report evidence was too weak to include as an audit finding.");
       lines.push(
-        "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output is recorded in the implementation log for this synthesis artifact.",
+        "Verification: Child report status and the synthesis ledger record why no finding was carried forward from this source artifact.",
       );
       lines.push("");
       return;
@@ -3200,6 +3122,7 @@ function buildDeterministicAuditSynthesisContentWithManifest(input: {
     input.artifacts,
     input.weakArtifacts,
     input.projectRoot,
+    input.artifactPath,
   ).trim();
   const snapshot = currentAuditReportSourceSnapshot(input.projectRoot);
   const sourceArtifactPaths = [
@@ -3215,6 +3138,7 @@ function buildDeterministicAuditSynthesisContentWithManifest(input: {
     requireProposedFix: true,
   }).classification;
   const outcome = toAuditPublicReportOutcome(sourceClassification);
+  const synthesisCommand = deterministicAuditSynthesisCommand(input.artifactPath);
   const evidenceOutput = [
     `summaryArtifact=${input.artifactPath}`,
     `sourceReportCount=${input.artifacts.length}`,
@@ -3239,7 +3163,7 @@ function buildDeterministicAuditSynthesisContentWithManifest(input: {
       riskHypothesisIds:
         outcome === "validated_no_findings" ? [DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID] : [],
       paths: [...sourceArtifactPaths, ...weakArtifactPaths],
-      command: `deterministic-audit-synthesis --artifact ${input.artifactPath}`,
+      command: synthesisCommand,
       exitCode: 0,
       output: evidenceOutput,
       maxPreviewChars: 4_000,

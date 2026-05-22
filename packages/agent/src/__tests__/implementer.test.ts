@@ -1492,7 +1492,12 @@ describe("runImplementer rework behavior", () => {
     expect(summary).not.toContain(".ai-factory/config.yaml");
     expect(summary).toContain("`README.md:2`");
     expect(summary).toContain("`src/config.ts:1`");
-    expect(summary).toContain('Command `rg -n "runtime evidence" README.md` output:');
+    expect(summary).toContain("## Synthesis Runtime Verification");
+    expect(summary).toContain(
+      "Command `node deterministic-audit-synthesis --artifact audit/summary.md` output includes `sourceReportCount=1`",
+    );
+    expect(summary).not.toContain("## Checked Commands");
+    expect(summary).not.toContain('Command `rg -n "runtime evidence" README.md` output');
     expect(summary).not.toContain("git grep -n -m 1 . --");
     expect(summary).not.toContain("owner-area|defects|that|produce");
     expect(summary).not.toContain("git ls-files --");
@@ -1527,6 +1532,9 @@ describe("runImplementer rework behavior", () => {
     });
     expect(validation.ok).toBe(true);
     expect(validation.sourceClassification).toBe("validated_no_findings");
+    expect(validation.issues.map((issue) => issue.code)).not.toContain(
+      "unbacked_runtime_command_evidence",
+    );
   });
 
   it("writes inconclusive synthesis when all source reports are inventory-only no-findings", async () => {
