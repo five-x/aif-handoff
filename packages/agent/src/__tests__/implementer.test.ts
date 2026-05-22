@@ -3053,7 +3053,7 @@ describe("runImplementer rework behavior", () => {
     expect(implementCall.options.resume).toBeUndefined();
   });
 
-  it("falls back to ledger-only report writer when source audit times out after evidence capture", async () => {
+  it("uses deterministic report repair before ledger writer when source audit times out after evidence capture", async () => {
     const db = testDb.current;
     writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
@@ -3141,26 +3141,24 @@ describe("runImplementer rework behavior", () => {
 
     await runImplementer("task-audit-timeout-ledger-writer", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(2);
-    const writerCall = queryMock.mock.calls[1]?.[0] as {
-      prompt: string;
-      options: {
-        maxTurns?: number;
-        maxTokens?: number;
-        repositoryInspectionBudgetFinalResponseTimeoutMs?: number;
-      };
-    };
-    expect(writerCall.prompt).toContain("AUDIT REPORT LEDGER WRITER MODE");
-    expect(writerCall.prompt).toContain("Do not call read_file, list_files, search_files");
-    expect(writerCall.prompt).toContain("ev_timeout_writer_00000000-0000-4000-8000-000000000001");
-    expect(writerCall.prompt).not.toContain("Plan path:");
-    expect(writerCall.options.maxTurns).toBe(18);
+    expect(queryMock).toHaveBeenCalledTimes(1);
     const updatedTask = db
       .select()
       .from(tasks)
       .where(eq(tasks.id, "task-audit-timeout-ledger-writer"))
       .get();
-    expect(updatedTask?.implementationLog).toContain("Ledger writer done");
+    expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
+    expect(updatedTask?.agentActivityLog).toContain(
+      "deterministic audit report repair fallback started after runtime failure",
+    );
+    expect(updatedTask?.agentActivityLog).not.toContain(
+      "audit-report-ledger-writer recovery started",
+    );
+    const updatedArtifact = findRoadmapBatchArtifactByTaskId("task-audit-timeout-ledger-writer");
+    expect(updatedArtifact?.state).toBe("valid");
+    expect(readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8")).toContain(
+      "```audit-report-manifest",
+    );
   });
 
   it("throws controlled budget exhaustion when timeout recovery has no substantive ledger evidence", async () => {
@@ -3242,7 +3240,7 @@ describe("runImplementer rework behavior", () => {
     expect(existsSync(join(projectRoot, "audit", "architecture.md"))).toBe(false);
   });
 
-  it("falls back to deterministic repair when ledger-writer recovery fails", async () => {
+  it("skips ledger-writer recovery when deterministic timeout repair succeeds", async () => {
     const db = testDb.current;
     writeFileSync(join(projectRoot, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
@@ -3318,23 +3316,17 @@ describe("runImplementer rework behavior", () => {
       redactionStatus: "clean",
       createdAt: "2026-05-21T00:00:00.000Z",
     });
-    queryMock
-      .mockImplementationOnce(() => {
-        throw new RuntimeExecutionError(
-          "Run timeout: qwen-local-agent exceeded 180000ms limit",
-          undefined,
-          "timeout",
-        );
-      })
-      .mockImplementationOnce(() => {
-        throw new Error("ledger writer failed");
-      });
+    queryMock.mockImplementationOnce(() => {
+      throw new RuntimeExecutionError(
+        "Run timeout: qwen-local-agent exceeded 180000ms limit",
+        undefined,
+        "timeout",
+      );
+    });
 
     await runImplementer("task-audit-budget-ledger-writer-fail", projectRoot);
 
-    expect(queryMock).toHaveBeenCalledTimes(2);
-    const writerCall = queryMock.mock.calls[1]?.[0] as { prompt: string };
-    expect(writerCall.prompt).toContain("AUDIT REPORT LEDGER WRITER MODE");
+    expect(queryMock).toHaveBeenCalledTimes(1);
     const updatedTask = db
       .select()
       .from(tasks)
@@ -3342,7 +3334,10 @@ describe("runImplementer rework behavior", () => {
       .get();
     expect(updatedTask?.implementationLog).toContain("Deterministic audit report repair completed");
     expect(updatedTask?.agentActivityLog).toContain(
-      "deterministic audit report repair fallback started after ledger-writer recovery failure",
+      "deterministic audit report repair fallback started after runtime failure",
+    );
+    expect(updatedTask?.agentActivityLog).not.toContain(
+      "audit-report-ledger-writer recovery started",
     );
     const updatedArtifact = findRoadmapBatchArtifactByTaskId(
       "task-audit-budget-ledger-writer-fail",

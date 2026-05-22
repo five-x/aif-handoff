@@ -4744,11 +4744,10 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
 
   let auditLedgerWriterRecoveryAttempted = false;
   let auditLedgerWriterRecoveryInvoked = false;
-  const runAuditLedgerWriterRecovery = async (error: unknown): Promise<string | null> => {
-    if (!expectedAuditReportArtifactPath || task.reworkRequested) return null;
-    if (!shouldAttemptAuditLedgerWriterRecovery(error)) return null;
-    auditLedgerWriterRecoveryAttempted = true;
-
+  const listSubstantiveAuditEvidenceForRecovery = (): {
+    auditPlanId: string;
+    substantiveEvidenceUnits: AuditEvidenceUnit[];
+  } => {
     const auditPlanId = resolveAuditPlanId({
       taskId,
       roadmapBatchId: roadmapArtifact?.batchId ?? null,
@@ -4758,6 +4757,15 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
       auditPlanId,
       limit: 80,
     }).filter((unit) => unit.evidenceGrade === "substantive");
+    return { auditPlanId, substantiveEvidenceUnits };
+  };
+
+  const runAuditLedgerWriterRecovery = async (error: unknown): Promise<string | null> => {
+    if (!expectedAuditReportArtifactPath || task.reworkRequested) return null;
+    if (!shouldAttemptAuditLedgerWriterRecovery(error)) return null;
+    auditLedgerWriterRecoveryAttempted = true;
+
+    const { auditPlanId, substantiveEvidenceUnits } = listSubstantiveAuditEvidenceForRecovery();
     if (substantiveEvidenceUnits.length === 0) {
       throw auditLedgerWriterRecoveryUnavailableError(error, "zero_substantive_ledger_evidence");
     }
@@ -4904,6 +4912,34 @@ Writer rules:
         const runtimeError = findRuntimeExecutionError(error);
         if (runtimeError) throw runtimeError;
         throw error;
+      }
+    }
+    if (!recoveredResultText) {
+      const shouldUseDeterministicRepairBeforeLedgerWriter =
+        expectedAuditReportArtifactPath &&
+        !task.reworkRequested &&
+        !isRepositoryInspectionBudgetExhaustionStatus(error) &&
+        shouldAttemptAuditLedgerWriterRecovery(error) &&
+        listSubstantiveAuditEvidenceForRecovery().substantiveEvidenceUnits.length > 0;
+      if (shouldUseDeterministicRepairBeforeLedgerWriter) {
+        try {
+          recoveredResultText = runDeterministicAuditReportRepairFallback(
+            "deterministic audit report repair fallback started after runtime failure",
+            "deterministic audit report repair fallback accepted the report after runtime failure",
+            "deterministic audit report repair fallback terminalized source_inconclusive after runtime failure",
+          );
+        } catch (deterministicRepairError) {
+          log.warn(
+            {
+              taskId,
+              deterministicRepairError:
+                deterministicRepairError instanceof Error
+                  ? deterministicRepairError.message
+                  : String(deterministicRepairError),
+            },
+            "Deterministic audit report repair fallback failed after runtime failure",
+          );
+        }
       }
     }
     if (!recoveredResultText) {
