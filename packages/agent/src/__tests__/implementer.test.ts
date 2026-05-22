@@ -3050,10 +3050,13 @@ describe("runImplementer rework behavior", () => {
     );
     expect(implementCall.prompt).toContain("do not expand into a repository-wide dependency map");
     expect(implementCall.prompt).toContain("Source audit dynamic budget:");
-    expect(implementCall.prompt).toContain("Runtime repository-inspection budget for this run: 60");
+    expect(implementCall.prompt).toContain("Runtime repository-inspection budget for this run: 32");
+    expect(implementCall.prompt).toContain(
+      "Treat the repository-inspection budget as a hard ceiling, not a target.",
+    );
     expect(implementCall.prompt).toContain("explain why each declared risk hypothesis is absent");
     expect(implementCall.prompt).toContain("Report artifact: audit/security-controls.md");
-    expect(implementCall.options.maxTurns).toBe(84);
+    expect(implementCall.options.maxTurns).toBe(48);
     const reportPath = join(projectRoot, "audit", "security-controls.md");
     expect(existsSync(reportPath)).toBe(true);
 

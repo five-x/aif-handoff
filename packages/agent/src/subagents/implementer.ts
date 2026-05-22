@@ -59,12 +59,12 @@ const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
   IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET * PROMPT_BUDGET_CHARS_PER_TOKEN;
 const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesis-no-findings";
 const DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS = new Set(["feature", "fix", "docs", "tests"]);
-const SOURCE_AUDIT_FIRST_RUN_MIN_MAX_TURNS = 48;
-const SOURCE_AUDIT_FIRST_RUN_MAX_MAX_TURNS = 96;
+const SOURCE_AUDIT_FIRST_RUN_MIN_MAX_TURNS = 36;
+const SOURCE_AUDIT_FIRST_RUN_MAX_MAX_TURNS = 64;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_MAX_TURNS = 18;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_MAX_TURNS = 28;
-const SOURCE_AUDIT_FIRST_RUN_MIN_INSPECTION_TOOL_BUDGET = 32;
-const SOURCE_AUDIT_FIRST_RUN_MAX_INSPECTION_TOOL_BUDGET = 80;
+const SOURCE_AUDIT_FIRST_RUN_MIN_INSPECTION_TOOL_BUDGET = 16;
+const SOURCE_AUDIT_FIRST_RUN_MAX_INSPECTION_TOOL_BUDGET = 36;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET = 3;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_INSPECTION_TOOL_BUDGET = 8;
 const SOURCE_AUDIT_FIRST_RUN_TIMEOUT_MS = 18 * 60 * 1000;
@@ -1278,7 +1278,7 @@ function computeSourceAuditInspectionToolBudget(input: {
     );
   }
   return clampNumber(
-    rootCount * 8 + 12,
+    rootCount * 4 + 8,
     SOURCE_AUDIT_FIRST_RUN_MIN_INSPECTION_TOOL_BUDGET,
     SOURCE_AUDIT_FIRST_RUN_MAX_INSPECTION_TOOL_BUDGET,
   );
@@ -1296,7 +1296,7 @@ function computeSourceAuditMaxTurns(input: {
     );
   }
   return clampNumber(
-    input.inspectionToolBudget + 24,
+    input.inspectionToolBudget + 16,
     SOURCE_AUDIT_FIRST_RUN_MIN_MAX_TURNS,
     SOURCE_AUDIT_FIRST_RUN_MAX_MAX_TURNS,
   );
@@ -4620,6 +4620,7 @@ Rework handling protocol:
     ? `Source audit dynamic budget:
 - Declared scope roots: ${auditScopeRepairability.roots.join(", ") || "none"}.
 - Runtime repository-inspection budget for this run: ${sourceAuditInspectionToolBudget ?? "default"} tool calls; max tool turns: ${sourceAuditMaxTurns ?? "default"}; run timeout: ${sourceAuditRunTimeoutMs ? `${Math.round(sourceAuditRunTimeoutMs / 60000)} minutes` : "default"}.
+- Treat the repository-inspection budget as a hard ceiling, not a target. Aim to finish source collection by about 75% of the budget; once every declared risk has exact scoped evidence, stop using repository-inspection tools and write the report.
 - Allocate the budget to coverage before depth: every declared scope root needs at least one substantive exact \`path:line\` citation from that root before a trusted no-findings outcome.
 - If a repository-inspection budget warning appears, stop requesting read/search/list/run_shell repository-inspection tools. Finalize the current report from the existing ledger evidence, or mark the report \`source_inconclusive\` with the exact missing roots instead of looping.
 - In runtime recovery mode, that budget is a total retry budget for targeted verification only. Do not treat it as permission to repeat first-run discovery.
@@ -4882,7 +4883,7 @@ Writer rules:
       maxTurns: sourceAuditMaxTurns,
       repositoryInspectionToolBudget: sourceAuditInspectionToolBudget,
       repositoryInspectionBudgetFinalizationMode: expectedAuditReportArtifactPath
-        ? "controlled_failure"
+        ? "compact_final_response"
         : undefined,
       runTimeoutMs: sourceAuditRunTimeoutMs,
     });

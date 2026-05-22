@@ -510,6 +510,7 @@ describe("executeSubagentQuery attribution", () => {
       workflowKind: "implementer",
       maxTurns: 32,
       repositoryInspectionToolBudget: 12,
+      repositoryInspectionBudgetFinalizationMode: "compact_final_response",
       runTimeoutMs: 123_000,
     });
 
@@ -518,6 +519,7 @@ describe("executeSubagentQuery attribution", () => {
         execution: expect.objectContaining({
           maxTurns: 32,
           repositoryInspectionToolBudget: 12,
+          repositoryInspectionBudgetFinalizationMode: "compact_final_response",
           runTimeoutMs: 123_000,
         }),
       }),
