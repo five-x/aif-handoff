@@ -446,6 +446,8 @@ export interface SubagentQueryOptions {
   maxTurns?: number;
   /** Optional repository-inspection tool-call budget for runtime adapters that support it. */
   repositoryInspectionToolBudget?: number;
+  /** Optional post-budget behavior for adapters that support repository-inspection budgets. */
+  repositoryInspectionBudgetFinalizationMode?: "compact_final_response" | "controlled_failure";
   /** Optional per-invocation run timeout. Defaults to the global stage timeout. */
   runTimeoutMs?: number;
   /** Optional adapter option overrides for one invocation. */
@@ -838,6 +840,7 @@ function buildExecutionIntent(
     maxBudgetUsd: options.maxBudgetUsd ?? null,
     maxTurns: options.maxTurns,
     repositoryInspectionToolBudget: options.repositoryInspectionToolBudget,
+    repositoryInspectionBudgetFinalizationMode: options.repositoryInspectionBudgetFinalizationMode,
     startTimeoutMs: options.queryStartTimeoutMs ?? env.AGENT_QUERY_START_TIMEOUT_MS,
     startRetryDelayMs: options.queryStartRetryDelayMs ?? env.AGENT_QUERY_START_RETRY_DELAY_MS,
     runTimeoutMs: options.runTimeoutMs ?? env.AGENT_STAGE_RUN_TIMEOUT_MS,

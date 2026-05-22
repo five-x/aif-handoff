@@ -208,6 +208,8 @@ export interface RuntimeExecutionIntent {
   maxTurns?: number;
   /** Optional cap for repository-inspection tool calls before write/finalization tools should be used. */
   repositoryInspectionToolBudget?: number;
+  /** Optional post-budget behavior for adapters that support repository-inspection budgets. */
+  repositoryInspectionBudgetFinalizationMode?: "compact_final_response" | "controlled_failure";
   /** Timeout waiting for the first output from the runtime stream (ms). */
   startTimeoutMs?: number;
   /** Delay before one automatic retry after a start timeout (ms). */

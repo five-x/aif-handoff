@@ -80,6 +80,7 @@ const REPOSITORY_INSPECTION_TOOL_NAMES = new Set([
 ]);
 const AUDIT_ARTIFACT_MAINTENANCE_TOOL_NAMES = new Set(["list_files", "read_file"]);
 const MAX_REPOSITORY_INSPECTION_TOOL_BUDGET = 200;
+const REPOSITORY_INSPECTION_BUDGET_FINALIZATION_CONTROLLED_FAILURE = "controlled_failure";
 const LOCAL_WAIT_ABORT = Symbol("qwenLocalAgentLocalWaitAbort");
 const endpointSemaphores = new Map();
 const endpointCircuitBreakers = new Map();
@@ -536,6 +537,18 @@ function readRepositoryInspectionBudgetFinalResponseTimeoutMs(input) {
   if (!Number.isFinite(raw) || raw <= 0) return null;
   return Math.floor(raw);
 }
+function readRepositoryInspectionBudgetFinalizationMode(input) {
+  const options = asRecord(input.options);
+  const raw =
+    typeof input.execution?.repositoryInspectionBudgetFinalizationMode === "string"
+      ? input.execution.repositoryInspectionBudgetFinalizationMode
+      : typeof options.repositoryInspectionBudgetFinalizationMode === "string"
+        ? options.repositoryInspectionBudgetFinalizationMode
+        : null;
+  return raw === REPOSITORY_INSPECTION_BUDGET_FINALIZATION_CONTROLLED_FAILURE
+    ? REPOSITORY_INSPECTION_BUDGET_FINALIZATION_CONTROLLED_FAILURE
+    : "compact_final_response";
+}
 function readRepeatedToolCallLimit(input) {
   const options = asRecord(input.options);
   const raw =
@@ -725,6 +738,22 @@ function repositoryInspectionBudgetExhaustedResult(toolName, budget) {
     touchedFiles: [],
     repositoryInspectionBudgetExhausted: true,
   };
+}
+function repositoryInspectionBudgetControlledFailure(toolCalls, budget) {
+  return new RuntimeExecutionError(
+    `qwen-local-agent stopped before finalization after repository inspection budget exhausted (${budget} inspection tool call(s)).`,
+    undefined,
+    "context_length",
+    {
+      providerMeta: {
+        status: REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS,
+        category: "context_length",
+        reason: "controlled_failure_after_repository_inspection_budget_exhaustion",
+        repositoryInspectionToolCalls: toolCalls,
+        repositoryInspectionToolBudget: budget,
+      },
+    },
+  );
 }
 function auditReportRepairInspectionDeniedResult(toolName) {
   const safeToolName = sanitizeQwenToolNameForLog(toolName);
@@ -1077,6 +1106,8 @@ export async function runQwenLocalAgentApi(input, logger) {
   const repositoryInspectionToolBudget = readRepositoryInspectionToolBudget(input);
   const repositoryInspectionBudgetFinalResponseTimeoutMs =
     readRepositoryInspectionBudgetFinalResponseTimeoutMs(input);
+  const repositoryInspectionBudgetFinalizationMode =
+    readRepositoryInspectionBudgetFinalizationMode(input);
   const repeatedToolCallLimit = readRepeatedToolCallLimit(input);
   const toolContext = createDefaultQwenToolContext({
     projectRoot: input.projectRoot,
@@ -1114,6 +1145,25 @@ export async function runQwenLocalAgentApi(input, logger) {
       const repositoryInspectionBudgetExhausted =
         repositoryInspectionToolBudget != null &&
         repositoryInspectionToolCalls >= repositoryInspectionToolBudget;
+      if (
+        repositoryInspectionBudgetExhausted &&
+        repositoryInspectionBudgetFinalizationMode ===
+          REPOSITORY_INSPECTION_BUDGET_FINALIZATION_CONTROLLED_FAILURE
+      ) {
+        logger?.warn?.(
+          {
+            runtimeId: input.runtimeId,
+            profileId: input.profileId ?? null,
+            repositoryInspectionToolCalls,
+            repositoryInspectionToolBudget,
+          },
+          "Stopped qwen-local-agent with controlled failure after repository inspection budget exhaustion",
+        );
+        throw repositoryInspectionBudgetControlledFailure(
+          repositoryInspectionToolCalls,
+          repositoryInspectionToolBudget,
+        );
+      }
       const budgetFinalizationTimeoutActive =
         repositoryInspectionBudgetExhausted &&
         repositoryInspectionBudgetFinalResponseTimeoutMs != null;

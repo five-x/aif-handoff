@@ -909,6 +909,61 @@ describe("qwen-local-agent adapter", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+  it("can controlled-fail instead of posting finalization after repository inspection budget exhaustion", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-controlled-failure-"));
+    await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-inspection-budget-controlled-failure",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call-read-budgeted",
+                  type: "function",
+                  function: {
+                    name: "read_file",
+                    arguments: JSON.stringify({ path: "README.md" }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            toolTimeoutMs: 5_000,
+            maxOutputChars: 4_000,
+            repositoryInspectionBudgetFinalizationMode: "controlled_failure",
+          },
+          execution: {
+            repositoryInspectionToolBudget: 1,
+            runTimeoutMs: 30_000,
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "context_length",
+      message: expect.stringContaining("stopped before finalization"),
+      providerMeta: expect.objectContaining({
+        status: "repository_inspection_budget_exhausted",
+        reason: "controlled_failure_after_repository_inspection_budget_exhaustion",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
   it("keeps repository budget exhaustion status when compacted finalization exceeds endpoint input budget", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-finalize-budget-"));
     await writeFile(path.join(root, "README.md"), "# Project\nArchitecture notes.\n", "utf8");

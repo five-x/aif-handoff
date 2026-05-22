@@ -4949,6 +4949,9 @@ Writer rules:
       fallbackSlashCommand: implementSlashCommand,
       maxTurns: sourceAuditMaxTurns,
       repositoryInspectionToolBudget: sourceAuditInspectionToolBudget,
+      repositoryInspectionBudgetFinalizationMode: expectedAuditReportArtifactPath
+        ? "controlled_failure"
+        : undefined,
       runTimeoutMs: sourceAuditRunTimeoutMs,
     });
     resultText = queryResult.resultText;
