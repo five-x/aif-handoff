@@ -3238,6 +3238,109 @@ describe("qwen-local-agent adapter", () => {
       "http://192.168.88.62:8003/v1/chat/completions",
     );
   });
+  it("retries one local endpoint HTTP 5xx after cooldown health check inside the same run", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-http-retry-"));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8005/v1",
+        endpointCooldownMs: 1_000,
+        endpointCooldownWaitMaxMs: 1_200,
+      },
+    });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "busy" }, 500))
+      .mockResolvedValueOnce(jsonResponse({ data: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-after-http-500",
+          choices: [{ message: { role: "assistant", content: "done after http retry" } }],
+        }),
+      );
+
+    await expect(runQwenLocalAgentApi(input, logger)).resolves.toMatchObject({
+      outputText: "done after http retry",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "http://192.168.88.62:8005/v1/chat/completions",
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe("http://192.168.88.62:8005/v1/models");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe(
+      "http://192.168.88.62:8005/v1/chat/completions",
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "http_500",
+        retryCount: 0,
+      }),
+      "qwen-local-agent request estimate",
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "http_500",
+        retryAfterSeconds: 1,
+        retryCount: 1,
+      }),
+      "Retrying qwen-local-agent request after endpoint HTTP 5xx cooldown",
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: null,
+        retryCount: 1,
+      }),
+      "qwen-local-agent request estimate",
+    );
+  });
+  it("does not retry non-transport HTTP endpoint failures", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-http-no-retry-"));
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8005/v1",
+        endpointCooldownMs: 1_000,
+      },
+    });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "prompt too large" }, 413));
+
+    await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
+      category: "context_length",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "http://192.168.88.62:8005/v1/chat/completions",
+    );
+  });
+  it("stops after one local endpoint HTTP 5xx retry by default", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-http-retry-bound-"));
+    const input = createRunInput(root, {
+      options: {
+        baseUrl: "http://192.168.88.62:8005/v1",
+        endpointCooldownMs: 1_000,
+        endpointCooldownWaitMaxMs: 1_200,
+      },
+    });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "busy" }, 500))
+      .mockResolvedValueOnce(jsonResponse({ data: [] }))
+      .mockResolvedValueOnce(jsonResponse({ error: "still busy" }, 502));
+
+    await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
+      category: "transport",
+      providerMeta: expect.objectContaining({ status: "endpoint_cooldown" }),
+      retryAfterSeconds: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "http://192.168.88.62:8005/v1/chat/completions",
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe("http://192.168.88.62:8005/v1/models");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe(
+      "http://192.168.88.62:8005/v1/chat/completions",
+    );
+  });
   it("does not extend endpoint cooldown when aborting during the local cooldown wait", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-cooldown-abort-"));
     const options = {

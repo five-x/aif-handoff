@@ -33,6 +33,8 @@ const MIN_FINALIZATION_OUTPUT_TOKENS = 512;
 const DEFAULT_ENDPOINT_COOLDOWN_MS = 30_000;
 const DEFAULT_ENDPOINT_HEALTH_TIMEOUT_MS = 5_000;
 const DEFAULT_ENDPOINT_COOLDOWN_WAIT_MAX_MS = 45_000;
+const DEFAULT_ENDPOINT_HTTP_RETRY_LIMIT = 1;
+const MAX_ENDPOINT_HTTP_RETRY_LIMIT = 3;
 const REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS = "repository_inspection_budget_exhausted";
 const LOCAL_ENDPOINT_BUDGETS = new Map([
   [
@@ -821,6 +823,12 @@ function readEndpointCooldownWaitMaxMs(input) {
   if (raw == null || raw < 0) return DEFAULT_ENDPOINT_COOLDOWN_WAIT_MAX_MS;
   return Math.floor(raw);
 }
+function readEndpointHttpRetryLimit(input) {
+  const options = asRecord(input.options);
+  const raw = readNumber(options.endpointHttpRetryLimit);
+  if (raw == null || raw < 0) return DEFAULT_ENDPOINT_HTTP_RETRY_LIMIT;
+  return Math.min(MAX_ENDPOINT_HTTP_RETRY_LIMIT, Math.floor(raw));
+}
 async function delayWithAbort(ms, signal, message) {
   if (ms <= 0) return;
   if (signal?.aborted) {
@@ -850,6 +858,15 @@ function endpointFailureCategory(error) {
 }
 function shouldTripEndpointCircuit(error) {
   return ["transport", "stream", "timeout"].includes(endpointFailureCategory(error));
+}
+function isHttp5xxEndpointTransportError(error) {
+  if (!(error instanceof RuntimeExecutionError)) return false;
+  return (
+    error.category === "transport" &&
+    typeof error.httpStatus === "number" &&
+    error.httpStatus >= 500 &&
+    error.httpStatus < 600
+  );
 }
 function isEndpointCooldownRuntimeError(error) {
   return (
@@ -1058,8 +1075,9 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
     policy.budget,
     estimatedInputTokens,
   );
-  const startedAt = Date.now();
-  const logContext = {
+  const baseRetryCount = requestMeta?.retryCount ?? 0;
+  const maxHttpRetries = policy.budget ? readEndpointHttpRetryLimit(input) : 0;
+  const baseLogContext = {
     runtimeId: input.runtimeId,
     profileId: input.profileId ?? null,
     baseUrl: policy.baseUrl,
@@ -1067,58 +1085,96 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
     maxOutputTokens:
       typeof projectedMaxOutputTokens === "number" ? Math.floor(projectedMaxOutputTokens) : null,
     toolCallCount: requestMeta?.toolCallCount ?? countToolCallsInMessages(messages),
-    retryCount: requestMeta?.retryCount ?? 0,
     turn: requestMeta?.turn ?? null,
   };
+  let attempt = 0;
+  const buildStartedAt = Date.now();
   try {
     body = buildQwenLocalAgentRequestBody(input, messages);
-    logContext.maxOutputTokens =
-      typeof body.max_tokens === "number" ? body.max_tokens : logContext.maxOutputTokens;
-    const response = await withEndpointSemaphore(policy, signal, async () => {
-      await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
-      return fetch(`${policy.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: buildHeaders(input),
-        body: JSON.stringify(body),
-        ...(signal ? { signal } : {}),
-      });
-    });
-    logger?.info?.(
+  } catch (error) {
+    logger?.warn?.(
       {
-        ...logContext,
-        durationMs: Date.now() - startedAt,
-        failureClass: response.ok ? null : `http_${response.status}`,
+        ...baseLogContext,
+        retryCount: baseRetryCount,
+        durationMs: Date.now() - buildStartedAt,
+        failureClass: requestEstimateFailureClass(error),
       },
       "qwen-local-agent request estimate",
     );
-    if (response.ok) {
-      if (policy.endpoint) endpointCircuitBreakers.delete(policy.endpoint.key);
-    } else {
+    throw error;
+  }
+  baseLogContext.maxOutputTokens =
+    typeof body.max_tokens === "number" ? body.max_tokens : baseLogContext.maxOutputTokens;
+  for (;;) {
+    const startedAt = Date.now();
+    const logContext = {
+      ...baseLogContext,
+      retryCount: baseRetryCount + attempt,
+    };
+    try {
+      const response = await withEndpointSemaphore(policy, signal, async () => {
+        await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
+        return fetch(`${policy.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: buildHeaders(input),
+          body: JSON.stringify(body),
+          ...(signal ? { signal } : {}),
+        });
+      });
+      logger?.info?.(
+        {
+          ...logContext,
+          durationMs: Date.now() - startedAt,
+          failureClass: response.ok ? null : `http_${response.status}`,
+        },
+        "qwen-local-agent request estimate",
+      );
+      if (response.ok) {
+        if (policy.endpoint) endpointCircuitBreakers.delete(policy.endpoint.key);
+        return response;
+      }
       const httpError = classifyQwenLocalAgentRuntimeError(
         new Error(`Qwen local agent request failed with status ${response.status}`),
         response.status,
       );
       const retryAfterSeconds = recordEndpointFailure(input, policy, httpError, logger);
+      if (
+        retryAfterSeconds != null &&
+        attempt < maxHttpRetries &&
+        isHttp5xxEndpointTransportError(httpError)
+      ) {
+        attempt += 1;
+        logger?.warn?.(
+          {
+            ...baseLogContext,
+            retryCount: baseRetryCount + attempt,
+            retryAfterSeconds,
+            failureClass: `http_${response.status}`,
+          },
+          "Retrying qwen-local-agent request after endpoint HTTP 5xx cooldown",
+        );
+        continue;
+      }
       if (retryAfterSeconds != null) {
         throw withEndpointCooldown(httpError, retryAfterSeconds);
       }
+      return response;
+    } catch (error) {
+      const retryAfterSeconds = recordEndpointFailure(input, policy, error, logger);
+      logger?.warn?.(
+        {
+          ...logContext,
+          durationMs: Date.now() - startedAt,
+          failureClass: requestEstimateFailureClass(error),
+          retryAfterSeconds,
+        },
+        "qwen-local-agent request estimate",
+      );
+      if (retryAfterSeconds != null) {
+        throw withEndpointCooldown(error, retryAfterSeconds);
+      }
+      throw error;
     }
-    return response;
-  } catch (error) {
-    const retryAfterSeconds = recordEndpointFailure(input, policy, error, logger);
-    logger?.warn?.(
-      {
-        ...logContext,
-        durationMs: Date.now() - startedAt,
-        failureClass: requestEstimateFailureClass(error),
-        retryAfterSeconds,
-      },
-      "qwen-local-agent request estimate",
-    );
-    if (retryAfterSeconds != null) {
-      throw withEndpointCooldown(error, retryAfterSeconds);
-    }
-    throw error;
   }
 }
 export async function runQwenLocalAgentApi(input, logger) {
