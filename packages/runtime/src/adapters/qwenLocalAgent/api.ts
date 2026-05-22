@@ -804,6 +804,96 @@ function repositoryInspectionBudgetControlledFailure(toolCalls, budget) {
     },
   );
 }
+function shouldCompleteBudgetFinalizationAfterAuditValidation(
+  input,
+  toolName,
+  args,
+  repositoryInspectionBudgetExhausted,
+  repositoryInspectionBudgetFinalizationMode,
+) {
+  if (!repositoryInspectionBudgetExhausted) return false;
+  if (repositoryInspectionBudgetFinalizationMode !== "compact_final_response") return false;
+  if (input.workflowKind !== "audit") return false;
+  if (toolName !== "validate_audit_report") return false;
+  const artifactPath = normalizeRepositoryBudgetPath(input.execution?.auditReportArtifactPath);
+  const validationPath = normalizeRepositoryBudgetPath(args.path);
+  return Boolean(artifactPath && validationPath && artifactPath === validationPath);
+}
+function budgetFinalizationCommitMessage(artifactPath) {
+  const safeName = artifactPath
+    .replaceAll("\\", "/")
+    .split("/")
+    .pop()
+    ?.replace(/\.md$/i, "")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return `Audit: finalize ${safeName || "report"}`;
+}
+async function completeBudgetFinalizedAuditReport(
+  input,
+  events,
+  toolContext,
+  sourceToolCall,
+  args,
+) {
+  const artifactPath =
+    normalizeRepositoryBudgetPath(args.path) ??
+    normalizeRepositoryBudgetPath(input.execution?.auditReportArtifactPath);
+  if (!artifactPath) {
+    return {
+      outputText:
+        "Audit report validation passed after repository-inspection budget exhaustion, but no artifact path was available for automatic commit.",
+    };
+  }
+  const commitArgs = {
+    paths: [artifactPath],
+    message: budgetFinalizationCommitMessage(artifactPath),
+  };
+  const commitToolCall = {
+    id: `${sourceToolCall.id}-budget-finalization-git-commit`,
+    type: "function",
+    function: {
+      name: "git_commit",
+      arguments: JSON.stringify(commitArgs),
+    },
+  };
+  emitToolUse(input, events, commitToolCall, commitArgs);
+  const commitResult = await executeQwenLocalTool("git_commit", commitArgs, toolContext);
+  emitToolResult(input, events, commitToolCall, commitResult);
+  if (!commitResult.ok) {
+    return {
+      outputText: [
+        `Audit report validation passed after repository-inspection budget exhaustion for ${artifactPath}.`,
+        "Automatic report-only git_commit did not complete; coordinator post-run checks must decide whether repair or rework is required.",
+        commitResult.error ? `git_commit error: ${commitResult.error}` : null,
+        commitResult.output ? `git_commit output:\n${commitResult.output}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    };
+  }
+  return {
+    outputText: [
+      `Audit report validation passed after repository-inspection budget exhaustion for ${artifactPath}.`,
+      "Automatic bounded report-only git_commit completed.",
+      commitResult.output ? `git_commit output:\n${commitResult.output}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  };
+}
+function budgetFinalizationValidationFailedText(args, result) {
+  const artifactPath = normalizeRepositoryBudgetPath(args.path) ?? "audit report";
+  return [
+    `Audit report validation failed during repository-inspection budget finalization for ${artifactPath}.`,
+    "Stopped without another LLM turn so coordinator post-run deterministic repair can use the bounded ledger evidence instead of timing out.",
+    result.output ? `validate_audit_report output:\n${result.output}` : null,
+    result.error ? `validate_audit_report error: ${result.error}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
 function auditReportRepairInspectionDeniedResult(toolName) {
   const safeToolName = sanitizeQwenToolNameForLog(toolName);
   return {
@@ -1523,6 +1613,9 @@ export async function runQwenLocalAgentApi(input, logger) {
         ) {
           repositoryInspectionToolCalls += 1;
         }
+        const repositoryInspectionBudgetExhaustedAfterTool =
+          repositoryInspectionToolBudget != null &&
+          repositoryInspectionToolCalls >= repositoryInspectionToolBudget;
         if (shouldSuppressRepeatedCall) {
           repeatedToolCallSuppressions += repeatedNonconsecutiveLoop
             ? REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS
@@ -1571,6 +1664,39 @@ export async function runQwenLocalAgentApi(input, logger) {
             auditEvidenceUnit ?? auditEvidenceResult,
           ),
         });
+        if (
+          shouldCompleteBudgetFinalizationAfterAuditValidation(
+            input,
+            toolCall.function.name,
+            args,
+            repositoryInspectionBudgetExhaustedAfterTool,
+            repositoryInspectionBudgetFinalizationMode,
+          )
+        ) {
+          if (result.ok) {
+            const completion = await completeBudgetFinalizedAuditReport(
+              input,
+              events,
+              toolContext,
+              toolCall,
+              args,
+            );
+            return {
+              outputText: completion.outputText,
+              sessionId,
+              usage,
+              events,
+              raw,
+            };
+          }
+          return {
+            outputText: budgetFinalizationValidationFailedText(args, result),
+            sessionId,
+            usage,
+            events,
+            raw,
+          };
+        }
         if (repeatedToolCallSuppressions >= REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS) {
           const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
           logger?.warn?.(

@@ -1829,7 +1829,16 @@ async function gitCommitTool(args, context) {
   assertNotAborted(context.signal, "git_commit");
   const commitResult = await spawnProcess({
     command: "git",
-    args: ["-c", `core.hooksPath=${hooksPath}`, "commit", "--no-verify", "-m", message],
+    args: [
+      "-c",
+      `core.hooksPath=${hooksPath}`,
+      "commit",
+      "--no-verify",
+      "-m",
+      message,
+      "--",
+      ...relativePaths,
+    ],
     cwd: root,
     env,
     timeoutMs,
