@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-19",
+  "updated": "2026-05-23",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -306,34 +306,38 @@
     {
       "taskId": "work-20260513-add-task-hierarchy-schema-api-contract",
       "title": "Add Task Hierarchy Schema And API Contract",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-add-task-hierarchy-schema-api-contract"
+      "rdpiPath": "docs/rdpi/work/work-20260513-add-task-hierarchy-schema-api-contract",
+      "updated": "2026-05-23"
     },
     {
       "taskId": "work-20260513-enforce-hierarchy-rollup-runtime-gates",
       "title": "Enforce Hierarchy Rollup And Runtime Gates",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-enforce-hierarchy-rollup-runtime-gates"
+      "rdpiPath": "docs/rdpi/work/work-20260513-enforce-hierarchy-rollup-runtime-gates",
+      "updated": "2026-05-23"
     },
     {
       "taskId": "work-20260513-surface-task-hierarchy-in-ui",
       "title": "Surface Task Hierarchy In UI",
-      "status": "queued",
+      "status": "done",
       "priority": "medium",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-surface-task-hierarchy-in-ui"
+      "rdpiPath": "docs/rdpi/work/work-20260513-surface-task-hierarchy-in-ui",
+      "updated": "2026-05-23"
     },
     {
       "taskId": "work-20260513-bridge-audit-roadmap-batches-to-hierarchy",
       "title": "Bridge Audit Roadmap Batches To Hierarchy",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
-      "rdpiPath": "docs/rdpi/work/work-20260513-bridge-audit-roadmap-batches-to-hierarchy"
+      "rdpiPath": "docs/rdpi/work/work-20260513-bridge-audit-roadmap-batches-to-hierarchy",
+      "updated": "2026-05-23"
     },
     {
       "taskId": "work-20260513-plan-b-audit-decomposition-regression-suite",
@@ -584,6 +588,69 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260519-tighten-generic-evidence-gates",
       "updated": "2026-05-19"
+    },
+    {
+      "taskId": "work-20260522-harden-audit-evidence-depth-gates",
+      "title": "Harden Audit Evidence Depth Gates",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260522-harden-audit-evidence-depth-gates",
+      "updated": "2026-05-22"
+    },
+    {
+      "taskId": "work-20260523-adversarial-audit-evidence-depth-bypass-review",
+      "title": "Adversarial Audit Evidence Depth Bypass Review",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260523-adversarial-audit-evidence-depth-bypass-review",
+      "updated": "2026-05-23"
+    },
+    {
+      "taskId": "work-20260523-harden-audit-command-query-output-depth",
+      "title": "Harden Audit Command Query Output Depth",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260523-harden-audit-command-query-output-depth",
+      "updated": "2026-05-23"
+    },
+    {
+      "taskId": "work-20260523-audit-synthesis-trust-propagation-review",
+      "title": "Audit Synthesis Trust Propagation Review",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260523-audit-synthesis-trust-propagation-review",
+      "updated": "2026-05-23"
+    },
+    {
+      "taskId": "work-20260523-audit-evidence-depth-positive-case-review",
+      "title": "Audit Evidence Depth Positive Case Review",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260523-audit-evidence-depth-positive-case-review",
+      "updated": "2026-05-23"
+    },
+    {
+      "taskId": "work-20260523-expand-audit-evidence-depth-regression-corpus",
+      "title": "Expand Audit Evidence Depth Regression Corpus",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260523-expand-audit-evidence-depth-regression-corpus",
+      "updated": "2026-05-23"
+    },
+    {
+      "taskId": "work-20260523-add-specialized-reviewer-fanout-gates",
+      "title": "Add Specialized Reviewer Fan-Out Gates",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260523-add-specialized-reviewer-fanout-gates",
+      "updated": "2026-05-23"
     }
   ]
 }

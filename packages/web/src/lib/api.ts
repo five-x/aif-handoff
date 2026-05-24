@@ -863,6 +863,7 @@ export const api = {
     created: number;
     skipped: number;
     taskIds: string[];
+    containerTaskId?: string;
     byPhase: Record<number, { created: number; skipped: number }>;
   }> {
     console.debug("[api] POST /projects/%s/roadmap/import", projectId, {

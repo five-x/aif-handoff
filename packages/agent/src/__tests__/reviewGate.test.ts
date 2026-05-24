@@ -583,6 +583,56 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(executeSubagentQueryMock).not.toHaveBeenCalled();
   });
 
+  it("preserves specialized role blockers when sidecar contract failure comments are malformed", async () => {
+    const specializedText =
+      "manual_review_required: security_data_loss reviewer was unavailable: runtime policy blocked reviewer role.";
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "- Contract Failure: structured_review_sidecar",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [structured-review-contract] review_gate | Structured review contract not satisfied: review output must include complete unique Security Coverage rows for secret_leaks, permissions_sandbox, unsafe_shell_network_file, and dependency_config. Failed sidecar(s): security_audit.",
+        `- [specialized-security] security_data_loss | ${specializedText}`,
+        "",
+        "## Advisories",
+        "- review_gate | Raw sidecar output is retained below with provider-text redaction applied.",
+        "- security_data_loss | Raw specialized reviewer output is retained below with provider-text redaction applied.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | not_checked | Structured review contract failed before secret-leak coverage could be trusted.",
+        "- permissions_sandbox | not_checked | Structured review contract failed before permission and sandbox coverage could be trusted.",
+        "- unsafe_shell_network_file | not_checked | Structured review contract failed before shell, network, and file-operation coverage could be trusted.",
+        "- dependency_config | not_checked | Structured review contract failed before dependency and configuration coverage could be trusted.",
+        "",
+        "## Raw Code Review",
+        "## Blocking Findings",
+        "- none",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.autoReviewState.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "specialized-security",
+          source: "security_data_loss",
+          text: specializedText,
+        }),
+      ]),
+    );
+    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+  });
+
   it("ignores raw embedded sidecar headings when parsing the canonical summary", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
@@ -1385,6 +1435,69 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         source: "code_review",
       }),
     ]);
+  });
+
+  it("preserves current specialized manual blockers when previous finding rows are missing", async () => {
+    const previousId = createAutoReviewFindingId(
+      "security_data_loss",
+      "Verify local service validation cannot run by default",
+    );
+    const unavailableText =
+      "manual_review_required: security_data_loss reviewer was unavailable: runtime policy blocked reviewer role.";
+    const unavailableId = createAutoReviewFindingId("security_data_loss", unavailableText);
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      previousFindings: [
+        {
+          id: previousId,
+          source: "security_data_loss",
+          text: "Verify local service validation cannot run by default",
+        },
+      ],
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        `- [${unavailableId}] security_data_loss | ${unavailableText}`,
+        "",
+        "## Advisories",
+        "- security_data_loss | Raw specialized reviewer output is retained below with provider-text redaction applied.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status !== "manual_review_required") {
+      throw new Error("expected manual_review_required");
+    }
+    expect(result.handoffReason).toBe("malformed_review_output_fallback");
+    expect(result.autoReviewState.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: previousId,
+          source: "security_data_loss",
+          text: "Verify local service validation cannot run by default",
+        }),
+        expect.objectContaining({
+          id: unavailableId,
+          source: "security_data_loss",
+          text: unavailableText,
+        }),
+      ]),
+    );
+    expect(result.autoReviewState.findings).toHaveLength(2);
   });
 
   it("starts a fresh streak for a new blocker", async () => {

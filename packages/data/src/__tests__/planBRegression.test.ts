@@ -76,6 +76,11 @@ const trustedNoFindings = {
       sourceClassification: "validated_no_findings",
       manifestStatus: "valid",
       manifestVersion: 1,
+      evidenceDepth: {
+        status: "substantive",
+        trustedNoFindingsSupported: true,
+        reasonCodes: [],
+      },
     },
   },
 };

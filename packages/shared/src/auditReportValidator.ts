@@ -8,6 +8,7 @@ import {
   extractSubstantiveAuditCommandEvidence,
   hasScopedNoFindingsRiskClaim,
   hasEmptyFileInspectionEvidence,
+  isInventoryAuditCommand,
   isLowSignalAuditEvidenceLine,
   isAuditPublicReportOutcome,
   toAuditPublicReportOutcome,
@@ -52,6 +53,11 @@ export const AUDIT_REPORT_VALIDATION_ISSUE_CODES = [
   "audit_evidence_discovery_only",
   "unbacked_runtime_command_evidence",
   "contradictory_search_evidence",
+  "shallow_evidence",
+  "inventory_only_evidence",
+  "irrelevant_grep_match",
+  "insufficient_scope_depth",
+  "reused_generic_evidence",
 ] as const;
 
 export type AuditReportValidationIssueCode = (typeof AUDIT_REPORT_VALIDATION_ISSUE_CODES)[number];
@@ -118,6 +124,38 @@ export interface AuditReportScopeCoverage {
   ok: boolean;
 }
 
+export const AUDIT_EVIDENCE_DEPTH_REASON_CODES = [
+  "shallow_evidence",
+  "inventory_only_evidence",
+  "irrelevant_grep_match",
+  "insufficient_scope_depth",
+  "reused_generic_evidence",
+] as const;
+
+export type AuditEvidenceDepthReasonCode = (typeof AUDIT_EVIDENCE_DEPTH_REASON_CODES)[number];
+
+export type AuditEvidenceDepthStatus = "substantive" | "shallow" | "inconclusive";
+
+export interface AuditEvidenceDepthAssessment {
+  id: string;
+  status: AuditEvidenceDepthStatus;
+  trustedNoFindingsSupported: boolean;
+  reasonCodes: AuditEvidenceDepthReasonCode[];
+  substantiveLineRefs: string[];
+  commandCount: number;
+  substantiveCommandCount: number;
+}
+
+export interface AuditEvidenceDepthResult {
+  status: AuditEvidenceDepthStatus;
+  trustedNoFindingsSupported: boolean;
+  reasonCodes: AuditEvidenceDepthReasonCode[];
+  report: AuditEvidenceDepthAssessment;
+  scopeRoots: AuditEvidenceDepthAssessment[];
+  riskHypotheses: AuditEvidenceDepthAssessment[];
+  risks: AuditEvidenceDepthAssessment[];
+}
+
 export interface AuditReportValidationResult {
   ok: boolean;
   issues: AuditReportValidationIssue[];
@@ -138,6 +176,7 @@ export interface AuditReportValidationResult {
   parsedScopeRoots: string[];
   scopeRoots: string[];
   scopeCoverage: AuditReportScopeCoverage[];
+  evidenceDepth: AuditEvidenceDepthResult;
 }
 
 const LOW_QUALITY_REPORT_PATTERNS: Array<{
@@ -257,6 +296,10 @@ function normalizePathForComparison(path: string): string {
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function stripAuditReportManifestBlocks(text: string): string {
@@ -1739,6 +1782,59 @@ function collectExistingRefsWithLineNumbers(
   return [...refs].sort();
 }
 
+interface ExistingLineRefDetail {
+  path: string;
+  startLine: number;
+  endLine: number;
+  ref: string;
+  lowSignal: boolean;
+}
+
+function collectExistingLineRefDetails(
+  text: string,
+  excludedPaths: Set<string>,
+  sourceReader: AuditReportSourceReader,
+): ExistingLineRefDetail[] {
+  const refs = new Map<string, ExistingLineRefDetail>();
+  const patterns = [SLASH_PATH_TOKEN_PATTERN, ROOT_FILE_TOKEN_PATTERN];
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    for (const match of text.matchAll(pattern)) {
+      const raw = match[1]?.trim();
+      if (!raw) continue;
+      const reference = extractLineReference(match[0] ?? "");
+      if (!reference) continue;
+      const normalized = normalizeRelativePath(raw);
+      if (excludedPaths.has(normalizePathForComparison(normalized))) continue;
+      const lineCount = sourceReader.fileLineCount(normalized);
+      if (
+        lineCount === null ||
+        reference.start < 1 ||
+        reference.end < reference.start ||
+        reference.end > lineCount
+      ) {
+        continue;
+      }
+      const lineText = sourceReader.fileLine(normalized, reference.start);
+      const ref = `${normalized}:${reference.start}`;
+      if (!refs.has(ref)) {
+        refs.set(ref, {
+          path: normalized,
+          startLine: reference.start,
+          endLine: reference.end,
+          ref,
+          lowSignal: isLowSignalAuditEvidenceLine({
+            path: normalized,
+            line: reference.start,
+            text: lineText,
+          }),
+        });
+      }
+    }
+  }
+  return [...refs.values()].sort((left, right) => left.ref.localeCompare(right.ref));
+}
+
 const IGNORED_SCOPE_DIRECTORY_NAMES = new Set([
   ".git",
   "node_modules",
@@ -2030,6 +2126,748 @@ function hasSubstantiveReportEvidenceInternal(input: {
   );
 }
 
+function uniqueReasonCodes(codes: AuditEvidenceDepthReasonCode[]): AuditEvidenceDepthReasonCode[] {
+  return [...new Set(codes)].sort();
+}
+
+function isGenericAuditGrepCommand(command: string): boolean {
+  const normalized = normalizeReportedCommand(command);
+  if (!/\b(?:rg|grep|git grep)\b/.test(normalized)) return false;
+  return (
+    /\b(?:rg|grep|git grep)\b[^\n]*\s\.(?:\s|$)/.test(normalized) ||
+    /\b(?:rg|grep|git grep)\b[^\n]*["']\.\*?["']/.test(normalized) ||
+    /\b(?:rg|grep|git grep)\b[^\n]*["']\.\+["']/.test(normalized)
+  );
+}
+
+function isSearchLikeAuditCommand(command: string): boolean {
+  const normalized = normalizeReportedCommand(command);
+  return (
+    /^(?:rg|grep|git\s+grep|search_files)\b/i.test(normalized) ||
+    /^(?:powershell|pwsh|cmd|bash|sh)\b[\s\S]*\b(?:rg|grep|git\s+grep|search_files)\b/i.test(
+      normalized,
+    )
+  );
+}
+
+const SEARCH_RESULT_LINE_PATTERN =
+  /(?:^|\s)(?:(?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12}:\d+(?::|[-\u2013])|\d+(?::|[-\u2013]))/i;
+
+function searchResultStartIndex(value: string): number {
+  const match = value.match(SEARCH_RESULT_LINE_PATTERN);
+  if (!match || match.index === undefined) return -1;
+  return match[0].startsWith(" ") ? match.index + 1 : match.index;
+}
+
+function isSearchResultLikeText(value: string): boolean {
+  return searchResultStartIndex(value) >= 0;
+}
+
+function observedSearchResultLines(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line
+        .trim()
+        .replace(/^[-*]\s+/, "")
+        .replace(/^\|\s*|\s*\|$/g, "")
+        .trim();
+      const resultStart = searchResultStartIndex(trimmed);
+      return resultStart >= 0 ? trimmed.slice(resultStart).trim() : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function stripSearchSelectorMetadata(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .map((line) => {
+      const withoutBracketed = line.replace(
+        /\[(?:search_files|rg|grep|git\s+grep)\b[^\]]*\]\s*/gi,
+        "",
+      );
+      if (
+        /\b(?:search_files|rg|grep|git\s+grep)\b/i.test(withoutBracketed) &&
+        /\b(?:query|path)\s*=/i.test(withoutBracketed)
+      ) {
+        const resultStart = searchResultStartIndex(withoutBracketed);
+        return resultStart >= 0 ? withoutBracketed.slice(resultStart) : "";
+      }
+      return withoutBracketed;
+    })
+    .join("\n");
+}
+
+function observedAuditCommandEvidenceText(entry: { command: string; evidence: string }): string {
+  const evidence = stripSearchSelectorMetadata(entry.evidence);
+  const fencedBlocks = [...evidence.matchAll(/```[^\r\n]*\r?\n([\s\S]*?)```/g)]
+    .map((match) => stripSearchSelectorMetadata(match[1] ?? "").trim())
+    .filter(Boolean);
+  if (fencedBlocks.length > 0) return fencedBlocks.join("\n");
+
+  const lines = evidence.split(/\r?\n/);
+  const commandPrefixPattern = new RegExp(
+    `^\\s*[-*]?\\s*(?:Verification:\\s*)?Command\\s+\`${escapeRegExp(
+      entry.command,
+    )}\`\\s+(?:output|returned|matched|included)\\b`,
+    "i",
+  );
+  const firstLine = lines[0] ?? "";
+  const restOfFirstLine = firstLine.replace(commandPrefixPattern, "").trim();
+  const trailingLines = lines.slice(1).join("\n").trim();
+  const labelBoundary = restOfFirstLine.indexOf(":");
+  let observed =
+    labelBoundary >= 0 ? restOfFirstLine.slice(labelBoundary + 1).trim() : restOfFirstLine;
+  const inlineOutputs = [...observed.matchAll(/`([^`\r\n]+)`/g)]
+    .map((match) => match[1]?.trim() ?? "")
+    .filter(Boolean);
+  const resultInlineOutputs = inlineOutputs.filter(isSearchResultLikeText);
+  if (resultInlineOutputs.length > 0) return resultInlineOutputs.join("\n");
+
+  if (trailingLines.length > 0 && !isSearchResultLikeText(observed)) {
+    observed = "";
+  }
+  if (labelBoundary < 0 && trailingLines.length > 0 && !isSearchResultLikeText(observed)) {
+    observed = "";
+  }
+
+  const outputPathLine = searchResultStartIndex(observed);
+  if (outputPathLine >= 0) {
+    observed = observed.slice(outputPathLine).trim();
+  } else if (trailingLines.length > 0 || trailingLines.length === 0) {
+    observed = "";
+  }
+  return [observed, observedSearchResultLines(trailingLines)].filter(Boolean).join("\n").trim();
+}
+
+function isSearchLikeAuditEvidenceUnit(unit: AuditEvidenceUnit): boolean {
+  const command = unit.command?.command ?? "";
+  const normalizedToolName = normalizeReportedCommand(unit.toolName);
+  return (
+    isSearchLikeAuditCommand(command) ||
+    /^(?:search_files|rg|grep|git\s+grep)\b/i.test(normalizedToolName) ||
+    (unit.evidenceKind === "search" && /(?:search|grep|rg)/i.test(normalizedToolName))
+  );
+}
+
+function isSubstantiveDepthCommand(command: string): boolean {
+  return !isInventoryAuditCommand(command) && !isGenericAuditGrepCommand(command);
+}
+
+function commandMentionsScope(command: string, scopeRoot: string): boolean {
+  const normalizedCommand = normalizeRelativePath(command).toLowerCase();
+  const normalizedScope = normalizeRelativePath(scopeRoot).toLowerCase();
+  return normalizedCommand.includes(normalizedScope);
+}
+
+function commandMentionsRisk(command: string, riskId: string): boolean {
+  const normalizedCommand = stripPathLikeRiskConceptText(command);
+  const riskTokens = riskId
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length >= 4 && token !== "risk");
+  return riskTokens.length > 0 && riskTokens.some((token) => normalizedCommand.includes(token));
+}
+
+function collectEmptyFileDepthRefs(input: {
+  text: string;
+  projectRoot: string;
+  scopeRoots: string[];
+  sourceReader: AuditReportSourceReader;
+}): string[] {
+  return input.scopeRoots
+    .filter((root) => input.sourceReader.fileLineCount(root) === 0)
+    .filter((root) =>
+      hasEmptyFileInspectionEvidence({
+        text: input.text,
+        path: root,
+        projectRoot: input.projectRoot,
+        sourceReader: input.sourceReader,
+      }),
+    )
+    .sort();
+}
+
+function assessment(
+  id: string,
+  reasonCodes: AuditEvidenceDepthReasonCode[],
+  substantiveLineRefs: string[],
+  commandCount: number,
+  substantiveCommandCount: number,
+): AuditEvidenceDepthAssessment {
+  const uniqueReasons = uniqueReasonCodes(reasonCodes);
+  const status: AuditEvidenceDepthStatus = uniqueReasons.length === 0 ? "substantive" : "shallow";
+  return {
+    id,
+    status,
+    trustedNoFindingsSupported: uniqueReasons.length === 0,
+    reasonCodes: uniqueReasons,
+    substantiveLineRefs: [...new Set(substantiveLineRefs)].sort(),
+    commandCount,
+    substantiveCommandCount,
+  };
+}
+
+function evidenceDepthIssueMessage(reasonCode: AuditEvidenceDepthReasonCode): string {
+  switch (reasonCode) {
+    case "shallow_evidence":
+      return "Audit report claims validated no-findings but cites only shallow source evidence.";
+    case "inventory_only_evidence":
+      return "Audit report claims validated no-findings but relies on inventory-only or generic listing evidence.";
+    case "irrelevant_grep_match":
+      return "Audit report claims validated no-findings with generic or loose grep evidence that is not tied to the stated behavior risk.";
+    case "insufficient_scope_depth":
+      return "Audit report claims validated no-findings without enough substantive evidence for every declared scope root.";
+    case "reused_generic_evidence":
+      return "Audit report reuses the same generic evidence across unrelated no-findings risks.";
+  }
+}
+
+function claimRiskIds(claim: unknown): string[] {
+  return collectManifestIds(
+    [claim],
+    ["riskId", "riskHypothesisId"],
+    ["riskIds", "riskHypothesisIds", "risks"],
+  );
+}
+
+function claimEvidenceRefs(claim: unknown): string[] {
+  return collectManifestIds([claim], ["evidenceRef"], ["evidenceRefs"]);
+}
+
+function manifestEntryId(value: unknown): string | null {
+  if (!isObjectRecord(value)) return null;
+  for (const key of ["id", "riskId", "riskHypothesisId"]) {
+    const entry = value[key];
+    if (typeof entry === "string" && entry.trim().length > 0) {
+      return normalizeRelativePath(entry.trim());
+    }
+  }
+  return null;
+}
+
+function manifestRiskText(manifest: AuditReportManifest | null, riskId: string): string {
+  if (!manifest) return "";
+  const match = manifest.riskHypotheses.find((entry) => manifestEntryId(entry) === riskId);
+  if (!isObjectRecord(match)) return "";
+  return ["description", "summary", "risk", "title", "name"]
+    .map((key) => match[key])
+    .filter((entry): entry is string => typeof entry === "string")
+    .join(" ");
+}
+
+function riskIdsInText(value: string): string[] {
+  return [...value.matchAll(/\brisk-[a-z0-9][a-z0-9-]*\b/gi)]
+    .map((match) => match[0]?.toLowerCase() ?? "")
+    .filter((riskId) => riskId && riskId !== "risk-specific");
+}
+
+function scopedNoFindingsRiskClaimSegments(text: string): string[] {
+  const scopedPathPattern =
+    /`(?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+(?:\.[A-Za-z0-9]{1,12})?(?::\d+(?:(?::|[-\u2013])\d+)?)?`/;
+  const claimPrefixPattern =
+    /\b(?:Risk hypotheses?|(?:Scoped\s+)?(?:(?:no-findings|no findings|absence)\s+claims?|absence\s+reasoning))\s*:/i;
+  const claimPrefixGlobalPattern =
+    /\b(?:Risk hypotheses?|(?:Scoped\s+)?(?:(?:no-findings|no findings|absence)\s+claims?|absence\s+reasoning))\s*:/gi;
+  const absenceClaimPattern =
+    /\b(?:absen(?:t|ce)|no[-\s]?findings?|no\s+actionable\s+finding|not\s+present|not\s+found|without\s+(?:accepted\s+)?findings?)\b/i;
+  const claimBlockTerminatorPattern =
+    /^(?:#{1,6}\s+|(?:Checked files|Checked commands|Evidence Register|Evidence notes|Finding|Findings|Proposed fix|Verification|Audit outcome)\b)/i;
+  const segments: string[] = [];
+  let inClaimBlock = false;
+  for (const line of text.split(/\r?\n/).map((entry) => entry.trim())) {
+    if (line.length === 0) {
+      inClaimBlock = false;
+      continue;
+    }
+    const lineHasClaimPrefix = claimPrefixPattern.test(line);
+    if (!lineHasClaimPrefix && claimBlockTerminatorPattern.test(line)) {
+      inClaimBlock = false;
+    }
+    const lineHasClaimContext = lineHasClaimPrefix || inClaimBlock;
+    for (const rawSegment of line.split(";").map((entry) => entry.trim())) {
+      const claimBoundaries = [0];
+      for (const match of rawSegment.matchAll(claimPrefixGlobalPattern)) {
+        if (match.index !== undefined && match.index > 0) {
+          claimBoundaries.push(match.index);
+        }
+      }
+      for (const [index, start] of claimBoundaries.entries()) {
+        const segment = rawSegment.slice(start, claimBoundaries[index + 1]).trim();
+        if (segment.length === 0 || riskIdsInText(segment).length > 0) continue;
+        if (!scopedPathPattern.test(segment)) continue;
+        if (
+          claimPrefixPattern.test(segment) ||
+          (lineHasClaimContext && absenceClaimPattern.test(segment))
+        ) {
+          segments.push(segment);
+        }
+      }
+    }
+    if (lineHasClaimPrefix) {
+      inClaimBlock = true;
+    }
+  }
+  return segments;
+}
+
+function textRiskSegment(text: string, riskId: string): string {
+  const escaped = riskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const riskPattern = new RegExp(`\\b${escaped}\\b`, "i");
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(riskPattern);
+    if (!match || match.index === undefined) continue;
+    const lineRiskIds = riskIdsInText(line);
+    if (lineRiskIds.length <= 1) return line;
+
+    const previousBoundary = line.lastIndexOf(";", match.index);
+    const nextBoundary = line.indexOf(";", match.index + match[0].length);
+    const segment = line
+      .slice(
+        previousBoundary >= 0 ? previousBoundary + 1 : 0,
+        nextBoundary >= 0 ? nextBoundary : undefined,
+      )
+      .trim();
+    if (riskIdsInText(segment).length === 1) return segment;
+  }
+  return "";
+}
+
+const GENERIC_AUDIT_RISK_TERMS = new Set([
+  "absent",
+  "actionable",
+  "audit",
+  "behavior",
+  "broken",
+  "checked",
+  "claim",
+  "covered",
+  "defect",
+  "drift",
+  "evidence",
+  "finding",
+  "findings",
+  "hypothesis",
+  "risk",
+  "scope",
+  "scoped",
+  "source",
+  "validated",
+]);
+
+function riskTermsForId(
+  manifest: AuditReportManifest | null,
+  text: string,
+  riskId: string,
+): string[] {
+  return riskTermsFromSource(
+    [riskId, manifestRiskText(manifest, riskId), textRiskSegment(text, riskId)].join(" "),
+  );
+}
+
+function riskTermsForTarget(
+  manifest: AuditReportManifest | null,
+  text: string,
+  target: AuditEvidenceDepthRiskTarget,
+): string[] {
+  if (target.claimText) {
+    return riskTermsFromSource(target.claimText);
+  }
+  return riskTermsForId(manifest, text, target.id);
+}
+
+function riskTermsFromSource(source: string): string[] {
+  const normalizedSource = source
+    .replace(/`[^`]*`/g, " ")
+    .replace(/\b[\w./@-]+\.[a-z0-9]+\b/gi, " ");
+  return [
+    ...new Set(
+      (normalizedSource.match(/[a-z][a-z0-9]{3,}/gi) ?? [])
+        .map((term) => term.toLowerCase())
+        .filter((term) => term !== "risk" && !GENERIC_AUDIT_RISK_TERMS.has(term)),
+    ),
+  ].sort();
+}
+
+function commandMentionsRiskConcept(command: string, riskId: string, riskTerms: string[]): boolean {
+  if (commandMentionsRisk(command, riskId)) return true;
+  return commandMentionsRiskTerms(command, riskTerms);
+}
+
+function commandMentionsRiskTerms(command: string, riskTerms: string[]): boolean {
+  const normalized = stripPathLikeRiskConceptText(command);
+  return riskTerms.some((term) => normalized.includes(term));
+}
+
+function commandEvidenceMentionsRiskConcept(
+  entry: { command: string; evidence: string },
+  riskId: string,
+  riskTerms: string[],
+): boolean {
+  if (!isSearchLikeAuditCommand(entry.command)) {
+    return commandMentionsRiskConcept(entry.command, riskId, riskTerms);
+  }
+  return (
+    commandMentionsRiskConcept(entry.command, riskId, riskTerms) &&
+    commandMentionsRiskConcept(observedAuditCommandEvidenceText(entry), riskId, riskTerms)
+  );
+}
+
+function commandEvidenceMentionsRiskTerms(
+  entry: { command: string; evidence: string },
+  riskTerms: string[],
+): boolean {
+  if (!isSearchLikeAuditCommand(entry.command)) {
+    return commandMentionsRiskTerms(entry.command, riskTerms);
+  }
+  return (
+    commandMentionsRiskTerms(entry.command, riskTerms) &&
+    commandMentionsRiskTerms(observedAuditCommandEvidenceText(entry), riskTerms)
+  );
+}
+
+function stripPathLikeRiskConceptText(value: string): string {
+  return normalizeReportedCommand(value)
+    .replace(/(?:^|\s)(?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[a-z0-9]{1,12}:\d+(?::\d+)?:?/gi, " ")
+    .replace(/\b(?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\.[a-z0-9]{1,12}\b/gi, " ")
+    .replace(/\b(?:\.{1,2}\/)?(?:[\w.@-]+\/)+[\w.@-]+\b/gi, " ")
+    .replace(/\b[\w.@-]+\.[a-z0-9]{1,12}\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function evidenceUnitMentionsRiskConcept(unit: AuditEvidenceUnit, riskTerms: string[]): boolean {
+  if (riskTerms.length === 0) return false;
+  const command = unit.command?.command ?? "";
+  const source = (
+    isSearchLikeAuditEvidenceUnit(unit)
+      ? stripPathLikeRiskConceptText(stripSearchSelectorMetadata(unit.outputPreview ?? ""))
+      : [
+          stripPathLikeRiskConceptText(command),
+          stripPathLikeRiskConceptText(unit.outputPreview ?? ""),
+        ].join(" ")
+  ).toLowerCase();
+  return riskTerms.some((term) => source.includes(term));
+}
+
+interface AuditEvidenceDepthRiskTarget {
+  id: string;
+  explicit: boolean;
+  claimText?: string;
+}
+
+function riskSpecificTextRefs(input: {
+  text: string;
+  riskId: string;
+  excludedPaths: Set<string>;
+  sourceReader: AuditReportSourceReader;
+}): string[] {
+  const escapedRiskId = input.riskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return [
+    ...new Set(
+      input.text
+        .split(/\r?\n/)
+        .filter((line) => new RegExp(`\\b${escapedRiskId}\\b`, "i").test(line))
+        .flatMap((line) =>
+          collectExistingLineRefDetails(line, input.excludedPaths, input.sourceReader)
+            .filter((entry) => !entry.lowSignal)
+            .map((entry) => entry.ref),
+        ),
+    ),
+  ].sort();
+}
+
+function riskSpecificEmptyFileRefs(input: {
+  text: string;
+  riskId: string;
+  projectRoot: string;
+  sourceReader: AuditReportSourceReader;
+}): string[] {
+  const escapedRiskId = input.riskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pathPattern = /`((?:\.{1,2}\/)?(?:[\w.@-]+\/)*[\w.@-]+\.[A-Za-z0-9]{1,12})`/g;
+  const refs = new Set<string>();
+  for (const line of input.text.split(/\r?\n/)) {
+    if (!new RegExp(`\\b${escapedRiskId}\\b`, "i").test(line)) continue;
+    for (const match of line.matchAll(pathPattern)) {
+      const path = normalizeRelativePath(match[1] ?? "");
+      if (
+        path &&
+        hasEmptyFileInspectionEvidence({
+          text: input.text,
+          path,
+          projectRoot: input.projectRoot,
+          sourceReader: input.sourceReader,
+        })
+      ) {
+        refs.add(path);
+      }
+    }
+  }
+  return [...refs].sort();
+}
+
+function substantiveLedgerUnitsForRisk(input: {
+  riskId: string;
+  riskTerms: string[];
+  evidenceRefs?: string[];
+  evidenceUnits: AuditEvidenceUnit[];
+}): AuditEvidenceUnit[] {
+  const allowedRefs = input.evidenceRefs ? new Set(input.evidenceRefs) : null;
+  return input.evidenceUnits.filter((unit) => {
+    if (allowedRefs && !allowedRefs.has(unit.id)) return false;
+    return (
+      unit.evidenceGrade === "substantive" &&
+      unit.riskHypothesisIds.includes(input.riskId) &&
+      evidenceUnitMentionsRiskConcept(unit, input.riskTerms)
+    );
+  });
+}
+
+function hasReusedGenericNoFindingsEvidence(input: {
+  manifest: AuditReportManifest | null;
+  text: string;
+  evidenceUnits: AuditEvidenceUnit[];
+}): boolean {
+  const { manifest } = input;
+  if (!manifest || manifest.noFindingsClaims.length < 2) return false;
+  const byEvidenceKey = new Map<string, Set<string>>();
+  for (const claim of manifest.noFindingsClaims) {
+    const riskIds = claimRiskIds(claim);
+    const evidenceRefs = claimEvidenceRefs(claim);
+    if (riskIds.length === 0 || evidenceRefs.length === 0) continue;
+    const key = evidenceRefs.join("|");
+    const risks = byEvidenceKey.get(key) ?? new Set<string>();
+    for (const riskId of riskIds) risks.add(riskId);
+    byEvidenceKey.set(key, risks);
+  }
+  return [...byEvidenceKey.entries()].some(([evidenceKey, riskIds]) => {
+    if (riskIds.size <= 1) return false;
+    const evidenceRefs = evidenceKey.split("|").filter(Boolean);
+    return [...riskIds].some((riskId) => {
+      const riskTerms = riskTermsForId(manifest, input.text, riskId);
+      return (
+        substantiveLedgerUnitsForRisk({
+          riskId,
+          riskTerms,
+          evidenceRefs,
+          evidenceUnits: input.evidenceUnits,
+        }).length === 0
+      );
+    });
+  });
+}
+
+function assessAuditEvidenceDepth(input: {
+  text: string;
+  projectRoot: string;
+  manifest: AuditReportManifest | null;
+  evidenceUnits: AuditEvidenceUnit[];
+  scopeRoots: string[];
+  scopeCoverage: AuditReportScopeCoverage[];
+  excludedPaths: Set<string>;
+  sourceReader: AuditReportSourceReader;
+  existingNoFindingsSupported: boolean;
+  ledgerBackedNoFindingsEvidence: boolean;
+}): AuditEvidenceDepthResult {
+  const hasNoFindingsClaim =
+    /\bNo validated findings\b/i.test(input.text) ||
+    input.manifest?.outcome === "validated_no_findings";
+  const lineRefs = collectExistingLineRefDetails(
+    input.text,
+    input.excludedPaths,
+    input.sourceReader,
+  );
+  const emptyFileRefs = collectEmptyFileDepthRefs({
+    text: input.text,
+    projectRoot: input.projectRoot,
+    scopeRoots: input.scopeRoots,
+    sourceReader: input.sourceReader,
+  });
+  const substantiveLineRefs = lineRefs.filter((entry) => !entry.lowSignal);
+  const substantiveRefValues = [...substantiveLineRefs.map((entry) => entry.ref), ...emptyFileRefs];
+  const commands = extractAuditCommandEvidence(input.text);
+  const substantiveCommands = commands.filter((entry) => isSubstantiveDepthCommand(entry.command));
+  const genericGrepCommands = commands.filter((entry) => isGenericAuditGrepCommand(entry.command));
+  const citedSubstantiveUnits = citedEvidenceUnitsForManifest(
+    input.manifest,
+    input.evidenceUnits,
+  ).filter((unit) => unit.evidenceGrade === "substantive");
+  const reportReasons: AuditEvidenceDepthReasonCode[] = [];
+
+  if (hasNoFindingsClaim) {
+    if (
+      substantiveRefValues.length === 0 ||
+      (commands.length === 0 && !input.ledgerBackedNoFindingsEvidence)
+    ) {
+      reportReasons.push("shallow_evidence");
+    }
+    if (substantiveCommands.length === 0 && !input.ledgerBackedNoFindingsEvidence) {
+      reportReasons.push("inventory_only_evidence");
+    }
+    if (genericGrepCommands.length > 0 && substantiveCommands.length === 0) {
+      reportReasons.push("inventory_only_evidence", "irrelevant_grep_match");
+    }
+    if (!input.existingNoFindingsSupported && !input.ledgerBackedNoFindingsEvidence) {
+      reportReasons.push("shallow_evidence");
+    }
+    if (
+      hasReusedGenericNoFindingsEvidence({
+        manifest: input.manifest,
+        text: input.text,
+        evidenceUnits: input.evidenceUnits,
+      })
+    ) {
+      reportReasons.push("reused_generic_evidence");
+    }
+  }
+
+  const scopeAssessments = input.scopeCoverage.map((scope) => {
+    const scopeLineRefs = substantiveLineRefs.filter((entry) =>
+      scope.kind === "directory"
+        ? isPathUnderDirectory(entry.path, scope.root)
+        : isSameRepositoryPath(entry.path, scope.root),
+    );
+    const scopeRefValues = [
+      ...scopeLineRefs.map((entry) => entry.ref),
+      ...emptyFileRefs.filter((path) =>
+        scope.kind === "directory"
+          ? isPathUnderDirectory(path, scope.root)
+          : isSameRepositoryPath(path, scope.root),
+      ),
+    ];
+    const scopeCommands = commands.filter((entry) =>
+      commandMentionsScope(entry.command, scope.root),
+    );
+    const scopeSubstantiveCommands = scopeCommands.filter((entry) =>
+      isSubstantiveDepthCommand(entry.command),
+    );
+    const reasons: AuditEvidenceDepthReasonCode[] = [];
+    if (hasNoFindingsClaim) {
+      if (!scope.ok || scopeRefValues.length === 0) reasons.push("insufficient_scope_depth");
+      if (scopeRefValues.length === 0) reasons.push("shallow_evidence");
+      if (
+        scopeCommands.length > 0 &&
+        scopeSubstantiveCommands.length === 0 &&
+        !input.ledgerBackedNoFindingsEvidence
+      ) {
+        reasons.push("inventory_only_evidence");
+      }
+    }
+    return assessment(
+      scope.root,
+      reasons,
+      scopeRefValues,
+      scopeCommands.length,
+      scopeSubstantiveCommands.length +
+        (input.ledgerBackedNoFindingsEvidence && scopeRefValues.length > 0 ? 1 : 0),
+    );
+  });
+
+  const manifestRiskIds = input.manifest ? manifestRiskHypothesisIds(input.manifest) : [];
+  const textRiskIds = riskIdsInText(input.text);
+  const explicitRiskIds = [...new Set([...manifestRiskIds, ...textRiskIds])].sort();
+  const syntheticRiskTargets = scopedNoFindingsRiskClaimSegments(input.text).map(
+    (claimText, index) => ({
+      id: `scoped-no-findings-${index + 1}`,
+      explicit: false,
+      claimText,
+    }),
+  );
+  const riskTargets: AuditEvidenceDepthRiskTarget[] = [
+    ...explicitRiskIds.map((riskId) => ({ id: riskId, explicit: true })),
+    ...syntheticRiskTargets,
+  ];
+  if (hasNoFindingsClaim && riskTargets.length === 0) {
+    reportReasons.push("shallow_evidence", "irrelevant_grep_match");
+  }
+  const riskAssessments = riskTargets.map((target) => {
+    const riskId = target.id;
+    const riskTerms = riskTermsForTarget(input.manifest, input.text, target);
+    const riskCommands = commands.filter((entry) =>
+      target.explicit
+        ? commandEvidenceMentionsRiskConcept(entry, riskId, riskTerms)
+        : commandEvidenceMentionsRiskTerms(entry, riskTerms),
+    );
+    const riskSubstantiveCommands = riskCommands.filter((entry) =>
+      isSubstantiveDepthCommand(entry.command),
+    );
+    const riskRefs = riskSpecificTextRefs({
+      text: input.text,
+      riskId,
+      excludedPaths: input.excludedPaths,
+      sourceReader: input.sourceReader,
+    });
+    const riskEmptyFileRefs = riskSpecificEmptyFileRefs({
+      text: input.text,
+      riskId,
+      projectRoot: input.projectRoot,
+      sourceReader: input.sourceReader,
+    });
+    const riskLedgerUnits = substantiveLedgerUnitsForRisk({
+      riskId,
+      riskTerms,
+      evidenceUnits: citedSubstantiveUnits,
+    });
+    const hasRiskSpecificDepth =
+      riskSubstantiveCommands.length > 0 ||
+      riskLedgerUnits.length > 0 ||
+      riskEmptyFileRefs.length > 0;
+    const reasons: AuditEvidenceDepthReasonCode[] = [];
+    if (hasNoFindingsClaim) {
+      if (!hasRiskSpecificDepth) {
+        reasons.push("shallow_evidence", "irrelevant_grep_match");
+      }
+      if (
+        !hasRiskSpecificDepth &&
+        substantiveCommands.length === 0 &&
+        riskLedgerUnits.length === 0
+      ) {
+        reasons.push("inventory_only_evidence");
+      }
+      if (genericGrepCommands.length > 0 && riskSubstantiveCommands.length === 0) {
+        reasons.push("irrelevant_grep_match");
+      }
+    }
+    return assessment(
+      riskId,
+      reasons,
+      riskRefs.length > 0 || riskEmptyFileRefs.length > 0
+        ? [...riskRefs, ...riskEmptyFileRefs]
+        : substantiveRefValues,
+      riskCommands.length,
+      riskSubstantiveCommands.length + riskLedgerUnits.length + riskEmptyFileRefs.length,
+    );
+  });
+
+  const report = assessment(
+    "report",
+    reportReasons,
+    substantiveRefValues,
+    commands.length,
+    substantiveCommands.length + (input.ledgerBackedNoFindingsEvidence ? 1 : 0),
+  );
+  const allReasonCodes = uniqueReasonCodes([
+    ...report.reasonCodes,
+    ...scopeAssessments.flatMap((entry) => entry.reasonCodes),
+    ...riskAssessments.flatMap((entry) => entry.reasonCodes),
+  ]);
+  const status: AuditEvidenceDepthStatus = !hasNoFindingsClaim
+    ? "inconclusive"
+    : allReasonCodes.length === 0
+      ? "substantive"
+      : "shallow";
+  return {
+    status,
+    trustedNoFindingsSupported: hasNoFindingsClaim && allReasonCodes.length === 0,
+    reasonCodes: allReasonCodes,
+    report,
+    scopeRoots: scopeAssessments,
+    riskHypotheses: riskAssessments,
+    risks: riskAssessments,
+  };
+}
+
 export function hasSubstantiveReportEvidence(input: {
   text: string;
   projectRoot: string;
@@ -2140,12 +2978,30 @@ export function validateAuditReportArtifact(
     excludedPaths,
     sourceReader,
   });
-  const sourceClassification: AuditSourceClassification =
+  const preliminarySourceClassification: AuditSourceClassification =
     qualityAdjustedSourceClassification === "validated_findings_present"
       ? qualityAdjustedSourceClassification
       : ledgerBackedNoFindingsEvidence
         ? "validated_no_findings"
         : qualityAdjustedSourceClassification;
+  const existingNoFindingsSupported = preliminarySourceClassification === "validated_no_findings";
+  const evidenceDepth = assessAuditEvidenceDepth({
+    text: classificationText,
+    projectRoot: input.projectRoot,
+    manifest,
+    evidenceUnits: input.auditEvidenceUnits ?? [],
+    scopeRoots,
+    scopeCoverage,
+    excludedPaths,
+    sourceReader,
+    existingNoFindingsSupported,
+    ledgerBackedNoFindingsEvidence,
+  });
+  const sourceClassification: AuditSourceClassification =
+    preliminarySourceClassification === "validated_no_findings" &&
+    !evidenceDepth.trustedNoFindingsSupported
+      ? "source_inconclusive"
+      : preliminarySourceClassification;
   const issues: AuditReportValidationIssue[] = [];
 
   if (
@@ -2374,6 +3230,15 @@ export function validateAuditReportArtifact(
     issues.push(...validateContradictorySearchEvidence(classificationText));
   }
 
+  if (
+    /\bNo validated findings\b/i.test(classificationText) &&
+    !evidenceDepth.trustedNoFindingsSupported
+  ) {
+    for (const reasonCode of evidenceDepth.reasonCodes) {
+      issues.push(issue(reasonCode, evidenceDepthIssueMessage(reasonCode)));
+    }
+  }
+
   const falseMissingPaths = collectFalseMissingPathClaims(classificationText, sourceReader);
   if (falseMissingPaths.length > 0) {
     issues.push(
@@ -2587,6 +3452,7 @@ export function validateAuditReportArtifact(
     parsedScopeRoots,
     scopeRoots,
     scopeCoverage,
+    evidenceDepth,
   };
 }
 

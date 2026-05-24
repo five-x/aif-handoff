@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { chatSessions, tasks } from "../schema.js";
 import { closeDb, createTestDb, getDb } from "../db.js";
 
-const CURRENT_DB_USER_VERSION = 33;
+const CURRENT_DB_USER_VERSION = 34;
 
 function removeSqliteArtifacts(dbPath: string): void {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
@@ -51,6 +51,58 @@ describe("db", () => {
           "source_ref",
         ]),
       );
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
+  });
+
+  it("creates task hierarchy columns and lookup indexes for fresh databases", () => {
+    closeDb();
+    const dbPath = join(
+      tmpdir(),
+      `aif-shared-task-hierarchy-${Date.now()}-${Math.random()}.sqlite`,
+    );
+
+    try {
+      getDb(dbPath);
+      closeDb();
+
+      const sqlite = new Database(dbPath, { readonly: true });
+      const columns = sqlite.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>;
+      const indexes = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (
+              'idx_tasks_parent',
+              'idx_tasks_root',
+              'idx_tasks_hierarchy_role'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const userVersion = sqlite.pragma("user_version", { simple: true }) as number;
+      sqlite.close();
+
+      expect(columns.map((column) => column.name)).toEqual(
+        expect.arrayContaining([
+          "parent_task_id",
+          "root_task_id",
+          "hierarchy_depth",
+          "hierarchy_role",
+          "hierarchy_position",
+          "parent_closeout_policy",
+        ]),
+      );
+      expect(indexes.map((row) => row.name).sort()).toEqual([
+        "idx_tasks_hierarchy_role",
+        "idx_tasks_parent",
+        "idx_tasks_root",
+      ]);
       expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();

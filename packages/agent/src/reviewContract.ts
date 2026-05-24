@@ -8,8 +8,9 @@ import type {
   AutoReviewSecurityCoverageStatus,
   AutoReviewState,
   AutoReviewStrategy,
+  SpecializedReviewerRole,
 } from "@aif/shared";
-import { redactProviderText } from "@aif/shared";
+import { AUTO_REVIEW_FINDING_SOURCES, redactProviderText } from "@aif/shared";
 
 export interface AutoReviewPreviousFinding extends AutoReviewFinding {
   status: AutoReviewPreviousFindingStatus;
@@ -37,6 +38,13 @@ export interface ParsedStructuredReviewComments {
   securityCoverage: AutoReviewSecurityCoverage[];
 }
 
+export interface ParsedSpecializedRoleOutput {
+  role: SpecializedReviewerRole;
+  blockingFindings: AutoReviewFinding[];
+  advisories: AutoReviewAdvisory[];
+  previousFindings: AutoReviewPreviousFinding[];
+}
+
 const PREVIOUS_FINDING_STATUS_PATTERN =
   "(resolved|still_blocking|new_blocker|not_reproducible|manual_review_required)";
 const SECURITY_COVERAGE_AREA_PATTERN =
@@ -48,6 +56,7 @@ const REQUIRED_SECURITY_COVERAGE_AREAS: AutoReviewSecurityCoverageArea[] = [
   "unsafe_shell_network_file",
   "dependency_config",
 ];
+const AUTO_REVIEW_FINDING_SOURCE_PATTERN = `(${AUTO_REVIEW_FINDING_SOURCES.join("|")})`;
 
 function collectSections(text: string): Map<string, string[]> {
   const sections = new Map<string, string[]>();
@@ -181,6 +190,125 @@ export function parseStructuredSidecarOutput(
   };
 }
 
+export function parseSpecializedRoleOutput(
+  resultText: string,
+  role: SpecializedReviewerRole,
+  previousFindingsInput: AutoReviewFinding[] = [],
+): ParsedSpecializedRoleOutput | null {
+  const sections = collectSections(resultText);
+  const verdictLines = normalizeListSection(sections.get("Verdict"));
+  const blockingItems = normalizeListSection(sections.get("Blocking Findings"));
+  const advisoryItems = normalizeListSection(sections.get("Advisories"));
+  const previousItems = normalizeListSection(sections.get("Previous Findings"));
+
+  if (
+    !verdictLines ||
+    verdictLines.length !== 1 ||
+    !blockingItems ||
+    !advisoryItems ||
+    previousItems === null
+  ) {
+    return null;
+  }
+
+  const verdict = verdictLines[0]?.trim().toUpperCase();
+  if (verdict !== "PASS" && verdict !== "FAIL" && verdict !== "INCONCLUSIVE") {
+    return null;
+  }
+  if (verdict === "PASS" && blockingItems.length > 0) {
+    return null;
+  }
+  if (verdict === "FAIL" && blockingItems.length === 0) {
+    return null;
+  }
+  if (verdict === "INCONCLUSIVE") {
+    return null;
+  }
+  if (verdict === "PASS" && !advisoryItems.some(hasConcreteSpecializedReviewEvidence)) {
+    return null;
+  }
+
+  const previousFindings: AutoReviewPreviousFinding[] = [];
+  const previousFindingMap = new Map(previousFindingsInput.map((finding) => [finding.id, finding]));
+  for (const item of previousItems) {
+    const match = item.match(
+      new RegExp(`^\\[([^\\]]+)\\]\\s+${PREVIOUS_FINDING_STATUS_PATTERN}\\s+\\|\\s+(.+)$`),
+    );
+    if (!match) {
+      return null;
+    }
+    const matchedFinding = previousFindingMap.get(match[1]);
+    if (!matchedFinding && previousFindingsInput.length > 0) {
+      return null;
+    }
+    previousFindings.push({
+      id: match[1],
+      source: matchedFinding?.source ?? role,
+      status: match[2] as AutoReviewPreviousFindingStatus,
+      note: normalizeReviewText(match[3]),
+      text: normalizeReviewText(match[3]),
+      closureEvidence: normalizeReviewText(match[3]),
+    });
+  }
+
+  if (
+    previousFindingsInput.length > 0 &&
+    previousFindings.length !== previousFindingsInput.length
+  ) {
+    return null;
+  }
+
+  return {
+    role,
+    blockingFindings: blockingItems.map((item) => ({
+      id: createAutoReviewFindingId(role, item),
+      text: normalizeReviewText(item),
+      source: role,
+    })),
+    advisories: advisoryItems.map((item) => ({
+      source: role,
+      text: normalizeReviewText(item),
+    })),
+    previousFindings,
+  };
+}
+
+function hasConcreteSpecializedReviewEvidence(text: string): boolean {
+  const normalized = normalizeFindingText(text);
+  if (normalized.length < 16) return false;
+  return [
+    /\b[\w./\\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|py|sh|ps1|css|scss|html)(?::\d+)?\b/i,
+    /`[^`]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|py|sh|ps1|css|scss|html)(?::\d+)?`/i,
+    /\b(?:command|test|tests|lint|build|validator|git|rg|npm(?:\.cmd)?)\b[^.]*\b(?:output|exit code|status|passed|failed|inspected|matched)\b/i,
+    /\b(?:manifest|evidenceRefs?|scope coverage|autoReviewState|manualReviewRequired|blocked_external)\b[^.]*\b(?:present|bound|covered|validated|contains|set|true|false|null)\b/i,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+export function buildSpecializedRoleManualReviewOutput(input: {
+  role: SpecializedReviewerRole;
+  reason: string;
+}): ParsedSpecializedRoleOutput {
+  const text = `manual_review_required: ${input.role} reviewer ${input.reason}`;
+  return {
+    role: input.role,
+    blockingFindings: [
+      {
+        id: createAutoReviewFindingId(input.role, text),
+        source: input.role,
+        status: "manual_review_required",
+        text: normalizeReviewText(text),
+      },
+    ],
+    advisories: [
+      {
+        source: input.role,
+        text: "Raw specialized reviewer output is retained below with provider-text redaction applied.",
+      },
+    ],
+    previousFindings: [],
+  };
+}
+
 function parseSecurityCoverageItems(items: string[]): AutoReviewSecurityCoverage[] | null {
   const coverage: AutoReviewSecurityCoverage[] = [];
   const seenAreas = new Set<AutoReviewSecurityCoverageArea>();
@@ -239,14 +367,21 @@ export function buildStructuredReviewComments(input: {
   iteration: number;
   codeReview: ParsedStructuredSidecarOutput;
   securityAudit: ParsedStructuredSidecarOutput;
+  specializedReviews?: ParsedSpecializedRoleOutput[];
   rawCodeReview: string;
   rawSecurityAudit: string;
+  rawSpecializedReviews?: Array<{ role: SpecializedReviewerRole; rawOutput: string }>;
 }): string {
   const previousFindings = [
     ...input.codeReview.previousFindings,
     ...input.securityAudit.previousFindings,
+    ...(input.specializedReviews ?? []).flatMap((review) => review.previousFindings),
   ];
-  const advisories = [...input.codeReview.advisories, ...input.securityAudit.advisories];
+  const advisories = [
+    ...input.codeReview.advisories,
+    ...input.securityAudit.advisories,
+    ...(input.specializedReviews ?? []).flatMap((review) => review.advisories),
+  ];
   const securityCoverage = mergeSecurityCoverage(
     input.codeReview.securityCoverage,
     input.securityAudit.securityCoverage,
@@ -273,6 +408,7 @@ export function buildStructuredReviewComments(input: {
   for (const finding of [
     ...input.codeReview.blockingFindings,
     ...input.securityAudit.blockingFindings,
+    ...(input.specializedReviews ?? []).flatMap((review) => review.blockingFindings),
   ]) {
     const blockingFinding: AutoReviewFinding = {
       ...finding,
@@ -314,6 +450,11 @@ export function buildStructuredReviewComments(input: {
     "",
     "## Raw Security Audit",
     redactProviderText(input.rawSecurityAudit.trim()) || "No security audit output.",
+    ...(input.rawSpecializedReviews ?? []).flatMap((review) => [
+      "",
+      `## Raw Specialized Review: ${review.role}`,
+      redactProviderText(review.rawOutput.trim()) || `No ${review.role} reviewer output.`,
+    ]),
   ];
 
   return lines.join("\n");
@@ -363,7 +504,7 @@ export function parseStructuredReviewComments(
   for (const item of previousItems) {
     const match = item.match(
       new RegExp(
-        `^\\[([^\\]]+)\\]\\s+(code_review|security_audit|review_gate)\\s+\\|\\s+${PREVIOUS_FINDING_STATUS_PATTERN}\\s+\\|\\s+(.+)$`,
+        `^\\[([^\\]]+)\\]\\s+${AUTO_REVIEW_FINDING_SOURCE_PATTERN}\\s+\\|\\s+${PREVIOUS_FINDING_STATUS_PATTERN}\\s+\\|\\s+(.+)$`,
       ),
     );
     if (!match) {
@@ -382,7 +523,7 @@ export function parseStructuredReviewComments(
   const blockingFindings: AutoReviewFinding[] = [];
   for (const item of blockingItems) {
     const match = item.match(
-      /^\[([^\]]+)\]\s+(code_review|security_audit|review_gate)\s+\|\s+(.+)$/,
+      new RegExp(`^\\[([^\\]]+)\\]\\s+${AUTO_REVIEW_FINDING_SOURCE_PATTERN}\\s+\\|\\s+(.+)$`),
     );
     if (!match) {
       return null;
@@ -396,7 +537,7 @@ export function parseStructuredReviewComments(
 
   const advisories: AutoReviewAdvisory[] = [];
   for (const item of advisoryItems) {
-    const match = item.match(/^(code_review|security_audit|review_gate)\s+\|\s+(.+)$/);
+    const match = item.match(new RegExp(`^${AUTO_REVIEW_FINDING_SOURCE_PATTERN}\\s+\\|\\s+(.+)$`));
     if (!match) {
       return null;
     }

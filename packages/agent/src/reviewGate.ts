@@ -8,6 +8,7 @@ import {
   isRiskyTask,
   redactProviderText,
   resolveAuditPlanId,
+  SPECIALIZED_REVIEWER_ROLES,
   type AutoReviewFinding,
   type AutoReviewStrategy,
   type TaskCompletionEvidenceTask,
@@ -505,26 +506,33 @@ function buildMetrics(input: {
 function buildMissingPreviousFindingHandoff(
   input: ReviewGateInput,
   metrics: ReviewGateMetrics,
+  currentFindings: AutoReviewFinding[] = [],
 ): ReviewGateResult {
-  const enrichedPreviousFindings = enrichBlockingFindings({
-    findings: input.previousFindings,
+  const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const mergedFindings = mergeFindings(input.previousFindings, currentFindings);
+  const enrichedFindings = enrichBlockingFindings({
+    findings: mergedFindings,
     previousFindings: input.previousFindings,
     iteration: input.iteration,
   });
+  const newBlockingCount = enrichedFindings.filter(
+    (finding) => !previousIds.has(finding.id),
+  ).length;
   return {
     status: "manual_review_required",
     handoffReason: "malformed_review_output_fallback",
     metrics: {
       ...metrics,
-      stillBlockingCount: enrichedPreviousFindings.length,
-      totalBlockingCount: enrichedPreviousFindings.length,
+      stillBlockingCount: input.previousFindings.length,
+      newBlockingCount,
+      totalBlockingCount: enrichedFindings.length,
     },
-    blockingFindings: enrichedPreviousFindings,
-    fixesMarkdown: formatFixesMarkdown(enrichedPreviousFindings),
+    blockingFindings: enrichedFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedFindings),
     autoReviewState: toAutoReviewState({
       strategy: input.strategy,
       iteration: input.iteration,
-      findings: enrichedPreviousFindings,
+      findings: enrichedFindings,
     }),
   };
 }
@@ -722,7 +730,7 @@ function buildStructuredDecision(
     !parsedPreviousFindingsMatchInput(input, parsed) ||
     !resolvedPreviousFindingsHaveClosureEvidence(parsed)
   ) {
-    return buildMissingPreviousFindingHandoff(input, metrics);
+    return buildMissingPreviousFindingHandoff(input, metrics, blockingFindings);
   }
 
   if (blockingFindings.length === 0) {
@@ -1101,10 +1109,16 @@ function buildMalformedStructuredReviewContractHandoff(
     source: "review_gate",
     text: STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT,
   };
+  const specializedFindings = extractSpecializedContractFailureFindings(input.reviewComments);
   const mergedFindings =
     input.previousFindings.length > 0
-      ? mergeFindings(input.previousFindings, [contractFinding], deterministicFindings)
-      : mergeFindings([contractFinding], deterministicFindings);
+      ? mergeFindings(
+          input.previousFindings,
+          [contractFinding],
+          specializedFindings,
+          deterministicFindings,
+        )
+      : mergeFindings([contractFinding], specializedFindings, deterministicFindings);
   const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
   const enrichedFindings = enrichBlockingFindings({
     findings: mergedFindings,
@@ -1136,6 +1150,15 @@ function buildMalformedStructuredReviewContractHandoff(
       findings: enrichedFindings,
     }),
   };
+}
+
+function extractSpecializedContractFailureFindings(
+  reviewComments: string | null,
+): AutoReviewFinding[] {
+  const parsed = parseStructuredReviewComments(reviewComments);
+  if (!parsed) return [];
+  const specializedSources = new Set<string>(SPECIALIZED_REVIEWER_ROLES);
+  return parsed.blockingFindings.filter((finding) => specializedSources.has(finding.source));
 }
 
 export async function evaluateReviewCommentsForAutoMode(

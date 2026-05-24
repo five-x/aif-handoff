@@ -28,6 +28,8 @@ import {
   AUTO_REVIEW_FINDING_SOURCES,
   AUTO_REVIEW_SECURITY_COVERAGE_AREAS,
   AUTO_REVIEW_STRATEGIES,
+  TASK_HIERARCHY_ROLES,
+  TASK_PARENT_CLOSEOUT_POLICIES,
   MEMORY_CLAIM_SOURCE_KINDS,
   MEMORY_CLAIM_STATUSES,
   MEMORY_FAILURE_FAMILIES,
@@ -113,6 +115,10 @@ import {
   type TaskArtifactTrustBatchCounts,
   type TaskArtifactTrustNextAction,
   type TaskArtifactTrustRollup,
+  type TaskChildSummary,
+  type TaskHierarchyChild,
+  type TaskHierarchyRole,
+  type TaskParentCloseoutPolicy,
   type TaskMemoryCandidatesResponse,
   type TaskRuntimeUsageEvent,
   type TaskRuntimeUsageResponse,
@@ -318,7 +324,380 @@ export type TaskFieldsUpdate = {
   position?: number;
   scheduledAt?: string | null;
   worktreePath?: string | null;
+  parentTaskId?: string | null;
+  hierarchyRole?: TaskHierarchyRole;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
 };
+
+const MAX_TASK_HIERARCHY_DEPTH = 2;
+const DEFAULT_HIERARCHY_POSITION = 1000;
+const TASK_HIERARCHY_ROLE_SET = new Set<string>(TASK_HIERARCHY_ROLES);
+const TASK_PARENT_CLOSEOUT_POLICY_SET = new Set<string>(TASK_PARENT_CLOSEOUT_POLICIES);
+const ACTIVE_CHILD_STATUSES = new Set<TaskStatus>([
+  "planning",
+  "plan_ready",
+  "implementing",
+  "review",
+]);
+
+function assertTaskHierarchyRole(value: TaskHierarchyRole | undefined): TaskHierarchyRole {
+  const role = value ?? "executable";
+  if (!TASK_HIERARCHY_ROLE_SET.has(role)) {
+    throw new Error(`Invalid task hierarchy role: ${String(value)}`);
+  }
+  return role;
+}
+
+function assertTaskParentCloseoutPolicy(
+  value: TaskParentCloseoutPolicy | null | undefined,
+): TaskParentCloseoutPolicy | null {
+  if (value == null) return null;
+  if (!TASK_PARENT_CLOSEOUT_POLICY_SET.has(value)) {
+    throw new Error(`Invalid task parent closeout policy: ${String(value)}`);
+  }
+  return value;
+}
+
+function effectiveHierarchyRole(row: Pick<TaskRow, "hierarchyRole">): TaskHierarchyRole {
+  return assertTaskHierarchyRole(row.hierarchyRole ?? "executable");
+}
+
+function effectiveCloseoutPolicy(
+  row: Pick<TaskRow, "parentCloseoutPolicy" | "hierarchyRole">,
+): TaskParentCloseoutPolicy | null {
+  const policy = assertTaskParentCloseoutPolicy(row.parentCloseoutPolicy ?? null);
+  return effectiveHierarchyRole(row) === "container" ? (policy ?? "all_children_verified") : null;
+}
+
+function directChildrenOf(taskId: string): TaskRow[] {
+  return getDb()
+    .select()
+    .from(tasks)
+    .where(eq(tasks.parentTaskId, taskId))
+    .orderBy(asc(tasks.hierarchyPosition), asc(tasks.position), asc(tasks.createdAt))
+    .all();
+}
+
+function directChildCount(taskId: string): number {
+  return (
+    getDb()
+      .select({ count: count() })
+      .from(tasks)
+      .where(eq(tasks.parentTaskId, taskId))
+      .get()?.count ?? 0
+  );
+}
+
+function computeNextHierarchyPosition(parentTaskId: string): number {
+  const row = getDb()
+    .select({ maxPosition: max(tasks.hierarchyPosition) })
+    .from(tasks)
+    .where(eq(tasks.parentTaskId, parentTaskId))
+    .get();
+  return row?.maxPosition == null ? DEFAULT_HIERARCHY_POSITION : Number(row.maxPosition) + 100;
+}
+
+function collectDescendantRows(taskId: string): TaskRow[] {
+  const descendants: TaskRow[] = [];
+  const queue = directChildrenOf(taskId);
+  while (queue.length > 0) {
+    const child = queue.shift()!;
+    descendants.push(child);
+    queue.push(...directChildrenOf(child.id));
+  }
+  return descendants;
+}
+
+function isTaskDescendant(candidateId: string, ancestorId: string): boolean {
+  let cursor = findTaskById(candidateId);
+  while (cursor?.parentTaskId) {
+    if (cursor.parentTaskId === ancestorId) return true;
+    cursor = findTaskById(cursor.parentTaskId);
+  }
+  return false;
+}
+
+export function getTaskChildSummary(taskId: string): TaskChildSummary {
+  const children = directChildrenOf(taskId);
+  return {
+    childCount: children.length,
+    blockedChildCount: children.filter(
+      (child) => child.status === "blocked_external" || child.manualReviewRequired,
+    ).length,
+    activeChildCount: children.filter((child) => ACTIVE_CHILD_STATUSES.has(child.status)).length,
+    verifiedChildCount: children.filter((child) => child.status === "verified").length,
+  };
+}
+
+function toHierarchyTaskReference(row: TaskRow) {
+  return {
+    id: row.id,
+    title: row.title,
+    status: row.status,
+    hierarchyRole: effectiveHierarchyRole(row),
+  };
+}
+
+function toHierarchyChild(row: TaskRow): TaskHierarchyChild {
+  return {
+    ...toHierarchyTaskReference(row),
+    priority: row.priority,
+    position: row.position,
+    hierarchyDepth: row.hierarchyDepth ?? 0,
+    hierarchyPosition: row.hierarchyPosition ?? DEFAULT_HIERARCHY_POSITION,
+    parentTaskId: row.parentTaskId ?? null,
+    childSummary: getTaskChildSummary(row.id),
+    updatedAt: row.updatedAt,
+  };
+}
+
+function promoteParentToContainer(parentTaskId: string, nowIso = new Date().toISOString()): void {
+  const parent = findTaskById(parentTaskId);
+  if (!parent) return;
+  if (effectiveHierarchyRole(parent) === "container" && parent.parentCloseoutPolicy) return;
+  getDb()
+    .update(tasks)
+    .set({
+      hierarchyRole: "container",
+      parentCloseoutPolicy: parent.parentCloseoutPolicy ?? "all_children_verified",
+      updatedAt: nowIso,
+    })
+    .where(eq(tasks.id, parentTaskId))
+    .run();
+}
+
+function resolveCreateHierarchy(input: {
+  projectId: string;
+  parentTaskId?: string | null;
+  hierarchyRole?: TaskHierarchyRole;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
+}): Pick<
+  TaskRow,
+  | "parentTaskId"
+  | "rootTaskId"
+  | "hierarchyDepth"
+  | "hierarchyRole"
+  | "hierarchyPosition"
+  | "parentCloseoutPolicy"
+> {
+  const role = assertTaskHierarchyRole(input.hierarchyRole);
+  const requestedPolicy = assertTaskParentCloseoutPolicy(input.parentCloseoutPolicy);
+
+  if (input.parentTaskId) {
+    const parent = findTaskById(input.parentTaskId);
+    if (!parent) throw new Error(`Parent task not found: ${input.parentTaskId}`);
+    if (parent.projectId !== input.projectId) {
+      throw new Error("Parent task must belong to the same project");
+    }
+    const hierarchyDepth = (parent.hierarchyDepth ?? 0) + 1;
+    if (hierarchyDepth > MAX_TASK_HIERARCHY_DEPTH) {
+      throw new Error(`Task hierarchy depth cannot exceed ${MAX_TASK_HIERARCHY_DEPTH}`);
+    }
+    if (role !== "container" && requestedPolicy) {
+      throw new Error("parentCloseoutPolicy requires hierarchyRole=container");
+    }
+    return {
+      parentTaskId: parent.id,
+      rootTaskId: parent.rootTaskId ?? parent.id,
+      hierarchyDepth,
+      hierarchyRole: role,
+      hierarchyPosition: computeNextHierarchyPosition(parent.id),
+      parentCloseoutPolicy:
+        role === "container" ? (requestedPolicy ?? "all_children_verified") : null,
+    };
+  }
+
+  if (role !== "container" && requestedPolicy) {
+    throw new Error("parentCloseoutPolicy requires hierarchyRole=container");
+  }
+  return {
+    parentTaskId: null,
+    rootTaskId: null,
+    hierarchyDepth: 0,
+    hierarchyRole: role,
+    hierarchyPosition: DEFAULT_HIERARCHY_POSITION,
+    parentCloseoutPolicy: role === "container" ? (requestedPolicy ?? "all_children_verified") : null,
+  };
+}
+
+function applyDescendantHierarchyShift(taskId: string, rootTaskId: string | null, depthDelta: number): void {
+  if (depthDelta === 0) return;
+  const db = getDb();
+  for (const descendant of collectDescendantRows(taskId)) {
+    db.update(tasks)
+      .set({
+        rootTaskId,
+        hierarchyDepth: (descendant.hierarchyDepth ?? 0) + depthDelta,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(tasks.id, descendant.id))
+      .run();
+  }
+}
+
+function resolveUpdateHierarchy(
+  existing: TaskRow,
+  fields: Pick<TaskFieldsUpdate, "parentTaskId" | "hierarchyRole" | "parentCloseoutPolicy">,
+): {
+  patch: Partial<TaskRow>;
+  oldParentTaskId: string | null;
+  newParentTaskId: string | null;
+  depthDelta: number;
+} {
+  const patch: Partial<TaskRow> = {};
+  const hasParentUpdate = Object.prototype.hasOwnProperty.call(fields, "parentTaskId");
+  const oldParentTaskId = existing.parentTaskId ?? null;
+  const nextParentTaskId = hasParentUpdate ? (fields.parentTaskId ?? null) : oldParentTaskId;
+  let nextDepth = existing.hierarchyDepth ?? 0;
+  let nextRootTaskId = existing.rootTaskId ?? null;
+  let nextHierarchyPosition = existing.hierarchyPosition ?? DEFAULT_HIERARCHY_POSITION;
+
+  if (hasParentUpdate) {
+    if (nextParentTaskId === existing.id) {
+      throw new Error("A task cannot be its own parent");
+    }
+    if (nextParentTaskId) {
+      const parent = findTaskById(nextParentTaskId);
+      if (!parent) throw new Error(`Parent task not found: ${nextParentTaskId}`);
+      if (parent.projectId !== existing.projectId) {
+        throw new Error("Parent task must belong to the same project");
+      }
+      if (isTaskDescendant(parent.id, existing.id)) {
+        throw new Error("Task hierarchy cannot contain cycles");
+      }
+      nextDepth = (parent.hierarchyDepth ?? 0) + 1;
+      nextRootTaskId = parent.rootTaskId ?? parent.id;
+      nextHierarchyPosition =
+        nextParentTaskId === oldParentTaskId
+          ? nextHierarchyPosition
+          : computeNextHierarchyPosition(nextParentTaskId);
+    } else {
+      nextDepth = 0;
+      nextRootTaskId = null;
+      nextHierarchyPosition = DEFAULT_HIERARCHY_POSITION;
+    }
+    if (nextDepth > MAX_TASK_HIERARCHY_DEPTH) {
+      throw new Error(`Task hierarchy depth cannot exceed ${MAX_TASK_HIERARCHY_DEPTH}`);
+    }
+    const depthDelta = nextDepth - (existing.hierarchyDepth ?? 0);
+    for (const descendant of collectDescendantRows(existing.id)) {
+      if ((descendant.hierarchyDepth ?? 0) + depthDelta > MAX_TASK_HIERARCHY_DEPTH) {
+        throw new Error(`Task hierarchy depth cannot exceed ${MAX_TASK_HIERARCHY_DEPTH}`);
+      }
+    }
+    patch.parentTaskId = nextParentTaskId;
+    patch.rootTaskId = nextRootTaskId;
+    patch.hierarchyDepth = nextDepth;
+    patch.hierarchyPosition = nextHierarchyPosition;
+  }
+
+  const nextRole = assertTaskHierarchyRole(fields.hierarchyRole ?? existing.hierarchyRole);
+  const requestedPolicy =
+    fields.parentCloseoutPolicy === undefined
+      ? existing.parentCloseoutPolicy
+      : fields.parentCloseoutPolicy;
+  const nextPolicy = assertTaskParentCloseoutPolicy(requestedPolicy);
+  const childCount = directChildCount(existing.id);
+  if (nextRole === "executable" && childCount > 0) {
+    throw new Error("Tasks with children must remain hierarchyRole=container");
+  }
+  if (nextRole !== "container" && nextPolicy) {
+    throw new Error("parentCloseoutPolicy requires hierarchyRole=container");
+  }
+  if (fields.hierarchyRole !== undefined) {
+    patch.hierarchyRole = nextRole;
+  }
+  if (fields.parentCloseoutPolicy !== undefined || fields.hierarchyRole !== undefined) {
+    patch.parentCloseoutPolicy =
+      nextRole === "container" ? (nextPolicy ?? "all_children_verified") : null;
+  }
+
+  return {
+    patch,
+    oldParentTaskId,
+    newParentTaskId: nextParentTaskId,
+    depthDelta: nextDepth - (existing.hierarchyDepth ?? 0),
+  };
+}
+
+function findAuthoritativeSynthesisChild(parent: TaskRow, children: TaskRow[]): TaskRow | null {
+  if (effectiveCloseoutPolicy(parent) !== "synthesis_child_verified") return null;
+  const childIds = new Set(children.map((child) => child.id));
+  if (childIds.size === 0 || parent.taskIntent !== "audit") return null;
+  const batches = getDb()
+    .select()
+    .from(roadmapBatches)
+    .where(and(eq(roadmapBatches.projectId, parent.projectId), eq(roadmapBatches.taskIntent, "audit")))
+    .all()
+    .filter((batch) => batch.synthesisTaskId != null && childIds.has(batch.synthesisTaskId));
+  const uniqueSynthesisIds = [...new Set(batches.map((batch) => batch.synthesisTaskId).filter(Boolean))];
+  if (batches.length !== 1 || uniqueSynthesisIds.length !== 1) return null;
+  return children.find((child) => child.id === uniqueSynthesisIds[0]) ?? null;
+}
+
+function computeParentRollupStatus(parent: TaskRow, children: TaskRow[]): TaskStatus {
+  if (children.length === 0) return parent.status === "verified" ? "verified" : "backlog";
+  if (children.some((child) => child.status === "blocked_external" || child.manualReviewRequired)) {
+    return "blocked_external";
+  }
+  if (children.some((child) => ACTIVE_CHILD_STATUSES.has(child.status))) {
+    return "implementing";
+  }
+  const policy = effectiveCloseoutPolicy(parent) ?? "all_children_verified";
+  if (policy === "all_children_done") {
+    return children.every((child) => child.status === "done" || child.status === "verified")
+      ? "done"
+      : "backlog";
+  }
+  if (policy === "all_children_verified") {
+    return children.every((child) => child.status === "verified") ? "done" : "backlog";
+  }
+  const synthesisChild = findAuthoritativeSynthesisChild(parent, children);
+  return synthesisChild?.status === "verified" ? "done" : "backlog";
+}
+
+function refreshParentRollup(parentId: string): void {
+  const parent = findTaskById(parentId);
+  if (!parent || effectiveHierarchyRole(parent) !== "container") return;
+  if (parent.status === "verified") return;
+  const children = directChildrenOf(parent.id);
+  const nextStatus = computeParentRollupStatus(parent, children);
+  const closeoutPolicy = effectiveCloseoutPolicy(parent);
+  const patch: Partial<TaskRow> = {
+    status: nextStatus,
+    parentCloseoutPolicy: closeoutPolicy,
+    updatedAt: new Date().toISOString(),
+  };
+  if (nextStatus !== "blocked_external") {
+    patch.blockedReason = null;
+    patch.blockedFromStatus = null;
+    patch.retryAfter = null;
+    patch.manualReviewRequired = false;
+  } else if (!parent.blockedReason) {
+    patch.blockedReason = "hierarchy_rollup: child task is blocked";
+    patch.blockedFromStatus = parent.status;
+    patch.retryAfter = null;
+  }
+  getDb().update(tasks).set(patch).where(eq(tasks.id, parent.id)).run();
+}
+
+function refreshAncestorRollups(taskId: string | null | undefined): void {
+  let cursor = taskId ? findTaskById(taskId) : undefined;
+  const visited = new Set<string>();
+  while (cursor?.parentTaskId && !visited.has(cursor.parentTaskId)) {
+    visited.add(cursor.parentTaskId);
+    refreshParentRollup(cursor.parentTaskId);
+    cursor = findTaskById(cursor.parentTaskId);
+  }
+}
+
+function refreshRollupsForParents(parentIds: Array<string | null | undefined>): void {
+  const uniqueParentIds = [...new Set(parentIds.filter((id): id is string => Boolean(id)))];
+  for (const parentId of uniqueParentIds) {
+    refreshParentRollup(parentId);
+    refreshAncestorRollups(parentId);
+  }
+}
 
 function redactTaskTextForExternalUse(text: string | null | undefined): string | null {
   if (typeof text !== "string") {
@@ -360,8 +739,19 @@ export function toTaskResponse(task: TaskRow): Task {
     implementationManifestJson,
     ...rest
   } = task;
+  const parentTask = task.parentTaskId ? findTaskById(task.parentTaskId) : undefined;
+  const children = directChildrenOf(task.id).map(toHierarchyChild);
   return {
     ...rest,
+    parentTaskId: task.parentTaskId ?? null,
+    rootTaskId: task.rootTaskId ?? null,
+    hierarchyDepth: task.hierarchyDepth ?? 0,
+    hierarchyRole: effectiveHierarchyRole(task),
+    hierarchyPosition: task.hierarchyPosition ?? DEFAULT_HIERARCHY_POSITION,
+    parentCloseoutPolicy: effectiveCloseoutPolicy(task),
+    childSummary: getTaskChildSummary(task.id),
+    parentTask: parentTask ? toHierarchyTaskReference(parentTask) : null,
+    ...(children.length > 0 ? { children } : {}),
     attachments: parseAttachments(attachments),
     tags: parseTags(tags),
     autoReviewState: parseAutoReviewState(autoReviewStateJson),
@@ -1052,6 +1442,7 @@ export function getMinBacklogPosition(projectId: string): number | null {
 /** Summary projection — excludes heavy text fields for list/search responses. */
 export type TaskSummaryRow = Pick<TaskRow,
   | "id" | "projectId" | "title" | "status" | "priority" | "position"
+  | "parentTaskId" | "rootTaskId" | "hierarchyDepth" | "hierarchyRole" | "hierarchyPosition" | "parentCloseoutPolicy"
   | "autoMode" | "taskIntent" | "isFix" | "paused" | "roadmapAlias" | "tags"
   | "runtimeProfileId" | "modelOverride"
   | "blockedReason" | "blockedFromStatus" | "retryAfter" | "retryCount"
@@ -1067,6 +1458,12 @@ const SUMMARY_COLUMNS = {
   status: tasks.status,
   priority: tasks.priority,
   position: tasks.position,
+  parentTaskId: tasks.parentTaskId,
+  rootTaskId: tasks.rootTaskId,
+  hierarchyDepth: tasks.hierarchyDepth,
+  hierarchyRole: tasks.hierarchyRole,
+  hierarchyPosition: tasks.hierarchyPosition,
+  parentCloseoutPolicy: tasks.parentCloseoutPolicy,
   autoMode: tasks.autoMode,
   taskIntent: tasks.taskIntent,
   isFix: tasks.isFix,
@@ -1179,8 +1576,17 @@ export function searchTasksPaginated(options: {
 /** Convert a TaskSummaryRow to a JSON-safe object (parse tags). */
 export function toTaskSummary(row: TaskSummaryRow) {
   const { tags, runtimeLimitSnapshotJson, ...rest } = row;
+  const parentTask = row.parentTaskId ? findTaskById(row.parentTaskId) : undefined;
   return {
     ...rest,
+    parentTaskId: row.parentTaskId ?? null,
+    rootTaskId: row.rootTaskId ?? null,
+    hierarchyDepth: row.hierarchyDepth ?? 0,
+    hierarchyRole: effectiveHierarchyRole(row),
+    hierarchyPosition: row.hierarchyPosition ?? DEFAULT_HIERARCHY_POSITION,
+    parentCloseoutPolicy: effectiveCloseoutPolicy(row),
+    childSummary: getTaskChildSummary(row.id),
+    parentTask: parentTask ? toHierarchyTaskReference(parentTask) : null,
     tags: parseTags(tags),
     runtimeLimitSnapshot: parseTaskRuntimeLimitSnapshot(runtimeLimitSnapshotJson, row.id),
   };
@@ -1211,10 +1617,19 @@ export function createTask(input: {
   tags?: string[];
   scheduledAt?: string | null;
   position?: number;
+  parentTaskId?: string | null;
+  hierarchyRole?: TaskHierarchyRole;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
 }): TaskRow | undefined {
   const db = getDb();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const hierarchy = resolveCreateHierarchy({
+    projectId: input.projectId,
+    parentTaskId: input.parentTaskId,
+    hierarchyRole: input.hierarchyRole,
+    parentCloseoutPolicy: input.parentCloseoutPolicy,
+  });
   const taskIntent = resolvePersistedTaskIntent(input);
   const intentDefaults = resolveTaskIntentDefaults(taskIntent, {
     envUseSubagents: getEnv().AGENT_USE_SUBAGENTS,
@@ -1262,6 +1677,12 @@ export function createTask(input: {
       attachments: JSON.stringify(input.attachments ?? []),
       priority: input.priority,
       autoMode: input.autoMode,
+      parentTaskId: hierarchy.parentTaskId,
+      rootTaskId: hierarchy.rootTaskId,
+      hierarchyDepth: hierarchy.hierarchyDepth,
+      hierarchyRole: hierarchy.hierarchyRole,
+      hierarchyPosition: hierarchy.hierarchyPosition,
+      parentCloseoutPolicy: hierarchy.parentCloseoutPolicy,
       taskIntent,
       isFix,
       plannerMode,
@@ -1297,14 +1718,40 @@ export function createTask(input: {
     })
     .run();
 
+  if (hierarchy.parentTaskId) {
+    promoteParentToContainer(hierarchy.parentTaskId, now);
+    refreshRollupsForParents([hierarchy.parentTaskId]);
+  }
+
   return findTaskById(id);
 }
 
 export function updateTask(id: string, fields: TaskFieldsUpdate): TaskRow | undefined {
-  const { attachments, tags, runtimeOptions, autoReviewState, implementationManifest, ...rest } =
-    fields;
-  const patch: TaskFieldsPatch = { ...rest, updatedAt: new Date().toISOString() };
   const existing = findTaskById(id);
+  if (!existing) return undefined;
+  const {
+    attachments,
+    tags,
+    runtimeOptions,
+    autoReviewState,
+    implementationManifest,
+    parentTaskId,
+    hierarchyRole,
+    parentCloseoutPolicy,
+    ...rest
+  } = fields;
+  const hierarchy = resolveUpdateHierarchy(existing, {
+    ...(Object.prototype.hasOwnProperty.call(fields, "parentTaskId") ? { parentTaskId } : {}),
+    ...(hierarchyRole !== undefined ? { hierarchyRole } : {}),
+    ...(Object.prototype.hasOwnProperty.call(fields, "parentCloseoutPolicy")
+      ? { parentCloseoutPolicy }
+      : {}),
+  });
+  const patch: TaskFieldsPatch = {
+    ...rest,
+    ...hierarchy.patch,
+    updatedAt: new Date().toISOString(),
+  };
   let effectiveIntent = existing?.taskIntent;
   if (fields.taskIntent !== undefined || fields.isFix !== undefined) {
     let normalizedIntent: TaskIntent | undefined;
@@ -1373,6 +1820,21 @@ export function updateTask(id: string, fields: TaskFieldsUpdate): TaskRow | unde
   }
   normalizeOperatorInputHoldPatch(patch, existing);
   getDb().update(tasks).set(patch).where(eq(tasks.id, id)).run();
+  if (hierarchy.newParentTaskId) {
+    promoteParentToContainer(hierarchy.newParentTaskId);
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(hierarchy.patch, "rootTaskId") ||
+    Object.prototype.hasOwnProperty.call(hierarchy.patch, "hierarchyDepth")
+  ) {
+    applyDescendantHierarchyShift(
+      id,
+      (hierarchy.patch.rootTaskId as string | null) ?? id,
+      hierarchy.depthDelta,
+    );
+  }
+  refreshRollupsForParents([hierarchy.oldParentTaskId, hierarchy.newParentTaskId]);
+  refreshAncestorRollups(id);
   return findTaskById(id);
 }
 
@@ -1393,6 +1855,7 @@ export function setTaskFields(id: string, fields: TaskFieldsPatch): void {
   }
   normalizeOperatorInputHoldPatch(patch, findTaskById(id));
   getDb().update(tasks).set(patch).where(eq(tasks.id, id)).run();
+  refreshAncestorRollups(id);
 }
 
 export function persistTaskRuntimeLimitSnapshot(
@@ -1439,9 +1902,23 @@ export function clearTaskRuntimeLimitSnapshot(
   return findTaskById(taskId);
 }
 
-export function deleteTask(id: string): void {
+export function deleteTask(
+  id: string,
+  options: { allowAttachedChild?: boolean } = {},
+): void {
   const db = getDb();
   const batchesToRefresh = new Set<string>();
+  const existing = findTaskById(id);
+  if (!existing) return;
+  if (directChildCount(id) > 0) {
+    throw new Error("Cannot delete a task that has child tasks");
+  }
+  if (existing.parentTaskId && !options.allowAttachedChild) {
+    const parent = findTaskById(existing.parentTaskId);
+    if (parent && parent.status !== "done" && parent.status !== "verified") {
+      throw new Error("Cannot delete an attached child while its parent is open");
+    }
+  }
 
   db.transaction((tx) => {
     const taskArtifacts = tx
@@ -1507,6 +1984,7 @@ export function deleteTask(id: string): void {
   for (const batchId of batchesToRefresh) {
     refreshRoadmapBatchSummary(batchId);
   }
+  refreshRollupsForParents([existing.parentTaskId]);
 }
 
 export function listTaskComments(taskId: string): CommentRow[] {
@@ -1878,6 +2356,7 @@ export function findCoordinatorTaskCandidates(stage: CoordinatorStage, limit: nu
     .from(tasks)
     .where(and(
       stageFilter,
+      ne(tasks.hierarchyRole, "container"),
       eq(tasks.paused, false),
       or(
         sql`${tasks.lockedBy} IS NULL`,
@@ -1911,6 +2390,7 @@ export function claimTask(
     })
     .where(and(
       eq(tasks.id, taskId),
+      ne(tasks.hierarchyRole, "container"),
       or(
         sql`${tasks.lockedBy} IS NULL`,
         lte(tasks.lockedUntil, nowIso),
@@ -1943,6 +2423,7 @@ export function blockTaskForRuntimeGateIfEligible(input: {
   const conditions = [
     eq(tasks.id, input.taskId),
     eq(tasks.status, input.expectedStatus),
+    ne(tasks.hierarchyRole, "container"),
     eq(tasks.paused, false),
     or(sql`${tasks.lockedBy} IS NULL`, lte(tasks.lockedUntil, nowIso)),
   ];
@@ -1968,6 +2449,7 @@ export function blockTaskForRuntimeGateIfEligible(input: {
     .where(and(...conditions))
     .run();
 
+  if (result.changes > 0) refreshAncestorRollups(input.taskId);
   return result.changes > 0;
 }
 
@@ -2002,8 +2484,16 @@ export function claimBacklogTaskForAdvance(taskId: string): boolean {
       lastHeartbeatAt: nowIso,
       updatedAt: nowIso,
     })
-    .where(and(eq(tasks.id, taskId), eq(tasks.status, "backlog"), eq(tasks.paused, false)))
+    .where(
+      and(
+        eq(tasks.id, taskId),
+        eq(tasks.status, "backlog"),
+        ne(tasks.hierarchyRole, "container"),
+        eq(tasks.paused, false),
+      ),
+    )
     .run();
+  if (result.changes > 0) refreshAncestorRollups(taskId);
   return result.changes > 0;
 }
 
@@ -2031,6 +2521,7 @@ export function countActivePipelineTasksForProject(projectId: string): number {
     .where(
       and(
         eq(tasks.projectId, projectId),
+        ne(tasks.hierarchyRole, "container"),
         inArray(tasks.status, ["planning", "plan_ready", "implementing", "review", "blocked_external"]),
       ),
     )
@@ -2189,6 +2680,7 @@ export function listDueBlockedExternalTasks(nowIso: string): TaskRow[] {
     .where(
       and(
         eq(tasks.status, "blocked_external"),
+        ne(tasks.hierarchyRole, "container"),
         eq(tasks.paused, false),
         isNotNull(tasks.retryAfter),
         lte(tasks.retryAfter, nowIso),
@@ -2207,6 +2699,7 @@ export function listDueScheduledTasks(nowIso: string): TaskRow[] {
     .where(
       and(
         eq(tasks.status, "backlog"),
+        ne(tasks.hierarchyRole, "container"),
         eq(tasks.paused, false),
         isNotNull(tasks.scheduledAt),
         lte(tasks.scheduledAt, nowIso),
@@ -2280,6 +2773,7 @@ export function nextBacklogTaskByPosition(projectId: string): TaskRow | undefine
       and(
         eq(tasks.projectId, projectId),
         eq(tasks.status, "backlog"),
+        ne(tasks.hierarchyRole, "container"),
         eq(tasks.paused, false),
         or(
           isNull(tasks.scheduledAt),
@@ -2300,6 +2794,7 @@ export function listStaleInProgressTasks(): TaskRow[] {
     .where(
       and(
         inArray(tasks.status, ["planning", "implementing", "review"]),
+        ne(tasks.hierarchyRole, "container"),
         eq(tasks.paused, false),
         // Skip tasks with active (non-expired) locks — they're being processed
         or(
@@ -4952,12 +5447,42 @@ function hasValidAuditManifestStatus(value: unknown): boolean {
   return false;
 }
 
-function hasTrustedAuditSourceClassification(artifact: RoadmapBatchArtifactRow): boolean {
-  const validationDetails = parseValidationDetails(artifact.validationDetailsJson);
+function hasTrustedAuditEvidenceDepth(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  const evidenceDepth = value.evidenceDepth;
+  if (isObjectRecord(evidenceDepth)) {
+    return evidenceDepth.trustedNoFindingsSupported === true;
+  }
+  const auditReportValidation = value.auditReportValidation;
+  if (isObjectRecord(auditReportValidation) && hasTrustedAuditEvidenceDepth(auditReportValidation)) {
+    return true;
+  }
+  const evidence = value.evidence;
+  if (isObjectRecord(evidence)) return hasTrustedAuditEvidenceDepth(evidence);
+  return false;
+}
+
+function validationDetailsHaveTrustedAuditSourceClassification(validationDetails: unknown): boolean {
   const classification = readAuditSourceClassification(validationDetails);
   if (!classification || !TRUSTED_AUDIT_SOURCE_CLASSIFICATIONS.has(classification)) return false;
   if (classification === "validated_findings_present") return true;
-  return hasValidAuditManifestStatus(validationDetails);
+  return hasValidAuditManifestStatus(validationDetails) && hasTrustedAuditEvidenceDepth(validationDetails);
+}
+
+function hasTrustedAuditSourceClassification(artifact: RoadmapBatchArtifactRow): boolean {
+  return validationDetailsHaveTrustedAuditSourceClassification(
+    parseValidationDetails(artifact.validationDetailsJson),
+  );
+}
+
+function attemptTrustedForSynthesisInput(
+  attempt: RoadmapBatchArtifactAttemptRow,
+  validationDetails: unknown,
+): boolean {
+  if (attempt.role === "report") {
+    return validationDetailsHaveTrustedAuditSourceClassification(validationDetails);
+  }
+  return attempt.state === "valid" && !attempt.failureFamily;
 }
 
 function roadmapArtifactCountsAsValid(artifact: RoadmapBatchArtifactRow): boolean {
@@ -5078,6 +5603,11 @@ function collectValidationReasonCodes(value: unknown): string[] {
         nested.trim().length > 0
       ) {
         codes.add(nested.trim());
+      }
+      if (key === "reasonCodes" && Array.isArray(nested)) {
+        for (const value of nested) {
+          if (typeof value === "string" && value.trim().length > 0) codes.add(value.trim());
+        }
       }
       if (Array.isArray(nested) || isObjectRecord(nested)) visit(nested);
     }
@@ -5911,7 +6441,10 @@ export function buildTaskArtifactTrustRollup(taskId: string): TaskArtifactTrustR
     artifactTrustLevel: mapArtifactTrustLevel(artifact),
     claimOutcome: acceptedTerminalAuditInconclusive
       ? "inconclusive"
-      : mapWorkflowClaimOutcome(artifact.state),
+      : mapArtifactClaimOutcome({
+          state: artifact.state,
+          trustedSynthesisInput,
+        }),
     failureFamily: artifact.failureFamily,
     reasonCodes: buildArtifactTrustReasonCodes({
       artifact,
@@ -6030,6 +6563,9 @@ export function createRoadmapBatchContract(
   if (!summary) {
     throw new Error(`Roadmap batch ${batchId} was not created`);
   }
+  if (input.synthesisTaskId) {
+    refreshAncestorRollups(input.synthesisTaskId);
+  }
   return summary;
 }
 
@@ -6119,6 +6655,9 @@ export function refreshRoadmapBatchSummary(batchId: string): RoadmapBatchSummary
       })
       .where(eq(tasks.id, batch.synthesisTaskId))
       .run();
+  }
+  if (batch.synthesisTaskId) {
+    refreshAncestorRollups(batch.synthesisTaskId);
   }
   const updated = db.select().from(roadmapBatches).where(eq(roadmapBatches.id, batchId)).get();
   return updated ? summarizeRoadmapArtifacts(updated, artifacts) : null;
@@ -6304,11 +6843,22 @@ function mapWorkflowClaimOutcome(state: string): WorkflowTimelineClaimOutcome {
   }
 }
 
+function mapArtifactClaimOutcome(input: {
+  state: string;
+  trustedSynthesisInput: boolean;
+}): WorkflowTimelineClaimOutcome {
+  if (input.state === "valid" && !input.trustedSynthesisInput) return "not_evaluated";
+  return mapWorkflowClaimOutcome(input.state);
+}
+
 function mapWorkflowTrustLevel(input: {
   state: string;
   failureFamily?: string | null;
+  trustedSynthesisInput?: boolean;
 }): WorkflowTimelineTrustLevel {
-  if (input.state === "valid" && !input.failureFamily) return "trusted";
+  if (input.state === "valid" && !input.failureFamily) {
+    return input.trustedSynthesisInput === false ? "untrusted" : "trusted";
+  }
   if (input.state === "manual_exception" || input.state === "expected") return "weak";
   return "untrusted";
 }
@@ -6331,10 +6881,14 @@ function workflowProjectionForArtifact(input: {
   }
   return {
     artifactState: mapWorkflowArtifactState(input.artifact.state),
-    claimOutcome: mapWorkflowClaimOutcome(input.artifact.state),
+    claimOutcome: mapArtifactClaimOutcome({
+      state: input.artifact.state,
+      trustedSynthesisInput: input.trustedSynthesisInput,
+    }),
     trustLevel: mapWorkflowTrustLevel({
       state: input.artifact.state,
       failureFamily: input.artifact.failureFamily,
+      trustedSynthesisInput: input.trustedSynthesisInput,
     }),
   };
 }
@@ -6345,6 +6899,7 @@ function workflowProjectionForAttempt(attempt: RoadmapBatchArtifactAttemptRow): 
   trustLevel: WorkflowTimelineTrustLevel;
 } {
   const validationDetails = parseValidationDetails(attempt.validationDetailsJson);
+  const trustedSynthesisInput = attemptTrustedForSynthesisInput(attempt, validationDetails);
   if (isAcceptedTerminalAuditInconclusiveAttempt({ attempt, validationDetails })) {
     return {
       artifactState: "inconclusive",
@@ -6354,10 +6909,14 @@ function workflowProjectionForAttempt(attempt: RoadmapBatchArtifactAttemptRow): 
   }
   return {
     artifactState: mapWorkflowArtifactState(attempt.state),
-    claimOutcome: mapWorkflowClaimOutcome(attempt.state),
+    claimOutcome: mapArtifactClaimOutcome({
+      state: attempt.state,
+      trustedSynthesisInput,
+    }),
     trustLevel: mapWorkflowTrustLevel({
       state: attempt.state,
       failureFamily: attempt.failureFamily,
+      trustedSynthesisInput,
     }),
   };
 }

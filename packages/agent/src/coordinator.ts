@@ -68,11 +68,12 @@ import {
   type TaskStatus,
   type RuntimeProfile,
   type RuntimeStage,
+  type EffectiveRuntimeProfileSource,
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
 import { runPlanChecker } from "./subagents/planChecker.js";
 import { runImplementer } from "./subagents/implementer.js";
-import { runReviewer } from "./subagents/reviewer.js";
+import { runReviewer, taskRequiresSpecializedReviewerFanout } from "./subagents/reviewer.js";
 import {
   describeDirtyWorkingTree,
   isGitRepo,
@@ -344,10 +345,107 @@ function isProtectedLocalLlmEndpoint(profile: RuntimeProfile | null | undefined)
   return protectedLocalLlmEndpoint(profile) !== null;
 }
 
+function protectedLocalLlmEndpointPort(profile: RuntimeProfile | null | undefined): string | null {
+  const rawBaseUrl =
+    profile?.baseUrl ??
+    (typeof profile?.options?.baseUrl === "string" ? profile.options.baseUrl : null);
+  if (!rawBaseUrl) return null;
+  try {
+    const url = new URL(rawBaseUrl);
+    const port =
+      url.port || (url.protocol === "https:" ? "443" : url.protocol === "http:" ? "80" : "");
+    return port === "8003" || port === "8005" ? port : null;
+  } catch {
+    return null;
+  }
+}
+
 function runtimeProfileSemaphoreKey(profile: RuntimeProfile | null | undefined): string | null {
   const endpoint = protectedLocalLlmEndpoint(profile);
   if (endpoint) return `runtime-endpoint:${endpoint}`;
   return profile?.id ? `runtime-profile:${profile.id}` : null;
+}
+
+function runtimeProfileSourceForTask(
+  task: TaskRow,
+  profile: RuntimeProfile,
+): EffectiveRuntimeProfileSource {
+  if (profile.id === task.runtimeProfileId) return "task_override";
+  return profile.projectId ? "project_default" : "system_default";
+}
+
+function selectProtectedAuditEndpointProfile(input: {
+  task: TaskRow;
+  currentProfile: RuntimeProfile;
+}): RuntimeProfile | null {
+  if (protectedLocalLlmEndpointPort(input.currentProfile) !== "8003") return null;
+  const currentCapacity = readProfileContextCapacity(input.currentProfile);
+  const profiles = listRuntimeProfileResponses({
+    projectId: input.task.projectId,
+    includeGlobal: true,
+    enabledOnly: true,
+  });
+  const candidates = profiles
+    .filter((profile) => {
+      if (profile.id === input.currentProfile.id) return false;
+      if (profile.runtimeId !== input.currentProfile.runtimeId) return false;
+      if (profile.providerId !== input.currentProfile.providerId) return false;
+      if ((profile.transport ?? null) !== (input.currentProfile.transport ?? null)) return false;
+      if (protectedLocalLlmEndpointPort(profile) !== "8005") return false;
+      const candidateCapacity = readProfileContextCapacity(profile);
+      return (
+        currentCapacity == null || candidateCapacity == null || candidateCapacity >= currentCapacity
+      );
+    })
+    .sort((left, right) => {
+      const leftProject = left.projectId === input.task.projectId ? 1 : 0;
+      const rightProject = right.projectId === input.task.projectId ? 1 : 0;
+      if (leftProject !== rightProject) return rightProject - leftProject;
+      return (readProfileContextCapacity(right) ?? 0) - (readProfileContextCapacity(left) ?? 0);
+    });
+  return candidates[0] ?? null;
+}
+
+function applyProtectedAuditEndpointRouting(input: {
+  task: TaskRow;
+  stage: RuntimeStage;
+  selection: ReturnType<typeof resolveEffectiveRuntimeProfile>;
+}): ReturnType<typeof resolveEffectiveRuntimeProfile> {
+  if (input.stage !== "audit" || !input.selection.profile) return input.selection;
+  const fallback = selectProtectedAuditEndpointProfile({
+    task: input.task,
+    currentProfile: input.selection.profile,
+  });
+  if (!fallback) return input.selection;
+
+  const source = runtimeProfileSourceForTask(input.task, fallback);
+  setRuntimeStageFallbackProfile({
+    taskId: input.task.id,
+    stage: input.stage,
+    profileId: fallback.id,
+    source,
+  });
+  const marker = `[runtime-route:audit-8005:${fallback.id}]`;
+  if (!input.task.agentActivityLog?.includes(marker)) {
+    appendTaskActivityLog(
+      input.task.id,
+      `[${new Date().toISOString()}] ${marker} Protected audit runtime route: selectedProfile=${input.selection.profile.id} endpoint=8003 routedProfile=${fallback.id} endpoint=8005`,
+    );
+  }
+  log.info(
+    {
+      taskId: input.task.id,
+      stage: input.stage,
+      selectedProfileId: input.selection.profile.id,
+      routedProfileId: fallback.id,
+    },
+    "Routed audit task from protected 8003 endpoint to 8005 endpoint",
+  );
+  return {
+    ...input.selection,
+    source,
+    profile: fallback,
+  };
 }
 
 function getPreferredContextFallbackProfileIds(input: {
@@ -498,6 +596,41 @@ function clearContextFallbackForTask(taskId: string, stage: RuntimeStage): void 
   setRuntimeStageFallbackProfile({ taskId, stage, profileId: null });
 }
 
+function readRuntimeProviderMetaString(err: unknown, key: string): string | null {
+  const runtimeError = findRuntimeExecutionError(err);
+  const providerMeta = runtimeError?.providerMeta;
+  if (!providerMeta || typeof providerMeta !== "object" || Array.isArray(providerMeta)) {
+    return null;
+  }
+  const raw = providerMeta[key];
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+}
+
+function readAttemptedRuntimeProfileIdFromError(err: unknown): string | null {
+  return readRuntimeProviderMetaString(err, "profileId");
+}
+
+function resolveFailedRuntimeProfileForRecovery(input: {
+  err: unknown;
+  activeFallback: ReturnType<typeof readContextFallbackRuntimeOption>;
+  resolvedSelection: ReturnType<typeof resolveEffectiveRuntimeProfile>;
+}): { failedProfile: RuntimeProfile | null; failedProfileId: string | null } {
+  const attemptedProfileId = readAttemptedRuntimeProfileIdFromError(input.err);
+  const attemptedProfile = attemptedProfileId
+    ? getRuntimeProfileResponseById(attemptedProfileId)
+    : null;
+  const failedProfile =
+    attemptedProfile ??
+    (input.activeFallback ? getRuntimeProfileResponseById(input.activeFallback.profileId) : null) ??
+    input.resolvedSelection.profile ??
+    null;
+  return {
+    failedProfile,
+    failedProfileId:
+      attemptedProfileId ?? failedProfile?.id ?? input.activeFallback?.profileId ?? null,
+  };
+}
+
 function handleRepositoryInspectionBudgetExhaustion(input: {
   task: TaskWithHydratedFields;
   projectRoot: string;
@@ -601,11 +734,11 @@ function handleContextLengthRecovery(input: {
     mode: input.stage,
     systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
   });
-  const failedProfile =
-    (activeFallback ? getRuntimeProfileResponseById(activeFallback.profileId) : null) ??
-    resolvedSelection.profile ??
-    null;
-  const failedProfileId = failedProfile?.id ?? activeFallback?.profileId ?? null;
+  const { failedProfile, failedProfileId } = resolveFailedRuntimeProfileForRecovery({
+    err: input.err,
+    activeFallback,
+    resolvedSelection,
+  });
   const failedProfileIds = new Set([
     ...readFailedContextProfileIds(latestTask.runtimeOptionsJson, input.stage),
     ...(failedProfileId ? [failedProfileId] : []),
@@ -737,11 +870,11 @@ function handleTransientRuntimeFallbackRecovery(input: {
     mode: input.stage,
     systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
   });
-  const failedProfile =
-    (activeFallback ? getRuntimeProfileResponseById(activeFallback.profileId) : null) ??
-    resolvedSelection.profile ??
-    null;
-  const failedProfileId = failedProfile?.id ?? activeFallback?.profileId ?? null;
+  const { failedProfile, failedProfileId } = resolveFailedRuntimeProfileForRecovery({
+    err: input.err,
+    activeFallback,
+    resolvedSelection,
+  });
   const failedProfileIds = new Set([
     ...readFailedContextProfileIds(latestTask.runtimeOptionsJson, input.stage),
     ...(failedProfileId ? [failedProfileId] : []),
@@ -863,6 +996,7 @@ function handleAuditReportTimeoutRecovery(input: {
     mode: input.stage,
     systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
   });
+  const failedProfileId = readAttemptedRuntimeProfileIdFromError(input.err);
   const runtimeOptionsJson =
     recoveryProfile && recoveryProfile.id !== resolvedSelection.profile?.id
       ? setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
@@ -870,7 +1004,7 @@ function handleAuditReportTimeoutRecovery(input: {
           profileId: recoveryProfile.id,
           previousProfileId:
             activeFallback?.previousProfileId ?? resolvedSelection.profile?.id ?? null,
-          failedProfileId: null,
+          failedProfileId,
           reason: "transient_runtime_error",
           attempt: retryCount,
           createdAt: nowIso,
@@ -898,13 +1032,14 @@ function handleAuditReportTimeoutRecovery(input: {
   );
   appendTaskActivityLog(
     latestTask.id,
-    `[${nowIso}] Audit report timeout scheduled immediate bounded retry: artifact=${artifact.artifactPath} selectedProfile=${recoveryProfile?.id ?? "current"} retry=${retryCount}/${AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES}`,
+    `[${nowIso}] Audit report timeout scheduled immediate bounded retry: artifact=${artifact.artifactPath} failedProfile=${failedProfileId ?? "none"} selectedProfile=${recoveryProfile?.id ?? "current"} retry=${retryCount}/${AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES}`,
   );
   log.warn(
     {
       taskId: latestTask.id,
       stage: input.stageLabel,
       artifactPath: artifact.artifactPath,
+      failedProfileId,
       selectedProfileId: recoveryProfile?.id ?? null,
       retryCount,
     },
@@ -950,6 +1085,7 @@ function handleAuditReportTransientRecovery(input: {
     mode: input.stage,
     systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
   });
+  const failedProfileId = readAttemptedRuntimeProfileIdFromError(input.err);
   const runtimeOptionsJson =
     recoveryProfile && recoveryProfile.id !== resolvedSelection.profile?.id
       ? setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
@@ -957,7 +1093,7 @@ function handleAuditReportTransientRecovery(input: {
           profileId: recoveryProfile.id,
           previousProfileId:
             activeFallback?.previousProfileId ?? resolvedSelection.profile?.id ?? null,
-          failedProfileId: resolvedSelection.profile?.id ?? null,
+          failedProfileId: failedProfileId ?? resolvedSelection.profile?.id ?? null,
           reason: "transient_runtime_error",
           attempt: retryCount,
           createdAt: nowIso,
@@ -985,7 +1121,7 @@ function handleAuditReportTransientRecovery(input: {
   );
   appendTaskActivityLog(
     latestTask.id,
-    `[${nowIso}] Audit report transient recovery scheduled immediate bounded retry: category=${runtimeError.category} artifact=${artifact.artifactPath} selectedProfile=${recoveryProfile?.id ?? "current"} retry=${retryCount}/${AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES}`,
+    `[${nowIso}] Audit report transient recovery scheduled immediate bounded retry: category=${runtimeError.category} artifact=${artifact.artifactPath} failedProfile=${failedProfileId ?? "none"} selectedProfile=${recoveryProfile?.id ?? "current"} retry=${retryCount}/${AUDIT_REPORT_TIMEOUT_RECOVERY_MAX_RETRIES}`,
   );
   log.warn(
     {
@@ -993,6 +1129,7 @@ function handleAuditReportTransientRecovery(input: {
       stage: input.stageLabel,
       runtimeCategory: runtimeError.category,
       artifactPath: artifact.artifactPath,
+      failedProfileId,
       selectedProfileId: recoveryProfile?.id ?? null,
       retryCount,
     },
@@ -2687,7 +2824,14 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       return false;
     }
 
-    if (stage.label === "implementer" && latestTask.skipReview) {
+    if (
+      stage.label === "implementer" &&
+      latestTask.skipReview &&
+      !taskRequiresSpecializedReviewerFanout(
+        latestTask,
+        findRoadmapBatchArtifactByTaskId(latestTask.id),
+      )
+    ) {
       if (
         blockTaskForCompletionEvidenceIfNeeded({
           task: latestTask,
@@ -2714,6 +2858,10 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       const outcome = await handleAutoReviewGate({
         taskId: task.id,
         projectRoot: task.worktreePath ?? project.rootPath,
+        force: taskRequiresSpecializedReviewerFanout(
+          latestTask,
+          findRoadmapBatchArtifactByTaskId(latestTask.id),
+        ),
       });
 
       if (outcome?.status === "manual_review_required") {
@@ -3110,6 +3258,16 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           },
           { title: taskTitle, fromStatus: stage.inProgress },
         );
+        {
+          const runtimeError = findRuntimeExecutionError(err);
+          const attemptedFailedProfileId = readAttemptedRuntimeProfileIdFromError(err);
+          if (runtimeError && attemptedFailedProfileId) {
+            appendTaskActivityLog(
+              task.id,
+              `[${new Date().toISOString()}] Runtime external failure attribution: category=${runtimeError.category} status=${readRuntimeProviderMetaString(err, "status") ?? "unknown"} failedProfile=${attemptedFailedProfileId} baseUrl=${readRuntimeProviderMetaString(err, "baseUrl") ?? "unknown"} model=${readRuntimeProviderMetaString(err, "model") ?? "unknown"} retryAfter=${recovery.retryAfter ?? "none"}`,
+            );
+          }
+        }
         break;
 
       case "revert":
@@ -3488,6 +3646,11 @@ export async function pollAndProcess(): Promise<void> {
           );
         }
       }
+      runtimeSelection = applyProtectedAuditEndpointRouting({
+        task,
+        stage: runtimeStage,
+        selection: runtimeSelection,
+      });
       let gateDecision = evaluateRuntimeLimitGate(runtimeSelection.profile);
       if (gateDecision.blocked) {
         if (!shouldBlockOnRuntimeLimit(runtimeStage) && runtimeSelection.profile?.id) {

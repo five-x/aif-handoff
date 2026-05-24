@@ -151,6 +151,12 @@ describe("tasks schema", () => {
     expect(result!.status).toBe("backlog");
     expect(result!.priority).toBe(0);
     expect(result!.position).toBe(1000.0);
+    expect(result!.parentTaskId).toBeNull();
+    expect(result!.rootTaskId).toBeNull();
+    expect(result!.hierarchyDepth).toBe(0);
+    expect(result!.hierarchyRole).toBe("executable");
+    expect(result!.hierarchyPosition).toBe(1000.0);
+    expect(result!.parentCloseoutPolicy).toBeNull();
     expect(result!.description).toBe("");
     expect(result!.autoMode).toBe(true);
     expect(result!.taskIntent).toBe("general");

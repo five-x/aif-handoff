@@ -523,7 +523,7 @@ function countReviewStageRepositoryToolActivity(
   if (!agentActivityLog) return 0;
   const lines = agentActivityLog.split(/\r?\n/);
   const reviewAgentEvent =
-    /\]\s+Agent:\s+(?:review-sidecar|security-sidecar|aif-review|aif-security-checklist|review-gate)\s+(started|complete|failed)\b/i;
+    /\]\s+Agent:\s+(?:review-sidecar|security-sidecar|aif-review|aif-security-checklist|review-gate|review-correctness|review-security-data-loss|review-regression-api-contract|review-audit-evidence)\s+(started|complete|failed)\b/i;
 
   let count = 0;
   let activeReviewAgents = 0;
@@ -1458,6 +1458,12 @@ export function evaluateTaskCompletionEvidence(
         "invalid_line_reference",
         "missing_declared_scope_root",
         "missing_scope_coverage",
+        "shallow_evidence",
+        "inventory_only_evidence",
+        "irrelevant_grep_match",
+        "insufficient_scope_depth",
+        "reused_generic_evidence",
+        "self_reported_command_output",
       ].includes(entry.code) ||
       (entry.code === "missing_substantive_evidence" &&
         !terminalAuditInconclusiveSynthesis &&
@@ -1562,7 +1568,7 @@ export function evaluateTaskCompletionEvidence(
       issues.push(
         issue(
           "missing_review_tool_activity",
-          "Audit/review/discovery tasks require repository tool activity during review-sidecar, security-sidecar, aif-review, aif-security-checklist, or review-gate validation.",
+          "Audit/review/discovery tasks require repository tool activity during review-sidecar, security-sidecar, specialized reviewer, aif-review, aif-security-checklist, or review-gate validation.",
         ),
       );
     }

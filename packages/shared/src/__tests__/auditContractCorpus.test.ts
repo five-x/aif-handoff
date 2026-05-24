@@ -33,6 +33,33 @@ function failureFamily(result: ReturnType<typeof validateAuditReportArtifact>): 
   });
 }
 
+function expectFixtureEvidenceDepth(
+  result: ReturnType<typeof validateAuditReportArtifact>,
+  fixture: {
+    expectedEvidenceDepthStatus?: string;
+    expectedEvidenceDepthReasonCodes?: string[];
+    expectedTrustedNoFindingsSupported?: boolean;
+  },
+): void {
+  if (fixture.expectedEvidenceDepthStatus) {
+    expect(result.evidenceDepth.status).toBe(fixture.expectedEvidenceDepthStatus);
+  }
+  if (fixture.expectedTrustedNoFindingsSupported !== undefined) {
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(
+      fixture.expectedTrustedNoFindingsSupported,
+    );
+  }
+  if (fixture.expectedEvidenceDepthReasonCodes) {
+    if (fixture.expectedEvidenceDepthReasonCodes.length === 0) {
+      expect(result.evidenceDepth.reasonCodes).toEqual([]);
+    } else {
+      expect(result.evidenceDepth.reasonCodes).toEqual(
+        expect.arrayContaining(fixture.expectedEvidenceDepthReasonCodes),
+      );
+    }
+  }
+}
+
 describe("audit contract corpus", () => {
   beforeAll(() => {
     corpusRoot = initAuditContractRepo();
@@ -55,6 +82,7 @@ describe("audit contract corpus", () => {
       expect(result.ok).toBe(false);
       expect(result.sourceClassification).toBe(fixture.expectedClassification);
       expect(issueCodes(result)).toEqual(expect.arrayContaining(fixture.expectedIssueCodes ?? []));
+      expectFixtureEvidenceDepth(result, fixture);
       if (fixture.expectedFailureFamily) {
         expect(failureFamily(result)).toBe(fixture.expectedFailureFamily);
       }
@@ -85,6 +113,7 @@ describe("audit contract corpus", () => {
       expect(result.manifestStatus).toBe("valid");
       expect(result.sourceClassification).toBe("validated_no_findings");
       expect(result.substantiveEvidence).toBe(true);
+      expectFixtureEvidenceDepth(result, fixture);
     },
     20_000,
   );
@@ -116,18 +145,25 @@ describe("audit contract corpus", () => {
   );
 
   it("classifies valid and weak source-report batches from the corpus", () => {
+    const synthesisNoFindingsFixtures = validNoFindingsAuditReportCases.filter(
+      (fixture) => fixture.id !== "empty-file-proof",
+    );
+    const noFindingReports = synthesisNoFindingsFixtures.map((fixture) => {
+      const report = buildManifestBackedReport({ report: fixture, snapshot: corpusSnapshot });
+      return {
+        artifactPath: report.artifactPath,
+        taskId: report.taskId,
+        auditPlanId: report.auditPlanId,
+        auditEvidenceUnits: report.evidenceUnits,
+        content: report.text,
+      };
+    });
     const noFindings = classifyAuditSynthesisSourceReports({
       projectRoot: corpusRoot,
-      reports: validNoFindingsAuditReportCases.map((fixture) => ({
-        artifactPath: fixture.artifactPath,
-        taskId: fixture.id,
-        content: fixture.body,
-      })),
+      reports: noFindingReports,
     });
     expect(noFindings.kind).toBe("validated_no_findings");
-    expect(noFindings.substantiveNoFindingsReportCount).toBe(
-      validNoFindingsAuditReportCases.length,
-    );
+    expect(noFindings.substantiveNoFindingsReportCount).toBe(synthesisNoFindingsFixtures.length);
 
     const findings = classifyAuditSynthesisSourceReports({
       projectRoot: corpusRoot,

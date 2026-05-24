@@ -1,16 +1,45 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { assertRemoteOnlyValidationTargets } from "./target-guard.mjs";
 
-const READY_URL = process.env.AIF_WEB_URL ?? "http://localhost:5180";
+const SKIP_DEV_SERVER = process.env.AIF_SKIP_DEV_SERVER !== "0";
+const READY_URL =
+  process.env.AIF_WEB_URL ?? (SKIP_DEV_SERVER ? "http://192.168.88.67" : "http://localhost:5180");
 const READY_TIMEOUT_MS = 120_000;
 const READY_POLL_MS = 500;
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = resolve(SCRIPT_DIR, "..");
+const WORKSPACE_ROOT = resolve(PACKAGE_ROOT, "../..");
 
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.cmd` : name;
+function npmCliPath() {
+  if (process.env.npm_execpath?.endsWith(".js")) {
+    return process.env.npm_execpath;
+  }
+
+  return resolve(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
+}
+
+function commandSpec(name, args) {
+  if (process.platform === "win32" && name === "npm") {
+    return { command: process.execPath, args: [npmCliPath(), ...args] };
+  }
+
+  if (process.platform === "win32" && name === "playwright") {
+    return {
+      command: process.execPath,
+      args: [resolve(WORKSPACE_ROOT, "node_modules/@playwright/test/cli.js"), ...args],
+    };
+  }
+
+  return { command: name, args };
 }
 
 function spawnInherited(command, args, options = {}) {
-  return spawn(commandName(command), args, {
+  const spec = commandSpec(command, args);
+
+  return spawn(spec.command, spec.args, {
     stdio: "inherit",
     ...options,
     env: {
@@ -20,11 +49,20 @@ function spawnInherited(command, args, options = {}) {
   });
 }
 
+function assertValidationTargetAllowed() {
+  assertRemoteOnlyValidationTargets({
+    skipDevServer: SKIP_DEV_SERVER,
+    urls: [READY_URL],
+    errorMessage:
+      "Local web perf validation requires explicit local opt-in: set AIF_SKIP_DEV_SERVER=0.",
+  });
+}
+
 async function waitForReady(child) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < READY_TIMEOUT_MS) {
-    if (child.exitCode !== null) {
+    if (child && child.exitCode !== null) {
       throw new Error(`dev:perf exited before ${READY_URL} became ready`);
     }
 
@@ -45,6 +83,11 @@ function stopDevServer(child) {
   if (child.exitCode !== null) return;
 
   try {
+    if (child.pid && process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      return;
+    }
+
     if (child.pid && process.platform !== "win32") {
       process.kill(-child.pid, "SIGTERM");
       return;
@@ -56,6 +99,24 @@ function stopDevServer(child) {
 }
 
 async function run() {
+  assertValidationTargetAllowed();
+
+  if (SKIP_DEV_SERVER) {
+    await waitForReady(null);
+    const perf = spawnInherited("playwright", ["test", "--config=playwright.config.ts"], {
+      env: {
+        AIF_SKIP_DEV_SERVER: "1",
+        AIF_WEB_URL: READY_URL,
+        AIF_API_URL: process.env.AIF_API_URL ?? "http://192.168.88.67/api",
+      },
+    });
+    const [code, signal] = await once(perf, "exit");
+    if (code !== 0) {
+      throw new Error(`playwright exited with ${code ?? signal}`);
+    }
+    return;
+  }
+
   const dev = spawnInherited("npm", ["run", "dev:perf", "--prefix", "../.."], {
     detached: process.platform !== "win32",
     env: { AIF_ENABLE_CODEX_LOGIN_PROXY: "false" },
@@ -67,7 +128,11 @@ async function run() {
     await waitForReady(dev);
 
     const perf = spawnInherited("playwright", ["test", "--config=playwright.config.ts"], {
-      env: { AIF_SKIP_DEV_SERVER: "1" },
+      env: {
+        AIF_SKIP_DEV_SERVER: "0",
+        AIF_WEB_URL: READY_URL,
+        AIF_API_URL: process.env.AIF_API_URL ?? "http://localhost:3009",
+      },
     });
     const [code, signal] = await once(perf, "exit");
     if (code !== 0) {

@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260519-tighten-generic-evidence-gates::project-capsule
+memory_id: task::aif-handoff::work::work-20260524-runtime-profile-backpressure-queue::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260519-tighten-generic-evidence-gates
-source_path: docs/rdpi/work/work-20260519-tighten-generic-evidence-gates
+task_id: work-20260524-runtime-profile-backpressure-queue
+source_path: docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-05-19
+updated_at: 2026-05-24
 supersedes:
 expires_at:
 tags:
@@ -24,18 +24,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/research.md
-- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/design.md
-- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/plan.md
-- docs/rdpi/work/work-20260519-tighten-generic-evidence-gates/result.md
-  created_at: 2026-05-19
-  last_verified_at: 2026-05-19
+- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/research.md
+- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/design.md
+- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/plan.md
+- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/result.md
+  created_at: 2026-05-24
+  last_verified_at: 2026-05-24
 
 ---
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260519-tighten-generic-evidence-gates.
+Current capsule for project aif-handoff, refreshed by task work-20260524-runtime-profile-backpressure-queue.
 
 # Why it matters
 

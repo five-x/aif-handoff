@@ -627,6 +627,10 @@ interface ValidatedAuditArtifactContent {
   taskId: string;
   source: string;
   content: string;
+  roadmapBatchId?: string | null;
+  roadmapAlias?: string | null;
+  auditPlanId?: string | null;
+  auditEvidenceUnits?: AuditEvidenceUnit[];
 }
 
 interface WeakAuditArtifactSummary {
@@ -1148,9 +1152,20 @@ function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSy
           `synthesis_not_ready: validated artifact is empty: ${artifact.artifactPath}`,
         );
       }
+      const auditPlanId = resolveAuditPlanId({
+        taskId: artifact.taskId,
+        roadmapBatchId: artifact.batchId,
+      });
       return {
         artifactPath: artifact.artifactPath,
         taskId: artifact.taskId,
+        roadmapBatchId: artifact.batchId,
+        roadmapAlias: artifact.roadmapAlias,
+        auditPlanId,
+        auditEvidenceUnits: listAuditEvidenceEvents({
+          taskId: artifact.taskId,
+          auditPlanId,
+        }),
         source,
         content,
       };
@@ -1511,6 +1526,10 @@ interface AuditReportRepairDecision {
   outcome: AuditReportRepairOutcome;
   reasons: string[];
   riskHypotheses: AuditRepairRiskHypothesis[];
+}
+
+function uniqueSortedStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))].sort();
 }
 
 const AUDIT_REPAIR_HIDDEN_TOOLING_ROOTS = new Set([
@@ -1926,6 +1945,51 @@ function buildAuditRepairRiskPattern(terms: string[]): string | null {
   return escaped.length > 0 ? escaped.join("|") : null;
 }
 
+const AUDIT_REPAIR_EVIDENCE_STOP_WORDS = new Set([
+  "async",
+  "await",
+  "class",
+  "const",
+  "export",
+  "false",
+  "from",
+  "function",
+  "import",
+  "interface",
+  "return",
+  "true",
+  "type",
+]);
+
+function readAuditRepairLine(projectRoot: string, ref: string): string | null {
+  const match = ref.match(/^(.+):(\d+)$/);
+  if (!match) return null;
+  const path = match[1] ?? "";
+  const lineNumber = Number(match[2]);
+  if (!Number.isInteger(lineNumber) || lineNumber < 1) return null;
+  try {
+    return readFileSync(resolve(projectRoot, path), "utf8").split(/\r?\n/)[lineNumber - 1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function buildAuditRepairEvidencePattern(projectRoot: string, lineRefs: string[]): string | null {
+  const terms = new Set<string>();
+  for (const ref of lineRefs) {
+    const line = readAuditRepairLine(projectRoot, ref);
+    if (!line) continue;
+    for (const token of line.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) ?? []) {
+      const lowered = token.toLowerCase();
+      if (AUDIT_REPAIR_EVIDENCE_STOP_WORDS.has(lowered)) continue;
+      terms.add(token);
+      if (terms.size >= 6) break;
+    }
+    if (terms.size >= 6) break;
+  }
+  return buildAuditRepairRiskPattern([...terms]);
+}
+
 function shellQuote(value: string): string {
   return /^[A-Za-z0-9_./:@=-]+$/.test(value)
     ? value
@@ -2044,6 +2108,36 @@ function firstAuditRepairOutputLine(output: string, preferredRefs: string[] = []
   return lines[0] ?? "<empty>";
 }
 
+function hasSubstantiveAuditRepairCommandOutput(command: GitCaptureResult): boolean {
+  return (
+    command.exitCode === 0 &&
+    command.output.split(/\r?\n/).some((line) => {
+      const parsed = parseAuditRepairGrepOutputLine(line);
+      return (
+        parsed !== null &&
+        !isLowSignalAuditEvidenceLine({
+          path: parsed.path,
+          line: parsed.line,
+          text: parsed.text,
+        })
+      );
+    })
+  );
+}
+
+function isSingleConcreteFileScopeEvidence(
+  root: string,
+  entry: AuditRepairEvidenceByRoot | undefined,
+): entry is AuditRepairEvidenceByRoot {
+  if (!entry || !entry.evidenceUnit || entry.lineRefs.length === 0) return false;
+  const normalizedRoot = root.replaceAll("\\", "/").toLowerCase();
+  return (
+    entry.files.length === 1 &&
+    entry.files[0]?.replaceAll("\\", "/").toLowerCase() === normalizedRoot &&
+    hasSubstantiveAuditRepairCommandOutput(entry.command)
+  );
+}
+
 function buildAuditReportManifest(input: {
   task: TaskRow;
   artifactPath: string;
@@ -2055,12 +2149,12 @@ function buildAuditReportManifest(input: {
   decision: AuditReportRepairDecision;
 }): Record<string, unknown> {
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
-  const evidenceRefs = [
+  const evidenceRefs = uniqueSortedStrings([
     ...input.evidenceByRoot.flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : [])),
     ...input.riskEvidence.flatMap((entry) => (entry.evidenceUnit ? [entry.evidenceUnit.id] : [])),
-  ].sort();
+  ]);
   const evidenceRefsForRisk = (risk: AuditRepairRiskHypothesis): string[] =>
-    [
+    uniqueSortedStrings([
       ...input.evidenceByRoot
         .filter((entry) => risk.scopeIds.includes(entry.root) && entry.evidenceUnit)
         .map((entry) => entry.evidenceUnit?.id)
@@ -2069,7 +2163,7 @@ function buildAuditReportManifest(input: {
         .filter((entry) => entry.riskId === risk.id && entry.evidenceUnit)
         .map((entry) => entry.evidenceUnit?.id)
         .filter((id): id is string => Boolean(id)),
-    ].sort();
+    ]);
   const scopeCoverage = input.evidenceByRoot.map((entry) => ({
     root: entry.root,
     covered:
@@ -2078,13 +2172,13 @@ function buildAuditReportManifest(input: {
         input.riskEvidence.some(
           (riskEntry) => riskEntry.root === entry.root && riskEntry.evidenceUnit,
         )),
-    evidenceRefs: [
+    evidenceRefs: uniqueSortedStrings([
       ...(entry.evidenceUnit ? [entry.evidenceUnit.id] : []),
       ...input.riskEvidence
         .filter((riskEntry) => riskEntry.root === entry.root && riskEntry.evidenceUnit)
         .map((riskEntry) => riskEntry.evidenceUnit?.id)
         .filter((id): id is string => Boolean(id)),
-    ].sort(),
+    ]),
   }));
   const noFindingsClaimsForRisk = (risk: AuditRepairRiskHypothesis): Record<string, unknown> => {
     const riskEvidenceRefs = evidenceRefsForRisk(risk);
@@ -2239,9 +2333,14 @@ function buildDeterministicAuditReportRepairContent(input: {
       const fallbackRef = firstAuditRepairEvidenceRef(input.projectRoot, file);
       return fallbackRef ? [fallbackRef] : [];
     });
-    const grepArgs = isAuditRepairHiddenToolingPath(root)
-      ? ["grep", "-n", "-m", "1", ".", "--", ...inspectionTargets]
-      : ["grep", "-n", ".", "--", ...inspectionTargets];
+    const evidencePattern = buildAuditRepairEvidencePattern(input.projectRoot, lineRefs);
+    const grepArgs = evidencePattern
+      ? isAuditRepairHiddenToolingPath(root)
+        ? ["grep", "-n", "-m", "1", "-E", evidencePattern, "--", ...inspectionTargets]
+        : ["grep", "-n", "-E", evidencePattern, "--", ...inspectionTargets]
+      : isAuditRepairHiddenToolingPath(root)
+        ? ["grep", "-n", "-m", "1", ".", "--", ...inspectionTargets]
+        : ["grep", "-n", ".", "--", ...inspectionTargets];
     const grepCommand =
       inspectionTargets.length > 0
         ? runGitCapture(input.projectRoot, grepArgs)
@@ -2293,11 +2392,18 @@ function buildDeterministicAuditReportRepairContent(input: {
       evidenceUnit,
     };
   });
+  const riskCountByRoot = new Map<string, number>();
+  for (const risk of riskHypotheses) {
+    for (const root of risk.scopeIds) {
+      riskCountByRoot.set(root, (riskCountByRoot.get(root) ?? 0) + 1);
+    }
+  }
   const riskEvidence = riskHypotheses
     .flatMap((risk) =>
       risk.scopeIds.map((root) => {
+        const rootEvidence = evidenceByRoot.find((entry) => entry.root === root);
         const files =
-          evidenceByRoot.find((entry) => entry.root === root)?.files.slice(0, 3) ??
+          rootEvidence?.files.slice(0, 3) ??
           collectAuditRepairEvidenceFiles(input.projectRoot, root);
         const pattern = buildAuditRepairRiskPattern(risk.terms);
         const command =
@@ -2350,13 +2456,22 @@ function buildDeterministicAuditReportRepairContent(input: {
                 maxPreviewChars: 2_000,
               }),
             )
-          : null;
+          : risk.terms.length === 0 &&
+              (riskCountByRoot.get(root) ?? 0) === 1 &&
+              isSingleConcreteFileScopeEvidence(root, rootEvidence)
+            ? rootEvidence.evidenceUnit
+            : null;
+        const evidenceCommand = hasSubstantiveRiskEvidence
+          ? command
+          : evidenceUnit && rootEvidence?.evidenceUnit?.id === evidenceUnit.id
+            ? rootEvidence.command
+            : command;
         return {
           riskId: risk.id,
           root,
           files,
           terms: risk.terms,
-          command,
+          command: evidenceCommand,
           evidenceUnit,
         };
       }),
@@ -2394,6 +2509,10 @@ function buildDeterministicAuditReportRepairContent(input: {
     );
     if (!hasBoundEvidence) {
       decisionReasons.push(`Risk ${risk.id} has no bound scoped source evidence.`);
+    }
+    const hasRiskSpecificEvidence = riskEvidence.some((entry) => entry.riskId === risk.id);
+    if (!hasRiskSpecificEvidence) {
+      decisionReasons.push(`Risk ${risk.id} has no risk-specific substantive command evidence.`);
     }
   }
   const decision: AuditReportRepairDecision = {
@@ -2453,7 +2572,7 @@ function buildDeterministicAuditReportRepairContent(input: {
               .filter((entry) => risk.scopeIds.includes(entry.root))
               .flatMap((entry) => entry.lineRefs)
               .slice(0, 6);
-            const evidenceIds = [
+            const evidenceIds = uniqueSortedStrings([
               ...evidenceByRoot
                 .filter((entry) => risk.scopeIds.includes(entry.root) && entry.evidenceUnit)
                 .map((entry) => entry.evidenceUnit?.id)
@@ -2462,7 +2581,7 @@ function buildDeterministicAuditReportRepairContent(input: {
                 .filter((entry) => entry.riskId === risk.id && entry.evidenceUnit)
                 .map((entry) => entry.evidenceUnit?.id)
                 .filter((id): id is string => Boolean(id)),
-            ].sort();
+            ]);
             return `- Absence reasoning: ${risk.id} covered ${refs
               .map((ref) => `\`${ref}\``)
               .join(", ")} with runtime audit evidence ${evidenceIds.join(
@@ -2730,11 +2849,11 @@ function formatTrustedSourceReportAbsenceReasoning(artifacts: ValidatedAuditArti
     .sort()
     .map((artifactPath) => `\`${artifactPath}\``);
   if (paths.length === 0) {
-    return "Absence reasoning: no trusted source reports were available for a validated no-findings synthesis.";
+    return `Absence reasoning: ${DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID} had no trusted source reports available for a validated no-findings synthesis.`;
   }
   const reportLabel = paths.length === 1 ? "trusted source report" : "trusted source reports";
   const statusLabel = paths.length === 1 ? "was classified" : "were each classified";
-  return `Absence reasoning: ${reportLabel} ${paths.join(
+  return `Absence reasoning: ${DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID} ${reportLabel} ${paths.join(
     ", ",
   )} ${statusLabel} as validated_no_findings with substantive child evidence; synthesis preserved those child outcomes and did not promote unsupported findings.`;
 }
@@ -2818,6 +2937,10 @@ function buildDeterministicAuditSynthesisContent(
     reports: artifacts.map((artifact) => ({
       artifactPath: artifact.artifactPath,
       taskId: artifact.taskId,
+      roadmapBatchId: artifact.roadmapBatchId,
+      roadmapAlias: artifact.roadmapAlias,
+      auditPlanId: artifact.auditPlanId,
+      auditEvidenceUnits: artifact.auditEvidenceUnits,
       content: artifact.content,
     })),
     weakReportCount: weakArtifacts.length,
@@ -2941,6 +3064,8 @@ function buildDeterministicAuditSynthesisContent(
       formatAuditSynthesisOutcomeForArtifact(sourceOutcome),
       "",
       "No validated findings.",
+      "",
+      `Risk hypotheses: ${DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID} for deterministic audit synthesis sourceReportCount coverage was covered and absent.`,
       "",
       "Audit outcome: Validated no-findings with substantive audit evidence.",
       "",
@@ -3365,6 +3490,7 @@ function buildAuditReportValidationDetails(
         sourceClassification: validation.sourceClassification,
         manifestStatus: validation.manifestStatus,
         manifestVersion: validation.manifestVersion,
+        evidenceDepth: validation.evidenceDepth,
       },
     },
     ...extra,

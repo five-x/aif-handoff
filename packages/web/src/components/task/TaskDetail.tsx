@@ -471,6 +471,7 @@ function OverviewView({
     ? getAuditCardDecisionRows(trust.auditCardDecision)
     : [];
   const memoryCount = task.memoryCandidateCount ?? 0;
+  const childSummary = task.childSummary;
 
   return (
     <div className="space-y-3">
@@ -479,6 +480,16 @@ function OverviewView({
           ["Status", task.status],
           ["Auto mode", task.autoMode ? "Enabled" : "Manual"],
           ["Intent", task.taskIntent ?? (task.isFix ? "fix" : "general")],
+          ["Hierarchy role", task.hierarchyRole ?? "executable"],
+          ["Parent", task.parentTask ? task.parentTask.title : "None"],
+          ["Depth", task.hierarchyDepth ?? 0],
+          ["Closeout policy", task.parentCloseoutPolicy ?? "None"],
+          [
+            "Children",
+            childSummary
+              ? `${childSummary.verifiedChildCount}/${childSummary.childCount} verified, ${childSummary.activeChildCount} active, ${childSummary.blockedChildCount} blocked`
+              : "0",
+          ],
           ["Artifact trust", trust?.artifactTrustLevel ?? "Not evaluated"],
           ["Next action", trust?.nextActionLabel ?? "None"],
           ["Memory candidates", memoryCount],
@@ -496,6 +507,35 @@ function OverviewView({
       {trust?.summary && (
         <div className="border border-border/70 bg-muted/20 p-3 text-xs text-muted-foreground">
           {trust.summary}
+        </div>
+      )}
+      {(task.children?.length ?? 0) > 0 && (
+        <div className="space-y-2 border border-border/70 bg-muted/20 p-3 text-xs">
+          <div className="font-semibold text-foreground">Direct children</div>
+          {task.children!.map((child) => (
+            <div
+              key={child.id}
+              className="border-t border-border/50 pt-2 first:border-t-0 first:pt-0"
+            >
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <div className="min-w-0 truncate font-medium">{child.title}</div>
+                <Badge size="xs" variant="outline">
+                  {child.status}
+                </Badge>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+                <span>P{child.priority}</span>
+                <span>depth {child.hierarchyDepth}</span>
+                <span>position {child.hierarchyPosition}</span>
+                {(child.childSummary?.childCount ?? 0) > 0 && (
+                  <span>
+                    children {child.childSummary?.verifiedChildCount}/
+                    {child.childSummary?.childCount} verified
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
       {auditCardDecisionRows.length > 0 && (
@@ -568,6 +608,11 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
   })();
   const activeTab: TaskDetailTab = selectedTab ?? defaultTab;
   const planQuality = task ? getPlanQualityPresentation(task) : null;
+  const deleteDisabled = Boolean(
+    task &&
+    ((task.childSummary?.childCount ?? 0) > 0 ||
+      (task.parentTask && !["done", "verified"].includes(task.parentTask.status))),
+  );
 
   return (
     <>
@@ -659,6 +704,12 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
                       variant="destructive"
                       size="sm"
                       onClick={() => actions.setShowDeleteConfirm(true)}
+                      disabled={deleteDisabled}
+                      title={
+                        deleteDisabled
+                          ? "Hierarchy tasks with open relationships cannot be deleted"
+                          : undefined
+                      }
                     >
                       <Trash2 className="mr-1 h-3 w-3" /> Delete task
                     </Button>

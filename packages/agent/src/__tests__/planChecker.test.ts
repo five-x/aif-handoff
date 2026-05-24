@@ -39,6 +39,23 @@ const {
   isPlanAlreadyChecklist,
 } = await import("../subagents/planChecker.js");
 
+function trustedNoFindingsValidationDetails(): Record<string, unknown> {
+  return {
+    evidence: {
+      auditReportValidation: {
+        sourceClassification: "validated_no_findings",
+        manifestStatus: "valid",
+        manifestVersion: 1,
+        evidenceDepth: {
+          status: "substantive",
+          trustedNoFindingsSupported: true,
+          reasonCodes: [],
+        },
+      },
+    },
+  };
+}
+
 function streamSuccess(result: string): AsyncIterable<{
   type: "result";
   subtype: "success";
@@ -672,14 +689,7 @@ describe("runPlanChecker", () => {
     updateRoadmapBatchArtifactState({
       taskId: "task-source-a",
       state: "valid",
-      validationDetails: {
-        evidence: {
-          auditReportValidation: {
-            sourceClassification: "validated_no_findings",
-            manifestStatus: "valid",
-          },
-        },
-      },
+      validationDetails: trustedNoFindingsValidationDetails(),
     });
     updateRoadmapBatchArtifactState({
       taskId: "task-source-b",

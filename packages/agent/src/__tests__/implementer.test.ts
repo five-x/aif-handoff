@@ -14,6 +14,7 @@ import {
   evaluateTaskCompletionEvidence,
   validateImplementationManifest,
   validateAuditReportArtifact,
+  computeAuditReportContentSha256,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
@@ -65,6 +66,11 @@ function trustedNoFindingsValidationDetails(): Record<string, unknown> {
         sourceClassification: "validated_no_findings",
         manifestStatus: "valid",
         manifestVersion: 1,
+        evidenceDepth: {
+          status: "substantive",
+          trustedNoFindingsSupported: true,
+          reasonCodes: [],
+        },
       },
     },
   };
@@ -74,6 +80,18 @@ function readAuditReportManifest(text: string): Record<string, unknown> {
   const match = text.match(/```audit-report-manifest\s*([\s\S]*?)```/);
   if (!match) throw new Error("missing audit-report-manifest block");
   return JSON.parse(match[1] ?? "{}") as Record<string, unknown>;
+}
+
+function gitSnapshot(root: string): { id: string; commit: string; tree: string } {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  return { id: `git:${commit}:${tree}`, commit, tree };
 }
 
 function streamSuccess(result: string): AsyncIterable<{
@@ -679,6 +697,85 @@ describe("runImplementer rework behavior", () => {
       "Implementation done without writing report",
     );
     expect(updatedTask?.agentActivityLog).toContain("post-run validation failure");
+  });
+
+  it("terminalizes deterministic repair when scoped source lacks risk-specific evidence", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "misc.ts"), "export const unrelated = 1;\n", "utf8");
+    execFileSync("git", ["add", "src/misc.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed unrelated source", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    queryMock.mockImplementationOnce(() => {
+      mkdirSync(join(projectRoot, "audit"), { recursive: true });
+      writeFileSync(
+        join(projectRoot, "audit", "risk-specific.md"),
+        ["# Audit", "", "No validated findings.", "", "Checked files:", "- `src/misc.ts:1`"].join(
+          "\n",
+        ),
+        "utf8",
+      );
+      return streamSuccess("Implementation done");
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-risk-specific-terminal",
+        projectId: "project-1",
+        title: "Audit timeout risk",
+        description: [
+          "Scope: src",
+          "Audit mandate: Review timeout behavior.",
+          "Risk hypotheses: risk-timeout src timeout cancellation handling may deadlock.",
+          "Allowed changes: only create/update audit/risk-specific.md.",
+          "Report artifact: audit/risk-specific.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\nProduce audit report",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-risk-specific-terminal",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-risk-specific-terminal"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-risk-specific-terminal",
+          role: "report",
+          artifactPath: "audit/risk-specific.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-risk-specific-terminal", projectRoot);
+
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-risk-specific-terminal");
+    if (!artifact) throw new Error("missing risk-specific terminal artifact");
+    expect(artifact.state).toBe("source_inconclusive");
+    expect(artifact.failureFamily).toBe("source_inconclusive");
+    const report = readFileSync(join(projectRoot, "audit", "risk-specific.md"), "utf8");
+    expect(readAuditReportManifest(report).outcome).toBe("source_inconclusive");
+    expect(report).toContain(
+      "Risk risk-timeout has no risk-specific substantive command evidence.",
+    );
   });
 
   it("fails closed when post-run audit report repair throws", async () => {
@@ -1779,7 +1876,7 @@ describe("runImplementer rework behavior", () => {
     expect(summary).not.toContain("git ls-files --");
     expect(summary).toContain("Audit outcome: Validated no-findings");
     expect(summary).toContain(
-      "Absence reasoning: trusted source report `audit/runtime.md` was classified as validated_no_findings with substantive child evidence",
+      "Absence reasoning: risk-deterministic-synthesis-no-findings trusted source report `audit/runtime.md` was classified as validated_no_findings with substantive child evidence",
     );
     expect(summary).not.toContain("ruled out validated source-report findings");
     expect(summary).not.toContain("Risk:");
@@ -1810,6 +1907,206 @@ describe("runImplementer rework behavior", () => {
     expect(validation.sourceClassification).toBe("validated_no_findings");
     expect(validation.issues.map((issue) => issue.code)).not.toContain(
       "unbacked_runtime_command_evidence",
+    );
+  });
+
+  it("synthesizes ledger-backed no-findings source reports without inline command output", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\nruntime evidence\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md", "src/config.ts"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "seed source", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    const sourceSnapshot = gitSnapshot(projectRoot);
+
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-ledger-source",
+          projectId: "project-1",
+          title: "Audit ledger source",
+          description: "Report artifact: audit/runtime.md",
+          taskIntent: "audit",
+          status: "done",
+        },
+        {
+          id: "task-ledger-synthesis",
+          projectId: "project-1",
+          title: "Synthesize audit findings",
+          description: "Report artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "implementing",
+          plan: "## Plan\n- [ ] Synthesize validated audit reports",
+          reworkRequested: true,
+          blockedReason:
+            "Completion evidence guard (missing_substantive_evidence): Report artifact lacks substantive evidence markers.",
+        },
+      ])
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-ledger-no-findings",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-ledger-source", "task-ledger-synthesis"],
+      synthesisTaskId: "task-ledger-synthesis",
+      artifacts: [
+        {
+          taskId: "task-ledger-source",
+          role: "report",
+          artifactPath: "audit/runtime.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-ledger-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    const sourceArtifact = findRoadmapBatchArtifactByTaskId("task-ledger-source");
+    if (!sourceArtifact) throw new Error("missing ledger source artifact");
+    const sourceAuditPlanId = `batch:${sourceArtifact.batchId}:task:task-ledger-source`;
+    const sourceEvidencePreview = [
+      '[search_files query="timeoutMs" path=src/config.ts]',
+      "src/config.ts:1:export const timeoutMs = 1000;",
+    ].join("\n");
+    appendAuditEvidenceEvent({
+      id: "ev-ledger-source",
+      taskId: "task-ledger-source",
+      auditPlanId: sourceAuditPlanId,
+      sourceSnapshotId: sourceSnapshot.id,
+      toolName: "search_files",
+      evidenceKind: "search",
+      evidenceGrade: "substantive",
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-config-timeout"],
+      pathHashes: ["0".repeat(64)],
+      pathRangeHashes: [],
+      command: null,
+      exitCode: 0,
+      outputSha256: "1".repeat(64),
+      outputPreview: sourceEvidencePreview,
+      outputPreviewTruncated: false,
+      parsedSummary: {
+        outputBytes: sourceEvidencePreview.length,
+        outputLineCount: 2,
+        previewChars: sourceEvidencePreview.length,
+        exitCode: 0,
+      },
+      redactionStatus: "clean",
+      createdAt: "2026-05-22T00:00:00.000Z",
+    });
+
+    const sourceBody = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-config-timeout for `src/config.ts` timeoutMs configuration was covered and is absent.",
+      "",
+      "## Checked Files",
+      "",
+      "- `src/config.ts:1`",
+      "",
+      "## Runtime Ledger Evidence",
+      "",
+      "- search_files audit evidence `ev-ledger-source` inspected `src/config.ts:1` for timeoutMs configuration.",
+      "",
+    ].join("\n");
+    const sourceManifest = {
+      version: 1,
+      auditPlanId: sourceAuditPlanId,
+      taskId: "task-ledger-source",
+      batchId: sourceArtifact.batchId,
+      roadmapAlias: sourceArtifact.roadmapAlias,
+      artifactPath: "audit/runtime.md",
+      contentSha256: computeAuditReportContentSha256(sourceBody),
+      sourceSnapshot: { ...sourceSnapshot, dirty: false },
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-ledger-source"] }],
+      riskHypotheses: [
+        {
+          id: "risk-config-timeout",
+          description: "timeoutMs configuration drift",
+          status: "covered",
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        { id: "nf-1", riskId: "risk-config-timeout", evidenceRefs: ["ev-ledger-source"] },
+      ],
+      evidenceRefs: ["ev-ledger-source"],
+    };
+    writeFileSync(
+      join(projectRoot, "audit", "runtime.md"),
+      `${sourceBody}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(sourceManifest, null, 2)}\n\`\`\`\n`,
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/runtime.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "source report", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const sourceValidation = validateAuditReportArtifact({
+      text: readFileSync(join(projectRoot, "audit", "runtime.md"), "utf8"),
+      projectRoot,
+      taskId: "task-ledger-source",
+      roadmapBatchId: sourceArtifact.batchId,
+      roadmapAlias: sourceArtifact.roadmapAlias,
+      auditPlanId: sourceAuditPlanId,
+      reportArtifactPaths: ["audit/runtime.md"],
+      expectedReportArtifactPath: "audit/runtime.md",
+      requireProposedFix: true,
+      auditEvidenceUnits: listAuditEvidenceEvents({
+        taskId: "task-ledger-source",
+        auditPlanId: sourceAuditPlanId,
+      }),
+      requireLedgerEvidence: true,
+    });
+    expect(sourceValidation.ok).toBe(true);
+    expect(sourceValidation.sourceClassification).toBe("validated_no_findings");
+    expect(sourceValidation.evidenceDepth.trustedNoFindingsSupported).toBe(true);
+
+    updateRoadmapBatchArtifactState({
+      taskId: "task-ledger-source",
+      state: "valid",
+      failureFamily: null,
+      sourceSnapshotId: sourceSnapshot.id,
+      validationDetails: trustedNoFindingsValidationDetails(),
+    });
+
+    await runImplementer("task-ledger-synthesis", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(summary).toContain("No validated findings.");
+    expect(summary).toContain("Audit outcome: Validated no-findings");
+    expect(summary).not.toContain("# Audit Inconclusive");
+    expect(summary).toContain(
+      "Absence reasoning: risk-deterministic-synthesis-no-findings trusted source report `audit/runtime.md` was classified as validated_no_findings with substantive child evidence",
     );
   });
 
@@ -2656,7 +2953,7 @@ describe("runImplementer rework behavior", () => {
 
     const description = [
       "Scope: src/bot_intevra/bot.py, src/bot_intevra/service.py",
-      "Risk hypotheses: risk-architecture-1 src/bot_intevra/bot.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe; risk-architecture-2 src/bot_intevra/service.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe",
+      "Risk hypotheses: risk-architecture-1 src/bot_intevra/bot.py may encode unsafe handle_message routing for note requests; risk-architecture-2 src/bot_intevra/service.py may encode unsafe create_note persistence handling for note text",
       "Report artifact: audit/architecture.md",
     ].join("\n");
     db.insert(tasks)
@@ -2842,7 +3139,7 @@ describe("runImplementer rework behavior", () => {
 
     const description = [
       "Scope: src/bot_intevra/bot.py, src/bot_intevra/service.py",
-      "Risk hypotheses: risk-architecture-1 src/bot_intevra/bot.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe; risk-architecture-2 src/bot_intevra/service.py may encode unclear ownership, circular dependencies, or cross-module routing that would make task changes unsafe",
+      "Risk hypotheses: risk-architecture-1 src/bot_intevra/bot.py may encode unsafe handle_message routing for note requests; risk-architecture-2 src/bot_intevra/service.py may encode unsafe create_note persistence handling for note text",
       "Report artifact: audit/architecture-timeout.md",
     ].join("\n");
     db.insert(tasks)
@@ -2947,14 +3244,14 @@ describe("runImplementer rework behavior", () => {
     mkdirSync(join(projectRoot, "src", "bot_intevra"), { recursive: true });
     mkdirSync(join(projectRoot, "docs", "ops"), { recursive: true });
     mkdirSync(join(projectRoot, "audit"), { recursive: true });
-    writeFileSync(join(projectRoot, ".env.example"), "SECRET_KEY=change-me\n", "utf8");
+    writeFileSync(join(projectRoot, ".env.example"), "secret_key=change-me\n", "utf8");
     writeFileSync(join(projectRoot, ".ai-factory", "config.yaml"), "retryCount: 100\n", "utf8");
     writeFileSync(join(projectRoot, "src", "app.py"), "APP = 'bot'\n", "utf8");
     writeFileSync(join(projectRoot, "src", "settings.py"), "SAFE_DIRECTORY = True\n", "utf8");
     writeFileSync(join(projectRoot, "src", "worker.py"), "def run():\n    return True\n", "utf8");
     writeFileSync(
       join(projectRoot, "src", "bot_intevra", "config.py"),
-      "TOKEN_ENV='BOT_TOKEN'\n",
+      "token_env='BOT_TOKEN'\n",
       "utf8",
     );
     writeFileSync(
@@ -2984,6 +3281,15 @@ describe("runImplementer rework behavior", () => {
     const description = [
       "Audit security and configuration controls.",
       "Scope: .env.example, .ai-factory/config.yaml, src/bot_intevra/config.py, src/bot_intevra/secret_scan.py, src, docs/ops",
+      [
+        "Risk hypotheses:",
+        "risk-env .env.example secret_key sample controls may drift;",
+        "risk-ai-factory .ai-factory/config.yaml retry controls may drift;",
+        "risk-src-bot-config src/bot_intevra/config.py token_env controls may drift;",
+        "risk-src-bot-secret src/bot_intevra/secret_scan.py scan value controls may drift;",
+        "risk-src src scan token controls may drift;",
+        "risk-docs docs/ops rollout retry controls may drift",
+      ].join(" "),
       "Report artifact: audit/security-controls.md",
     ].join("\n");
     db.insert(tasks)
@@ -3098,7 +3404,7 @@ describe("runImplementer rework behavior", () => {
         title: "Audit architecture",
         description: [
           "Scope: README.md",
-          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Risk hypotheses: risk-architecture-1 README.md notes may drift.",
           "Allowed changes: only create/update audit/architecture.md.",
           "Report artifact: audit/architecture.md",
           "Constraint: diagnostic-only; do not implement fixes.",
@@ -3171,7 +3477,7 @@ describe("runImplementer rework behavior", () => {
         title: "Audit architecture",
         description: [
           "Scope: README.md",
-          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Risk hypotheses: risk-architecture-1 README.md notes may drift.",
           "Allowed changes: only create/update audit/architecture.md.",
           "Report artifact: audit/architecture.md",
           "Constraint: diagnostic-only; do not implement fixes.",
@@ -3280,7 +3586,7 @@ describe("runImplementer rework behavior", () => {
         title: "Audit architecture",
         description: [
           "Scope: README.md",
-          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Risk hypotheses: risk-architecture-1 README.md notes may drift.",
           "Allowed changes: only create/update audit/architecture.md.",
           "Report artifact: audit/architecture.md",
           "Constraint: diagnostic-only; do not implement fixes.",
@@ -3358,7 +3664,7 @@ describe("runImplementer rework behavior", () => {
         title: "Audit architecture",
         description: [
           "Scope: README.md",
-          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Risk hypotheses: risk-architecture-1 README.md notes may drift.",
           "Allowed changes: only create/update audit/architecture.md.",
           "Report artifact: audit/architecture.md",
           "Constraint: diagnostic-only; do not implement fixes.",
@@ -3461,7 +3767,7 @@ describe("runImplementer rework behavior", () => {
         title: "Audit architecture",
         description: [
           "Scope: README.md",
-          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Risk hypotheses: risk-architecture-1 README.md notes may drift.",
           "Allowed changes: only create/update audit/architecture.md.",
           "Report artifact: audit/architecture.md",
           "Constraint: diagnostic-only; do not implement fixes.",
@@ -3545,7 +3851,7 @@ describe("runImplementer rework behavior", () => {
         title: "Audit architecture",
         description: [
           "Scope: README.md",
-          "Risk hypotheses: risk-architecture-1 README.md may hide unclear ownership.",
+          "Risk hypotheses: risk-architecture-1 README.md notes may drift.",
           "Allowed changes: only create/update audit/architecture.md.",
           "Report artifact: audit/architecture.md",
           "Constraint: diagnostic-only; do not implement fixes.",
@@ -4619,8 +4925,8 @@ describe("runImplementer rework behavior", () => {
       "",
       "| Scope | Checked evidence | Verification |",
       "| --- | --- | --- |",
-      '| `README.md` | `README.md:2` | Command `git grep -n "." -- README.md` output includes `README.md:2:runtime notes` |',
-      '| `src` | `src/alpha.ts:1`, `src/beta.ts:1`, `src/gamma.ts:1` | Command `git grep -n "." -- src/alpha.ts` output includes `src/alpha.ts:1:export const alpha = 1;` |',
+      "| `README.md` | `README.md:2` | Command `git grep -n runtime -- README.md` output includes `README.md:2:runtime notes` |",
+      "| `src` | `src/alpha.ts:1`, `src/beta.ts:1`, `src/gamma.ts:1` | Command `git grep -n alpha -- src/alpha.ts` output includes `src/alpha.ts:1:export const alpha = 1;` |",
       "",
       "## Checked Files",
       "",
@@ -4631,11 +4937,11 @@ describe("runImplementer rework behavior", () => {
       "",
       "## Checked Commands",
       "",
-      '- Command `git grep -n "." -- README.md` output:',
+      "- Command `git grep -n runtime -- README.md` output:",
       "```",
       "README.md:2:runtime notes",
       "```",
-      '- Command `git grep -n "." -- src/alpha.ts` output:',
+      "- Command `git grep -n alpha -- src/alpha.ts` output:",
       "```",
       "src/alpha.ts:1:export const alpha = 1;",
       "```",

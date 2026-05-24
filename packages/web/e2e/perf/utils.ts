@@ -21,6 +21,33 @@ export interface NetworkSample {
   resourceType: string;
 }
 
+const USE_LOCAL_DEV_SERVER = process.env.AIF_SKIP_DEV_SERVER === "0";
+
+export const PERF_API_URL =
+  process.env.AIF_API_URL ??
+  (USE_LOCAL_DEV_SERVER ? "http://localhost:3009" : "http://192.168.88.67/api");
+export const PERF_API_PATH_PREFIX =
+  process.env.AIF_API_PATH_PREFIX ?? inferPathPrefix(PERF_API_URL);
+
+function inferPathPrefix(url: string | undefined): string {
+  if (!url) return "";
+  try {
+    const pathname = new URL(url).pathname.replace(/\/$/, "");
+    return pathname === "" || pathname === "/" ? "" : pathname;
+  } catch {
+    return "";
+  }
+}
+
+export function apiPath(path: string): string {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${PERF_API_PATH_PREFIX}${normalizedPath}`;
+}
+
+export function apiUrl(path: string): string {
+  return `${PERF_API_URL.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+}
+
 /** Capture browser Navigation Timing entries for the current document. */
 export async function readNavigationTiming(page: Page): Promise<NavigationTimingMetrics> {
   return await page.evaluate(() => {
@@ -122,10 +149,8 @@ export function recordNetwork(
  * Budgets enforced by every perf spec. Tune these after a few runs on the
  * target hardware so that regressions (not natural variance) trigger failures.
  */
-// Budgets are calibrated for the full dev stack running (api + web + agent
-// poller) — the agent's 2s tick adds contention on shared caches, so cold
-// numbers here are noticeably higher than a curl-against-idle-server baseline.
-// Tune after a handful of local runs; they should catch 10× regressions
+// Budgets are calibrated for the deployed service path used by Codex validation.
+// Tune after a handful of remote runs; they should catch 10x regressions
 // (the original "v13 schema miss" bug pushed cold /runtime-profiles to ~14s),
 // not natural variance.
 export const PERF_BUDGETS = {

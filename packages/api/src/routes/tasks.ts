@@ -96,6 +96,41 @@ function parseRuntimeOptionsForAudit(
   }
 }
 
+function taskHierarchyContractError(
+  error: unknown,
+): { error: string; code: string; status: ContentfulStatusCode } | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const hierarchyMessages = [
+    "Parent task not found",
+    "Parent task must belong to the same project",
+    "Task hierarchy depth cannot exceed",
+    "parentCloseoutPolicy requires hierarchyRole=container",
+    "A task cannot be its own parent",
+    "Task hierarchy cannot contain cycles",
+    "Tasks with children must remain hierarchyRole=container",
+  ];
+  if (!hierarchyMessages.some((fragment) => message.includes(fragment))) {
+    return null;
+  }
+  const status: ContentfulStatusCode =
+    message.includes("cycles") || message.includes("children") ? 409 : 400;
+  return {
+    error: message,
+    code: "TASK_HIERARCHY_INVALID",
+    status,
+  };
+}
+
+function attachmentsCreatedFromIncoming(
+  persisted: Awaited<ReturnType<typeof persistAttachments>>,
+  incoming: Parameters<typeof persistAttachments>[0],
+): Awaited<ReturnType<typeof persistAttachments>> {
+  return persisted.filter((attachment, index) => {
+    const source = incoming[index];
+    return Boolean(attachment.path && source && !source.path && source.content !== null);
+  });
+}
+
 function taskRuntimeOptionsSecretLikeKeys(
   runtimeOptions: Record<string, unknown> | null | undefined,
 ) {
@@ -574,31 +609,46 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
   }
 
   // Pre-create the task to get an ID, then persist attachments to storage
-  const created = createTask({
-    projectId: body.projectId,
-    title: body.title,
-    description: body.description,
-    sourceRef: body.sourceRef ?? null,
-    attachments: [],
-    priority: body.priority,
-    autoMode: body.autoMode,
-    taskIntent,
-    isFix: resolvedIsFix,
-    plannerMode: resolvedPlannerMode,
-    planPath: body.planPath ?? defaultPlanPath,
-    planDocs: resolvedPlanDocs,
-    planTests: resolvedPlanTests,
-    skipReview: resolvedSkipReview,
-    useSubagents: resolvedUseSubagents,
-    maxReviewIterations: body.maxReviewIterations,
-    paused: body.paused,
-    runtimeProfileId: body.runtimeProfileId,
-    modelOverride: body.modelOverride,
-    runtimeOptions: body.runtimeOptions,
-    roadmapAlias: body.roadmapAlias,
-    tags: body.tags,
-    scheduledAt: body.scheduledAt ?? null,
-  });
+  let created: ReturnType<typeof createTask>;
+  try {
+    created = createTask({
+      projectId: body.projectId,
+      title: body.title,
+      description: body.description,
+      sourceRef: body.sourceRef ?? null,
+      attachments: [],
+      priority: body.priority,
+      autoMode: body.autoMode,
+      taskIntent,
+      isFix: resolvedIsFix,
+      plannerMode: resolvedPlannerMode,
+      planPath: body.planPath ?? defaultPlanPath,
+      planDocs: resolvedPlanDocs,
+      planTests: resolvedPlanTests,
+      skipReview: resolvedSkipReview,
+      useSubagents: resolvedUseSubagents,
+      maxReviewIterations: body.maxReviewIterations,
+      paused: body.paused,
+      runtimeProfileId: body.runtimeProfileId,
+      modelOverride: body.modelOverride,
+      runtimeOptions: body.runtimeOptions,
+      roadmapAlias: body.roadmapAlias,
+      tags: body.tags,
+      scheduledAt: body.scheduledAt ?? null,
+      parentTaskId: body.parentTaskId ?? null,
+      hierarchyRole: body.hierarchyRole,
+      parentCloseoutPolicy: body.parentCloseoutPolicy ?? null,
+    });
+  } catch (error) {
+    const hierarchyError = taskHierarchyContractError(error);
+    if (hierarchyError) {
+      return c.json(
+        { error: hierarchyError.error, code: hierarchyError.code },
+        hierarchyError.status,
+      );
+    }
+    throw error;
+  }
   if (!created) return c.json({ error: "Failed to create task" }, 500);
 
   // Persist attachments to project files and update the task with path-based metadata
@@ -612,7 +662,7 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
         });
       } catch (error) {
         if (error instanceof AttachmentValidationError) {
-          deleteTask(created.id);
+          deleteTask(created.id, { allowAttachedChild: true });
           return c.json({ error: error.message }, 400);
         }
         throw error;
@@ -873,6 +923,7 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
 
   let oldAttachmentsForCleanup: ReturnType<typeof parseAttachments> | null = null;
   let projectRootForCleanup: string | null = null;
+  let attachmentsCreatedForFailureCleanup: Awaited<ReturnType<typeof persistAttachments>> = [];
 
   // Persist new attachments first; clean up replaced files only after the DB update succeeds.
   if (incomingAttachments !== undefined) {
@@ -880,10 +931,15 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
     if (project) {
       const oldAttachments = parseAttachments(existing.attachments);
       try {
-        (updatePayload as Record<string, unknown>).attachments = await persistAttachments(
+        const persistedAttachments = await persistAttachments(incomingAttachments, {
+          projectRoot: project.rootPath,
+          taskId: id,
+        });
+        attachmentsCreatedForFailureCleanup = attachmentsCreatedFromIncoming(
+          persistedAttachments,
           incomingAttachments,
-          { projectRoot: project.rootPath, taskId: id },
         );
+        (updatePayload as Record<string, unknown>).attachments = persistedAttachments;
       } catch (error) {
         if (error instanceof AttachmentValidationError) {
           return c.json({ error: error.message }, 400);
@@ -900,7 +956,22 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
     modelOverride: existing.modelOverride,
     runtimeOptions: parseRuntimeOptionsForAudit(existing.runtimeOptionsJson),
   });
-  const updated = updateTask(id, updatePayload);
+  let updated: ReturnType<typeof updateTask>;
+  try {
+    updated = updateTask(id, updatePayload);
+  } catch (error) {
+    const hierarchyError = taskHierarchyContractError(error);
+    if (hierarchyError) {
+      if (attachmentsCreatedForFailureCleanup.length > 0 && projectRootForCleanup) {
+        cleanupReplacedAttachments(projectRootForCleanup, attachmentsCreatedForFailureCleanup, []);
+      }
+      return c.json(
+        { error: hierarchyError.error, code: hierarchyError.code },
+        hierarchyError.status,
+      );
+    }
+    throw error;
+  }
   if (!updated) return c.json({ error: "Task not found after update" }, 500);
   if (hasTaskRuntimeOverrideInput(body)) {
     appendTaskRuntimeOverrideAudit({ before: beforeRuntimeOverride, task: updated });
@@ -946,7 +1017,11 @@ tasksRouter.delete("/:id", (c) => {
     return c.json({ error: "Task not found" }, 404);
   }
 
-  deleteTask(id);
+  try {
+    deleteTask(id);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+  }
   log.debug({ taskId: id }, "Task deleted");
 
   broadcast({ type: "task:deleted", payload: { id } });

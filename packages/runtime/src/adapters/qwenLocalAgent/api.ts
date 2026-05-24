@@ -35,7 +35,15 @@ const DEFAULT_ENDPOINT_HEALTH_TIMEOUT_MS = 5_000;
 const DEFAULT_ENDPOINT_COOLDOWN_WAIT_MAX_MS = 45_000;
 const DEFAULT_ENDPOINT_HTTP_RETRY_LIMIT = 1;
 const MAX_ENDPOINT_HTTP_RETRY_LIMIT = 3;
+const DEFAULT_ENDPOINT_QUEUE_LIMIT = 1;
+const MAX_ENDPOINT_QUEUE_LIMIT = 50;
+const DEFAULT_ENDPOINT_QUEUE_TIMEOUT_MS = 30_000;
 const REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS = "repository_inspection_budget_exhausted";
+const LOCAL_ENDPOINT_NON_FAILURE_STATUSES = new Set([
+  "endpoint_queue_timeout",
+  "endpoint_queue_full",
+  "endpoint_request_cancelled",
+]);
 const LOCAL_ENDPOINT_BUDGETS = new Map([
   [
     "8003",
@@ -1061,6 +1069,24 @@ function readEndpointHttpRetryLimit(input) {
   if (raw == null || raw < 0) return DEFAULT_ENDPOINT_HTTP_RETRY_LIMIT;
   return Math.min(MAX_ENDPOINT_HTTP_RETRY_LIMIT, Math.floor(raw));
 }
+function readEndpointQueueLimit(input) {
+  const options = asRecord(input.options);
+  const raw = readNumber(options.endpointQueueLimit);
+  if (raw == null || raw < 0) return DEFAULT_ENDPOINT_QUEUE_LIMIT;
+  return Math.min(MAX_ENDPOINT_QUEUE_LIMIT, Math.floor(raw));
+}
+function readEndpointQueueTimeoutMs(input) {
+  const options = asRecord(input.options);
+  const raw = readNumber(options.endpointQueueTimeoutMs);
+  if (raw == null || raw < 0) return DEFAULT_ENDPOINT_QUEUE_TIMEOUT_MS;
+  return Math.floor(raw);
+}
+function readRequestTimeoutMs(input) {
+  const executionTimeout = readNumber(input.execution?.runTimeoutMs);
+  if (executionTimeout != null && executionTimeout > 0) return Math.floor(executionTimeout);
+  const optionTimeout = readNumber(asRecord(input.options).timeoutMs);
+  return optionTimeout != null && optionTimeout > 0 ? Math.floor(optionTimeout) : null;
+}
 async function delayWithAbort(ms, signal, message) {
   if (ms <= 0) return;
   if (signal?.aborted) {
@@ -1088,7 +1114,18 @@ function endpointFailureCategory(error) {
   if (isAbortTimeoutError(error)) return "timeout";
   return classifyQwenLocalAgentRuntimeError(error).category;
 }
+function endpointProviderStatus(error) {
+  if (!(error instanceof RuntimeExecutionError)) return null;
+  const status = asRecord(error.providerMeta).status;
+  return typeof status === "string" ? status : null;
+}
+function isLocalEndpointNonFailure(error) {
+  if (isLocalWaitAbortError(error)) return true;
+  const status = endpointProviderStatus(error);
+  return Boolean(status && LOCAL_ENDPOINT_NON_FAILURE_STATUSES.has(status));
+}
 function shouldTripEndpointCircuit(error) {
+  if (isLocalEndpointNonFailure(error)) return false;
   return ["transport", "stream", "timeout"].includes(endpointFailureCategory(error));
 }
 function isHttp5xxEndpointTransportError(error) {
@@ -1107,15 +1144,21 @@ function isEndpointCooldownRuntimeError(error) {
   );
 }
 function withEndpointCooldown(error, retryAfterSeconds) {
+  const category = endpointFailureCategory(error);
+  const previousProviderMeta =
+    error instanceof RuntimeExecutionError ? asRecord(error.providerMeta) : {};
+  const previousStatus = readString(previousProviderMeta.status);
   return new RuntimeExecutionError(
     error instanceof Error ? error.message : String(error),
     error,
-    endpointFailureCategory(error),
+    category,
     {
       retryAfterSeconds,
       providerMeta: {
+        ...previousProviderMeta,
         status: "endpoint_cooldown",
-        category: endpointFailureCategory(error),
+        previousStatus,
+        category,
         retryAfterSeconds,
       },
     },
@@ -1137,18 +1180,73 @@ function withRepositoryInspectionBudgetStatus(error, categoryOverride) {
     },
   );
 }
-function buildEndpointCircuitError(endpoint, retryAfterSeconds, cause) {
+function endpointProviderMeta(input, policy, extra = {}) {
+  return {
+    runtimeId: input.runtimeId,
+    taskId: input.usageContext?.taskId ?? null,
+    profileId: input.profileId ?? null,
+    baseUrl: policy.baseUrl,
+    model:
+      readString(extra.model) ??
+      readString(input.model) ??
+      readString(asRecord(input.options).model) ??
+      readString(process.env[DEFAULT_MODEL_ENV_VAR]),
+    endpointKey: policy.endpoint?.key ?? null,
+    endpointLabel: policy.endpoint?.label ?? null,
+    ...extra,
+  };
+}
+function endpointQueueError(input, policy, status, message, extra = {}) {
+  return new RuntimeExecutionError(message, undefined, "timeout", {
+    providerMeta: endpointProviderMeta(input, policy, {
+      status,
+      category: "timeout",
+      ...extra,
+    }),
+  });
+}
+function classifyRequestAbort(input, policy, signal, error, startedAt, model) {
+  const durationMs = Date.now() - startedAt;
+  const reason = signal?.reason ?? input.execution?.abortController?.signal?.reason;
+  const abortedByTimeout =
+    error instanceof DOMException && error.name === "TimeoutError"
+      ? true
+      : reason instanceof DOMException && reason.name === "TimeoutError";
+  const status = abortedByTimeout ? "endpoint_request_timeout" : "endpoint_request_cancelled";
+  const message = abortedByTimeout
+    ? `qwen-local-agent request timed out after ${readRequestTimeoutMs(input) ?? durationMs}ms`
+    : "qwen-local-agent request cancelled before completion";
+  return new RuntimeExecutionError(message, error, "timeout", {
+    providerMeta: endpointProviderMeta(input, policy, {
+      status,
+      category: "timeout",
+      durationMs,
+      timeoutMs: readRequestTimeoutMs(input),
+      model,
+    }),
+  });
+}
+function buildEndpointCircuitError(input, policy, retryAfterSeconds, cause) {
+  const rawCategory = cause ? endpointFailureCategory(cause) : "transport";
+  const category = ["transport", "stream", "timeout"].includes(rawCategory)
+    ? rawCategory
+    : "transport";
+  const previousProviderMeta =
+    cause instanceof RuntimeExecutionError ? asRecord(cause.providerMeta) : {};
+  const previousStatus = readString(previousProviderMeta.status);
   return new RuntimeExecutionError(
-    `qwen-local-agent endpoint ${endpoint.label} is cooling down after transport/timeout failure`,
+    `qwen-local-agent endpoint ${policy.endpoint.label} is cooling down after transport/timeout failure`,
     cause,
-    "transport",
+    category,
     {
       retryAfterSeconds,
-      providerMeta: {
+      providerMeta: endpointProviderMeta(input, policy, {
+        ...previousProviderMeta,
         status: "endpoint_cooldown",
-        category: "transport",
+        previousStatus,
+        category,
         retryAfterSeconds,
-      },
+      }),
     },
   );
 }
@@ -1176,7 +1274,7 @@ async function assertEndpointCircuitAllowsRequest(input, policy, signal, logger)
     if (remainingMs > 0) {
       const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
       if (remainingMs > maxWaitMs) {
-        throw buildEndpointCircuitError(policy.endpoint, remainingSeconds);
+        throw buildEndpointCircuitError(input, policy, remainingSeconds);
       }
       logger?.info?.(
         {
@@ -1212,15 +1310,12 @@ async function assertEndpointCircuitAllowsRequest(input, policy, signal, logger)
         failures,
         cooldownUntilMs: Date.now() + cooldownMs,
       });
-      throw buildEndpointCircuitError(
-        policy.endpoint,
-        Math.ceil(cooldownMs / 1000),
-        classifyQwenLocalAgentRuntimeError(error),
-      );
+      throw buildEndpointCircuitError(input, policy, Math.ceil(cooldownMs / 1000), error);
     }
   }
 }
 function recordEndpointFailure(input, policy, error, logger) {
+  if (isLocalEndpointNonFailure(error)) return null;
   if (isLocalWaitAbortError(error)) return null;
   if (isEndpointCooldownRuntimeError(error)) return null;
   if (!policy.endpoint || !policy.budget || !shouldTripEndpointCircuit(error)) return null;
@@ -1247,8 +1342,18 @@ function recordEndpointFailure(input, policy, error, logger) {
   );
   return retryAfterSeconds;
 }
-async function acquireEndpointSemaphore(policy, signal) {
-  if (!policy.endpoint || !policy.budget) return () => {};
+function releaseEndpointSemaphoreState(state) {
+  const next = state.queue.shift();
+  if (next) {
+    next.resolve();
+  } else {
+    state.active = false;
+  }
+}
+async function acquireEndpointSemaphore(input, policy, signal, logger, logContext) {
+  if (!policy.endpoint || !policy.budget) {
+    return { release: () => {}, queued: false, queueWaitMs: 0 };
+  }
   let state = endpointSemaphores.get(policy.endpoint.key);
   if (!state) {
     state = { active: false, queue: [] };
@@ -1258,11 +1363,37 @@ async function acquireEndpointSemaphore(policy, signal) {
     throw localWaitAbortError("qwen-local-agent endpoint semaphore wait aborted");
   }
   if (state.active) {
+    const queueLimit = readEndpointQueueLimit(input);
+    if (state.queue.length >= queueLimit) {
+      throw endpointQueueError(
+        input,
+        policy,
+        "endpoint_queue_full",
+        `qwen-local-agent endpoint ${policy.endpoint.label} queue is full`,
+        {
+          queueLimit,
+          queueDepth: state.queue.length,
+          timeoutMs: readEndpointQueueTimeoutMs(input),
+        },
+      );
+    }
+    const queuedAt = Date.now();
+    const queueTimeoutMs = readEndpointQueueTimeoutMs(input);
+    logger?.info?.(
+      {
+        ...logContext,
+        queueDepth: state.queue.length + 1,
+        queueLimit,
+        queueTimeoutMs,
+      },
+      "qwen-local-agent request queued",
+    );
     await new Promise((resolve, reject) => {
+      let timeout;
       const entry = {
         resolve: () => {
           cleanup();
-          resolve();
+          resolve(undefined);
         },
         reject,
         onAbort: () => {
@@ -1271,31 +1402,68 @@ async function acquireEndpointSemaphore(policy, signal) {
           cleanup();
           reject(localWaitAbortError("qwen-local-agent endpoint semaphore wait aborted"));
         },
+        onTimeout: () => {
+          const index = state.queue.indexOf(entry);
+          if (index >= 0) state.queue.splice(index, 1);
+          cleanup();
+          reject(
+            endpointQueueError(
+              input,
+              policy,
+              "endpoint_queue_timeout",
+              `qwen-local-agent endpoint ${policy.endpoint.label} queue timed out after ${queueTimeoutMs}ms`,
+              {
+                queueLimit,
+                queueDepth: state.queue.length,
+                queueWaitMs: Date.now() - queuedAt,
+                timeoutMs: queueTimeoutMs,
+              },
+            ),
+          );
+        },
       };
       const cleanup = () => {
+        if (timeout) clearTimeout(timeout);
         signal?.removeEventListener?.("abort", entry.onAbort);
       };
       signal?.addEventListener?.("abort", entry.onAbort, { once: true });
+      if (queueTimeoutMs >= 0) {
+        timeout = setTimeout(entry.onTimeout, queueTimeoutMs);
+      }
       state.queue.push(entry);
     });
+    logger?.info?.(
+      {
+        ...logContext,
+        queueWaitMs: Date.now() - queuedAt,
+      },
+      "qwen-local-agent request dequeued",
+    );
+    if (signal?.aborted) {
+      releaseEndpointSemaphoreState(state);
+      throw localWaitAbortError("qwen-local-agent endpoint semaphore wait aborted");
+    }
+    state.active = true;
+    return {
+      release: () => releaseEndpointSemaphoreState(state),
+      queued: true,
+      queueWaitMs: Date.now() - queuedAt,
+    };
   }
   state.active = true;
-  return () => {
-    const next = state.queue.shift();
-    if (next) {
-      next.resolve();
-    } else {
-      state.active = false;
-    }
+  return {
+    release: () => releaseEndpointSemaphoreState(state),
+    queued: false,
+    queueWaitMs: 0,
   };
 }
-async function withEndpointSemaphore(policy, signal, fn) {
+async function withEndpointSemaphore(input, policy, signal, logger, logContext, fn) {
   if (!policy.endpoint || !policy.budget) return fn();
-  const release = await acquireEndpointSemaphore(policy, signal);
+  const acquisition = await acquireEndpointSemaphore(input, policy, signal, logger, logContext);
   try {
-    return await fn();
+    return await fn(acquisition);
   } finally {
-    release();
+    acquisition.release();
   }
 }
 async function postChatCompletions(input, messages, signal, requestMeta, logger) {
@@ -1312,10 +1480,17 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
   );
   const baseRetryCount = requestMeta?.retryCount ?? 0;
   const maxHttpRetries = policy.budget ? readEndpointHttpRetryLimit(input) : 0;
-  const baseLogContext = {
+  let baseLogContext = {
     runtimeId: input.runtimeId,
+    taskId: input.usageContext?.taskId ?? null,
     profileId: input.profileId ?? null,
     baseUrl: policy.baseUrl,
+    endpointKey: policy.endpoint?.key ?? null,
+    model:
+      readString(input.model) ??
+      readString(asRecord(input.options).model) ??
+      readString(process.env[DEFAULT_MODEL_ENV_VAR]),
+    timeoutMs: readRequestTimeoutMs(input),
     estimatedInputTokens,
     maxOutputTokens:
       typeof projectedMaxOutputTokens === "number" ? Math.floor(projectedMaxOutputTokens) : null,
@@ -1341,6 +1516,7 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
   }
   baseLogContext.maxOutputTokens =
     typeof body.max_tokens === "number" ? body.max_tokens : baseLogContext.maxOutputTokens;
+  baseLogContext = { ...baseLogContext, model: body.model };
   for (;;) {
     const startedAt = Date.now();
     const logContext = {
@@ -1348,15 +1524,39 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
       retryCount: baseRetryCount + attempt,
     };
     try {
-      const response = await withEndpointSemaphore(policy, signal, async () => {
-        await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
-        return fetch(`${policy.baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: buildHeaders(input),
-          body: JSON.stringify(body),
-          ...(signal ? { signal } : {}),
-        });
-      });
+      const response = await withEndpointSemaphore(
+        input,
+        policy,
+        signal,
+        logger,
+        logContext,
+        async (acquisition) => {
+          await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
+          logger?.info?.(
+            {
+              ...logContext,
+              queueWaitMs: acquisition?.queueWaitMs ?? 0,
+              queued: acquisition?.queued === true,
+            },
+            "qwen-local-agent request start",
+          );
+          return fetch(`${policy.baseUrl}/chat/completions`, {
+            method: "POST",
+            headers: buildHeaders(input),
+            body: JSON.stringify(body),
+            ...(signal ? { signal } : {}),
+          });
+        },
+      );
+      logger?.info?.(
+        {
+          ...logContext,
+          durationMs: Date.now() - startedAt,
+          httpStatus: response.status,
+          ok: response.ok,
+        },
+        "qwen-local-agent request end",
+      );
       logger?.info?.(
         {
           ...logContext,
@@ -1372,6 +1572,16 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
       const httpError = classifyQwenLocalAgentRuntimeError(
         new Error(`Qwen local agent request failed with status ${response.status}`),
         response.status,
+        {
+          providerMeta: endpointProviderMeta(input, policy, {
+            status: `http_${response.status}`,
+            category: response.status >= 500 ? "transport" : "unknown",
+            httpStatus: response.status,
+            durationMs: Date.now() - startedAt,
+            timeoutMs: readRequestTimeoutMs(input),
+            model: baseLogContext.model,
+          }),
+        },
       );
       const retryAfterSeconds = recordEndpointFailure(input, policy, httpError, logger);
       if (
@@ -1396,20 +1606,62 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
       }
       return response;
     } catch (error) {
-      const retryAfterSeconds = recordEndpointFailure(input, policy, error, logger);
+      const runtimeError =
+        isAbortTimeoutError(error) || signal?.aborted
+          ? classifyRequestAbort(input, policy, signal, error, startedAt, baseLogContext.model)
+          : error;
+      const status = endpointProviderStatus(runtimeError);
+      if (status === "endpoint_queue_timeout") {
+        logger?.warn?.(
+          {
+            ...logContext,
+            durationMs: Date.now() - startedAt,
+            failureClass: status,
+          },
+          "qwen-local-agent request queue timeout",
+        );
+      } else if (status === "endpoint_queue_full") {
+        logger?.warn?.(
+          {
+            ...logContext,
+            durationMs: Date.now() - startedAt,
+            failureClass: status,
+          },
+          "qwen-local-agent request queue full",
+        );
+      } else if (status === "endpoint_request_cancelled") {
+        logger?.warn?.(
+          {
+            ...logContext,
+            durationMs: Date.now() - startedAt,
+            failureClass: status,
+          },
+          "qwen-local-agent request cancel",
+        );
+      } else if (status === "endpoint_request_timeout") {
+        logger?.warn?.(
+          {
+            ...logContext,
+            durationMs: Date.now() - startedAt,
+            failureClass: status,
+          },
+          "qwen-local-agent request timeout",
+        );
+      }
+      const retryAfterSeconds = recordEndpointFailure(input, policy, runtimeError, logger);
       logger?.warn?.(
         {
           ...logContext,
           durationMs: Date.now() - startedAt,
-          failureClass: requestEstimateFailureClass(error),
+          failureClass: requestEstimateFailureClass(runtimeError),
           retryAfterSeconds,
         },
         "qwen-local-agent request estimate",
       );
       if (retryAfterSeconds != null) {
-        throw withEndpointCooldown(error, retryAfterSeconds);
+        throw withEndpointCooldown(runtimeError, retryAfterSeconds);
       }
-      throw error;
+      throw runtimeError;
     }
   }
 }
@@ -1623,6 +1875,14 @@ export async function runQwenLocalAgentApi(input, logger) {
         throw classifyQwenLocalAgentRuntimeError(
           new Error(safeProviderErrorMessage(rawText, "Qwen local agent request failed")),
           response.status,
+          {
+            providerMeta: endpointProviderMeta(input, resolveEndpointPolicy(input), {
+              status: `http_${response.status}`,
+              category: response.status >= 500 ? "transport" : "unknown",
+              httpStatus: response.status,
+              timeoutMs: readRequestTimeoutMs(input),
+            }),
+          },
         );
       }
       const payload = rawText.trim().length > 0 ? JSON.parse(rawText) : {};

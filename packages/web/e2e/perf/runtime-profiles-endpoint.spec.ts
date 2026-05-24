@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { PERF_BUDGETS, recordNetwork } from "./utils";
+import { PERF_BUDGETS, apiPath, apiUrl, recordNetwork } from "./utils";
 
 // Measures the `/runtime-profiles` request from inside the browser: this is
 // the real user path through fetch → React Query → render, not a raw curl.
@@ -14,25 +14,24 @@ test.describe("runtime-profiles endpoint timing", () => {
     // Cold call from inside the page so cookies/origin match any session the
     // app is relying on. Fire-and-wait, not page-triggered, so we isolate the
     // endpoint cost from React render work.
-    // Go through the Vite proxy (same origin) so there is no CORS or cookie
-    // drift — this mirrors how the real app talks to the API in dev.
+    // Go through the target service origin so there is no CORS or cookie drift.
     const coldStart = Date.now();
-    const coldResponse = await page.evaluate(async () => {
+    const coldResponse = await page.evaluate(async (path) => {
       const started = performance.now();
-      const res = await fetch("/runtime-profiles?includeGlobal=true", {
+      const res = await fetch(path, {
         credentials: "include",
       });
       return { status: res.status, ms: performance.now() - started };
-    });
+    }, apiPath("/runtime-profiles?includeGlobal=true"));
     const coldTotalMs = Date.now() - coldStart;
 
-    const warmResponse = await page.evaluate(async () => {
+    const warmResponse = await page.evaluate(async (path) => {
       const started = performance.now();
-      const res = await fetch("/runtime-profiles?includeGlobal=true", {
+      const res = await fetch(path, {
         credentials: "include",
       });
       return { status: res.status, ms: performance.now() - started };
-    });
+    }, apiPath("/runtime-profiles?includeGlobal=true"));
 
     const samples = network.stop();
 
@@ -51,7 +50,7 @@ test.describe("runtime-profiles endpoint timing", () => {
 
     // Baseline from the node-side request API hits the API directly (no proxy)
     // so that a broken Vite dev proxy surfaces as a diff between the two.
-    const baseline = await request.get("http://localhost:3009/runtime-profiles?includeGlobal=true");
+    const baseline = await request.get(apiUrl("/runtime-profiles?includeGlobal=true"));
     expect(baseline.ok()).toBeTruthy();
   });
 });

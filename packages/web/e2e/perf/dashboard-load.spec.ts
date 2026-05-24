@@ -1,23 +1,30 @@
 import { expect, test } from "@playwright/test";
-import { PERF_BUDGETS, readNavigationTiming, readWebVitals, recordNetwork } from "./utils";
+import {
+  PERF_API_URL,
+  PERF_BUDGETS,
+  readNavigationTiming,
+  readWebVitals,
+  recordNetwork,
+} from "./utils";
 
-// This spec exercises the cold dashboard render: open `/`, wait for the kanban
-// columns to be present, then snapshot timing + network. "Cold" here means the
-// browser has no HTTP cache for bundles — the API still uses its server-side
+// This spec exercises the cold dashboard render: open `/`, wait for the app
+// shell to be present, then snapshot timing + network. "Cold" here means the
+// browser has no HTTP cache for bundles; the API still uses its server-side
 // cache, so early runs right after starting dev will hit worst-case latencies.
 test.describe("dashboard cold load", () => {
   test("renders kanban shell within LCP/DOM-ready budgets", async ({ page, context }) => {
     await context.clearCookies();
-    const network = recordNetwork(page, (url) => url.includes("localhost:3009"));
+    const network = recordNetwork(page, (url) => url.startsWith(PERF_API_URL));
 
     const nav = page.goto("/", { waitUntil: "domcontentloaded" });
     const response = await nav;
     expect(response?.status() ?? 500).toBeLessThan(400);
 
-    // Wait until app shell paints the first kanban column header. If the app
-    // renames the column label, update this locator — the goal is to anchor on
-    // something that only exists once the board has real data rendered.
-    await page.waitForSelector("text=/Backlog|Planning|Implementing/i", { timeout: 30_000 });
+    // Wait until the dashboard paints either the populated kanban board or the
+    // empty-project state used by a fresh local database.
+    await expect(
+      page.getByText(/Backlog|Planning|Implementing|No projects yet/i).first(),
+    ).toBeVisible({ timeout: 30_000 });
 
     const timing = await readNavigationTiming(page);
     const vitals = await readWebVitals(page);
@@ -28,7 +35,7 @@ test.describe("dashboard cold load", () => {
       nav: timing,
       vitals,
       apiCalls: apiCalls.map(({ url, durationMs, status }) => ({
-        url: url.replace("http://localhost:3009", ""),
+        url: url.replace(PERF_API_URL, ""),
         durationMs,
         status,
       })),

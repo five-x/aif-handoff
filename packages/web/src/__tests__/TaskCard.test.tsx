@@ -133,6 +133,34 @@ describe("TaskCard", () => {
     expect(screen.getByText("Auto-review stopped. Human review required.")).toBeDefined();
   });
 
+  it("renders hierarchy container and parent context badges", () => {
+    render(
+      <TaskCard
+        task={{
+          ...mockTask,
+          hierarchyRole: "container",
+          childSummary: {
+            childCount: 2,
+            activeChildCount: 1,
+            blockedChildCount: 1,
+            verifiedChildCount: 1,
+          },
+          parentTask: {
+            id: "parent-123456",
+            title: "Parent Task",
+            status: "backlog",
+            hierarchyRole: "container",
+          },
+        }}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Container")).toBeDefined();
+    expect(screen.getByText("2 children / 1 active / 1 blocked / 1 verified")).toBeDefined();
+    expect(screen.getByText("Parent: Parent Task")).toBeDefined();
+  });
+
   it("renders done with trusted valid artifact distinctly", () => {
     render(<TaskCard task={withArtifactTrust({})} onClick={vi.fn()} />);
 

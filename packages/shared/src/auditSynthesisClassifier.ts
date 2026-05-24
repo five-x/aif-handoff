@@ -1,10 +1,11 @@
 import {
   AUDIT_PUBLIC_REPORT_OUTCOMES,
-  classifyAuditSourceEvidence,
   countValidatedAuditFindings,
   extractSubstantiveAuditCommandEvidence,
   type AuditPublicReportOutcome,
 } from "./auditSourceEvidence.js";
+import { validateAuditReportArtifact } from "./auditReportValidator.js";
+import type { AuditEvidenceUnit } from "./auditEvidenceLedger.js";
 
 export const AUDIT_SYNTHESIS_OUTCOME_KINDS = AUDIT_PUBLIC_REPORT_OUTCOMES;
 
@@ -13,6 +14,10 @@ export type AuditSynthesisOutcomeKind = AuditPublicReportOutcome | "inconclusive
 export interface AuditSynthesisSourceReport {
   artifactPath: string;
   taskId?: string | null;
+  roadmapBatchId?: string | null;
+  roadmapAlias?: string | null;
+  auditPlanId?: string | null;
+  auditEvidenceUnits?: AuditEvidenceUnit[];
   content: string;
 }
 
@@ -60,22 +65,32 @@ function isTerminalSourceInconclusiveReport(text: string): boolean {
   return hasTerminalSourceInconclusiveManifest(text) || /\bAudit inconclusive\b/i.test(text);
 }
 
+function countValidatedFindings(text: string, projectRoot: string): number {
+  return countValidatedAuditFindings({ text, projectRoot, requireProposedFix: true });
+}
+
 function hasSubstantiveNoFindingsEvidence(text: string, projectRoot: string): boolean {
+  const validation = validateAuditReportArtifact({
+    text,
+    projectRoot,
+    reportArtifactPaths: ["audit/synthesis.md"],
+    requireProposedFix: true,
+  });
   return (
-    classifyAuditSourceEvidence({ text, projectRoot, requireProposedFix: true }).classification ===
-    "validated_no_findings"
+    validation.sourceClassification === "validated_no_findings" &&
+    validation.evidenceDepth.trustedNoFindingsSupported
   );
 }
 
 function hasInventoryOnlyNoFindingsEvidence(text: string, projectRoot: string): boolean {
   return (
-    classifyAuditSourceEvidence({ text, projectRoot, requireProposedFix: true }).classification ===
-    "inventory_only_invalid"
+    validateAuditReportArtifact({
+      text,
+      projectRoot,
+      reportArtifactPaths: ["audit/synthesis.md"],
+      requireProposedFix: true,
+    }).sourceClassification === "inventory_only_invalid"
   );
-}
-
-function countValidatedFindings(text: string, projectRoot: string): number {
-  return countValidatedAuditFindings({ text, projectRoot, requireProposedFix: true });
 }
 
 function inconclusive(
@@ -112,11 +127,27 @@ export function classifyAuditSynthesisSourceReports(
     (sum, report) => sum + countValidatedFindings(report.content, input.projectRoot),
     0,
   );
-  const substantiveNoFindingsReportCount = trustedReports.filter((report) =>
-    hasSubstantiveNoFindingsEvidence(report.content, input.projectRoot),
+  const sourceValidations = trustedReports.map((report) =>
+    validateAuditReportArtifact({
+      text: report.content,
+      projectRoot: input.projectRoot,
+      taskId: report.taskId ?? undefined,
+      roadmapBatchId: report.roadmapBatchId ?? undefined,
+      roadmapAlias: report.roadmapAlias ?? undefined,
+      auditPlanId: report.auditPlanId ?? undefined,
+      reportArtifactPaths: [report.artifactPath],
+      expectedReportArtifactPath: report.artifactPath,
+      requireProposedFix: true,
+      auditEvidenceUnits: report.auditEvidenceUnits ?? [],
+    }),
+  );
+  const substantiveNoFindingsReportCount = sourceValidations.filter(
+    (validation) =>
+      validation.sourceClassification === "validated_no_findings" &&
+      validation.evidenceDepth.trustedNoFindingsSupported,
   ).length;
-  const inventoryOnlyNoFindingsReportCount = trustedReports.filter((report) =>
-    hasInventoryOnlyNoFindingsEvidence(report.content, input.projectRoot),
+  const inventoryOnlyNoFindingsReportCount = sourceValidations.filter(
+    (validation) => validation.sourceClassification === "inventory_only_invalid",
   ).length;
   const base = {
     sourceReportCount: input.reports.length,

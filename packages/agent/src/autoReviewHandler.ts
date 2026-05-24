@@ -59,6 +59,7 @@ export type ReviewGateOutcome =
 interface AutoReviewInput {
   taskId: string;
   projectRoot: string;
+  force?: boolean;
 }
 
 function toAuditArtifactRole(role: string | null | undefined): "report" | "synthesis" | null {
@@ -277,7 +278,7 @@ export async function handleAutoReviewGate(
 ): Promise<ReviewGateOutcome | null> {
   const env = getEnv();
   const refreshedTask = findTaskById(input.taskId);
-  if (!refreshedTask?.autoMode) {
+  if (!refreshedTask || (!refreshedTask.autoMode && !input.force)) {
     return null;
   }
 

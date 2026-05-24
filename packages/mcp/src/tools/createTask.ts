@@ -5,8 +5,12 @@ import {
   isTaskIntent,
   logger,
   normalizeTaskIntent,
+  TASK_HIERARCHY_ROLES,
+  TASK_PARENT_CLOSEOUT_POLICIES,
   TASK_INTENTS,
   type TaskIntent,
+  type TaskHierarchyRole,
+  type TaskParentCloseoutPolicy,
 } from "@aif/shared";
 import { createTask, findProjectById, toTaskResponse } from "@aif/data";
 import { registerMcpTool, type ToolContext } from "./index.js";
@@ -72,6 +76,18 @@ const createTaskInputSchema: Record<string, z.ZodTypeAny> = {
     .nullable()
     .optional()
     .describe("Optional runtime-specific options for task execution"),
+  parentTaskId: z
+    .string()
+    .uuid()
+    .nullable()
+    .optional()
+    .describe("Optional parent task ID for hierarchy attachment"),
+  hierarchyRole: z.enum(TASK_HIERARCHY_ROLES).optional().describe("Hierarchy role for this task"),
+  parentCloseoutPolicy: z
+    .enum(TASK_PARENT_CLOSEOUT_POLICIES)
+    .nullable()
+    .optional()
+    .describe("Closeout policy for container tasks"),
 };
 
 type CreateTaskArgs = {
@@ -93,6 +109,9 @@ type CreateTaskArgs = {
   sourceRef?: string;
   skipReview?: boolean;
   tags?: string[];
+  parentTaskId?: string | null;
+  hierarchyRole?: TaskHierarchyRole;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
   title: string;
   useSubagents?: boolean;
 };
@@ -169,6 +188,9 @@ export function register(server: McpServer, context: ToolContext): void {
         runtimeProfileId: args.runtimeProfileId,
         modelOverride: args.modelOverride,
         runtimeOptions: args.runtimeOptions,
+        parentTaskId: args.parentTaskId ?? null,
+        hierarchyRole: args.hierarchyRole,
+        parentCloseoutPolicy: args.parentCloseoutPolicy ?? null,
       });
 
       if (!row) {

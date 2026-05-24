@@ -294,8 +294,21 @@ function splitFindingSections(text: string): string[] {
     .filter((section) => /\b(?:finding|issue)\b/i.test(section));
 }
 
+function isGenericAuditSearchCommand(command: string): boolean {
+  const normalized = command
+    .trim()
+    .replace(/[`\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+  if (!/^(?:git\s+grep|rg|grep)\b/.test(normalized)) return false;
+  return /(?:^|\s)["']?(?:\.|\.\*|\.\+)["']?(?:\s|$)/.test(normalized);
+}
+
 export function isInventoryAuditCommand(command: string): boolean {
-  return INVENTORY_COMMAND_PATTERNS.some((pattern) => pattern.test(command.trim()));
+  return (
+    INVENTORY_COMMAND_PATTERNS.some((pattern) => pattern.test(command.trim())) ||
+    isGenericAuditSearchCommand(command)
+  );
 }
 
 export function collectExistingAuditLineEvidenceRefs(input: {

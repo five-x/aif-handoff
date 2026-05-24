@@ -89,6 +89,12 @@ function ensureTables(sqlite: Database.Database): void {
       status TEXT NOT NULL DEFAULT 'backlog',
       priority INTEGER NOT NULL DEFAULT 0,
       position REAL NOT NULL DEFAULT 1000.0,
+      parent_task_id TEXT,
+      root_task_id TEXT,
+      hierarchy_depth INTEGER NOT NULL DEFAULT 0,
+      hierarchy_role TEXT NOT NULL DEFAULT 'executable',
+      hierarchy_position REAL NOT NULL DEFAULT 1000.0,
+      parent_closeout_policy TEXT,
       plan TEXT,
       implementation_log TEXT,
       implementation_manifest_json TEXT,
@@ -1111,6 +1117,18 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 34,
+    description: "Add first-class task hierarchy fields",
+    sql: `
+      ALTER TABLE tasks ADD COLUMN parent_task_id TEXT;
+      ALTER TABLE tasks ADD COLUMN root_task_id TEXT;
+      ALTER TABLE tasks ADD COLUMN hierarchy_depth INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE tasks ADD COLUMN hierarchy_role TEXT NOT NULL DEFAULT 'executable';
+      ALTER TABLE tasks ADD COLUMN hierarchy_position REAL NOT NULL DEFAULT 1000.0;
+      ALTER TABLE tasks ADD COLUMN parent_closeout_policy TEXT;
+    `,
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -1421,6 +1439,10 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_tasks_status_retry ON tasks(status, retry_after)",
     // Composite: task list ordering within a project by status and position
     "CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status, position)",
+    // Hierarchy lookups and parent rollup.
+    "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id, hierarchy_position)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_root ON tasks(root_task_id, hierarchy_depth)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_hierarchy_role ON tasks(project_id, hierarchy_role, status)",
     // Task comments lookup by task
     "CREATE INDEX IF NOT EXISTS idx_task_comments_task_id ON task_comments(task_id)",
     // Task locking: find unlocked or stale-locked tasks

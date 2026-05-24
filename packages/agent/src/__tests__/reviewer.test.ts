@@ -34,7 +34,10 @@ vi.mock("../subagentQuery.js", () => ({
   startHeartbeat: () => setInterval(() => undefined, 60_000),
 }));
 
-const { runReviewer } = await import("../subagents/reviewer.js");
+const { resolveRequiredSpecializedReviewerRoles, runReviewer } =
+  await import("../subagents/reviewer.js");
+const { evaluateReviewCommentsForAutoMode } = await import("../reviewGate.js");
+const { parseStructuredReviewComments } = await import("../reviewContract.js");
 const { appendAuditEvidenceEvent, createRoadmapBatchContract, updateRoadmapBatchArtifactState } =
   await import("@aif/data");
 
@@ -81,7 +84,182 @@ function passingSidecarOutput(previousFindingIds: string[] = []): string {
   ].join("\n");
 }
 
+function passingSpecializedRoleOutput(): string {
+  return [
+    "## Verdict",
+    "- PASS",
+    "",
+    "## Blocking Findings",
+    "- none",
+    "",
+    "## Advisories",
+    "- packages/agent/src/subagents/reviewer.ts:1 was inspected for this role.",
+    "",
+    "## Previous Findings",
+    "- none",
+  ].join("\n");
+}
+
+function failingSpecializedRoleOutput(text: string): string {
+  return [
+    "## Verdict",
+    "- FAIL",
+    "",
+    "## Blocking Findings",
+    `- ${text}`,
+    "",
+    "## Advisories",
+    "- packages/agent/src/subagents/reviewer.ts:1 was inspected for this role.",
+    "",
+    "## Previous Findings",
+    "- none",
+  ].join("\n");
+}
+
+function isSpecializedReviewerAgent(agentName: string): boolean {
+  return [
+    "review-correctness",
+    "review-security-data-loss",
+    "review-regression-api-contract",
+    "review-audit-evidence",
+  ].includes(agentName);
+}
+
+function passingReviewerOutputForAgent(
+  agentName: string,
+  previousFindingIds: string[] = [],
+): string {
+  return isSpecializedReviewerAgent(agentName)
+    ? passingSpecializedRoleOutput()
+    : passingSidecarOutput(previousFindingIds);
+}
+
+function expectAuditSpecializedFanoutCalls(): void {
+  const agentNames = executeSubagentQueryMock.mock.calls.map(
+    (call) => (call[0] as { agentName: string }).agentName,
+  );
+  expect(executeSubagentQueryMock).toHaveBeenCalledTimes(6);
+  expect(agentNames).toEqual(
+    expect.arrayContaining([
+      "review-sidecar",
+      "security-sidecar",
+      "review-correctness",
+      "review-security-data-loss",
+      "review-regression-api-contract",
+      "review-audit-evidence",
+    ]),
+  );
+}
+
+function expectDeterministicAuditSpecializedOnlyCalls(): void {
+  const agentNames = executeSubagentQueryMock.mock.calls.map(
+    (call) => (call[0] as { agentName: string }).agentName,
+  );
+  expect(executeSubagentQueryMock).toHaveBeenCalledTimes(4);
+  expect(agentNames).toEqual(
+    expect.arrayContaining([
+      "review-correctness",
+      "review-security-data-loss",
+      "review-regression-api-contract",
+      "review-audit-evidence",
+    ]),
+  );
+  expect(agentNames).not.toContain("review-sidecar");
+  expect(agentNames).not.toContain("security-sidecar");
+}
+
+type SpecializedRoleResolutionTask = Parameters<typeof resolveRequiredSpecializedReviewerRoles>[0];
+
+function roleResolutionTask(
+  overrides: Partial<SpecializedRoleResolutionTask>,
+): SpecializedRoleResolutionTask {
+  return {
+    id: "task-role-resolution",
+    projectId: "project-role-resolution",
+    title: "Role resolution task",
+    description: null,
+    status: "review",
+    priority: 0,
+    taskIntent: "general",
+    roadmapAlias: null,
+    tags: null,
+    ...overrides,
+  } as SpecializedRoleResolutionTask;
+}
+
+describe("resolveRequiredSpecializedReviewerRoles", () => {
+  it("requires audit evidence plus base roles for discovery and review-style risky tasks", () => {
+    for (const task of [
+      roleResolutionTask({
+        title: "Discovery inventory for task lifecycle gaps",
+        description: "Findings report for validation coverage",
+      }),
+      roleResolutionTask({
+        title: "Code review findings validation",
+        description: "Review the reported evidence for blockers",
+      }),
+      roleResolutionTask({
+        title: "Research spike for audit evidence bypasses",
+        taskIntent: "spike",
+      }),
+    ]) {
+      expect(resolveRequiredSpecializedReviewerRoles(task, null)).toEqual([
+        "correctness",
+        "security_data_loss",
+        "regression_api_contract",
+        "audit_evidence",
+      ]);
+    }
+  });
+
+  it("keeps high-risk non-audit tasks on base roles and low-risk tasks without fan-out", () => {
+    expect(
+      resolveRequiredSpecializedReviewerRoles(
+        roleResolutionTask({
+          title: "Update public API contract",
+          description: "High risk schema migration",
+          priority: 3,
+          taskIntent: "feature",
+        }),
+        null,
+      ),
+    ).toEqual(["correctness", "security_data_loss", "regression_api_contract"]);
+
+    expect(
+      resolveRequiredSpecializedReviewerRoles(
+        roleResolutionTask({
+          title: "Adjust button copy",
+          description: "Tiny wording change",
+          taskIntent: "docs",
+        }),
+        null,
+      ),
+    ).toEqual([]);
+  });
+});
+
 type FixtureSourceClassification = "validated_no_findings" | "validated_findings_present";
+
+function trustedAuditReportValidationDetails(
+  sourceClassification: FixtureSourceClassification,
+): Record<string, unknown> {
+  return {
+    auditReportValidation: {
+      manifestStatus: "valid",
+      sourceClassification,
+      ...(sourceClassification === "validated_no_findings"
+        ? {
+            manifestVersion: 1,
+            evidenceDepth: {
+              status: "substantive",
+              trustedNoFindingsSupported: true,
+              reasonCodes: [],
+            },
+          }
+        : {}),
+    },
+  };
+}
 
 function seedTrustedSynthesisReviewerFixture(input: {
   idSuffix: string;
@@ -185,12 +363,7 @@ function seedTrustedSynthesisReviewerFixture(input: {
       state: "valid",
       failureFamily: null,
       classification,
-      validationDetails: {
-        auditReportValidation: {
-          manifestStatus: "valid",
-          sourceClassification: classification,
-        },
-      },
+      validationDetails: trustedAuditReportValidationDetails(classification),
     });
   });
 
@@ -244,14 +417,15 @@ function seedTrustedSynthesisReviewerFixture(input: {
     }),
     "",
     "No validated findings.",
+    "Risk hypotheses: risk-deterministic-synthesis-no-findings for retries evidence from trusted source reports was covered and absent.",
     "Audit outcome: Validated no-findings with substantive audit evidence.",
-    "Absence reasoning: trusted source reports `audit/source-a.md`, `audit/source-b.md` were each classified as validated_no_findings with substantive child evidence.",
+    "Absence reasoning: risk-deterministic-synthesis-no-findings trusted source reports `audit/source-a.md`, `audit/source-b.md` were each classified as validated_no_findings with substantive child evidence.",
     "",
     "## Evidence Register",
     "",
     "| Source report | Checked evidence | Verification |",
     "| --- | --- | --- |",
-    "| `audit/source-a.md` | `src/config.ts:1` | - Command `git grep -n . -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
+    "| `audit/source-a.md` | `src/config.ts:1` | - Command `git grep -n retries -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
     "| `audit/source-b.md` | `src/config.ts:1` | - Command `git grep -n retries -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
     "",
     "## Checked Files",
@@ -260,7 +434,7 @@ function seedTrustedSynthesisReviewerFixture(input: {
     "",
     "## Checked Commands",
     "",
-    "- Command `git grep -n . -- src/config.ts` output:",
+    "- Command `git grep -n retries -- src/config.ts` output:",
     "```",
     "src/config.ts:1:export const retries = 2;",
     "```",
@@ -323,6 +497,9 @@ describe("runReviewer", () => {
   beforeEach(() => {
     testDb.current = createTestDb();
     executeSubagentQueryMock.mockReset();
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
+      resultText: passingReviewerOutputForAgent(input.agentName),
+    }));
   });
 
   it("passes redacted rework snapshot context to code and security sidecars", async () => {
@@ -412,6 +589,159 @@ describe("runReviewer", () => {
       expect(prompt).toContain("M packages/agent/src/reviewGate.ts");
       expect(prompt).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz1234567890");
       expect(prompt).not.toContain("https://private.example.invalid/secrets");
+    }
+  });
+
+  it("fans out base specialized reviewers for high-risk non-audit tasks", async () => {
+    const calls: Array<{ agentName: string; profileMode?: string }> = [];
+    executeSubagentQueryMock.mockImplementation(
+      async (input: { agentName: string; profileMode?: string }) => {
+        calls.push({ agentName: input.agentName, profileMode: input.profileMode });
+        if (input.agentName === "review-correctness") {
+          return { resultText: failingSpecializedRoleOutput("Correctness blocker") };
+        }
+        if (isSpecializedReviewerAgent(input.agentName)) {
+          return { resultText: passingSpecializedRoleOutput() };
+        }
+        return { resultText: passingSidecarOutput() };
+      },
+    );
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({ id: "project-specialized", name: "Specialized", rootPath: "/tmp/specialized" })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-high-risk-review",
+        projectId: "project-specialized",
+        title: "Update public API contract",
+        description: "High risk schema/API contract change",
+        status: "review",
+        priority: 3,
+        taskIntent: "feature",
+        useSubagents: true,
+        implementationLog: "Changed API contract and ran tests.",
+      })
+      .run();
+
+    await runReviewer("task-high-risk-review", "/tmp/specialized");
+
+    const agentNames = calls.map((call) => call.agentName);
+    expect(agentNames).toEqual(
+      expect.arrayContaining([
+        "review-sidecar",
+        "security-sidecar",
+        "review-correctness",
+        "review-security-data-loss",
+        "review-regression-api-contract",
+      ]),
+    );
+    expect(agentNames).not.toContain("review-audit-evidence");
+    expect(calls.find((call) => call.agentName === "review-security-data-loss")?.profileMode).toBe(
+      "security",
+    );
+
+    const storedTask = db.select().from(tasks).where(eq(tasks.id, "task-high-risk-review")).get();
+    const parsed = parseStructuredReviewComments(storedTask?.reviewComments ?? null);
+    expect(parsed?.blockingFindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "correctness", text: "Correctness blocker" }),
+      ]),
+    );
+  });
+
+  it("requires audit evidence plus base specialized roles for audit tasks by default", async () => {
+    const agentNames: string[] = [];
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => {
+      agentNames.push(input.agentName);
+      if (isSpecializedReviewerAgent(input.agentName)) {
+        return { resultText: passingSpecializedRoleOutput() };
+      }
+      return { resultText: passingSidecarOutput() };
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({ id: "project-audit-fanout", name: "Audit Fanout", rootPath: "/tmp/audit-fanout" })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-fanout",
+        projectId: "project-audit-fanout",
+        title: "Review audit report",
+        description: "Audit evidence review task",
+        status: "review",
+        priority: 0,
+        taskIntent: "audit",
+        useSubagents: true,
+        implementationLog: "Produced an audit report for review.",
+      })
+      .run();
+
+    await runReviewer("task-audit-fanout", "/tmp/audit-fanout");
+
+    expect(agentNames).toEqual(
+      expect.arrayContaining([
+        "review-correctness",
+        "review-security-data-loss",
+        "review-regression-api-contract",
+        "review-audit-evidence",
+      ]),
+    );
+  });
+
+  it("e2e-style fails closed when a required specialized reviewer is unavailable", async () => {
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => {
+      if (input.agentName === "review-regression-api-contract") {
+        throw new Error("runtime policy blocked reviewer role");
+      }
+      if (isSpecializedReviewerAgent(input.agentName)) {
+        return { resultText: passingSpecializedRoleOutput() };
+      }
+      return { resultText: passingSidecarOutput() };
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({ id: "project-e2e-fanout", name: "E2E Fanout", rootPath: "/tmp/e2e-fanout" })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-e2e-fanout",
+        projectId: "project-e2e-fanout",
+        title: "Update public API schema",
+        description: "High risk API contract change",
+        status: "review",
+        priority: 3,
+        taskIntent: "feature",
+        autoMode: true,
+        useSubagents: true,
+        implementationLog: "Changed API schema.",
+      })
+      .run();
+
+    await runReviewer("task-e2e-fanout", "/tmp/e2e-fanout");
+    const storedTask = db.select().from(tasks).where(eq(tasks.id, "task-e2e-fanout")).get();
+    const result = await evaluateReviewCommentsForAutoMode({
+      taskId: "task-e2e-fanout",
+      projectRoot: "/tmp/e2e-fanout",
+      reviewComments: storedTask?.reviewComments ?? null,
+      strategy: "full_re_review",
+      iteration: 1,
+      previousFindings: [],
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    if (result.status === "manual_review_required") {
+      expect(result.autoReviewState.findings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: "regression_api_contract",
+            text: expect.stringContaining("manual_review_required"),
+          }),
+        ]),
+      );
     }
   });
 
@@ -515,7 +845,7 @@ describe("runReviewer", () => {
       "# Runtime Audit",
       "",
       "No validated findings.",
-      "Risk hypotheses: risk-1 for `src` runtime configuration drift was covered and is absent.",
+      "Risk hypotheses: risk-1 for `src` runtime timeout configuration drift was covered and is absent.",
       "",
       "## Evidence Register",
       "",
@@ -548,7 +878,7 @@ describe("runReviewer", () => {
       riskHypotheses: [
         {
           id: "risk-1",
-          description: "Runtime configuration drift",
+          description: "Runtime timeout configuration drift",
           scopeIds: ["src"],
           status: "covered",
           evidenceRefs: ["ev-1"],
@@ -573,7 +903,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-audit-reviewer", projectRoot);
 
-    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    expectDeterministicAuditSpecializedOnlyCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, "task-audit-reviewer")).get();
     expect(storedTask?.reviewComments).toContain("## Blocking Findings");
     expect(storedTask?.reviewComments).toContain("- none");
@@ -641,7 +971,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-invalid-audit-reviewer", projectRoot);
 
-    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    expectDeterministicAuditSpecializedOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -698,7 +1028,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-missing-audit-reviewer", projectRoot);
 
-    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    expectDeterministicAuditSpecializedOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -787,12 +1117,7 @@ describe("runReviewer", () => {
       state: "valid",
       failureFamily: null,
       classification: "validated_no_findings",
-      validationDetails: {
-        auditReportValidation: {
-          manifestStatus: "valid",
-          sourceClassification: "validated_no_findings",
-        },
-      },
+      validationDetails: trustedAuditReportValidationDetails("validated_no_findings"),
     });
 
     const auditPlanId = resolveAuditPlanId({
@@ -845,7 +1170,7 @@ describe("runReviewer", () => {
       }),
       "",
       "No validated findings.",
-      "Risk hypotheses: risk-1 for `src/config.ts` was covered and is absent.",
+      "Risk hypotheses: risk-1 for `src/config.ts` runtime timeout coverage was covered and is absent.",
       "",
       "## Evidence Register",
       "",
@@ -879,7 +1204,7 @@ describe("runReviewer", () => {
       riskHypotheses: [
         {
           id: "risk-1",
-          description: "Synthesis source report coverage",
+          description: "Synthesis runtime timeout coverage",
           scopeIds: ["src/config.ts"],
           status: "covered",
           evidenceRefs: ["ev-synthesis-1"],
@@ -904,7 +1229,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-reviewer", projectRoot);
 
-    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    expectDeterministicAuditSpecializedOnlyCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, "task-synthesis-reviewer")).get();
     expect(storedTask?.reviewComments).toContain("## Blocking Findings");
     expect(storedTask?.reviewComments).toContain("- none");
@@ -914,7 +1239,9 @@ describe("runReviewer", () => {
   });
 
   it("does not let generic synthesis validation bypass persisted source classification mismatch", async () => {
-    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
+      resultText: passingReviewerOutputForAgent(input.agentName),
+    }));
 
     const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-synthesis-generic-bypass-"));
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
@@ -1114,7 +1441,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-generic-bypass", projectRoot);
 
-    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    expectAuditSpecializedFanoutCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -1129,7 +1456,12 @@ describe("runReviewer", () => {
   });
 
   it("accepts trusted deterministic synthesis when source report command evidence lives outside the checkout", async () => {
-    executeSubagentQueryMock.mockRejectedValue(new Error("sidecar should not run"));
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => {
+      if (isSpecializedReviewerAgent(input.agentName)) {
+        return { resultText: passingSpecializedRoleOutput() };
+      }
+      throw new Error("base sidecar should not run");
+    });
 
     const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-synthesis-trusted-"));
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
@@ -1213,12 +1545,7 @@ describe("runReviewer", () => {
         state: "valid",
         failureFamily: null,
         classification: "validated_no_findings",
-        validationDetails: {
-          auditReportValidation: {
-            manifestStatus: "valid",
-            sourceClassification: "validated_no_findings",
-          },
-        },
+        validationDetails: trustedAuditReportValidationDetails("validated_no_findings"),
       });
     }
 
@@ -1274,14 +1601,15 @@ describe("runReviewer", () => {
       }),
       "",
       "No validated findings.",
+      "Risk hypotheses: risk-deterministic-synthesis-no-findings for retries evidence from trusted source reports was covered and absent.",
       "Audit outcome: Validated no-findings with substantive audit evidence.",
-      "Absence reasoning: trusted source reports `audit/source-a.md`, `audit/source-b.md` were each classified as validated_no_findings with substantive child evidence.",
+      "Absence reasoning: risk-deterministic-synthesis-no-findings trusted source reports `audit/source-a.md`, `audit/source-b.md` were each classified as validated_no_findings with substantive child evidence.",
       "",
       "## Evidence Register",
       "",
       "| Source report | Checked evidence | Verification |",
       "| --- | --- | --- |",
-      "| `audit/source-a.md` | `src/config.ts:1` | - Command `git grep -n . -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
+      "| `audit/source-a.md` | `src/config.ts:1` | - Command `git grep -n retries -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
       "| `audit/source-b.md` | `src/config.ts:1` | - Command `git grep -n retries -- src/config.ts` output: ``` src/config.ts:1:export const retries = 2; ``` |",
       "",
       "## Checked Files",
@@ -1290,7 +1618,7 @@ describe("runReviewer", () => {
       "",
       "## Checked Commands",
       "",
-      "- Command `git grep -n . -- src/config.ts` output:",
+      "- Command `git grep -n retries -- src/config.ts` output:",
       "```",
       "src/config.ts:1:export const retries = 2;",
       "```",
@@ -1338,7 +1666,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-trusted-reviewer", projectRoot);
 
-    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    expectDeterministicAuditSpecializedOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -1356,7 +1684,9 @@ describe("runReviewer", () => {
   });
 
   it("falls back to sidecars when synthesis outcome metadata lacks a valid manifest", async () => {
-    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
+      resultText: passingReviewerOutputForAgent(input.agentName),
+    }));
 
     const { db, projectRoot, synthesisTaskId } = seedTrustedSynthesisReviewerFixture({
       idSuffix: "missing-manifest",
@@ -1365,7 +1695,7 @@ describe("runReviewer", () => {
 
     await runReviewer(synthesisTaskId, projectRoot);
 
-    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    expectAuditSpecializedFanoutCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
     expect(storedTask?.reviewComments).not.toContain(
       "- Deterministic Review: audit_synthesis_validation",
@@ -1374,7 +1704,10 @@ describe("runReviewer", () => {
 
   it("falls back to sidecars when prior sidecar blockers exist for trusted synthesis", async () => {
     executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
-      resultText: passingSidecarOutput(input.agentName.includes("security") ? ["sec-prior"] : []),
+      resultText: passingReviewerOutputForAgent(
+        input.agentName,
+        input.agentName.includes("security") ? ["sec-prior"] : [],
+      ),
     }));
 
     const { db, projectRoot, synthesisTaskId } = seedTrustedSynthesisReviewerFixture({
@@ -1390,7 +1723,7 @@ describe("runReviewer", () => {
 
     await runReviewer(synthesisTaskId, projectRoot);
 
-    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    expectAuditSpecializedFanoutCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
     expect(storedTask?.reviewComments).not.toContain(
       "- Deterministic Review: audit_synthesis_validation",
@@ -1399,7 +1732,9 @@ describe("runReviewer", () => {
   });
 
   it("falls back to sidecars when source classifications contradict no-findings synthesis", async () => {
-    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
+      resultText: passingReviewerOutputForAgent(input.agentName),
+    }));
 
     const { db, projectRoot, synthesisTaskId } = seedTrustedSynthesisReviewerFixture({
       idSuffix: "classification-mismatch",
@@ -1408,7 +1743,7 @@ describe("runReviewer", () => {
 
     await runReviewer(synthesisTaskId, projectRoot);
 
-    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    expectAuditSpecializedFanoutCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
     expect(storedTask?.reviewComments).not.toContain(
       "- Deterministic Review: audit_synthesis_validation",
@@ -1596,7 +1931,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-inconclusive-reviewer", projectRoot);
 
-    expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    expectDeterministicAuditSpecializedOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -1613,7 +1948,9 @@ describe("runReviewer", () => {
   });
 
   it("falls back to sidecars when inconclusive synthesis contradicts trusted source reports", async () => {
-    executeSubagentQueryMock.mockResolvedValue({ resultText: passingSidecarOutput() });
+    executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
+      resultText: passingReviewerOutputForAgent(input.agentName),
+    }));
 
     const { db, projectRoot, synthesisTaskId, batchId } = seedTrustedSynthesisReviewerFixture({
       idSuffix: "inconclusive-source-mismatch",
@@ -1711,7 +2048,7 @@ describe("runReviewer", () => {
 
     await runReviewer(synthesisTaskId, projectRoot);
 
-    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    expectAuditSpecializedFanoutCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, synthesisTaskId)).get();
     expect(storedTask?.reviewComments).not.toContain(
       "- Deterministic Review: audit_synthesis_inconclusive",
@@ -1720,7 +2057,8 @@ describe("runReviewer", () => {
 
   it("falls back to sidecars for inconclusive synthesis with prior sidecar blockers", async () => {
     executeSubagentQueryMock.mockImplementation(async (input: { agentName: string }) => ({
-      resultText: passingSidecarOutput(
+      resultText: passingReviewerOutputForAgent(
+        input.agentName,
         input.agentName.includes("security") ? ["sec-inconclusive"] : [],
       ),
     }));
@@ -1910,7 +2248,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-inconclusive-sidecar", projectRoot);
 
-    expect(executeSubagentQueryMock).toHaveBeenCalledTimes(2);
+    expectAuditSpecializedFanoutCalls();
     const storedTask = db
       .select()
       .from(tasks)

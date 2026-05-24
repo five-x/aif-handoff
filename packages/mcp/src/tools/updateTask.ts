@@ -5,8 +5,12 @@ import {
   isTaskIntent,
   logger,
   normalizeTaskIntent,
+  TASK_HIERARCHY_ROLES,
+  TASK_PARENT_CLOSEOUT_POLICIES,
   TASK_INTENTS,
   type TaskIntent,
+  type TaskHierarchyRole,
+  type TaskParentCloseoutPolicy,
 } from "@aif/shared";
 import { findTaskById, updateTask, toTaskResponse } from "@aif/data";
 import { registerMcpTool, type ToolContext } from "./index.js";
@@ -80,6 +84,18 @@ const updateTaskInputSchema: Record<string, z.ZodTypeAny> = {
     .nullable()
     .optional()
     .describe("Optional runtime-specific options for task execution"),
+  parentTaskId: z
+    .string()
+    .uuid()
+    .nullable()
+    .optional()
+    .describe("Optional parent task ID for hierarchy attachment"),
+  hierarchyRole: z.enum(TASK_HIERARCHY_ROLES).optional().describe("Hierarchy role for this task"),
+  parentCloseoutPolicy: z
+    .enum(TASK_PARENT_CLOSEOUT_POLICIES)
+    .nullable()
+    .optional()
+    .describe("Closeout policy for container tasks"),
 };
 
 type UpdateTaskArgs = {
@@ -105,6 +121,9 @@ type UpdateTaskArgs = {
   sourceRef?: string | null;
   skipReview?: boolean;
   tags?: string[];
+  parentTaskId?: string | null;
+  hierarchyRole?: TaskHierarchyRole;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
   taskId: string;
   title?: string;
   useSubagents?: boolean;

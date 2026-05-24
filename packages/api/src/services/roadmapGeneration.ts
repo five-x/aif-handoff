@@ -1437,6 +1437,32 @@ function collectAuditImportArtifact(input: {
   };
 }
 
+function parseStoredTags(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((tag): tag is string => typeof tag === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function auditHierarchyParentTitle(alias: string): string {
+  return `Audit roadmap: ${alias}`;
+}
+
+function isAuditHierarchyParentTask(task: TaskRow, alias: string): boolean {
+  const tags = parseStoredTags(task.tags);
+  return (
+    task.roadmapAlias === alias &&
+    task.taskIntent === "audit" &&
+    task.hierarchyRole === "container" &&
+    tags.includes("audit-roadmap-parent")
+  );
+}
+
 const auditRoadmapHooks: RoadmapWorkflowHooks = Object.freeze({
   assertIntentMatchesRequest(input, resolvedIntent) {
     if (
@@ -1450,7 +1476,10 @@ const auditRoadmapHooks: RoadmapWorkflowHooks = Object.freeze({
     }
   },
   rejectReusedAlias(input) {
-    const existingCount = findTasksByRoadmapAlias(input.projectId, input.roadmapAlias).length;
+    const existingTasks = findTasksByRoadmapAlias(input.projectId, input.roadmapAlias);
+    const existingCount = existingTasks.filter(
+      (task) => !isAuditHierarchyParentTask(task, input.roadmapAlias),
+    ).length;
     const existingBatch = findRoadmapBatchByProjectAlias(input.projectId, input.roadmapAlias);
     if (existingCount === 0 && !existingBatch) return null;
     if (existingCount === 0 && existingBatch) {
@@ -2251,6 +2280,32 @@ function resolveAuditBatchExecutionPolicy(projectRoot: string): RoadmapBatchExec
   return "serialized_shared_checkout";
 }
 
+function createOrReuseAuditHierarchyParent(input: {
+  alias: string;
+  projectId: string;
+  existingTasks: TaskRow[];
+  position: number;
+}): TaskRow | undefined {
+  const existingParent = input.existingTasks.find((task) =>
+    isAuditHierarchyParentTask(task, input.alias),
+  );
+  if (existingParent) return existingParent;
+
+  return createTask({
+    projectId: input.projectId,
+    title: auditHierarchyParentTitle(input.alias),
+    description: `Coordination container for audit roadmap ${input.alias}.`,
+    taskIntent: "audit",
+    roadmapAlias: input.alias,
+    tags: ["roadmap", `rm:${input.alias}`, "audit-roadmap-parent", "diagnostic-only", "kind:audit"],
+    autoMode: false,
+    paused: true,
+    hierarchyRole: "container",
+    parentCloseoutPolicy: "synthesis_child_verified",
+    position: input.position,
+  });
+}
+
 // -- Dedupe + batch creation --
 
 export interface ImportResult {
@@ -2258,6 +2313,7 @@ export interface ImportResult {
   created: number;
   skipped: number;
   taskIds: string[];
+  containerTaskId?: string;
   byPhase: Record<number, { created: number; skipped: number }>;
   batchSummary?: RoadmapBatchSummary;
 }
@@ -2355,6 +2411,26 @@ export function importGeneratedTasks(
     taskIds: [],
     byPhase: {},
   };
+  const auditHierarchyParent =
+    importIntent === "audit"
+      ? createOrReuseAuditHierarchyParent({
+          alias,
+          projectId,
+          existingTasks: existing,
+          position: importPositionStart - 100,
+        })
+      : undefined;
+  if (auditHierarchyParent) {
+    result.containerTaskId = auditHierarchyParent.id;
+    if (auditHierarchyParent.planPath && auditHierarchyParent.planPath !== cfg.paths.plan) {
+      usedPlanPaths.add(auditHierarchyParent.planPath);
+    }
+  } else if (importIntent === "audit") {
+    throw new RoadmapGenerationError(
+      "IMPORT_FAILED",
+      `Failed to create audit roadmap hierarchy parent for ${alias}`,
+    );
+  }
 
   const orderedTasks = generatedTasks
     .map((task, index) => ({ task, index }))
@@ -2423,6 +2499,7 @@ export function importGeneratedTasks(
         importOverrides.useSubagents ?? (taskIntent === "spike" ? true : defaults.useSubagents),
       position: importPositionStart + createdPositionIndex * 100,
       paused: importOverrides.paused ?? false,
+      parentTaskId: auditHierarchyParent?.id ?? null,
     });
 
     if (created) {

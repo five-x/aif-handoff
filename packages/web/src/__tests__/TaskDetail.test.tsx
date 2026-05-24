@@ -152,6 +152,53 @@ const mockBlockedTask: Task = {
   blockedReason: "rate limit",
 };
 
+const mockHierarchyTask: Task = {
+  ...mockTask,
+  id: "detail-hierarchy",
+  title: "Hierarchy Parent",
+  status: "backlog",
+  hierarchyRole: "container",
+  parentCloseoutPolicy: "all_children_verified",
+  childSummary: {
+    childCount: 2,
+    activeChildCount: 1,
+    blockedChildCount: 0,
+    verifiedChildCount: 1,
+  },
+  children: [
+    {
+      id: "detail-child-1",
+      title: "Child One",
+      status: "planning",
+      hierarchyRole: "executable",
+      priority: 1,
+      position: 900,
+      hierarchyDepth: 1,
+      hierarchyPosition: 1000,
+      parentTaskId: "detail-hierarchy",
+      childSummary: {
+        childCount: 0,
+        activeChildCount: 0,
+        blockedChildCount: 0,
+        verifiedChildCount: 0,
+      },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: "detail-child-2",
+      title: "Child Two",
+      status: "verified",
+      hierarchyRole: "executable",
+      priority: 2,
+      position: 1000,
+      hierarchyDepth: 1,
+      hierarchyPosition: 1100,
+      parentTaskId: "detail-hierarchy",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+  ],
+};
+
 const mockAuditDecisionTask: Task = {
   ...mockTask,
   id: "detail-audit-decision",
@@ -369,19 +416,21 @@ vi.mock("@/hooks/useTasks", () => ({
                     ? mockBlockedTask
                     : id === "detail-audit-decision"
                       ? mockAuditDecisionTask
-                      : id === "detail-audit-inconclusive-timeline"
-                        ? mockAuditInconclusiveTimelineTask
-                        : id === "detail-plan-ready-manual"
-                          ? mockPlanReadyManualTask
-                          : id === "detail-review"
-                            ? mockReviewTask
-                            : id === "detail-with-attachment"
-                              ? mockTaskWithAttachment
-                              : id === "detail-no-plan-no-log"
-                                ? mockTaskNoPlanNoLog
-                                : id === "detail-planning-activity"
-                                  ? mockPlanningTaskWithActivityOnly
-                                  : null,
+                      : id === "detail-hierarchy"
+                        ? mockHierarchyTask
+                        : id === "detail-audit-inconclusive-timeline"
+                          ? mockAuditInconclusiveTimelineTask
+                          : id === "detail-plan-ready-manual"
+                            ? mockPlanReadyManualTask
+                            : id === "detail-review"
+                              ? mockReviewTask
+                              : id === "detail-with-attachment"
+                                ? mockTaskWithAttachment
+                                : id === "detail-no-plan-no-log"
+                                  ? mockTaskNoPlanNoLog
+                                  : id === "detail-planning-activity"
+                                    ? mockPlanningTaskWithActivityOnly
+                                    : null,
   }),
   useTaskTimeline: (id: string | null) => ({
     data: id === "detail-audit-inconclusive-timeline" ? mockAuditInconclusiveTimeline : null,
@@ -468,6 +517,18 @@ describe("TaskDetail", () => {
   it("should render task title when open", () => {
     render(<TaskDetail taskId="detail-1" onClose={vi.fn()} />, { wrapper: Wrapper });
     expect(screen.getByText("Detail Task")).toBeDefined();
+  });
+
+  it("renders hierarchy overview and direct children", () => {
+    render(<TaskDetail taskId="detail-hierarchy" onClose={vi.fn()} />, { wrapper: Wrapper });
+    fireEvent.click(screen.getByText("Overview"));
+
+    expect(screen.getByText("Hierarchy Parent")).toBeDefined();
+    expect(screen.getByText("all_children_verified")).toBeDefined();
+    expect(screen.getByText("1/2 verified, 1 active, 0 blocked")).toBeDefined();
+    expect(screen.getByText("Direct children")).toBeDefined();
+    expect(screen.getByText("Child One")).toBeDefined();
+    expect(screen.getByText("Child Two")).toBeDefined();
   });
 
   it("should render task description", () => {

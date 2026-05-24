@@ -572,6 +572,148 @@ describe("tasks API", () => {
       expect(body.status).toBe("backlog");
     });
 
+    it("creates hierarchy children with server-computed fields and ignores computed input", async () => {
+      const parentRes = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Parent",
+          description: "Container",
+          projectId: "test-project",
+          hierarchyRole: "container",
+          parentCloseoutPolicy: "all_children_done",
+        }),
+      });
+      expect(parentRes.status).toBe(201);
+      const parent = await parentRes.json();
+      expect(parent.parentCloseoutPolicy).toBe("all_children_done");
+
+      const childRes = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Child",
+          description: "Leaf",
+          projectId: "test-project",
+          parentTaskId: parent.id,
+          rootTaskId: "caller-root",
+          hierarchyDepth: 99,
+          hierarchyPosition: -1,
+          childSummary: { childCount: 99 },
+          children: [{ id: "caller-child" }],
+        }),
+      });
+
+      expect(childRes.status).toBe(201);
+      const child = await childRes.json();
+      expect(child.parentTaskId).toBe(parent.id);
+      expect(child.rootTaskId).toBe(parent.id);
+      expect(child.hierarchyDepth).toBe(1);
+      expect(child.hierarchyPosition).toBe(1000);
+      expect(child.childSummary).toEqual({
+        childCount: 0,
+        blockedChildCount: 0,
+        activeChildCount: 0,
+        verifiedChildCount: 0,
+      });
+      expect(child.children).toBeUndefined();
+    });
+
+    it("returns controlled 4xx responses for hierarchy create validation failures", async () => {
+      const missingParent = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Missing parent child",
+          projectId: "test-project",
+          parentTaskId: "missing-parent",
+        }),
+      });
+      expect(missingParent.status).toBe(400);
+      await expect(missingParent.json()).resolves.toMatchObject({
+        code: "TASK_HIERARCHY_INVALID",
+      });
+
+      testDb.current
+        .insert(projects)
+        .values([
+          { id: "test-project", name: "Test Project", rootPath: "/tmp/test" },
+          { id: "other-project", name: "Other Project", rootPath: "/tmp/other" },
+        ])
+        .run();
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "foreign-parent",
+          projectId: "other-project",
+          title: "Foreign parent",
+          hierarchyRole: "container",
+        })
+        .run();
+
+      const crossProject = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Cross project child",
+          projectId: "test-project",
+          parentTaskId: "foreign-parent",
+        }),
+      });
+      expect(crossProject.status).toBe(400);
+      await expect(crossProject.json()).resolves.toMatchObject({
+        code: "TASK_HIERARCHY_INVALID",
+      });
+
+      const root = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Root",
+          projectId: "test-project",
+          hierarchyRole: "container",
+        }),
+      });
+      const rootBody = await root.json();
+      const level1 = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Level 1",
+          projectId: "test-project",
+          parentTaskId: rootBody.id,
+          hierarchyRole: "container",
+        }),
+      });
+      const level1Body = await level1.json();
+      const level2 = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Level 2",
+          projectId: "test-project",
+          parentTaskId: level1Body.id,
+          hierarchyRole: "container",
+        }),
+      });
+      expect(level2.status).toBe(201);
+      const level2Body = await level2.json();
+
+      const tooDeep = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Too deep",
+          projectId: "test-project",
+          parentTaskId: level2Body.id,
+        }),
+      });
+      expect(tooDeep.status).toBe(400);
+      const tooDeepBody = await tooDeep.json();
+      expect(tooDeepBody).toMatchObject({ code: "TASK_HIERARCHY_INVALID" });
+      expect(tooDeepBody.error).toContain("depth");
+    });
+
     it("should keep omitted taskIntent as general for ordinary create callers", async () => {
       const res = await app.request("/tasks", {
         method: "POST",
@@ -1789,6 +1931,102 @@ describe("tasks API", () => {
       expect(res.status).toBe(404);
     });
 
+    it("returns controlled 4xx responses for hierarchy update validation failures", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values([
+          {
+            id: "upd-parent",
+            projectId: "test-project",
+            title: "Parent",
+            hierarchyRole: "container",
+            parentCloseoutPolicy: "all_children_verified",
+          },
+          {
+            id: "upd-child",
+            projectId: "test-project",
+            title: "Child",
+            parentTaskId: "upd-parent",
+            rootTaskId: "upd-parent",
+            hierarchyDepth: 1,
+            hierarchyRole: "executable",
+          },
+        ])
+        .run();
+
+      const cycle = await app.request("/tasks/upd-parent", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parentTaskId: "upd-child" }),
+      });
+      expect(cycle.status).toBe(409);
+      await expect(cycle.json()).resolves.toMatchObject({
+        code: "TASK_HIERARCHY_INVALID",
+      });
+
+      const executableParent = await app.request("/tasks/upd-parent", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hierarchyRole: "executable" }),
+      });
+      expect(executableParent.status).toBe(409);
+      const executableParentBody = await executableParent.json();
+      expect(executableParentBody).toMatchObject({ code: "TASK_HIERARCHY_INVALID" });
+      expect(executableParentBody.error).toContain("children");
+    });
+
+    it("keeps path-backed attachments when hierarchy update validation fails", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-put-hierarchy-attach-safe-"));
+      const attachmentDir = join(rootPath, ".ai-factory", "files", "tasks", "upd-h-parent");
+      const attachmentPath = ".ai-factory/files/tasks/upd-h-parent/keep.txt";
+      mkdirSync(attachmentDir, { recursive: true });
+      writeFileSync(join(attachmentDir, "keep.txt"), "old", "utf8");
+      const existingAttachments = [
+        { name: "keep.txt", mimeType: "text/plain", size: 3, content: null, path: attachmentPath },
+      ];
+
+      db.insert(projects)
+        .values({ id: "project-hierarchy-attach", name: "Hierarchy Attach", rootPath })
+        .run();
+      db.insert(tasks)
+        .values([
+          {
+            id: "upd-h-parent",
+            projectId: "project-hierarchy-attach",
+            title: "Parent",
+            attachments: JSON.stringify(existingAttachments),
+            hierarchyRole: "container",
+            parentCloseoutPolicy: "all_children_verified",
+          },
+          {
+            id: "upd-h-child",
+            projectId: "project-hierarchy-attach",
+            title: "Child",
+            parentTaskId: "upd-h-parent",
+            rootTaskId: "upd-h-parent",
+            hierarchyDepth: 1,
+            hierarchyRole: "executable",
+          },
+        ])
+        .run();
+
+      const res = await app.request("/tasks/upd-h-parent", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          hierarchyRole: "executable",
+          attachments: existingAttachments,
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      await expect(res.json()).resolves.toMatchObject({ code: "TASK_HIERARCHY_INVALID" });
+      const row = db.select().from(tasks).where(eq(tasks.id, "upd-h-parent")).get();
+      expect(JSON.parse(row!.attachments)).toEqual(existingAttachments);
+      expect(existsSync(join(attachmentDir, "keep.txt"))).toBe(true);
+    });
+
     it("should update skipReview via PUT", async () => {
       const db = testDb.current;
       db.insert(tasks).values({ id: "upd-sr", projectId: "test-project", title: "SR task" }).run();
@@ -2430,6 +2668,31 @@ describe("tasks API", () => {
         .get();
       expect(blocked?.status).toBe("blocked_external");
       expect(blocked?.blockedReason).toContain("PROJECT_CONFIG_INVALID_BOOLEAN");
+    });
+
+    it("rejects runtime-starting events for container tasks", async () => {
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "task-container-start",
+          projectId: "test-project",
+          title: "Container",
+          description: "",
+          status: "backlog",
+          hierarchyRole: "container",
+          parentCloseoutPolicy: "all_children_verified",
+        })
+        .run();
+
+      const res = await app.request("/tasks/task-container-start/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_ai" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("Container tasks");
     });
 
     it("should return 404 for events on non-existent task", async () => {
@@ -3908,6 +4171,31 @@ describe("tasks API", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.status).toBe("planning");
+    });
+
+    it("should reject request_replanning for container tasks", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-plan-replan-container",
+          projectId: "test-project",
+          title: "Container needs child replanning",
+          status: "plan_ready",
+          autoMode: false,
+          hierarchyRole: "container",
+          parentCloseoutPolicy: "all_children_verified",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-replan-container/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "request_replanning" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("Container tasks");
     });
 
     it("should retry blocked task to blockedFromStatus", async () => {

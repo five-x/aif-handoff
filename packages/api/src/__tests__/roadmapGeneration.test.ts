@@ -1410,13 +1410,19 @@ describe("roadmapGeneration", () => {
       });
 
       expect(result.created).toBe(2);
+      expect(result.containerTaskId).toBeTruthy();
       expect(result.batchSummary?.status).toBe("expected");
       expect(result.batchSummary?.executionPolicy).toBe("serialized_shared_checkout");
       expect(result.batchSummary?.counts.total).toBe(2);
       const storedTasks = findTasksByRoadmapAlias(projectId, "audit");
       const task = storedTasks.find((stored) => stored.title === "Audit: configuration");
       const synthesis = storedTasks.find((stored) => stored.title === "Synthesize audit findings");
+      const parent = storedTasks.find((stored) => stored.id === result.containerTaskId);
+      expect(parent).toBeDefined();
+      expect(parent?.hierarchyRole).toBe("container");
+      expect(parent?.parentCloseoutPolicy).toBe("synthesis_child_verified");
       expect(task).toBeDefined();
+      expect(task?.parentTaskId).toBe(parent?.id);
       expect(task?.taskIntent).toBe("audit");
       expect(task?.plannerMode).toBe("full");
       expect(task?.planDocs).toBe(true);
@@ -1426,9 +1432,12 @@ describe("roadmapGeneration", () => {
       expect(task?.tags).toContain("kind:audit");
       expect(task?.tags).toContain("diagnostic-only");
       expect(synthesis?.paused).toBe(true);
+      expect(synthesis?.parentTaskId).toBe(parent?.id);
       expect(synthesis?.blockedReason).toContain("synthesis_not_ready");
       const batch = findRoadmapBatchByProjectAlias(projectId, "audit");
       expect(batch).toBeDefined();
+      expect(JSON.parse(batch!.createdTaskIdsJson)).toEqual(result.taskIds);
+      expect(JSON.parse(batch!.createdTaskIdsJson)).not.toContain(result.containerTaskId);
       const artifacts = listRoadmapBatchArtifacts(batch!.id);
       expect(artifacts.map((artifact) => artifact.role).sort()).toEqual(["report", "synthesis"]);
       expect(artifacts.map((artifact) => artifact.artifactPath).sort()).toEqual([

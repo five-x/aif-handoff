@@ -35,6 +35,7 @@ const {
   updateTaskComment,
   getLatestHumanComment,
   getLatestReworkComment,
+  buildTaskWorkflowTimeline,
   listProjects,
   findProjectById,
   createProject,
@@ -143,6 +144,23 @@ function makeCodexSnapshot(checkedAt = "2026-04-23T10:00:00.000Z") {
         percentRemaining: 39,
       },
     ],
+  };
+}
+
+function trustedNoFindingsValidationDetails() {
+  return {
+    evidence: {
+      auditReportValidation: {
+        sourceClassification: "validated_no_findings",
+        manifestStatus: "valid",
+        manifestVersion: 1,
+        evidenceDepth: {
+          status: "substantive",
+          trustedNoFindingsSupported: true,
+          reasonCodes: [],
+        },
+      },
+    },
   };
 }
 
@@ -959,10 +977,7 @@ describe("data layer", () => {
         state: "valid",
         failureFamily: null,
         validationDetails: {
-          auditReportValidation: {
-            sourceClassification: "validated_no_findings",
-            manifestStatus: "valid",
-          },
+          ...trustedNoFindingsValidationDetails(),
           auditCardDecision: {
             otzRequirement: "Produce an accepted audit source report.",
             acceptanceCriteria: ["Report artifact exists and is trusted valid."],
@@ -1392,15 +1407,7 @@ describe("data layer", () => {
         taskId: reportTask!.id,
         state: "valid",
         failureFamily: null,
-        validationDetails: {
-          evidence: {
-            auditReportValidation: {
-              sourceClassification: "validated_no_findings",
-              manifestStatus: "valid",
-              manifestVersion: 1,
-            },
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
 
       expect(ready?.synthesisReady).toBe(true);
@@ -1453,15 +1460,7 @@ describe("data layer", () => {
         taskId: reportTask!.id,
         state: "valid",
         failureFamily: null,
-        validationDetails: {
-          evidence: {
-            auditReportValidation: {
-              sourceClassification: "validated_no_findings",
-              manifestStatus: "valid",
-              manifestVersion: 1,
-            },
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
       expect(ready?.synthesisReady).toBe(true);
       expect(findTaskById(synthesisTask!.id)?.paused).toBe(false);
@@ -1522,15 +1521,7 @@ describe("data layer", () => {
         taskId: reportTask!.id,
         state: "valid",
         failureFamily: null,
-        validationDetails: {
-          evidence: {
-            auditReportValidation: {
-              sourceClassification: "validated_no_findings",
-              manifestStatus: "valid",
-              manifestVersion: 1,
-            },
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
 
       expect(ready?.synthesisReady).toBe(true);
@@ -1700,15 +1691,7 @@ describe("data layer", () => {
         taskId: reportTask!.id,
         state: "valid",
         failureFamily: null,
-        validationDetails: {
-          evidence: {
-            auditReportValidation: {
-              sourceClassification: "validated_no_findings",
-              manifestStatus: "valid",
-              manifestVersion: 1,
-            },
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
       const inconclusive = updateRoadmapBatchArtifactState({
         taskId: synthesisTask!.id,
@@ -1796,7 +1779,7 @@ describe("data layer", () => {
       expect(markdownOnly?.synthesisReady).toBe(false);
       expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
 
-      const trusted = updateRoadmapBatchArtifactState({
+      const shallowManifestValid = updateRoadmapBatchArtifactState({
         taskId: reportTask!.id,
         state: "valid",
         failureFamily: null,
@@ -1805,7 +1788,45 @@ describe("data layer", () => {
             sourceClassification: "validated_no_findings",
             manifestStatus: "valid",
             manifestVersion: 1,
+            evidenceDepth: {
+              status: "shallow",
+              trustedNoFindingsSupported: false,
+              reasonCodes: ["shallow_evidence"],
+            },
           },
+        },
+      });
+
+      expect(shallowManifestValid?.counts.valid).toBe(0);
+      expect(shallowManifestValid?.synthesisReady).toBe(false);
+      expect(buildTaskArtifactTrustRollup(reportTask!.id)).toEqual(
+        expect.objectContaining({
+          artifactTrustLevel: "untrusted",
+          reasonCodes: expect.arrayContaining(["shallow_evidence", "untrusted_artifact"]),
+          trustedSynthesisInput: false,
+        }),
+      );
+      const shallowTimeline = buildTaskWorkflowTimeline(reportTask!.id);
+      expect(shallowTimeline?.attempts.at(-1)).toEqual(
+        expect.objectContaining({
+          outcome: "not_evaluated",
+          trustLevel: "untrusted",
+        }),
+      );
+      expect(shallowTimeline?.claims.find((claim) => claim.attemptId !== null)).toEqual(
+        expect.objectContaining({
+          outcome: "not_evaluated",
+          trustLevel: "untrusted",
+        }),
+      );
+      expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+
+      const trusted = updateRoadmapBatchArtifactState({
+        taskId: reportTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          ...trustedNoFindingsValidationDetails(),
           manifest: { sourceSnapshot: "snapshot-1" },
         },
       });
@@ -1857,13 +1878,7 @@ describe("data layer", () => {
         taskId: trustedReportTask!.id,
         state: "valid",
         failureFamily: null,
-        validationDetails: {
-          auditReportValidation: {
-            sourceClassification: "validated_no_findings",
-            manifestStatus: "valid",
-            manifestVersion: 1,
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
       expect(partial?.counts.valid).toBe(1);
       expect(partial?.synthesisReady).toBe(false);
@@ -2058,12 +2073,7 @@ describe("data layer", () => {
       const missingBoundary = updateRoadmapBatchArtifactState({
         taskId: reportTask!.id,
         state: "valid",
-        validationDetails: {
-          auditReportValidation: {
-            sourceClassification: "validated_no_findings",
-            manifestStatus: "valid",
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
       expect(listRoadmapBatchArtifacts(summary.batchId)[0]).toMatchObject({
         state: "invalid",
@@ -2074,12 +2084,7 @@ describe("data layer", () => {
         taskId: reportTask!.id,
         state: "valid",
         attemptBoundaryId: oldBoundary,
-        validationDetails: {
-          auditReportValidation: {
-            sourceClassification: "validated_no_findings",
-            manifestStatus: "valid",
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
       });
 
       const artifact = listRoadmapBatchArtifacts(summary.batchId).find(
@@ -2397,6 +2402,32 @@ describe("data layer", () => {
             text: "Add manual review banner",
           },
         ],
+      });
+    });
+
+    it("preserves specialized reviewer role identity in autoReviewState findings", () => {
+      const t = createTask({ projectId: "proj-1", title: "Specialized", description: "D" });
+      setTaskFields(t!.id, {
+        autoReviewStateJson: JSON.stringify({
+          strategy: "full_re_review",
+          iteration: 1,
+          findings: [
+            {
+              id: "finding-specialized",
+              source: "security_data_loss",
+              text: "manual_review_required: security_data_loss reviewer was unavailable.",
+            },
+          ],
+        }),
+      });
+
+      const raw = findTaskById(t!.id)!;
+      const resp = toTaskResponse(raw);
+
+      expect(resp.autoReviewState?.findings[0]).toEqual({
+        id: "finding-specialized",
+        source: "security_data_loss",
+        text: "manual_review_required: security_data_loss reviewer was unavailable.",
       });
     });
 
@@ -4428,6 +4459,203 @@ describe("data layer", () => {
       ).toBeUndefined();
       expect(markRuntimeWarmupSessionFailed("missing-warmup", "failed")).toBeUndefined();
       expect(clearActiveRuntimeWarmupSessions({ ...scope, model: "missing-model" })).toBe(0);
+    });
+  });
+
+  describe("task hierarchy", () => {
+    it("creates child tasks with server-computed hierarchy metadata and promotes the parent", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Parent",
+        description: "Container candidate",
+      })!;
+
+      const child = createTask({
+        projectId: "proj-1",
+        title: "Child",
+        description: "Leaf",
+        parentTaskId: parent.id,
+        rootTaskId: "caller-root",
+        hierarchyDepth: 99,
+        hierarchyPosition: -1,
+      } as Parameters<typeof createTask>[0] & Record<string, unknown>)!;
+
+      const refreshedParent = findTaskById(parent.id)!;
+      expect(refreshedParent.hierarchyRole).toBe("container");
+      expect(refreshedParent.parentCloseoutPolicy).toBe("all_children_verified");
+      expect(child.parentTaskId).toBe(parent.id);
+      expect(child.rootTaskId).toBe(parent.id);
+      expect(child.hierarchyDepth).toBe(1);
+      expect(child.hierarchyPosition).toBe(1000);
+
+      const response = toTaskResponse(refreshedParent);
+      expect(response.childSummary).toEqual({
+        childCount: 1,
+        blockedChildCount: 0,
+        activeChildCount: 0,
+        verifiedChildCount: 0,
+      });
+      expect(response.children?.[0]?.id).toBe(child.id);
+    });
+
+    it("rejects invalid hierarchy relationships and executable parents with children", () => {
+      const parent = createTask({ projectId: "proj-1", title: "Parent", description: "" })!;
+      const child = createTask({
+        projectId: "proj-1",
+        title: "Child",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+
+      seedProject("proj-2");
+      const otherProjectTask = createTask({
+        projectId: "proj-2",
+        title: "Other",
+        description: "",
+      })!;
+
+      expect(() =>
+        createTask({
+          projectId: "proj-1",
+          title: "Cross",
+          description: "",
+          parentTaskId: otherProjectTask.id,
+        }),
+      ).toThrow(/same project/i);
+      expect(() => updateTask(parent.id, { hierarchyRole: "executable" })).toThrow(/children/i);
+      expect(() => updateTask(parent.id, { parentTaskId: child.id })).toThrow(/cycles/i);
+    });
+
+    it("rolls up all_children_verified parents without auto-verifying them", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Parent",
+        description: "",
+        hierarchyRole: "container",
+      })!;
+      const first = createTask({
+        projectId: "proj-1",
+        title: "First",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+      const second = createTask({
+        projectId: "proj-1",
+        title: "Second",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+
+      updateTaskStatus(first.id, "verified");
+      expect(findTaskById(parent.id)?.status).toBe("backlog");
+
+      updateTaskStatus(second.id, "blocked_external", {
+        blockedFromStatus: "review",
+        blockedReason: "external system unavailable",
+      });
+      expect(findTaskById(parent.id)?.status).toBe("blocked_external");
+
+      updateTaskStatus(second.id, "verified");
+      const rolledUp = findTaskById(parent.id)!;
+      expect(rolledUp.status).toBe("done");
+      expect(rolledUp.status).not.toBe("verified");
+    });
+
+    it("rolls up all_children_done parents when direct children are done or verified", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Parent",
+        description: "",
+        hierarchyRole: "container",
+        parentCloseoutPolicy: "all_children_done",
+      })!;
+      const doneChild = createTask({
+        projectId: "proj-1",
+        title: "Done child",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+      const verifiedChild = createTask({
+        projectId: "proj-1",
+        title: "Verified child",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+
+      updateTaskStatus(doneChild.id, "done");
+      expect(findTaskById(parent.id)?.status).toBe("backlog");
+
+      updateTaskStatus(verifiedChild.id, "verified");
+      const rolledUp = findTaskById(parent.id)!;
+      expect(rolledUp.status).toBe("done");
+      expect(rolledUp.status).not.toBe("verified");
+    });
+
+    it("fails closed for synthesis_child_verified until one audit synthesis child is verified", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Audit parent",
+        description: "",
+        taskIntent: "audit",
+        hierarchyRole: "container",
+        parentCloseoutPolicy: "synthesis_child_verified",
+      })!;
+      const report = createTask({
+        projectId: "proj-1",
+        title: "Audit report",
+        description: "",
+        taskIntent: "audit",
+        parentTaskId: parent.id,
+      })!;
+      const synthesis = createTask({
+        projectId: "proj-1",
+        title: "Audit synthesis",
+        description: "",
+        taskIntent: "audit",
+        parentTaskId: parent.id,
+      })!;
+
+      updateTaskStatus(report.id, "verified");
+      updateTaskStatus(synthesis.id, "verified");
+      expect(findTaskById(parent.id)?.status).toBe("backlog");
+
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-hierarchy",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [report.id, synthesis.id],
+        synthesisTaskId: synthesis.id,
+        artifacts: [
+          { taskId: report.id, role: "report", artifactPath: "reports/report.md" },
+          { taskId: synthesis.id, role: "synthesis", artifactPath: "reports/synthesis.md" },
+        ],
+      });
+
+      expect(findTaskById(parent.id)?.status).toBe("done");
+    });
+
+    it("excludes containers from runtime queue helpers and blocks unsafe child deletion", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Container",
+        description: "",
+        hierarchyRole: "container",
+      })!;
+      const child = createTask({
+        projectId: "proj-1",
+        title: "Child",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+      setTaskFields(parent.id, { status: "planning" });
+
+      expect(findCoordinatorTaskCandidates("planner", 10).map((task) => task.id)).not.toContain(
+        parent.id,
+      );
+      expect(claimBacklogTaskForAdvance(parent.id)).toBe(false);
+      expect(() => deleteTask(parent.id)).toThrow(/child tasks/i);
+      expect(() => deleteTask(child.id)).toThrow(/parent is open/i);
     });
   });
 

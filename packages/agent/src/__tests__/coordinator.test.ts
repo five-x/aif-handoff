@@ -64,6 +64,7 @@ vi.mock("../subagents/implementer.js", () => ({
 }));
 vi.mock("../subagents/reviewer.js", () => ({
   runReviewer: vi.fn().mockResolvedValue(undefined),
+  taskRequiresSpecializedReviewerFanout: vi.fn().mockReturnValue(false),
 }));
 vi.mock("../reviewGate.js", () => ({
   evaluateReviewCommentsForAutoMode: vi.fn().mockResolvedValue({ status: "success" }),
@@ -98,7 +99,8 @@ const {
 const { runPlanner } = await import("../subagents/planner.js");
 const { runPlanChecker } = await import("../subagents/planChecker.js");
 const { runImplementer } = await import("../subagents/implementer.js");
-const { runReviewer } = await import("../subagents/reviewer.js");
+const { runReviewer, taskRequiresSpecializedReviewerFanout } =
+  await import("../subagents/reviewer.js");
 const { handleAutoReviewGate } = await import("../autoReviewHandler.js");
 const { readGitWorktreeReworkSnapshot } = await import("../reworkSnapshot.js");
 const {
@@ -180,6 +182,23 @@ function trustedFindingsValidationDetails(): Record<string, unknown> {
   return {
     evidence: {
       auditReportValidation: { sourceClassification: "validated_findings_present" },
+    },
+  };
+}
+
+function trustedNoFindingsValidationDetails(): Record<string, unknown> {
+  return {
+    evidence: {
+      auditReportValidation: {
+        sourceClassification: "validated_no_findings",
+        manifestStatus: "valid",
+        manifestVersion: 1,
+        evidenceDepth: {
+          status: "substantive",
+          trustedNoFindingsSupported: true,
+          reasonCodes: [],
+        },
+      },
     },
   };
 }
@@ -365,14 +384,7 @@ describe("coordinator", () => {
     updateRoadmapBatchArtifactState({
       taskId: "task-source-valid",
       state: "valid",
-      validationDetails: {
-        evidence: {
-          auditReportValidation: {
-            sourceClassification: "validated_no_findings",
-            manifestStatus: "valid",
-          },
-        },
-      },
+      validationDetails: trustedNoFindingsValidationDetails(),
     });
     updateRoadmapBatchArtifactState({
       taskId: "task-source-missing",
@@ -421,6 +433,7 @@ describe("coordinator", () => {
     expect(handleAutoReviewGate).toHaveBeenCalledWith({
       taskId: "task-worktree",
       projectRoot: "/tmp/test-worktree",
+      force: false,
     });
   });
 
@@ -1058,15 +1071,7 @@ describe("coordinator", () => {
         taskId,
         state: "valid",
         failureFamily: null,
-        validationDetails: {
-          evidence: {
-            auditReportValidation: {
-              sourceClassification: "validated_no_findings",
-              manifestStatus: "valid",
-              manifestVersion: 1,
-            },
-          },
-        },
+        validationDetails: trustedNoFindingsValidationDetails(),
         projectRoot: rootPath,
       });
     });
@@ -1608,6 +1613,64 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
+  it("should force auto review gate for specialized fan-out even when autoMode=false", async () => {
+    const db = testDb.current;
+    vi.mocked(taskRequiresSpecializedReviewerFanout).mockReturnValueOnce(true);
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "manual_review_required",
+      currentIteration: 1,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      handoffReason: "malformed_review_output_fallback",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 1,
+        findings: [
+          {
+            id: "specialized-unavailable",
+            source: "security_data_loss",
+            text: "manual_review_required: security_data_loss reviewer was unavailable.",
+          },
+        ],
+      },
+    });
+    db.insert(tasks)
+      .values({
+        id: "task-review-specialized-manual-mode",
+        projectId: "test-project",
+        title: "Manual mode specialized review",
+        description: "High risk API contract change",
+        status: "review",
+        autoMode: false,
+        taskIntent: "feature",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(handleAutoReviewGate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-review-specialized-manual-mode",
+        force: true,
+      }),
+    );
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-review-specialized-manual-mode"))
+      .get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.autoReviewStateJson).toContain("security_data_loss");
+  });
+
   it("should proceed to done when auto review gate accepts", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -1629,6 +1692,7 @@ describe("coordinator", () => {
     expect(handleAutoReviewGate).toHaveBeenCalledWith({
       taskId: "task-review-auto-log",
       projectRoot: "/tmp/test",
+      force: false,
     });
   });
 
@@ -2792,6 +2856,7 @@ describe("coordinator", () => {
       runtimeId: "qwen-local-agent",
       providerId: "qwen",
       transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
       options: {},
     });
     insertRuntimeProfile({
@@ -2799,6 +2864,7 @@ describe("coordinator", () => {
       runtimeId: "qwen-local-agent",
       providerId: "qwen",
       transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
       options: {},
     });
     db.update(projects)
@@ -2817,7 +2883,14 @@ describe("coordinator", () => {
       })
       .run();
     vi.mocked(runImplementer).mockRejectedValueOnce(
-      new RuntimeExecutionError("fetch failed", undefined, "transport"),
+      new RuntimeExecutionError("fetch failed", undefined, "transport", {
+        providerMeta: {
+          status: "endpoint_request_timeout",
+          profileId: "profile-fast-transport",
+          baseUrl: "http://192.168.88.62:8003/v1",
+          model: "Qwen3.6-27B-Q5_K_M-mtp.gguf",
+        },
+      }),
     );
 
     await pollAndProcess();
@@ -2832,10 +2905,13 @@ describe("coordinator", () => {
     expect(retrying!.manualReviewRequired).toBe(false);
     expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-transport");
     expect(retrying!.runtimeOptionsJson).toContain("profile-fast-transport");
+    expect(retrying!.runtimeOptionsJson).toContain('"failedContextProfileIds"');
     expect(retrying!.runtimeOptionsJson).toContain("transient_runtime_error");
     expect(retrying!.agentActivityLog).toContain(
       "Transient runtime failure scheduled immediate one-shot fallback",
     );
+    expect(retrying!.agentActivityLog).toContain("failedProfile=profile-fast-transport");
+    expect(retrying!.agentActivityLog).toContain("selectedProfile=profile-heavy-transport");
 
     await pollAndProcess();
 
@@ -2846,6 +2922,168 @@ describe("coordinator", () => {
     expect(done!.agentActivityLog).toContain("selectedProfile=profile-heavy-transport");
     expect(done!.runtimeOptionsJson).not.toContain("contextFallback");
     expect(done!.runtimeOptionsJson).toContain("profile-fast-transport");
+  });
+
+  it("keeps attempted failed profile metadata when transient recovery already has an active fallback", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-active-fallback",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
+      options: {},
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-active-fallback",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: {},
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-active-fallback",
+        defaultReviewRuntimeProfileId: "profile-heavy-active-fallback",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-active-fallback-attribution",
+        projectId: "test-project",
+        title: "Active fallback attribution",
+        status: "implementing",
+        retryCount: 1,
+        runtimeOptionsJson: JSON.stringify({
+          __aifRuntimeRecovery: {
+            contextFallback: {
+              stage: "implementer",
+              profileId: "profile-heavy-active-fallback",
+              previousProfileId: "profile-fast-active-fallback",
+              failedProfileId: "profile-fast-active-fallback",
+              reason: "transient_runtime_error",
+              attempt: 1,
+              createdAt: "2026-05-20T00:00:00.000Z",
+            },
+            failedContextProfileIds: {
+              implementer: ["profile-fast-active-fallback"],
+            },
+          },
+        }),
+      })
+      .run();
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("fetch failed", undefined, "transport", {
+        providerMeta: {
+          status: "endpoint_cooldown",
+          previousStatus: "endpoint_request_timeout",
+          profileId: "profile-fast-active-fallback",
+          baseUrl: "http://192.168.88.62:8003/v1",
+          model: "Qwen3.6-27B-Q5_K_M-mtp.gguf",
+        },
+      }),
+    );
+
+    await pollAndProcess();
+
+    const retrying = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-active-fallback-attribution"))
+      .get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.blockedReason).toContain("Runtime transient transport recovery");
+    expect(retrying!.retryCount).toBe(2);
+    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-active-fallback");
+    expect(
+      JSON.parse(retrying!.runtimeOptionsJson!).__aifRuntimeRecovery.failedContextProfileIds
+        .implementer,
+    ).toContain("profile-fast-active-fallback");
+    expect(retrying!.agentActivityLog).toContain("Runtime one-shot fallback before implementer");
+    expect(retrying!.agentActivityLog).toContain("failedProfile=profile-fast-active-fallback");
+    expect(retrying!.agentActivityLog).toContain("selectedProfile=profile-heavy-active-fallback");
+  });
+
+  it("logs attempted profile metadata for cooldown backoff while a durable fallback is active", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-cooldown-attribution",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
+      options: {},
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-cooldown-attribution",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: {},
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-cooldown-attribution",
+        defaultReviewRuntimeProfileId: "profile-heavy-cooldown-attribution",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-cooldown-attribution",
+        projectId: "test-project",
+        title: "Cooldown attribution",
+        status: "implementing",
+        retryCount: 1,
+        runtimeOptionsJson: JSON.stringify({
+          __aifRuntimeRecovery: {
+            contextFallback: {
+              stage: "implementer",
+              profileId: "profile-heavy-cooldown-attribution",
+              previousProfileId: "profile-fast-cooldown-attribution",
+              failedProfileId: "profile-fast-cooldown-attribution",
+              reason: "transient_runtime_error",
+              attempt: 1,
+              createdAt: "2026-05-20T00:00:00.000Z",
+            },
+            failedContextProfileIds: {
+              implementer: ["profile-fast-cooldown-attribution"],
+            },
+          },
+        }),
+      })
+      .run();
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "qwen-local-agent endpoint http://192.168.88.62:8003 is cooling down",
+        undefined,
+        "transport",
+        {
+          retryAfterSeconds: 30,
+          providerMeta: {
+            status: "endpoint_cooldown",
+            profileId: "profile-fast-cooldown-attribution",
+            baseUrl: "http://192.168.88.62:8003/v1",
+            model: "Qwen3.6-27B-Q5_K_M-mtp.gguf",
+            endpointKey: "http://192.168.88.62:8003",
+          },
+        },
+      ),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db.select().from(tasks).where(eq(tasks.id, "task-cooldown-attribution")).get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.retryAfter).not.toBeNull();
+    expect(blocked!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
+    expect(blocked!.agentActivityLog).toContain("Runtime external failure attribution");
+    expect(blocked!.agentActivityLog).toContain("failedProfile=profile-fast-cooldown-attribution");
+    expect(blocked!.agentActivityLog).toContain("status=endpoint_cooldown");
+    expect(blocked!.agentActivityLog).toContain("baseUrl=[REDACTED]");
   });
 
   it("retries audit report timeouts immediately with a bounded source-audit recovery", async () => {
@@ -3004,6 +3242,7 @@ describe("coordinator", () => {
       runtimeId: "qwen-local-agent",
       providerId: "qwen",
       transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
       options: { n_ctx: 32768 },
     });
     insertRuntimeProfile({
@@ -3011,6 +3250,7 @@ describe("coordinator", () => {
       runtimeId: "qwen-local-agent",
       providerId: "qwen",
       transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
       options: { n_ctx: 81920 },
     });
     db.update(projects)
@@ -4078,6 +4318,28 @@ describe("coordinator", () => {
     expect(runImplementer).toHaveBeenCalledWith("task-skip-review", "/tmp/test");
     expect(runReviewer).not.toHaveBeenCalled();
     const task = db.select().from(tasks).where(eq(tasks.id, "task-skip-review")).get();
+    expect(task!.status).toBe("done");
+  });
+
+  it("should not bypass review when specialized reviewer fan-out is required", async () => {
+    vi.mocked(taskRequiresSpecializedReviewerFanout).mockReturnValueOnce(true);
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-skip-review-specialized",
+        projectId: "test-project",
+        title: "Skip review but high risk",
+        status: "implementing",
+        skipReview: true,
+        taskIntent: "general",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-skip-review-specialized", "/tmp/test");
+    expect(runReviewer).toHaveBeenCalledWith("task-skip-review-specialized", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-skip-review-specialized")).get();
     expect(task!.status).toBe("done");
   });
 
@@ -5374,6 +5636,49 @@ describe("coordinator", () => {
       .mocked(runImplementer)
       .mock.calls.filter(([taskId]) => String(taskId).startsWith("qwen-endpoint-task-"));
     expect(qwenCalls).toHaveLength(1);
+  });
+
+  it("routes audit implementation from protected 8003 to compatible 8005 profile", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-audit-8003",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-audit-8005",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultPlanRuntimeProfileId: "profile-audit-8003",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-route-8005",
+        projectId: "test-project",
+        title: "Audit with protected route",
+        taskIntent: "audit",
+        status: "implementing",
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-audit-route-8005", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-audit-route-8005")).get();
+    expect(task!.agentActivityLog).toContain("[runtime-route:audit-8005:profile-audit-8005]");
+    expect(task!.agentActivityLog).toContain("selectedProfile=profile-audit-8003");
+    expect(task!.agentActivityLog).toContain("routedProfile=profile-audit-8005");
   });
 
   it("should serialize branch-isolated parallel projects while task worktrees are disabled", async () => {

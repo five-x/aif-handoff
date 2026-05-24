@@ -72,6 +72,17 @@ const ACTION_BUTTONS_BY_STATUS: Partial<
   ],
 };
 
+const RUNTIME_STARTING_EVENTS = new Set<TaskEvent>([
+  "start_ai",
+  "accept_existing_plan",
+  "start_implementation",
+  "request_replanning",
+  "fast_fix",
+  "retry_from_blocked",
+]);
+
+const RUNTIME_STARTING_ACTION_TYPES = new Set(["open_replanning", "open_fast_fix"]);
+
 function resolveDisplayIntent(task: Task): TaskIntent {
   return task.taskIntent ?? (task.isFix ? "fix" : "general");
 }
@@ -99,8 +110,15 @@ export function TaskDetailHeader({
   planChangeSuccess,
   onClose,
 }: TaskDetailHeaderProps) {
+  const isContainer = task.hierarchyRole === "container";
   const visibleActions = (ACTION_BUTTONS_BY_STATUS[task.status] ?? []).filter(
-    (action) => action.visible?.(task) ?? true,
+    (action) =>
+      (action.visible?.(task) ?? true) &&
+      !(
+        isContainer &&
+        ((action.event && RUNTIME_STARTING_EVENTS.has(action.event)) ||
+          (action.actionType && RUNTIME_STARTING_ACTION_TYPES.has(action.actionType)))
+      ),
   );
   const usageLimitsEnabled = useUsageLimitsEnabled();
   const runtimeLimitDisplay = usageLimitsEnabled
@@ -117,7 +135,7 @@ export function TaskDetailHeader({
   // Pause is also shown in `backlog` so users can park a task that auto-queue
   // would otherwise advance — paused backlog tasks are skipped by both the
   // scheduler and the auto-queue advancer.
-  const showPauseButton = !["done", "verified"].includes(task.status);
+  const showPauseButton = !isContainer && !["done", "verified"].includes(task.status);
 
   return (
     <div className="border-b border-border p-6 pb-4 pr-14">
@@ -163,6 +181,24 @@ export function TaskDetailHeader({
           {task.priority > 0 && (
             <Badge variant="outline" size="sm">
               P{task.priority}
+            </Badge>
+          )}
+          {isContainer && (
+            <Badge
+              size="sm"
+              className="border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+            >
+              CONTAINER
+            </Badge>
+          )}
+          {task.parentTask && (
+            <Badge variant="outline" size="sm" className="max-w-[16rem] truncate">
+              Parent {task.parentTask.title}
+            </Badge>
+          )}
+          {(task.childSummary?.childCount ?? 0) > 0 && (
+            <Badge variant="outline" size="sm">
+              Children {task.childSummary?.verifiedChildCount ?? 0}/{task.childSummary?.childCount}
             </Badge>
           )}
           <Badge variant="outline" size="sm">

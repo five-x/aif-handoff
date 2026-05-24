@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { ChevronUp, ChevronDown, Clock, Pause, Play } from "lucide-react";
 import { STATUS_CONFIG, type Task } from "@aif/shared/browser";
+import { Badge } from "@/components/ui/badge";
 import { TableHeaderCell } from "@/components/ui/table-header-cell";
 import { useReorderTask, useUpdateTask } from "@/hooks/useTasks";
 import { getArtifactTrustPresentation } from "@/lib/artifactTrust";
@@ -10,6 +11,19 @@ interface TaskListTableProps {
   isCompact: boolean;
   onTaskClick: (taskId: string) => void;
   onReorderBacklog?: () => void;
+}
+
+function shortTaskId(id: string) {
+  return id.slice(0, 8);
+}
+
+function childSummaryText(task: Task): string | null {
+  const summary = task.childSummary;
+  if (!summary || summary.childCount === 0) return null;
+  const parts = [`${summary.childCount} child${summary.childCount === 1 ? "" : "ren"}`];
+  if (summary.blockedChildCount > 0) parts.push(`${summary.blockedChildCount} blocked`);
+  if (summary.verifiedChildCount > 0) parts.push(`${summary.verifiedChildCount} verified`);
+  return parts.join(" / ");
 }
 
 export function TaskListTable({
@@ -83,6 +97,9 @@ export function TaskListTable({
         <tbody>
           {tasks.map((task) => {
             const artifactTrust = getArtifactTrustPresentation(task.artifactTrust);
+            const summary = childSummaryText(task);
+            const titleIndent = Math.min(task.hierarchyDepth ?? 0, 2) * (isCompact ? 10 : 14);
+            const canOrder = task.status === "backlog" && task.hierarchyRole !== "container";
             return (
               <tr
                 key={task.id}
@@ -90,16 +107,47 @@ export function TaskListTable({
                 onClick={() => onTaskClick(task.id)}
               >
                 <td className={`px-3 overflow-hidden ${isCompact ? "py-1" : "py-2.5"}`}>
-                  <div
-                    className={`truncate ${isCompact ? "text-xs" : "text-sm"} font-medium tracking-tight`}
-                  >
-                    {task.title}
+                  <div style={{ paddingLeft: titleIndent }}>
+                    <div
+                      className={`truncate ${isCompact ? "text-xs" : "text-sm"} font-medium tracking-tight`}
+                    >
+                      {task.title}
+                    </div>
+                    <div className="mt-0.5 flex flex-wrap gap-1">
+                      {task.hierarchyRole === "container" && (
+                        <Badge
+                          size="xs"
+                          className="border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                        >
+                          Container
+                        </Badge>
+                      )}
+                      {task.parentTask && (
+                        <Badge size="xs" variant="outline">
+                          Parent #{shortTaskId(task.parentTask.id)}
+                        </Badge>
+                      )}
+                      {summary && (
+                        <Badge size="xs" variant="outline">
+                          {summary}
+                        </Badge>
+                      )}
+                    </div>
                   </div>
                   {task.description && (
                     <div
                       className={`truncate text-muted-foreground ${isCompact ? "text-2xs" : "text-xs"}`}
+                      style={{ paddingLeft: titleIndent }}
                     >
                       {task.description}
+                    </div>
+                  )}
+                  {task.parentTask && (
+                    <div
+                      className={`truncate text-muted-foreground ${isCompact ? "text-3xs" : "text-2xs"}`}
+                      style={{ paddingLeft: titleIndent }}
+                    >
+                      {task.parentTask.title}
                     </div>
                   )}
                   {task.scheduledAt && task.status === "backlog" && (
@@ -159,7 +207,7 @@ export function TaskListTable({
                   className={`px-2 ${isCompact ? "py-1" : "py-2.5"}`}
                   onClick={(e) => e.stopPropagation()}
                 >
-                  {task.status === "backlog" ? (
+                  {canOrder ? (
                     <div className="flex items-center justify-center gap-1">
                       <button
                         type="button"

@@ -183,6 +183,18 @@ describe("task state machine", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("rejects retry_from_blocked for specialized reviewer manual-review blocks", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "review" as const,
+      blockedReason: "manual_review_required: specialized reviewer security_data_loss unavailable",
+      manualReviewRequired: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(false);
+  });
+
   it("rejects retry_from_blocked for manual_exception blocked reasons", () => {
     const blocked = {
       ...makeTask("blocked_external"),

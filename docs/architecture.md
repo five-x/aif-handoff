@@ -191,7 +191,7 @@ Auto-review strategy is controlled globally by `AGENT_AUTO_REVIEW_STRATEGY`:
 - `closure_first`: rework cycles verify previously-blocking findings first; only `still_blocking` previous findings can trigger another automatic loop.
 - If `closure_first` resolves previous blockers but the reviewer finds new blockers, max review iterations are reached, the same blocker fingerprint repeats past `AGENT_AUTO_REVIEW_STALL_THRESHOLD`, or audit/report rework resubmits an unchanged artifact, the task moves to `blocked_external` with `manualReviewRequired=true` and preserved `autoReviewState` diagnostics instead of being labeled `done`.
 
-Tasks also have a `skipReview` flag (default `false`). When `true`, the coordinator bypasses the review stage entirely — after successful implementation the task moves directly to `done`, skipping the `review-sidecar` and `security-sidecar` runs. This is useful for small changes or tasks where code review is unnecessary.
+Tasks also have a `skipReview` flag (default `false`). When `true`, the coordinator bypasses the review stage after successful implementation only for tasks that do not require specialized reviewer fan-out. Risky/audit tasks that require specialized fan-out ignore `skipReview`; the coordinator still runs the forced auto-review gate, even when `autoMode=false`, so specialized review blockers cannot be bypassed.
 
 ### Pause / Resume
 

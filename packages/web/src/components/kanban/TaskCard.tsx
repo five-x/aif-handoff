@@ -74,6 +74,16 @@ function runtimeBadgeLabel(runtime: ReturnType<typeof operatorTaskFields>["effec
   return runtime.runtimeId ?? runtime.providerId ?? runtime.source ?? null;
 }
 
+function childSummaryLabel(task: Task): string | null {
+  const summary = task.childSummary;
+  if (!summary || summary.childCount === 0) return null;
+  const parts = [`${summary.childCount} child${summary.childCount === 1 ? "" : "ren"}`];
+  if (summary.activeChildCount > 0) parts.push(`${summary.activeChildCount} active`);
+  if (summary.blockedChildCount > 0) parts.push(`${summary.blockedChildCount} blocked`);
+  if (summary.verifiedChildCount > 0) parts.push(`${summary.verifiedChildCount} verified`);
+  return parts.join(" / ");
+}
+
 export function TaskCard({
   task,
   onClick,
@@ -88,8 +98,11 @@ export function TaskCard({
   const priority = PRIORITY_LABELS[task.priority] ?? PRIORITY_LABELS[0];
   const isCompact = density === "compact";
   const showReorder =
-    task.status === "backlog" && (onMoveUp !== undefined || onMoveDown !== undefined);
-  const showPauseToggle = task.status === "backlog" && onTogglePause !== undefined;
+    task.status === "backlog" &&
+    task.hierarchyRole !== "container" &&
+    (onMoveUp !== undefined || onMoveDown !== undefined);
+  const showPauseToggle =
+    task.status === "backlog" && task.hierarchyRole !== "container" && onTogglePause !== undefined;
   const usageLimitsEnabled = useUsageLimitsEnabled();
   const runtimeLimitDisplay = usageLimitsEnabled
     ? getRuntimeLimitDisplay(task.runtimeLimitSnapshot, {
@@ -103,6 +116,7 @@ export function TaskCard({
   const operatorFields = operatorTaskFields(task);
   const runtimeLabel = runtimeBadgeLabel(operatorFields.effectiveRuntime);
   const blockedFamily = blockedReasonFamily(task.blockedReason);
+  const hierarchySummary = childSummaryLabel(task);
   const hasWorktree = Boolean(
     task.worktreePath || task.branchName || task.artifactTrust?.worktreePath,
   );
@@ -176,6 +190,24 @@ export function TaskCard({
               {priority.label}
             </Badge>
           )}
+          {task.hierarchyRole === "container" && (
+            <Badge
+              size={isCompact ? "xs" : "sm"}
+              className="border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+            >
+              Container
+            </Badge>
+          )}
+          {task.parentTask && (
+            <Badge size={isCompact ? "xs" : "sm"} variant="outline">
+              Parent #{shortTaskId(task.parentTask.id)}
+            </Badge>
+          )}
+          {hierarchySummary && (
+            <Badge size={isCompact ? "xs" : "sm"} variant="outline">
+              {hierarchySummary}
+            </Badge>
+          )}
           <Badge size={isCompact ? "xs" : "sm"} variant="outline">
             {taskIntentContract.label}
           </Badge>
@@ -224,6 +256,14 @@ export function TaskCard({
           className={`line-clamp-2 text-muted-foreground ${isCompact ? "mt-0.5 pl-1.5 text-2xs" : "mt-1.5 pl-2 text-xs"}`}
         >
           {task.description}
+        </div>
+      )}
+
+      {task.parentTask && (
+        <div
+          className={`truncate text-muted-foreground ${isCompact ? "mt-0.5 pl-1.5 text-3xs" : "mt-1 pl-2 text-2xs"}`}
+        >
+          Parent: {task.parentTask.title}
         </div>
       )}
 

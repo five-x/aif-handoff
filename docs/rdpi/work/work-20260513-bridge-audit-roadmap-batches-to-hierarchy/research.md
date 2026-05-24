@@ -2,30 +2,46 @@
 
 # Research
 
-## Task framing and lane
+## Task Framing And Lane
 
-- Pending.
+- Task: `work-20260513-bridge-audit-roadmap-batches-to-hierarchy`
+- Lane: work
+- Intake card: `docs/intake/work/work-20260513-bridge-audit-roadmap-batches-to-hierarchy.md`
+- Scope: attach broad audit roadmap batch tasks to generic hierarchy while preserving roadmap batch artifact readiness semantics.
+- Depends on: schema/API and runtime rollup slices.
 
-## Accepted planning sources
+## Accepted Planning Sources Or Local Facts
 
-- Pending.
+- `packages/api/src/services/roadmapGeneration.ts` imports generated roadmap tasks and creates roadmap batch summaries through workflow hooks.
+- Audit workflow hooks already mark synthesis tasks paused with `synthesis_not_ready` until batch readiness allows synthesis.
+- `packages/data/src/index.ts` owns `createRoadmapBatchContract`, `refreshRoadmapBatchSummary`, artifact attempts/readiness, and synthesis pause/unpause.
+- `roadmap_batches` and `roadmap_batch_artifacts` are authoritative for audit artifact readiness and should not be duplicated into generic hierarchy states.
+- Existing Plan B docs say parent/child audit synthesis should use roadmap batch/artifact contract until generic hierarchy lands, then bridge to hierarchy.
 
-## Same-project memory
+## Same-Project Memory
 
-- Pending.
+- Not used before `PLAN PASS`.
+- Equivalent planning facts came from local sources: the task card, parent RDPI design, repository files, and explorer output.
 
-## Cross-project reusable patterns
+## Cross-Project Reusable Patterns
 
-- Pending.
+- None used.
 
-## Rejected or stale memory candidates
+## Rejected Or Stale Memory Candidates
 
-- Pending.
+- No stale memory accepted.
+
+## Key Risks
+
+- Creating duplicate audit parent tasks on repeated imports.
+- Accidentally treating source inconclusive/invalid/missing artifact states as generic hierarchy states.
+- Weakening `synthesis_not_ready` readiness behavior while attaching children.
 
 ## Open questions
 
-- Pending.
+- Whether existing duplicate import behavior is title-based or batch-based; implementation should preserve the existing child skip behavior while adding deterministic parent reuse.
 
 ## Hypotheses
 
-- Pending.
+- Audit parent creation can be introduced inside the roadmap import service without changing artifact readiness code.
+- Passing `parentTaskId` through generated child creation should be enough for UI and rollup once hierarchy fields exist.

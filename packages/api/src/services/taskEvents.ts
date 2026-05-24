@@ -57,6 +57,7 @@ const RUNTIME_STARTING_EVENTS = new Set<TaskEvent>([
   "start_ai",
   "accept_existing_plan",
   "start_implementation",
+  "request_replanning",
   "fast_fix",
   "retry_from_blocked",
 ]);
@@ -953,6 +954,13 @@ export async function handleTaskEvent(input: EventHandlerInput): Promise<EventHa
   const task = findTaskById(input.taskId);
   if (!task) {
     return { ok: false, status: 404, error: "Task not found" };
+  }
+  if (task.hierarchyRole === "container" && RUNTIME_STARTING_EVENTS.has(input.event)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "Container tasks are coordination surfaces and cannot start runtime execution",
+    };
   }
   const configBlocker = checkConfigGovernanceBlocker(task, input.event);
   if (configBlocker) return configBlocker;

@@ -209,6 +209,12 @@ export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailure
   invalid_line_reference: "invalid_artifact_content",
   missing_report_file_references: "invalid_artifact_content",
   missing_substantive_evidence: "invalid_artifact_content",
+  shallow_evidence: "insufficient_substantive_evidence",
+  inventory_only_evidence: "invalid_inventory_only",
+  irrelevant_grep_match: "insufficient_substantive_evidence",
+  insufficient_scope_depth: "insufficient_substantive_evidence",
+  reused_generic_evidence: "insufficient_substantive_evidence",
+  self_reported_command_output: "insufficient_substantive_evidence",
   missing_declared_scope_root: "invalid_artifact_content",
   missing_scope_coverage: "invalid_artifact_content",
   missing_risk_hypotheses: "invalid_artifact_content",
@@ -318,6 +324,15 @@ export function selectAuditArtifactFailureFamily(input: {
   const issueCodes = input.issueCodes ?? readIssueCodes(input.validationDetails);
   const issueFamily =
     issueCodes.length > 0 ? selectTaskCompletionAuditFailureFamily(issueCodes) : null;
+  const sourceClassification =
+    input.sourceClassification ??
+    readNestedString(input.validationDetails, ["sourceClassification"]);
+  if (
+    sourceClassification === "inventory_only_invalid" &&
+    issueFamily === "insufficient_substantive_evidence"
+  ) {
+    return "invalid_inventory_only";
+  }
   if (
     issueFamily &&
     issueFamily !== "invalid_artifact_content" &&
@@ -326,9 +341,6 @@ export function selectAuditArtifactFailureFamily(input: {
     return issueFamily;
   }
 
-  const sourceClassification =
-    input.sourceClassification ??
-    readNestedString(input.validationDetails, ["sourceClassification"]);
   if (sourceClassification === "inventory_only_invalid") return "invalid_inventory_only";
   if (sourceClassification === "insufficient_substantive_evidence") {
     return "insufficient_substantive_evidence";

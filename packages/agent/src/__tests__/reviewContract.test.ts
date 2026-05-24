@@ -3,6 +3,7 @@ import {
   buildStructuredReviewComments,
   createAutoReviewFindingId,
   normalizeFindingText,
+  parseSpecializedRoleOutput,
   parseStructuredReviewComments,
   parseStructuredSidecarOutput,
 } from "../reviewContract.js";
@@ -137,6 +138,125 @@ describe("reviewContract", () => {
     ).toBeNull();
   });
 
+  it("parses specialized reviewer role output with role-sourced findings", () => {
+    const parsed = parseSpecializedRoleOutput(
+      [
+        "## Verdict",
+        "- FAIL",
+        "",
+        "## Blocking Findings",
+        "- API response shape changed without compatibility coverage",
+        "",
+        "## Advisories",
+        "- packages/api/src/routes/tasks.ts:1 was inspected.",
+        "",
+        "## Previous Findings",
+        "- none",
+      ].join("\n"),
+      "regression_api_contract",
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.blockingFindings).toHaveLength(1);
+    expect(parsed?.blockingFindings[0]).toEqual(
+      expect.objectContaining({
+        source: "regression_api_contract",
+        text: "API response shape changed without compatibility coverage",
+      }),
+    );
+    expect(parsed?.advisories[0]?.source).toBe("regression_api_contract");
+  });
+
+  it("rejects specialized reviewer pass with blockers and inconclusive output", () => {
+    expect(
+      parseSpecializedRoleOutput(
+        [
+          "## Verdict",
+          "- PASS",
+          "",
+          "## Blocking Findings",
+          "- A blocker cannot accompany PASS",
+          "",
+          "## Advisories",
+          "- none",
+          "",
+          "## Previous Findings",
+          "- none",
+        ].join("\n"),
+        "correctness",
+      ),
+    ).toBeNull();
+
+    expect(
+      parseSpecializedRoleOutput(
+        [
+          "## Verdict",
+          "- INCONCLUSIVE",
+          "",
+          "## Blocking Findings",
+          "- none",
+          "",
+          "## Advisories",
+          "- Evidence was ambiguous.",
+          "",
+          "## Previous Findings",
+          "- none",
+        ].join("\n"),
+        "security_data_loss",
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects specialized reviewer pass without concrete inspection evidence", () => {
+    const withoutAdvisoryEvidence = [
+      "## Verdict",
+      "- PASS",
+      "",
+      "## Blocking Findings",
+      "- none",
+      "",
+      "## Advisories",
+      "- none",
+      "",
+      "## Previous Findings",
+      "- none",
+    ].join("\n");
+    const genericAdvisory = [
+      "## Verdict",
+      "- PASS",
+      "",
+      "## Blocking Findings",
+      "- none",
+      "",
+      "## Advisories",
+      "- Everything looks good after review.",
+      "",
+      "## Previous Findings",
+      "- none",
+    ].join("\n");
+
+    expect(parseSpecializedRoleOutput(withoutAdvisoryEvidence, "correctness")).toBeNull();
+    expect(parseSpecializedRoleOutput(genericAdvisory, "regression_api_contract")).toBeNull();
+  });
+
+  it("rejects specialized reviewer output without previous findings section", () => {
+    expect(
+      parseSpecializedRoleOutput(
+        [
+          "## Verdict",
+          "- PASS",
+          "",
+          "## Blocking Findings",
+          "- none",
+          "",
+          "## Advisories",
+          "- packages/agent/src/reviewContract.ts:1 was inspected.",
+        ].join("\n"),
+        "correctness",
+      ),
+    ).toBeNull();
+  });
+
   it("rejects canonical review comments without complete unique security coverage", () => {
     const withoutSecurityCoverage = [
       "## Auto Review Metadata",
@@ -208,8 +328,23 @@ describe("reviewContract", () => {
         ],
         securityCoverage: completeSecurityAuditCoverage,
       },
+      specializedReviews: [
+        {
+          role: "correctness",
+          previousFindings: [],
+          blockingFindings: [
+            {
+              id: createAutoReviewFindingId("correctness", "State transition skips review"),
+              source: "correctness",
+              text: "State transition skips review",
+            },
+          ],
+          advisories: [{ source: "correctness", text: "coordinator.ts:1 inspected" }],
+        },
+      ],
       rawCodeReview: "structured code review",
       rawSecurityAudit: "structured security audit",
+      rawSpecializedReviews: [{ role: "correctness", rawOutput: "raw correctness" }],
     });
 
     const parsed = parseStructuredReviewComments(reviewComments);
@@ -228,13 +363,17 @@ describe("reviewContract", () => {
       },
     ]);
     expect(parsed?.blockingFindings.map((finding) => finding.id)).toContain(previousId);
-    expect(parsed?.advisories).toEqual([
-      {
-        source: "security_audit",
-        text: "Consider masking internal file paths in human-facing comments",
-      },
-    ]);
+    expect(parsed?.advisories).toContainEqual({
+      source: "security_audit",
+      text: "Consider masking internal file paths in human-facing comments",
+    });
     expect(parsed?.securityCoverage).toEqual(completeSecurityAuditCoverage);
+    expect(parsed?.blockingFindings.map((finding) => finding.source)).toContain("correctness");
+    expect(parsed?.advisories).toContainEqual({
+      source: "correctness",
+      text: "coordinator.ts:1 inspected",
+    });
+    expect(reviewComments).toContain("## Raw Specialized Review: correctness");
   });
 
   it("round-trips expanded previous statuses and redacts secret-like review text", () => {

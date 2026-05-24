@@ -33,6 +33,7 @@ export interface RoadmapImportResult {
   created: number;
   skipped: number;
   taskIds: string[];
+  containerTaskId?: string;
 }
 
 interface Props {

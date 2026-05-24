@@ -7,6 +7,8 @@ import {
   MEMORY_ITEM_TYPES,
   MEMORY_SCOPES,
   TASK_EVENTS,
+  TASK_HIERARCHY_ROLES,
+  TASK_PARENT_CLOSEOUT_POLICIES,
   TASK_INTENTS,
   TASK_STATUSES,
   ATTACHMENT_CONTENT_MAX_CHARS,
@@ -142,6 +144,9 @@ export const createTaskSchema = z.object({
   roadmapAlias: z.string().max(200).optional(),
   tags: z.array(z.string().max(100)).max(50).default([]),
   scheduledAt: scheduledAtSchema,
+  parentTaskId: z.string().min(1).nullable().optional(),
+  hierarchyRole: z.enum(TASK_HIERARCHY_ROLES).optional(),
+  parentCloseoutPolicy: z.enum(TASK_PARENT_CLOSEOUT_POLICIES).nullable().optional(),
 });
 
 export const updateTaskSchema = z.object({
@@ -178,6 +183,9 @@ export const updateTaskSchema = z.object({
   modelOverride: z.string().max(200).nullable().optional(),
   runtimeOptions: z.record(z.string(), z.unknown()).nullable().optional(),
   scheduledAt: scheduledAtSchema,
+  parentTaskId: z.string().min(1).nullable().optional(),
+  hierarchyRole: z.enum(TASK_HIERARCHY_ROLES).optional(),
+  parentCloseoutPolicy: z.enum(TASK_PARENT_CLOSEOUT_POLICIES).nullable().optional(),
 });
 
 export const taskEventSchema = z.object({

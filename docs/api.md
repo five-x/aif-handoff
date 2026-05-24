@@ -682,7 +682,7 @@ POST /tasks
 | `priority` | integer | no | `0` | Priority level (0-5) |
 | `autoMode` | boolean | no | `true` | Auto-advance through agent pipeline, including automatic post-review rework loop when fixes are detected |
 | `isFix` | boolean | no | `false` | Marks the task as fix-flow task (uses FIX plan conventions) |
-| `skipReview` | boolean | no | `false` | Skip the review stage — task moves directly from implementing to done |
+| `skipReview` | boolean | no | `false` | Skip the review stage only when specialized reviewer fan-out is not required; risky/audit tasks still run the forced review gate even with `autoMode=false` |
 | `paused` | boolean | no | `false` | Pause agent processing — coordinator skips this task until resumed |
 | `useSubagents` | boolean | no | `false` | Run via custom subagents (`plan-coordinator`, `implement-coordinator`, sidecars). `false` uses `aif-*` skills directly |
 | `runtimeProfileId` | string \| null | no | `null` | Task-specific runtime override. When absent, resolution falls back to project default, then app default, then environment fallback |

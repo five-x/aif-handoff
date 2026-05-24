@@ -21,7 +21,9 @@ export const options = {
 export function setup() {
   const projectId = resolveFirstProjectId();
   if (!projectId) {
-    throw new Error("No project present in the dev DB — seed a project before running k6.");
+    throw new Error(
+      "No project present in the target service DB; seed a project before running k6.",
+    );
   }
   return { projectId };
 }

@@ -18,11 +18,14 @@ import {
   classifyAuditSynthesisOutput,
   formatAttachmentsForPrompt,
   formatTaskIntentContractForPrompt,
+  isRiskyTask,
   resolveAuditPlanId,
   validateAuditReportArtifact,
   type AutoReviewState,
   type AutoReviewFinding,
   type AutoReviewStrategy,
+  SPECIALIZED_REVIEWER_ROLES,
+  type SpecializedReviewerRole,
 } from "@aif/shared";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
 import { flushActivityQueue, logActivity } from "../hooks.js";
@@ -30,9 +33,12 @@ import { buildTaskMemoryContext } from "../memoryContext.js";
 import { executeSubagentQuery, startHeartbeat } from "../subagentQuery.js";
 import {
   buildStructuredReviewComments,
+  buildSpecializedRoleManualReviewOutput,
   createAutoReviewFindingId,
   formatPreviousFindingsForPrompt,
+  parseSpecializedRoleOutput,
   parseStructuredSidecarOutput,
+  type ParsedSpecializedRoleOutput,
 } from "../reviewContract.js";
 
 const log = logger("reviewer");
@@ -50,6 +56,34 @@ const REVIEWER_PROMPT_SECTION_LIMITS = {
   changedFilesSummaryCount: 25,
 };
 
+const SPECIALIZED_REVIEWER_AGENT_NAMES: Record<SpecializedReviewerRole, string> = {
+  correctness: "review-correctness",
+  security_data_loss: "review-security-data-loss",
+  regression_api_contract: "review-regression-api-contract",
+  audit_evidence: "review-audit-evidence",
+};
+
+const SPECIALIZED_REVIEWER_WORKFLOW_KINDS: Record<SpecializedReviewerRole, string> = {
+  correctness: "review-correctness",
+  security_data_loss: "review-security-data-loss",
+  regression_api_contract: "review-regression-api-contract",
+  audit_evidence: "review-audit-evidence",
+};
+
+type SpecializedReviewerInput = {
+  role: SpecializedReviewerRole;
+  prompt: string;
+};
+
+type SpecializedReviewerResult = {
+  role: SpecializedReviewerRole;
+  rawOutput: string;
+  parsed: ParsedSpecializedRoleOutput;
+};
+
+const HIGH_RISK_REVIEW_PATTERN =
+  /\b(high[-_\s]?risk|critical|security|auth|permission|sandbox|secret|token|credential|data[-_\s]?loss|destructive|delete|migration|schema|database|regression|api[-_\s]?contract|breaking[-_\s]?change|public[-_\s]?api)\b/i;
+
 function compactReviewerPromptText(label: string, value: string, maxChars: number): string {
   const redacted = redactProviderText(value)
     .replace(/\[REDACTED\]\]+/g, "[REDACTED]")
@@ -62,6 +96,247 @@ function compactReviewerPromptBlock(label: string, value: string, maxChars: numb
   const trimmed = value.trim();
   if (trimmed.length <= maxChars) return trimmed;
   return `${trimmed.slice(0, maxChars).trimEnd()} [... ${label} truncated ...]`;
+}
+
+function isAuditReviewTask(task: TaskRow, roadmapArtifact: unknown): boolean {
+  return (
+    task.taskIntent === "audit" ||
+    isRiskyTask(task) ||
+    Boolean(roadmapArtifact) ||
+    /\b(audit|evidence|findings?|report|synthesis)\b/i.test(
+      [task.title, task.description, task.roadmapAlias, task.tags].filter(Boolean).join("\n"),
+    )
+  );
+}
+
+function isHighRiskReviewTask(task: TaskRow): boolean {
+  return (
+    task.priority >= 3 ||
+    HIGH_RISK_REVIEW_PATTERN.test(
+      [task.title, task.description, task.roadmapAlias, task.tags].filter(Boolean).join("\n"),
+    )
+  );
+}
+
+export function resolveRequiredSpecializedReviewerRoles(
+  task: TaskRow,
+  roadmapArtifact: unknown,
+): SpecializedReviewerRole[] {
+  const roles = new Set<SpecializedReviewerRole>();
+  const auditReviewTask = isAuditReviewTask(task, roadmapArtifact);
+  if (auditReviewTask || isHighRiskReviewTask(task)) {
+    roles.add("correctness");
+    roles.add("security_data_loss");
+    roles.add("regression_api_contract");
+  }
+  if (auditReviewTask) {
+    roles.add("audit_evidence");
+  }
+  return SPECIALIZED_REVIEWER_ROLES.filter((role) => roles.has(role));
+}
+
+export function taskRequiresSpecializedReviewerFanout(
+  task: TaskRow,
+  roadmapArtifact: unknown,
+): boolean {
+  return resolveRequiredSpecializedReviewerRoles(task, roadmapArtifact).length > 0;
+}
+
+function roleFocus(role: SpecializedReviewerRole): string {
+  if (role === "correctness") {
+    return "Correctness: verify implemented behavior matches the task, edge cases are handled, and the implementation does not contain logic errors.";
+  }
+  if (role === "security_data_loss") {
+    return "Security and data loss: verify secret handling, auth/permission boundaries, unsafe shell/file/network behavior, and destructive or irreversible data changes.";
+  }
+  if (role === "regression_api_contract") {
+    return "Regression and API contract: verify public interfaces, persisted schema/contract compatibility, runtime configuration, and backwards-compatible behavior.";
+  }
+  return "Audit evidence: verify audit/report/synthesis claims are source-backed, cite concrete repository evidence, and do not rely on placeholders, speculative claims, or untrusted artifacts.";
+}
+
+function buildSpecializedReviewerPrompt(input: {
+  role: SpecializedReviewerRole;
+  scopeConstraint: string;
+  task: TaskRow;
+  taskIntentContract: string;
+  auditSynthesisContext: string;
+  auditArtifactReviewScopeBlock: string;
+  strategy: AutoReviewStrategy;
+  reviewIteration: number;
+  previousFindings: string;
+  autoReviewReworkContext: string;
+}): string {
+  return `Specialized review role: ${input.role}
+${roleFocus(input.role)}
+
+${input.scopeConstraint}
+
+Title: ${input.task.title}
+Description: ${input.task.description}
+Task intent contract:
+${input.taskIntentContract}
+
+Task attachments:
+${formatAttachmentsForPrompt(input.task.attachments)}
+
+Implementation Log:
+${input.task.implementationLog ?? "No implementation log available."}
+
+${input.auditSynthesisContext}
+
+${input.auditArtifactReviewScopeBlock}
+
+Auto-review strategy: ${input.strategy}
+Review iteration: ${input.reviewIteration}
+
+Previous Findings Input:
+${input.previousFindings}
+
+Auto-review rework context:
+${input.autoReviewReworkContext}
+
+Output contract:
+Return markdown only with these exact sections, in this exact order:
+
+## Verdict
+- PASS
+or
+- FAIL
+or
+- INCONCLUSIVE
+
+## Blocking Findings
+- <blocking finding>
+or
+- none
+
+## Advisories
+- <non-blocking advisory with concrete repository evidence inspected>
+or
+- none
+
+## Previous Findings
+- [<id>] resolved | <current-attempt closure evidence>
+- [<id>] still_blocking | <short reason and required evidence>
+- [<id>] new_blocker | <new blocker claim and required fix>
+- [<id>] not_reproducible | <inspection evidence that disproves or cannot reproduce the original blocker>
+- [<id>] manual_review_required | <why automatic closure is unsafe>
+or
+- none
+
+Rules:
+- PASS is valid only when Blocking Findings is exactly "- none".
+- FAIL requires at least one concrete blocking finding.
+- INCONCLUSIVE means automatic review is unsafe and will require manual review.
+- Review is read-only: do not create, edit, delete, move, or commit repository files.
+- Call at least one repository inspection tool before answering.
+- Never include raw secret values, bearer tokens, API keys, client secrets, access tokens, cookies, or private URLs.
+- Reuse only IDs provided in Previous Findings input. New Blocking Findings should be written without invented IDs.
+- Do not add any headings before, between, or after these sections.
+- Do not use code fences.`;
+}
+
+async function runSpecializedReviewerRole(input: {
+  role: SpecializedReviewerRole;
+  prompt: string;
+  taskId: string;
+  projectRoot: string;
+  sidecarBudget: number | null;
+  useSubagents: boolean;
+  scopeConstraint: string;
+  maxTurns?: number;
+  repositoryInspectionToolBudget?: number;
+  profileMode?: "reviewer" | "security";
+}): Promise<{
+  role: SpecializedReviewerRole;
+  rawOutput: string;
+  parsed: ParsedSpecializedRoleOutput;
+}> {
+  const agentName = SPECIALIZED_REVIEWER_AGENT_NAMES[input.role];
+  const workflowKind = SPECIALIZED_REVIEWER_WORKFLOW_KINDS[input.role];
+  const prompt = input.useSubagents ? input.prompt : `/aif-review ${input.prompt}`;
+  const workflowSpec = createRuntimeWorkflowSpec({
+    workflowKind,
+    prompt,
+    requiredCapabilities: input.useSubagents
+      ? ["supportsAgentDefinitions", "supportsRepositoryTools"]
+      : ["supportsRepositoryTools"],
+    agentDefinitionName: input.useSubagents ? agentName : undefined,
+    fallbackSlashCommand: "/aif-review",
+    fallbackStrategy: input.useSubagents ? "slash_command" : "none",
+    sessionReusePolicy: "new_session",
+    systemPromptAppend: input.scopeConstraint,
+    metadata: { specializedReviewerRole: input.role },
+  });
+
+  try {
+    const rawOutput = await runSidecar(
+      prompt,
+      input.taskId,
+      input.projectRoot,
+      agentName,
+      input.sidecarBudget,
+      input.useSubagents,
+      workflowSpec,
+      "/aif-review",
+      input.maxTurns,
+      input.repositoryInspectionToolBudget,
+      input.profileMode,
+    );
+    const parsed =
+      parseSpecializedRoleOutput(rawOutput, input.role) ??
+      buildSpecializedRoleManualReviewOutput({
+        role: input.role,
+        reason: "returned INCONCLUSIVE or malformed output.",
+      });
+    return { role: input.role, rawOutput, parsed };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      role: input.role,
+      rawOutput: `Unavailable: ${message}`,
+      parsed: buildSpecializedRoleManualReviewOutput({
+        role: input.role,
+        reason: `was unavailable: ${message}`,
+      }),
+    };
+  }
+}
+
+async function runSpecializedReviewerInputs(input: {
+  reviewerInputs: SpecializedReviewerInput[];
+  taskId: string;
+  projectRoot: string;
+  sidecarBudget: number | null;
+  useSubagents: boolean;
+  scopeConstraint: string;
+  maxTurns?: number;
+  repositoryInspectionToolBudget?: number;
+}): Promise<SpecializedReviewerResult[]> {
+  const runOne = (reviewerInput: SpecializedReviewerInput) =>
+    runSpecializedReviewerRole({
+      role: reviewerInput.role,
+      prompt: reviewerInput.prompt,
+      taskId: input.taskId,
+      projectRoot: input.projectRoot,
+      sidecarBudget: input.sidecarBudget,
+      useSubagents: input.useSubagents,
+      scopeConstraint: input.scopeConstraint,
+      maxTurns: input.maxTurns,
+      repositoryInspectionToolBudget: input.repositoryInspectionToolBudget,
+      profileMode: reviewerInput.role === "security_data_loss" ? "security" : "reviewer",
+    });
+
+  if (input.useSubagents) {
+    return Promise.all(input.reviewerInputs.map(runOne));
+  }
+
+  const results: SpecializedReviewerResult[] = [];
+  for (const reviewerInput of input.reviewerInputs) {
+    results.push(await runOne(reviewerInput));
+  }
+  return results;
 }
 
 function formatReviewerAutoReviewStateForPrompt(state: AutoReviewState | null | undefined): string {
@@ -199,12 +474,22 @@ function buildStructuredReviewContractFailureComments(input: {
   parsedSecurity: boolean;
   rawCodeReview: string;
   rawSecurityAudit: string;
+  specializedReviews?: ParsedSpecializedRoleOutput[];
+  rawSpecializedReviews?: Array<{ role: SpecializedReviewerRole; rawOutput: string }>;
 }): string {
   const failedSidecars = [
     !input.parsedReview ? "code_review" : null,
     !input.parsedSecurity ? "security_audit" : null,
   ].filter((entry): entry is string => Boolean(entry));
   const note = `${STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT} Failed sidecar(s): ${failedSidecars.join(", ")}.`;
+  const specializedBlockingFindings = (input.specializedReviews ?? []).flatMap((review) =>
+    review.blockingFindings.map(
+      (finding) => `- [${finding.id}] ${finding.source} | ${finding.text}`,
+    ),
+  );
+  const specializedAdvisories = (input.specializedReviews ?? []).flatMap((review) =>
+    review.advisories.map((advisory) => `- ${advisory.source} | ${advisory.text}`),
+  );
 
   return [
     "## Auto Review Metadata",
@@ -217,9 +502,11 @@ function buildStructuredReviewContractFailureComments(input: {
     "",
     "## Blocking Findings",
     `- [structured-review-contract] review_gate | ${note}`,
+    ...specializedBlockingFindings,
     "",
     "## Advisories",
     "- review_gate | Raw sidecar output is retained below with provider-text redaction applied.",
+    ...specializedAdvisories,
     "",
     "## Security Coverage",
     "- secret_leaks | not_checked | Structured review contract failed before secret-leak coverage could be trusted.",
@@ -232,6 +519,11 @@ function buildStructuredReviewContractFailureComments(input: {
     "",
     "## Raw Security Audit",
     redactProviderText(input.rawSecurityAudit.trim()) || "No security audit output.",
+    ...(input.rawSpecializedReviews ?? []).flatMap((review) => [
+      "",
+      `## Raw Specialized Review: ${review.role}`,
+      redactProviderText(review.rawOutput.trim()) || `No ${review.role} reviewer output.`,
+    ]),
   ].join("\n");
 }
 
@@ -246,13 +538,15 @@ async function runSidecar(
   fallbackSlashCommand?: string,
   maxTurns?: number,
   repositoryInspectionToolBudget?: number,
+  profileMode?: "reviewer" | "security",
 ): Promise<string> {
   const { resultText } = await executeSubagentQuery({
     taskId,
     projectRoot,
     agentName,
     prompt,
-    profileMode: workflowSpec.workflowKind === "review-security" ? "security" : "reviewer",
+    profileMode:
+      profileMode ?? (workflowSpec.workflowKind === "review-security" ? "security" : "reviewer"),
     maxBudgetUsd,
     agent: useSubagentAgent ? agentName : undefined,
     workflowSpec,
@@ -775,6 +1069,89 @@ function buildDeterministicAuditSynthesisTrustedReviewComments(input: {
   ].join("\n");
 }
 
+function formatSpecializedPreviousFindingLine(
+  finding: ParsedSpecializedRoleOutput["previousFindings"][number],
+): string {
+  return `- [${finding.id}] ${finding.source} | ${finding.status} | ${finding.note}`;
+}
+
+function formatSpecializedBlockingFindingLine(finding: AutoReviewFinding): string {
+  return `- [${finding.id}] ${finding.source} | ${finding.text}`;
+}
+
+function formatSpecializedAdvisoryLine(
+  advisory: ParsedSpecializedRoleOutput["advisories"][number],
+): string {
+  return `- ${advisory.source} | ${advisory.text}`;
+}
+
+function updateStructuredListSection(lines: string[], heading: string, addedItems: string[]): void {
+  if (addedItems.length === 0) return;
+  const headingIndex = lines.findIndex((line) => line.trim() === heading);
+  if (headingIndex < 0) return;
+
+  const start = headingIndex + 1;
+  let end = lines.length;
+  for (let index = start; index < lines.length; index += 1) {
+    if (lines[index]?.startsWith("## ")) {
+      end = index;
+      break;
+    }
+  }
+
+  const currentItems = lines.slice(start, end).filter((line) => line.trim().length > 0);
+  const existingItems =
+    currentItems.length === 1 && currentItems[0]?.trim().toLowerCase() === "- none"
+      ? []
+      : currentItems;
+  lines.splice(start, end - start, ...existingItems, ...addedItems);
+}
+
+function mergeSpecializedResultsIntoStructuredReviewComments(
+  reviewComments: string,
+  specializedResults: SpecializedReviewerResult[],
+): string {
+  if (specializedResults.length === 0) return reviewComments;
+
+  const previousFindingLines = specializedResults.flatMap((result) =>
+    result.parsed.previousFindings.map(formatSpecializedPreviousFindingLine),
+  );
+  const blockingFindingLines = specializedResults.flatMap((result) => [
+    ...result.parsed.previousFindings
+      .filter((finding) =>
+        ["still_blocking", "new_blocker", "manual_review_required"].includes(finding.status),
+      )
+      .map((finding) =>
+        formatSpecializedBlockingFindingLine({
+          id: finding.id,
+          source: finding.source,
+          text: finding.note,
+          status: finding.status,
+          closureEvidence: finding.closureEvidence,
+        }),
+      ),
+    ...result.parsed.blockingFindings.map(formatSpecializedBlockingFindingLine),
+  ]);
+  const advisoryLines = specializedResults.flatMap((result) =>
+    result.parsed.advisories.map(formatSpecializedAdvisoryLine),
+  );
+
+  const lines = reviewComments.split(/\r?\n/);
+  updateStructuredListSection(lines, "## Previous Findings", previousFindingLines);
+  updateStructuredListSection(lines, "## Blocking Findings", blockingFindingLines);
+  updateStructuredListSection(lines, "## Advisories", advisoryLines);
+
+  for (const result of specializedResults) {
+    lines.push(
+      "",
+      `## Raw Specialized Review: ${result.role}`,
+      redactProviderText(result.rawOutput.trim()) || `No ${result.role} reviewer output.`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
 function recordDeterministicAuditReportReviewActivity(taskId: string, artifactPath: string): void {
   logActivity(taskId, "Agent", "review-gate started (deterministic audit report validation)");
   logActivity(taskId, "Tool", `read_file ${artifactPath}`);
@@ -819,6 +1196,7 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
   const securityPreviousFindings = formatPreviousFindingsForPrompt(securityPreviousFindingState);
   const autoReviewReworkContext = formatReviewerAutoReviewStateForPrompt(task.autoReviewState);
   const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
+  const specializedReviewerRoles = resolveRequiredSpecializedReviewerRoles(task, roadmapArtifact);
   const auditSynthesisContext =
     roadmapArtifact?.role === "synthesis"
       ? [
@@ -836,7 +1214,14 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
       : "Audit synthesis batch context: not a roadmap-batch synthesis task.";
 
   log.info(
-    { taskId, title: task.title, useSubagents, strategy, reviewIteration },
+    {
+      taskId,
+      title: task.title,
+      useSubagents,
+      strategy,
+      reviewIteration,
+      specializedReviewerRoles,
+    },
     "Starting review stage",
   );
 
@@ -918,16 +1303,62 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
   const auditArtifactReviewInspectionToolBudget = auditArtifactReviewScopeBlock
     ? AUDIT_ARTIFACT_REVIEW_INSPECTION_TOOL_BUDGET
     : undefined;
+  const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
+All file reads, searches, and analysis must stay within this directory. Do NOT navigate to parent directories or other projects.`;
+  const taskIntentContract = formatTaskIntentContractForPrompt(task.taskIntent ?? "general");
+  const specializedReviewerInputs = specializedReviewerRoles.map((role) => {
+    const previousFindingState = previousFindings.filter((finding) => finding.source === role);
+    return {
+      role,
+      prompt: buildSpecializedReviewerPrompt({
+        role,
+        scopeConstraint,
+        task,
+        taskIntentContract,
+        auditSynthesisContext,
+        auditArtifactReviewScopeBlock,
+        strategy,
+        reviewIteration,
+        previousFindings: formatPreviousFindingsForPrompt(previousFindingState, role),
+        autoReviewReworkContext,
+      }),
+    };
+  });
+  const runRequiredSpecializedReviewers = async () => {
+    const heartbeatTimer = startHeartbeat(taskId);
+    try {
+      return await runSpecializedReviewerInputs({
+        reviewerInputs: specializedReviewerInputs,
+        taskId,
+        projectRoot,
+        sidecarBudget,
+        useSubagents,
+        scopeConstraint,
+        maxTurns: auditArtifactReviewMaxTurns,
+        repositoryInspectionToolBudget: auditArtifactReviewInspectionToolBudget,
+      });
+    } finally {
+      try {
+        clearInterval(heartbeatTimer);
+      } catch {
+        /* safety guard */
+      }
+    }
+  };
 
   if (canUseDeterministicAuditReportReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const combinedReview = buildDeterministicAuditReportReviewComments({
-      strategy,
-      iteration: reviewIteration,
-      artifactPath: roadmapArtifact.artifactPath,
-      validation: deterministicReviewValidation,
-      previousFindings,
-    });
+    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
+      buildDeterministicAuditReportReviewComments({
+        strategy,
+        iteration: reviewIteration,
+        artifactPath: roadmapArtifact.artifactPath,
+        validation: deterministicReviewValidation,
+        previousFindings,
+      }),
+      specializedRoleResults,
+    );
     setTaskFields(taskId, {
       reviewComments: combinedReview,
       updatedAt: new Date().toISOString(),
@@ -947,13 +1378,17 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
 
   if (canUseDeterministicAuditReportInvalidReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const combinedReview = buildDeterministicAuditReportInvalidReviewComments({
-      strategy,
-      iteration: reviewIteration,
-      artifactPath: roadmapArtifact.artifactPath,
-      validation: deterministicReviewValidation,
-      previousFindings,
-    });
+    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
+      buildDeterministicAuditReportInvalidReviewComments({
+        strategy,
+        iteration: reviewIteration,
+        artifactPath: roadmapArtifact.artifactPath,
+        validation: deterministicReviewValidation,
+        previousFindings,
+      }),
+      specializedRoleResults,
+    );
     setTaskFields(taskId, {
       reviewComments: combinedReview,
       updatedAt: new Date().toISOString(),
@@ -977,18 +1412,22 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
 
   if (canUseDeterministicAuditSynthesisTrustedReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const combinedReview = buildDeterministicAuditSynthesisTrustedReviewComments({
-      strategy,
-      iteration: reviewIteration,
-      artifactPath: roadmapArtifact.artifactPath,
-      outcomeKind:
-        deterministicSynthesisOutcome.kind === "validated_findings_present"
-          ? "validated_findings_present"
-          : "validated_no_findings",
-      sourceReportCount: deterministicSynthesisOutcome.sourceReportCount,
-      validatedFindingCount: deterministicSynthesisOutcome.validatedFindingCount,
-      previousFindings,
-    });
+    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
+      buildDeterministicAuditSynthesisTrustedReviewComments({
+        strategy,
+        iteration: reviewIteration,
+        artifactPath: roadmapArtifact.artifactPath,
+        outcomeKind:
+          deterministicSynthesisOutcome.kind === "validated_findings_present"
+            ? "validated_findings_present"
+            : "validated_no_findings",
+        sourceReportCount: deterministicSynthesisOutcome.sourceReportCount,
+        validatedFindingCount: deterministicSynthesisOutcome.validatedFindingCount,
+        previousFindings,
+      }),
+      specializedRoleResults,
+    );
     setTaskFields(taskId, {
       reviewComments: combinedReview,
       updatedAt: new Date().toISOString(),
@@ -1013,13 +1452,17 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
     (roadmapArtifact.role === "report" || roadmapArtifact.role === "synthesis")
   ) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const combinedReview = buildDeterministicAuditArtifactMissingReviewComments({
-      strategy,
-      iteration: reviewIteration,
-      artifactPath: roadmapArtifact.artifactPath,
-      role: roadmapArtifact.role,
-      previousFindings,
-    });
+    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
+      buildDeterministicAuditArtifactMissingReviewComments({
+        strategy,
+        iteration: reviewIteration,
+        artifactPath: roadmapArtifact.artifactPath,
+        role: roadmapArtifact.role,
+        previousFindings,
+      }),
+      specializedRoleResults,
+    );
     setTaskFields(taskId, {
       reviewComments: combinedReview,
       updatedAt: new Date().toISOString(),
@@ -1039,13 +1482,17 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
 
   if (canUseDeterministicAuditSynthesisInconclusiveReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const combinedReview = buildDeterministicAuditSynthesisInconclusiveReviewComments({
-      strategy,
-      iteration: reviewIteration,
-      artifactPath: roadmapArtifact.artifactPath,
-      outcomeReason: deterministicSynthesisOutcome.reason,
-      previousFindings,
-    });
+    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
+      buildDeterministicAuditSynthesisInconclusiveReviewComments({
+        strategy,
+        iteration: reviewIteration,
+        artifactPath: roadmapArtifact.artifactPath,
+        outcomeReason: deterministicSynthesisOutcome.reason,
+        previousFindings,
+      }),
+      specializedRoleResults,
+    );
     setTaskFields(taskId, {
       reviewComments: combinedReview,
       updatedAt: new Date().toISOString(),
@@ -1067,8 +1514,6 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
     return;
   }
 
-  const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
-All file reads, searches, and analysis must stay within this directory. Do NOT navigate to parent directories or other projects.`;
   const reviewMemoryContext = buildTaskMemoryContext({
     task,
     workflowKind: "reviewer",
@@ -1083,8 +1528,6 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
   });
   const reviewMemoryBlock = reviewMemoryContext ? `\n\n${reviewMemoryContext}\n` : "";
   const securityMemoryBlock = securityMemoryContext ? `\n\n${securityMemoryContext}\n` : "";
-  const taskIntentContract = formatTaskIntentContractForPrompt(task.taskIntent ?? "general");
-
   const reviewOutputContract = `Output contract:
 Return markdown only with these exact sections, in this exact order:
 
@@ -1232,9 +1675,14 @@ ${reviewOutputContract}`;
 
     let reviewResult = "";
     let securityResult = "";
+    let specializedRoleResults: Array<{
+      role: SpecializedReviewerRole;
+      rawOutput: string;
+      parsed: ParsedSpecializedRoleOutput;
+    }> = [];
     try {
       if (useSubagents) {
-        [reviewResult, securityResult] = await Promise.all([
+        const [reviewOutput, securityOutput, ...specializedOutputs] = await Promise.all([
           runSidecar(
             reviewPrompt,
             taskId,
@@ -1259,7 +1707,24 @@ ${reviewOutputContract}`;
             auditArtifactReviewMaxTurns,
             auditArtifactReviewInspectionToolBudget,
           ),
+          ...specializedReviewerInputs.map((input) =>
+            runSpecializedReviewerRole({
+              role: input.role,
+              prompt: input.prompt,
+              taskId,
+              projectRoot,
+              sidecarBudget,
+              useSubagents,
+              scopeConstraint,
+              maxTurns: auditArtifactReviewMaxTurns,
+              repositoryInspectionToolBudget: auditArtifactReviewInspectionToolBudget,
+              profileMode: input.role === "security_data_loss" ? "security" : "reviewer",
+            }),
+          ),
         ]);
+        reviewResult = reviewOutput;
+        securityResult = securityOutput;
+        specializedRoleResults = specializedOutputs;
       } else {
         reviewResult = await runSidecar(
           reviewPrompt,
@@ -1285,6 +1750,23 @@ ${reviewOutputContract}`;
           auditArtifactReviewMaxTurns,
           auditArtifactReviewInspectionToolBudget,
         );
+        specializedRoleResults = [];
+        for (const input of specializedReviewerInputs) {
+          specializedRoleResults.push(
+            await runSpecializedReviewerRole({
+              role: input.role,
+              prompt: input.prompt,
+              taskId,
+              projectRoot,
+              sidecarBudget,
+              useSubagents,
+              scopeConstraint,
+              maxTurns: auditArtifactReviewMaxTurns,
+              repositoryInspectionToolBudget: auditArtifactReviewInspectionToolBudget,
+              profileMode: input.role === "security_data_loss" ? "security" : "reviewer",
+            }),
+          );
+        }
       }
     } finally {
       try {
@@ -1299,7 +1781,7 @@ ${reviewOutputContract}`;
       assertCurrentBranch(projectRoot, task.branchName);
     }
 
-    log.info({ taskId }, "Review and security sidecars completed");
+    log.info({ taskId, specializedReviewerRoles }, "Review sidecars completed");
 
     const parsedReview = parseStructuredSidecarOutput(
       reviewResult,
@@ -1319,8 +1801,13 @@ ${reviewOutputContract}`;
             iteration: reviewIteration,
             codeReview: parsedReview,
             securityAudit: parsedSecurity,
+            specializedReviews: specializedRoleResults.map((result) => result.parsed),
             rawCodeReview: reviewResult,
             rawSecurityAudit: securityResult,
+            rawSpecializedReviews: specializedRoleResults.map((result) => ({
+              role: result.role,
+              rawOutput: result.rawOutput,
+            })),
           })
         : buildStructuredReviewContractFailureComments({
             strategy,
@@ -1329,6 +1816,11 @@ ${reviewOutputContract}`;
             parsedSecurity: Boolean(parsedSecurity),
             rawCodeReview: reviewResult,
             rawSecurityAudit: securityResult,
+            specializedReviews: specializedRoleResults.map((result) => result.parsed),
+            rawSpecializedReviews: specializedRoleResults.map((result) => ({
+              role: result.role,
+              rawOutput: result.rawOutput,
+            })),
           });
 
     if (!parsedReview || !parsedSecurity) {
@@ -1337,6 +1829,7 @@ ${reviewOutputContract}`;
           taskId,
           parsedReview: Boolean(parsedReview),
           parsedSecurity: Boolean(parsedSecurity),
+          specializedReviewerRoles,
         },
         "Structured review contract not satisfied, saving fail-closed review contract blocker",
       );
@@ -1351,8 +1844,14 @@ ${reviewOutputContract}`;
       taskId,
       "Agent",
       useSubagents
-        ? "review stage complete (review-sidecar + security-sidecar)"
-        : "review stage complete (aif-review + aif-security-checklist)",
+        ? `review stage complete (review-sidecar + security-sidecar${
+            specializedReviewerRoles.length > 0
+              ? ` + ${specializedReviewerRoles.map((role) => SPECIALIZED_REVIEWER_AGENT_NAMES[role]).join(" + ")}`
+              : ""
+          })`
+        : `review stage complete (aif-review + aif-security-checklist${
+            specializedReviewerRoles.length > 0 ? " + specialized reviewers" : ""
+          })`,
     );
     log.debug({ taskId }, "Review comments saved to task");
   } catch (err) {

@@ -79,7 +79,7 @@ function withManifest(input: {
     outcome: input.outcome ?? "validated_no_findings",
     scopeCoverage: input.scopeCoverage ?? [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
     riskHypotheses: input.riskHypotheses ?? [
-      { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
+      { id: "risk-1", description: "Runtime timeout configuration drift", status: "covered" },
     ],
     findings:
       input.outcome === "validated_findings_present"
@@ -251,6 +251,1568 @@ describe("auditReportValidator", () => {
     expect(result.substantiveEvidence).toBe(true);
     expect(result.sourceClassification).toBe("validated_no_findings");
     expect(result.existingReferencedPaths).toContain("src/config.ts");
+  });
+
+  it("rejects self-reported search evidence when only the command query matches the risk", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects shell-wrapped search evidence when only the command query matches the risk", () => {
+    const cases = [
+      'powershell -Command "rg -n auth src/config.ts"',
+      'pwsh -Command "rg -n auth src/config.ts"',
+      'cmd /c "rg -n auth src/config.ts"',
+      'bash -lc "rg -n auth src/config.ts"',
+      'sh -c "rg -n auth src/config.ts"',
+    ];
+
+    for (const command of cases) {
+      const root = initRepo();
+      const text = [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        `- Command \`${command}\` output: \`src/config.ts:1:export const timeoutMs = 1000;\``,
+        "",
+        "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+        "",
+      ].join("\n");
+
+      const result = validateAuditReportArtifact({
+        text,
+        projectRoot: root,
+        scopeRoots: ["src/config.ts"],
+        reportArtifactPaths: ["audit/runtime-audit.md"],
+        requireProposedFix: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.sourceClassification).toBe("source_inconclusive");
+      expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+      expect(result.evidenceDepth.reasonCodes).toEqual(
+        expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      );
+    }
+  });
+
+  it("rejects self-reported search evidence when only the output label matches the risk", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output for auth: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects bullet command output when only the output label matches the risk", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output for auth',
+      "- src/config.ts:1:export const timeoutMs = 1000;",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects table command output when only the output label matches the risk", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output for auth',
+      "| src/config.ts:1:export const timeoutMs = 1000; |",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects bullet command output when only a backticked output label matches the risk", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output `for auth`:',
+      "- src/config.ts:1:export const timeoutMs = 1000;",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects table command output when only a backticked output label matches the risk", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output `for auth`:',
+      "| src/config.ts:1:export const timeoutMs = 1000; |",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects first-line output labels followed by unrelated multiline output", () => {
+    const cases = [
+      {
+        label: "output: auth",
+        outputLine: "- src/config.ts:1:export const timeoutMs = 1000;",
+      },
+      {
+        label: "output: for auth",
+        outputLine: "| src/config.ts:1:export const timeoutMs = 1000; |",
+      },
+      {
+        label: "output: `for auth`",
+        outputLine: "- src/config.ts:1:export const timeoutMs = 1000;",
+      },
+    ];
+
+    for (const entry of cases) {
+      const root = initRepo();
+      const text = [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        `- Command \`rg -n "auth" src/config.ts\` ${entry.label}`,
+        entry.outputLine,
+        "",
+        "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+        "",
+      ].join("\n");
+
+      const result = validateAuditReportArtifact({
+        text,
+        projectRoot: root,
+        scopeRoots: ["src/config.ts"],
+        reportArtifactPaths: ["audit/runtime-audit.md"],
+        requireProposedFix: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.sourceClassification).toBe("source_inconclusive");
+      expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+      expect(result.evidenceDepth.reasonCodes).toEqual(
+        expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      );
+    }
+  });
+
+  it("rejects trailing output labels without search result lines", () => {
+    const cases = [
+      {
+        outputLine: "- for auth",
+      },
+      {
+        outputLine: "| for auth |",
+      },
+    ];
+
+    for (const entry of cases) {
+      const root = initRepo();
+      const text = [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "auth" src/config.ts` output:',
+        entry.outputLine,
+        "",
+        "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+        "",
+      ].join("\n");
+
+      const result = validateAuditReportArtifact({
+        text,
+        projectRoot: root,
+        scopeRoots: ["src/config.ts"],
+        reportArtifactPaths: ["audit/runtime-audit.md"],
+        requireProposedFix: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.sourceClassification).toBe("source_inconclusive");
+      expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+      expect(result.evidenceDepth.reasonCodes).toEqual(
+        expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      );
+    }
+  });
+
+  it("rejects inline output labels before unrelated output tokens", () => {
+    const cases = [
+      "output: `for auth`: `src/config.ts:1:export const timeoutMs = 1000;`",
+      "output: for auth src/config.ts:1:export const timeoutMs = 1000;",
+    ];
+
+    for (const labelAndOutput of cases) {
+      const root = initRepo();
+      const text = [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        `- Command \`rg -n "auth" src/config.ts\` ${labelAndOutput}`,
+        "",
+        "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+        "",
+      ].join("\n");
+
+      const result = validateAuditReportArtifact({
+        text,
+        projectRoot: root,
+        scopeRoots: ["src/config.ts"],
+        reportArtifactPaths: ["audit/runtime-audit.md"],
+        requireProposedFix: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.sourceClassification).toBe("source_inconclusive");
+      expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+      expect(result.evidenceDepth.reasonCodes).toEqual(
+        expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      );
+    }
+  });
+
+  it("rejects ledger-backed search evidence when only the command query matches the risk", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      "- Runtime ledger ev-1 search evidence:",
+      '- Command `rg -n "auth" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-auth"],
+    });
+    evidenceUnit.command = { command: 'rg -n "auth" src/config.ts', args: [], cwd: null };
+    evidenceUnit.outputPreview = "src/config.ts:1:export const timeoutMs = 1000;";
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-auth", description: "Auth drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects search_files ledger metadata when only the query matches the risk", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Runtime ledger evidence:",
+      "- Evidence `ev-1` from search_files query `auth` inspected `src/config.ts:1`.",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-auth"],
+    });
+    evidenceUnit.toolName = "search_files";
+    evidenceUnit.evidenceKind = "search";
+    evidenceUnit.command = null;
+    evidenceUnit.outputPreview = [
+      '[search_files query="auth" path=src/config.ts]',
+      "src/config.ts:1:export const timeoutMs = 1000;",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-auth", description: "Auth drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects search_files ledger inline metadata when only the query matches the risk", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Runtime ledger evidence:",
+      "- Evidence `ev-1` from search_files query `auth` inspected `src/config.ts:1`.",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-auth"],
+    });
+    evidenceUnit.toolName = "search_files";
+    evidenceUnit.evidenceKind = "search";
+    evidenceUnit.command = null;
+    evidenceUnit.outputPreview =
+      '[search_files query="auth" path=src/config.ts] src/config.ts:1:export const timeoutMs = 1000;';
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-auth", description: "Auth drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects search_files ledger metadata preceded by prose when only the query matches the risk", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Runtime ledger evidence:",
+      "- Evidence `ev-1` from search_files query `auth` inspected `src/config.ts:1`.",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-auth"],
+    });
+    evidenceUnit.toolName = "search_files";
+    evidenceUnit.evidenceKind = "search";
+    evidenceUnit.command = null;
+    evidenceUnit.outputPreview =
+      'Result: [search_files query="auth" path=src/config.ts] src/config.ts:1:export const timeoutMs = 1000;';
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-auth", description: "Auth drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects unbracketed search_files ledger metadata when only the query matches the risk", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Runtime ledger evidence:",
+      "- Evidence `ev-1` from search_files query `auth` inspected `src/config.ts:1`.",
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-auth"],
+    });
+    evidenceUnit.toolName = "search_files";
+    evidenceUnit.evidenceKind = "search";
+    evidenceUnit.command = null;
+    evidenceUnit.outputPreview =
+      'search_files query="auth" path=src/config.ts src/config.ts:1:export const timeoutMs = 1000;';
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-auth", description: "Auth drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects reordered or pathless search_files ledger metadata when only the query matches the risk", () => {
+    const previews = [
+      'search_files path=src/config.ts query="auth" src/config.ts:1:export const timeoutMs = 1000;',
+      'search_files query="auth" src/config.ts:1:export const timeoutMs = 1000;',
+    ];
+
+    for (const outputPreview of previews) {
+      const root = initRepo();
+      const snapshot = gitSnapshot(root);
+      const body = [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Runtime ledger evidence:",
+        "- Evidence `ev-1` from search_files query `auth` inspected `src/config.ts:1`.",
+        "",
+        "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+        "",
+      ].join("\n");
+      const evidenceUnit = manifestEvidenceUnit({
+        snapshot,
+        scopeIds: ["src/config.ts"],
+        riskHypothesisIds: ["risk-auth"],
+      });
+      evidenceUnit.toolName = "search_files";
+      evidenceUnit.evidenceKind = "search";
+      evidenceUnit.command = null;
+      evidenceUnit.outputPreview = outputPreview;
+
+      const result = validateAuditReportArtifact({
+        text: withManifest({
+          body,
+          snapshot,
+          riskHypotheses: [{ id: "risk-auth", description: "Auth drift", status: "covered" }],
+          noFindingsClaims: [
+            {
+              id: "nf-auth",
+              riskId: "risk-auth",
+              scopeIds: ["src/config.ts"],
+              evidenceRefs: ["ev-1"],
+            },
+          ],
+          scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+        }),
+        projectRoot: root,
+        scopeRoots: ["src/config.ts"],
+        reportArtifactPaths: ["audit/runtime-audit.md"],
+        auditEvidenceUnits: [evidenceUnit],
+        requireLedgerEvidence: true,
+        requireProposedFix: true,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.sourceClassification).toBe("source_inconclusive");
+      expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+      expect(result.evidenceDepth.reasonCodes).toEqual(
+        expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      );
+    }
+  });
+
+  it("accepts search evidence when the observed output is risk-substantive", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      'export const timeoutMs = 1000;\nexport const authMode = "strict";\n',
+      "utf8",
+    );
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:2`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output: `src/config.ts:2:export const authMode = "strict";`',
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:2`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(true);
+  });
+
+  it("accepts shell-wrapped search evidence when the observed output is risk-substantive", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      'export const timeoutMs = 1000;\nexport const authMode = "strict";\n',
+      "utf8",
+    );
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:2`",
+      "",
+      "Checked commands:",
+      '- Command `powershell -Command "rg -n auth src/config.ts"` output: `src/config.ts:2:export const authMode = "strict";`',
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:2`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(true);
+  });
+
+  it("rejects generic grep dumps as trusted no-findings evidence", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      "- Command `git grep -n . -- src/config.ts` output:",
+      "```",
+      "src/config.ts:1:export const timeoutMs = 1000;",
+      "```",
+      "",
+      "Absence reasoning: risk-1 covered `src/config.ts:1`; no actionable finding was identified in the scoped inspection.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("inventory_only_invalid");
+    expect(result.evidenceDepth.status).toBe("shallow");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["inventory_only_evidence", "irrelevant_grep_match"]),
+    );
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["inventory_only_evidence", "irrelevant_grep_match"]),
+    );
+  });
+
+  it("rejects a single no-findings risk with unrelated substantive command evidence", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      'export const timeoutMs = 1000;\nexport const authMode = "strict";\n',
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "expand config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "authMode" src/config.ts` output: `src/config.ts:2:export const authMode = "strict";`',
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.status).toBe("shallow");
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-timeout"),
+    ).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+  });
+
+  it("rejects manifest-backed no-findings risk when ledger evidence does not match the risk", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      'export const timeoutMs = 1000;\nexport const authMode = "strict";\n',
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "expand config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "authMode" src/config.ts` output: `src/config.ts:2:export const authMode = "strict";`',
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-timeout"],
+    });
+    evidenceUnit.command = { command: 'rg -n "authMode" src/config.ts', args: [], cwd: null };
+    evidenceUnit.outputPreview = 'src/config.ts:2:export const authMode = "strict";';
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-timeout", description: "Timeout drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-timeout",
+            riskId: "risk-timeout",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.reasonCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("rejects no-findings risk when the only risk term match is the scoped file path", () => {
+    const root = initRepo();
+    writeFileSync(join(root, "src", "auth.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "src/auth.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add auth source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/auth.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/auth.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/auth.ts` output: `src/auth.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-auth covered `src/auth.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/auth.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-auth")).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+  });
+
+  it("rejects manifest-backed no-findings risk when ledger only matches the risk file path", () => {
+    const root = initRepo();
+    writeFileSync(join(root, "src", "auth.ts"), "export const timeoutMs = 1000;\n", "utf8");
+    execFileSync("git", ["add", "src/auth.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add auth source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/auth.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/auth.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/auth.ts` output: `src/auth.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-auth covered `src/auth.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/auth.ts"],
+      riskHypothesisIds: ["risk-auth"],
+    });
+    evidenceUnit.command = { command: 'rg -n "timeoutMs" src/auth.ts', args: [], cwd: null };
+    evidenceUnit.outputPreview = "src/auth.ts:1:export const timeoutMs = 1000;";
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-auth", description: "Auth drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/auth.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/auth.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/auth.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-auth")).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+  });
+
+  it("rejects reused generic evidence across unrelated no-findings risks", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses:",
+      "- risk-1 `src/config.ts` timeout drift was covered and is absent.",
+      "- risk-2 `src/config.ts` retry drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [
+          { id: "risk-1", description: "Timeout drift", status: "covered" },
+          { id: "risk-2", description: "Retry drift", status: "covered" },
+        ],
+        noFindingsClaims: [
+          { id: "nf-1", riskId: "risk-1", scopeIds: ["src/config.ts"], evidenceRefs: ["ev-1"] },
+          { id: "nf-2", riskId: "risk-2", scopeIds: ["src/config.ts"], evidenceRefs: ["ev-1"] },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [
+        manifestEvidenceUnit({
+          snapshot,
+          scopeIds: ["src/config.ts"],
+          riskHypothesisIds: ["risk-1", "risk-2"],
+        }),
+      ],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.status).toBe("shallow");
+    expect(result.evidenceDepth.reasonCodes).toContain("reused_generic_evidence");
+    expect(result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-2")).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+    expect(issueCodes(result)).toContain("reused_generic_evidence");
+  });
+
+  it("rejects two risks that reuse prose source citations without risk-matching commands", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\nexport const retryCount = 3;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "expand config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses:",
+      "- risk-timeout `src/config.ts` timeout drift was covered and is absent.",
+      "- risk-retry `src/config.ts` retry drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "Absence reasoning: risk-retry covered `src/config.ts:1`; no retry drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-retry")).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+  });
+
+  it("rejects manifest-backed reused prose citations when only one risk has matching ledger evidence", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\nexport const retryCount = 3;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "expand config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses:",
+      "- risk-timeout `src/config.ts` timeout drift was covered and is absent.",
+      "- risk-retry `src/config.ts` retry drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "Absence reasoning: risk-retry covered `src/config.ts:1`; no retry drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-timeout", "risk-retry"],
+    });
+    evidenceUnit.command = { command: 'rg -n "timeoutMs" src/config.ts', args: [], cwd: null };
+    evidenceUnit.outputPreview = "src/config.ts:1:export const timeoutMs = 1000;";
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [
+          { id: "risk-timeout", description: "Timeout drift", status: "covered" },
+          { id: "risk-retry", description: "Retry drift", status: "covered" },
+        ],
+        noFindingsClaims: [
+          {
+            id: "nf-timeout",
+            riskId: "risk-timeout",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+          {
+            id: "nf-retry",
+            riskId: "risk-retry",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-retry")).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+  });
+
+  it("rejects inline multi-risk no-findings when only one risk has matching command evidence", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      'export const timeoutMs = 1000;\nexport const authMode = "strict";\n',
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "expand config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout and risk-auth for `src/config.ts` timeout and auth drift were covered and are absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-auth")).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+  });
+
+  it("rejects manifest-backed inline multi-risk no-findings when ledger evidence matches only one risk", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      'export const timeoutMs = 1000;\nexport const authMode = "strict";\n',
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "expand config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout and risk-auth for `src/config.ts` timeout and auth drift were covered and are absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-timeout", "risk-auth"],
+    });
+    evidenceUnit.command = { command: 'rg -n "timeoutMs" src/config.ts', args: [], cwd: null };
+    evidenceUnit.outputPreview = "src/config.ts:1:export const timeoutMs = 1000;";
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [
+          { id: "risk-timeout", description: "Timeout drift", status: "covered" },
+          { id: "risk-auth", description: "Auth drift", status: "covered" },
+        ],
+        noFindingsClaims: [
+          {
+            id: "nf-timeout",
+            riskId: "risk-timeout",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-auth")).toEqual(
+      expect.objectContaining({
+        status: "shallow",
+        reasonCodes: expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+      }),
+    );
+  });
+
+  it("allows one substantive ledger unit to cover multiple related no-findings risks", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      'export const timeoutMs = 1000;\nexport const authMode = "strict";\n',
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/config.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "expand config", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout and risk-auth for `src/config.ts` timeout and auth drift were covered and are absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `src/config.ts:2`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs|authMode" src/config.ts` output:',
+      "```",
+      "src/config.ts:1:export const timeoutMs = 1000;",
+      'src/config.ts:2:export const authMode = "strict";',
+      "```",
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "Absence reasoning: risk-auth covered `src/config.ts:2`; no auth drift was identified.",
+      "",
+    ].join("\n");
+    const evidenceUnit = manifestEvidenceUnit({
+      snapshot,
+      scopeIds: ["src/config.ts"],
+      riskHypothesisIds: ["risk-timeout", "risk-auth"],
+    });
+    evidenceUnit.command = {
+      command: 'rg -n "timeoutMs|authMode" src/config.ts',
+      args: [],
+      cwd: null,
+    };
+    evidenceUnit.outputPreview = [
+      "src/config.ts:1:export const timeoutMs = 1000;",
+      'src/config.ts:2:export const authMode = "strict";',
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [
+          { id: "risk-timeout", description: "Timeout drift", status: "covered" },
+          { id: "risk-auth", description: "Auth drift", status: "covered" },
+        ],
+        noFindingsClaims: [
+          {
+            id: "nf-timeout",
+            riskId: "risk-timeout",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+          {
+            id: "nf-auth",
+            riskId: "risk-auth",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [evidenceUnit],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(result.evidenceDepth.status).toBe("substantive");
+    expect(issueCodes(result)).not.toContain("reused_generic_evidence");
+  });
+
+  it("does not treat the Risk-Specific Evidence heading as a risk hypothesis", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-timeout covered `src/config.ts:1`; no timeout drift was identified.",
+      "",
+      "## Risk-Specific Evidence",
+      "",
+      '- risk-timeout / `src/config.ts`: Command `rg -n "timeoutMs" src/config.ts` matched `src/config.ts:1`.',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text: withManifest({
+        body,
+        snapshot,
+        riskHypotheses: [{ id: "risk-timeout", description: "Timeout drift", status: "covered" }],
+        noFindingsClaims: [
+          {
+            id: "nf-timeout",
+            riskId: "risk-timeout",
+            scopeIds: ["src/config.ts"],
+            evidenceRefs: ["ev-1"],
+          },
+        ],
+        scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      }),
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      auditEvidenceUnits: [
+        manifestEvidenceUnit({
+          snapshot,
+          scopeIds: ["src/config.ts"],
+          riskHypothesisIds: ["risk-timeout"],
+        }),
+      ],
+      requireLedgerEvidence: true,
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceClassification).toBe("validated_no_findings");
+    expect(result.evidenceDepth.riskHypotheses.map((entry) => entry.id)).not.toContain(
+      "risk-specific",
+    );
   });
 
   it("does not treat tool invocations after source line citations as source assertions", () => {
@@ -504,14 +2066,14 @@ describe("auditReportValidator", () => {
       "# Architecture Audit",
       "",
       "No validated findings.",
-      "Risk hypotheses: risk-readme-boundary for `README.md` ownership routing drift was covered and is absent.",
+      "Risk hypotheses: risk-readme-boundary for `README.md` local inbox and shared memory routing drift was covered and is absent.",
       "",
       "Checked files:",
       "- `README.md:20`",
       "- `README.md:23`",
       "",
       "Checked commands:",
-      "- Command `git grep -n . -- README.md` output:",
+      '- Command `git grep -n -E "Local inbox|Shared Memory" -- README.md` output:',
       "```",
       "README.md:20:1. Local inbox",
       "README.md:23:2. Shared Memory",
@@ -542,13 +2104,13 @@ describe("auditReportValidator", () => {
       "# Configuration Audit",
       "",
       "No validated findings.",
-      "Risk hypotheses: risk-1 for `src/config.ts:1` runtime configuration drift was covered and is absent.",
+      "Risk hypotheses: risk-1 for `src/config.ts:1` runtime timeout configuration drift was covered and is absent.",
       "",
       "Evidence Register",
       "",
       "| Evidence ID | Claim | Evidence | Verification |",
       "|---|---|---|---|",
-      "| ev-1 | risk-1 configuration drift checked | `src/config.ts:1` declares the only timeout constant | search_files evidence ev-1 returned the scoped `timeoutMs` match under `src/config.ts` |",
+      "| ev-1 | risk-1 timeout configuration drift checked | `src/config.ts:1` declares the only timeout constant | search_files evidence ev-1 returned the scoped `timeoutMs` match under `src/config.ts` |",
       "",
       "Absence reasoning: risk-1 was checked against `src/config.ts:1` and substantive runtime ledger search evidence ev-1; no actionable finding was identified in the scoped inspection.",
       "",
@@ -557,7 +2119,7 @@ describe("auditReportValidator", () => {
       body,
       snapshot,
       scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
-      riskHypotheses: [{ id: "risk-1", description: "Runtime configuration drift" }],
+      riskHypotheses: [{ id: "risk-1", description: "Runtime timeout configuration drift" }],
       noFindingsClaims: [{ root: "src/config.ts", riskId: "risk-1", evidenceRefs: ["ev-1"] }],
     });
 
@@ -614,7 +2176,7 @@ describe("auditReportValidator", () => {
       "# Test Readiness Audit",
       "",
       "No validated findings.",
-      "Risk hypotheses: risk-tests for `tests/test_attachments.py` and `tests/test_company_profile.py` fixture coverage was covered and is absent.",
+      "Risk hypotheses: risk-tests for `tests/test_attachments.py` and `tests/test_company_profile.py` file_unique_id, profile path, and joinpath fixture coverage was covered and is absent.",
       "",
       "Checked files:",
       "- `tests/test_attachments.py:4`",
@@ -622,11 +2184,11 @@ describe("auditReportValidator", () => {
       "- `tests/test_company_profile.py:4`",
       "",
       "Checked commands:",
-      "- Command `git grep -n . -- tests/test_attachments.py` output:",
+      '- Command `git grep -n "file_unique_id" -- tests/test_attachments.py` output:',
       "```",
       'tests/test_attachments.py:4:    file_unique_id = "abc123"',
       "```",
-      "- Command `git grep -n . -- tests/test_company_profile.py` output:",
+      '- Command `git grep -n -E "PROFILE_PATH|joinpath" -- tests/test_company_profile.py` output:',
       "```",
       'tests/test_company_profile.py:3:PROFILE_PATH = Path("docs") / "memory" / "entities" / "Intevra" / "company-profile.md"',
       'tests/test_company_profile.py:4:Path("source").joinpath("note.txt").write_text("hello", encoding="utf-8")',
@@ -795,7 +2357,7 @@ describe("auditReportValidator", () => {
       "# Runtime Audit",
       "",
       "No validated findings.",
-      "Risk hypotheses: risk-1 for `src/config.ts` newline serialization handling was covered and is absent.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout configuration handling was covered and is absent.",
       "",
       "Evidence:",
       "- `src/config.ts:1` defines the runtime timeout constant used by the parser fixture.",
@@ -1142,6 +2704,276 @@ describe("auditReportValidator", () => {
     ]);
   });
 
+  it("rejects scoped no-findings without a risk id when command evidence inspects an unrelated term", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      ["export const timeoutMs = 1000;", 'export const authMode = "strict";', ""].join("\n"),
+      "utf8",
+    );
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Scoped no-findings claim: `src/config.ts` timeout configuration risk is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "authMode" src/config.ts` output: `src/config.ts:2:export const authMode = "strict";`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["shallow_evidence", "irrelevant_grep_match"]),
+    );
+    expect(result.evidenceDepth.riskHypotheses).toEqual([
+      expect.objectContaining({
+        id: "scoped-no-findings-1",
+        trustedNoFindingsSupported: false,
+      }),
+    ]);
+  });
+
+  it("rejects mixed explicit-risk and scoped no-risk claims when the scoped command is unrelated", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "worker.ts"),
+      'export function processJob() { return "ok"; }\n',
+      "utf8",
+    );
+
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout for `src/config.ts` timeout configuration was covered and is absent.",
+      "Scoped no-findings claim: `src/worker.ts` queue processing deadlock risk is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `src/worker.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      '- Command `rg -n "processJob" src/worker.ts` output: `src/worker.ts:1:export function processJob() { return "ok"; }`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts and src/worker.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["shallow_evidence", "irrelevant_grep_match"]),
+    );
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-timeout"),
+    ).toEqual(expect.objectContaining({ trustedNoFindingsSupported: true }));
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "scoped-no-findings-1"),
+    ).toEqual(expect.objectContaining({ trustedNoFindingsSupported: false }));
+  });
+
+  it("rejects inline mixed explicit-risk and scoped no-risk claims when the scoped command is unrelated", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "worker.ts"),
+      'export function processJob() { return "ok"; }\n',
+      "utf8",
+    );
+
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout for `src/config.ts` timeout configuration was covered and is absent; scoped no-findings claim: `src/worker.ts` queue processing deadlock risk is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `src/worker.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      '- Command `rg -n "processJob" src/worker.ts` output: `src/worker.ts:1:export function processJob() { return "ok"; }`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts and src/worker.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["shallow_evidence", "irrelevant_grep_match"]),
+    );
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-timeout"),
+    ).toEqual(expect.objectContaining({ trustedNoFindingsSupported: true }));
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "scoped-no-findings-1"),
+    ).toEqual(expect.objectContaining({ trustedNoFindingsSupported: false }));
+  });
+
+  it("rejects same-line mixed explicit-risk and scoped no-risk claims without semicolon boundaries", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "worker.ts"),
+      'export function processJob() { return "ok"; }\n',
+      "utf8",
+    );
+
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout for `src/config.ts` timeout configuration was covered and is absent and scoped no-findings claim: `src/worker.ts` queue processing deadlock risk is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `src/worker.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      '- Command `rg -n "processJob" src/worker.ts` output: `src/worker.ts:1:export function processJob() { return "ok"; }`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts and src/worker.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["shallow_evidence", "irrelevant_grep_match"]),
+    );
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "risk-timeout"),
+    ).toEqual(expect.objectContaining({ trustedNoFindingsSupported: true }));
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "scoped-no-findings-1"),
+    ).toEqual(expect.objectContaining({ trustedNoFindingsSupported: false }));
+  });
+
+  it("rejects no-risk scoped bullets under risk hypotheses when the scoped command is unrelated", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "worker.ts"),
+      'export function processJob() { return "ok"; }\n',
+      "utf8",
+    );
+
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses:",
+      "- risk-timeout for `src/config.ts` timeout configuration was covered and is absent.",
+      "- `src/worker.ts` queue processing deadlock risk is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `src/worker.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      '- Command `rg -n "processJob" src/worker.ts` output: `src/worker.ts:1:export function processJob() { return "ok"; }`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts and src/worker.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(issueCodes(result)).toEqual(
+      expect.arrayContaining(["shallow_evidence", "irrelevant_grep_match"]),
+    );
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "scoped-no-findings-1"),
+    ).toEqual(expect.objectContaining({ trustedNoFindingsSupported: false }));
+  });
+
+  it("rejects no-risk scoped bullets under plural absence claim blocks when command evidence is unrelated", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "worker.ts"),
+      'export function processJob() { return "ok"; }\n',
+      "utf8",
+    );
+
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-timeout for `src/config.ts` timeout configuration was covered and is absent.",
+      "",
+      "Absence claims:",
+      "- `src/worker.ts` queue processing deadlock risk is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "- `src/worker.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      '- Command `rg -n "processJob" src/worker.ts` output: `src/worker.ts:1:export function processJob() { return "ok"; }`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: src/config.ts and src/worker.ts",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).not.toBe("validated_no_findings");
+    expect(result.evidenceDepth.trustedNoFindingsSupported).toBe(false);
+    expect(
+      result.evidenceDepth.riskHypotheses.find((entry) => entry.id === "scoped-no-findings-1"),
+    ).toEqual(
+      expect.objectContaining({
+        trustedNoFindingsSupported: false,
+        reasonCodes: expect.arrayContaining(["shallow_evidence", "irrelevant_grep_match"]),
+      }),
+    );
+  });
+
   it("ignores bare missing paths that appear only inside scoped command output", () => {
     const root = initRepo();
     mkdirSync(join(root, "tests"), { recursive: true });
@@ -1160,13 +2992,13 @@ describe("auditReportValidator", () => {
       "# Test Readiness Audit",
       "",
       "No validated findings.",
-      "Risk hypotheses: risk-tests for `tests/test_local_state_adapters.py` coverage was checked and is absent.",
+      "Risk hypotheses: risk-tests for `tests/test_local_state_adapters.py` recording memory client references coverage was checked and is absent.",
       "",
       "Checked files:",
       "- `tests/test_local_state_adapters.py:1`",
       "",
       "Checked commands:",
-      "- Command `git grep -n . -- tests/test_local_state_adapters.py` output:",
+      '- Command `git grep -n -E "_RecordingMemoryClient|references" -- tests/test_local_state_adapters.py` output:',
       "```",
       "tests/test_local_state_adapters.py:1:class _RecordingMemoryClient:",
       'tests/test_local_state_adapters.py:2:    references=[Reference(reference_id="unexpected", file_path="docs/unexpected.md")]',
@@ -1460,7 +3292,7 @@ describe("auditReportValidator", () => {
     }
     const text = [
       "No validated findings.",
-      "Risk hypotheses: risk-1 for `src/config.ts` source exports was covered and is absent.",
+      "Risk hypotheses: risk-1 for `src/config.ts` export const coverage was covered and is absent.",
       "",
       "Checked files:",
       "- `src/config.ts:1`",
@@ -1658,7 +3490,7 @@ describe("auditReportValidator", () => {
       "# Runtime Audit",
       "",
       "No validated findings.",
-      "Scoped no-findings claim: `.ai-factory/config.yaml` generated-config risk is absent.",
+      "Scoped no-findings claim: `.ai-factory/config.yaml` enabled generated-config risk is absent.",
       "",
       "Checked files:",
       "- `.ai-factory/config.yaml:1`",

@@ -550,7 +550,9 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
     const result = importGeneratedTasks(id, generation);
 
     // Broadcast each created task
-    for (const taskId of result.taskIds) {
+    for (const taskId of [result.containerTaskId, ...result.taskIds].filter(
+      (candidate): candidate is string => Boolean(candidate),
+    )) {
       const task = findTaskById(taskId);
       if (task) {
         broadcast({ type: "task:created", payload: toTaskBroadcastPayload(task) });
@@ -1014,7 +1016,9 @@ async function runRoadmapGenerationJob(
     const result = importGeneratedTasks(projectId, extraction);
 
     // Step 5: Broadcast each created task
-    for (const taskId of result.taskIds) {
+    for (const taskId of [result.containerTaskId, ...result.taskIds].filter(
+      (candidate): candidate is string => Boolean(candidate),
+    )) {
       const task = findTaskById(taskId);
       if (task) {
         broadcast({ type: "task:created", payload: toTaskBroadcastPayload(task) });
@@ -1035,6 +1039,7 @@ async function runRoadmapGenerationJob(
         created: result.created,
         skipped: result.skipped,
         taskIds: result.taskIds,
+        containerTaskId: result.containerTaskId,
         byPhase: result.byPhase,
         batchSummary: result.batchSummary,
       },

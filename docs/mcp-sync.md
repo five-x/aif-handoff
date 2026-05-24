@@ -256,11 +256,11 @@ The system supports two execution modes for AIF skills and agents. The mode dete
 
 Every `query()` call from the Handoff agent system injects these env vars into the Claude Code subprocess:
 
-| Variable              | Set when                        | Description                                               |
-| --------------------- | ------------------------------- | --------------------------------------------------------- |
-| `HANDOFF_MODE`        | Always `"1"` from Handoff agent | Signals that the Handoff coordinator is managing this run |
-| `HANDOFF_TASK_ID`     | Task ID is known                | UUID of the associated Handoff task                       |
-| `HANDOFF_SKIP_REVIEW` | `task.skipReview` is true       | Skip the review stage (implementing → done)               |
+| Variable              | Set when                        | Description                                                                         |
+| --------------------- | ------------------------------- | ----------------------------------------------------------------------------------- |
+| `HANDOFF_MODE`        | Always `"1"` from Handoff agent | Signals that the Handoff coordinator is managing this run                           |
+| `HANDOFF_TASK_ID`     | Task ID is known                | UUID of the associated Handoff task                                                 |
+| `HANDOFF_SKIP_REVIEW` | `task.skipReview` is true       | Request review-stage skip; ignored for tasks requiring specialized reviewer fan-out |
 
 Skills read these at load time via dynamic shell substitution:
 
@@ -288,7 +288,7 @@ Handoff Coordinator (TypeScript)
   │   └─ /aif-implement sees HANDOFF_MODE=1
   │       ├─ Skips interactive prompts
   │       └─ Does NOT call MCP
-  ├─ if skipReview: updateTaskStatus(id, "done")
+  ├─ if skipReview and no specialized reviewer fan-out is required: updateTaskStatus(id, "done")
   │   else: updateTaskStatus(id, "review") → runReviewer(id)
   └─ WebSocket broadcast → Kanban UI updates
 ```
@@ -313,7 +313,7 @@ Developer in Claude Code
   │       ├─ Calls handoff_sync_status(newStatus: "implementing")
   │       ├─ On each checklist update: calls handoff_push_plan(...)
   │       ├─ On completion:
-  │       │   ├─ If HANDOFF_SKIP_REVIEW=1: handoff_sync_status("done")
+  │       │   ├─ If HANDOFF_SKIP_REVIEW=1 and no specialized fan-out is required: handoff_sync_status("done")
   │       │   └─ Else: handoff_sync_status("review")
   │       └─ Kanban UI updates via WebSocket broadcast from MCP
 ```
@@ -326,7 +326,7 @@ backlog ──start_ai──► planning ──────────► plan_
                       │                    ├─ request_replanning ─►  planning     │              ├─ approve_done ─► verified
                       │                    └─ fast_fix ─► plan_ready              │              └─ request_changes ─► implementing
                       │                                                           │
-                      │                                                           └─ (skipReview) ─► done
+                      │                                                           └─ (skipReview, unless specialized fan-out is required) ─► done
 ```
 
 Status transitions driven by AIF:

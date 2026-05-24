@@ -449,7 +449,10 @@ Model IDs use the `provider/model` format (e.g. `anthropic/claude-sonnet-4`, `op
   "options": {
     "toolTimeoutMs": 30000,
     "maxToolTurns": 12,
-    "maxOutputChars": 12000
+    "maxOutputChars": 12000,
+    "endpointQueueLimit": 1,
+    "endpointQueueTimeoutMs": 30000,
+    "timeoutMs": 120000
   },
   "enabled": true
 }
@@ -463,6 +466,13 @@ Operational notes:
 - `defaultModel` may come from the profile or `QWEN_MODEL`.
 - `QWEN_API_KEY` is optional for protected local deployments that authenticate at the network layer. If it is present, the adapter sends it as a bearer token.
 - The adapter owns the repository tool loop. It does not start Codex App Server, does not use Codex Responses tools, and does not modify raw inference endpoints.
+- Protected llama.cpp endpoints on ports `8003` and `8005` are treated as single-slot endpoints inside each AIF process. AIF serializes in-flight requests for those endpoint/profile selections, applies a bounded pre-runtime queue, and times out queue waits before sending HTTP to the runtime.
+- `endpointQueueLimit` controls how many requests may wait behind the active protected-endpoint request. Keep it at `1` for the current `8003` / `8005` single-slot deployment.
+- `endpointQueueTimeoutMs` controls how long a queued request may wait before failing locally with `endpoint_queue_timeout`. Queue-full and queue-timeout outcomes are local backpressure outcomes and must not trip endpoint cooldown.
+- Request lifecycle logs for this adapter include `taskId`, `profileId`, `baseUrl`, `model`, `durationMs`, `timeoutMs`, and HTTP/error status for start, end, cancel, timeout, queue-full, and queue-timeout events.
+- Request timeout/cancel aborts the active fetch signal so llama.cpp can stop work for AIF requests that AIF has already abandoned.
+- Long audit tasks should use a protected `8005` profile explicitly. If an audit stage resolves to a protected `8003` profile and a compatible enabled `8005` profile is visible, the coordinator records a one-shot audit-stage route to `8005`. Use `8003` only with hard context and output budgets.
+- The concurrency guard is process-local. If multiple AIF agent/API processes can send to the same llama.cpp endpoint, deploy an external lease/proxy or run a single writer process for those profiles.
 
 Safety model:
 
@@ -481,9 +491,10 @@ Safety model:
 Canary guidance:
 
 1. Create a project-scoped non-default profile for the target project.
-2. Run an explicit canary task that asks Qwen local agent to create `audit/test-agent-runtime.md`, inspect workspace state, run git status, and commit only that file.
-3. Verify the resulting commit in the project workspace.
-4. Verify existing raw inference services remain unchanged.
+2. Run explicit canary and audit-quality checks only against the remote AIF service at `http://192.168.88.67/` / `http://192.168.88.67/api`; do not start a local AIF service or use localhost e2e validation for this deployment.
+3. Ask Qwen local agent to create `audit/test-agent-runtime.md`, inspect workspace state, run git status, and commit only that file.
+4. Verify the resulting commit in the remote project workspace.
+5. Verify existing raw inference services remain unchanged.
 
 ### OpenCode (API)
 

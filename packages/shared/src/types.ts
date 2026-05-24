@@ -17,6 +17,18 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export type { TaskIntent };
 
+export const TASK_HIERARCHY_ROLES = ["executable", "container"] as const;
+
+export type TaskHierarchyRole = (typeof TASK_HIERARCHY_ROLES)[number];
+
+export const TASK_PARENT_CLOSEOUT_POLICIES = [
+  "all_children_done",
+  "all_children_verified",
+  "synthesis_child_verified",
+] as const;
+
+export type TaskParentCloseoutPolicy = (typeof TASK_PARENT_CLOSEOUT_POLICIES)[number];
+
 export const COORDINATOR_STAGES = ["planner", "plan-checker", "implementer", "reviewer"] as const;
 
 export type CoordinatorStage = (typeof COORDINATOR_STAGES)[number];
@@ -25,10 +37,20 @@ export const AUTO_REVIEW_STRATEGIES = ["full_re_review", "closure_first"] as con
 
 export type AutoReviewStrategy = (typeof AUTO_REVIEW_STRATEGIES)[number];
 
+export const SPECIALIZED_REVIEWER_ROLES = [
+  "correctness",
+  "security_data_loss",
+  "regression_api_contract",
+  "audit_evidence",
+] as const;
+
+export type SpecializedReviewerRole = (typeof SPECIALIZED_REVIEWER_ROLES)[number];
+
 export const AUTO_REVIEW_FINDING_SOURCES = [
   "code_review",
   "security_audit",
   "review_gate",
+  ...SPECIALIZED_REVIEWER_ROLES,
 ] as const;
 
 export type AutoReviewFindingSource = (typeof AUTO_REVIEW_FINDING_SOURCES)[number];
@@ -202,6 +224,15 @@ export interface Task {
   status: TaskStatus;
   priority: number;
   position: number;
+  parentTaskId?: string | null;
+  rootTaskId?: string | null;
+  hierarchyDepth?: number;
+  hierarchyRole?: TaskHierarchyRole;
+  hierarchyPosition?: number;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
+  childSummary?: TaskChildSummary;
+  parentTask?: TaskHierarchyTaskReference | null;
+  children?: TaskHierarchyChild[];
   plan: string | null;
   implementationLog: string | null;
   implementationManifest?: ImplementationManifest | null;
@@ -240,6 +271,30 @@ export interface Task {
   branchName: string | null;
   worktreePath: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskChildSummary {
+  childCount: number;
+  blockedChildCount: number;
+  activeChildCount: number;
+  verifiedChildCount: number;
+}
+
+export interface TaskHierarchyTaskReference {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  hierarchyRole: TaskHierarchyRole;
+}
+
+export interface TaskHierarchyChild extends TaskHierarchyTaskReference {
+  priority: number;
+  position: number;
+  hierarchyDepth: number;
+  hierarchyPosition: number;
+  parentTaskId: string | null;
+  childSummary?: TaskChildSummary;
   updatedAt: string;
 }
 
@@ -487,6 +542,9 @@ export interface CreateTaskInput {
   roadmapAlias?: string;
   tags?: string[];
   scheduledAt?: string | null;
+  parentTaskId?: string | null;
+  hierarchyRole?: TaskHierarchyRole;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
 }
 
 /** PUT /tasks/:id body */
@@ -531,6 +589,9 @@ export interface UpdateTaskInput {
   modelOverride?: string | null;
   runtimeOptions?: Record<string, unknown> | null;
   scheduledAt?: string | null;
+  parentTaskId?: string | null;
+  hierarchyRole?: TaskHierarchyRole;
+  parentCloseoutPolicy?: TaskParentCloseoutPolicy | null;
 }
 
 export const TASK_EVENTS = [
@@ -901,6 +962,7 @@ export interface RoadmapCompletePayload {
   created: number;
   skipped: number;
   taskIds: string[];
+  containerTaskId?: string;
   byPhase: Record<number, { created: number; skipped: number }>;
   batchSummary?: RoadmapBatchSummaryPayload;
 }

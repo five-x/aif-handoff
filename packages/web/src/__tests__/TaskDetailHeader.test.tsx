@@ -198,6 +198,39 @@ describe("TaskDetailHeader", () => {
     expect(screen.queryByText("Request replanning")).toBeNull();
   });
 
+  it("renders container metadata and hides runtime-starting actions", () => {
+    const containerTask: Task = {
+      ...baseTask,
+      hierarchyRole: "container",
+      childSummary: {
+        childCount: 3,
+        activeChildCount: 1,
+        blockedChildCount: 0,
+        verifiedChildCount: 2,
+      },
+    };
+    render(
+      <TaskDetailHeader
+        task={containerTask}
+        activeTab="implementation"
+        onTabChange={vi.fn()}
+        onActionClick={vi.fn()}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("CONTAINER")).toBeDefined();
+    expect(screen.getByText("Children 2/3")).toBeDefined();
+    expect(screen.queryByText("Start implementation")).toBeNull();
+    expect(screen.queryByText("Request replanning")).toBeNull();
+    expect(screen.queryByText("Fast fix")).toBeNull();
+    expect(screen.queryByText("Pause")).toBeNull();
+  });
+
   it("should call onActionClick when action button is clicked", () => {
     const onActionClick = vi.fn();
     render(

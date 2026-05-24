@@ -9,6 +9,8 @@ import {
   formatAuditSynthesisOutcomeForArtifact,
   parseAuditSynthesisOutcomeFromText,
 } from "../auditSynthesisClassifier.js";
+import { computeAuditReportContentSha256 } from "../auditReportValidator.js";
+import type { AuditEvidenceUnit } from "../auditEvidenceLedger.js";
 
 function initRepo(): string {
   const root = mkdtempSync(join(tmpdir(), "aif-synthesis-classifier-"));
@@ -27,12 +29,100 @@ function initRepo(): string {
   return root;
 }
 
+function gitSnapshot(root: string): { id: string; commit: string; tree: string } {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  return { id: `git:${commit}:${tree}`, commit, tree };
+}
+
+function sourceManifest(input: {
+  body: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): string {
+  return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(
+    {
+      version: 1,
+      auditPlanId: "batch:batch-1:task:task-source",
+      taskId: "task-source",
+      batchId: "batch-1",
+      roadmapAlias: "audit-runtime",
+      artifactPath: "audit/source.md",
+      contentSha256: computeAuditReportContentSha256(input.body),
+      sourceSnapshot: { ...input.snapshot, dirty: false },
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "src/config.ts", covered: true, evidenceRefs: ["ev-1"] }],
+      riskHypotheses: [
+        {
+          id: "risk-config-timeout",
+          description: "timeoutMs configuration drift",
+          status: "covered",
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [{ id: "nf-1", riskId: "risk-config-timeout", evidenceRefs: ["ev-1"] }],
+      evidenceRefs: ["ev-1"],
+    },
+    null,
+    2,
+  )}\n\`\`\`\n`;
+}
+
+function sourceEvidenceUnit(snapshot: {
+  id: string;
+  commit: string;
+  tree: string;
+}): AuditEvidenceUnit {
+  const outputPreview = [
+    '[search_files query="timeoutMs" path=src/config.ts]',
+    "src/config.ts:1:export const timeoutMs = 1000;",
+  ].join("\n");
+  return {
+    id: "ev-1",
+    taskId: "task-source",
+    auditPlanId: "batch:batch-1:task:task-source",
+    sourceSnapshotId: snapshot.id,
+    toolName: "search_files",
+    evidenceKind: "search",
+    evidenceGrade: "substantive",
+    scopeIds: ["src/config.ts"],
+    riskHypothesisIds: ["risk-config-timeout"],
+    pathHashes: ["0".repeat(64)],
+    pathRangeHashes: [],
+    command: null,
+    exitCode: 0,
+    outputSha256: "1".repeat(64),
+    outputPreview,
+    outputPreviewTruncated: false,
+    parsedSummary: {
+      outputBytes: outputPreview.length,
+      outputLineCount: 2,
+      previewChars: outputPreview.length,
+      exitCode: 0,
+    },
+    redactionStatus: "clean",
+    createdAt: "2026-05-22T00:00:00.000Z",
+  };
+}
+
 function substantiveNoFindingsReport(path = "src/config.ts"): string {
+  const isWorker = path.endsWith("worker.ts");
+  const riskId = isWorker ? "risk-worker-run" : "risk-config-timeout";
+  const riskText = isWorker ? "function behavior" : "timeoutMs configuration";
+  const commandPattern = isWorker ? "function" : "timeoutMs";
+  const outputLine = isWorker
+    ? "export function run() { return true; }"
+    : "export const timeoutMs = 1000;";
   return [
     "# Runtime Audit",
     "",
     "No validated findings.",
-    `Scoped no-findings claim: \`${path}\` runtime risk is absent.`,
+    `Risk hypotheses: ${riskId} for \`${path}\` ${riskText} was covered and is absent.`,
     "",
     "## Checked Files",
     "",
@@ -40,9 +130,9 @@ function substantiveNoFindingsReport(path = "src/config.ts"): string {
     "",
     "## Checked Commands",
     "",
-    `- Command \`rg -n "timeoutMs|run" ${path}\` output:`,
+    `- Command \`rg -n "${commandPattern}" ${path}\` output:`,
     "```",
-    `${path}:1:export const timeoutMs = 1000;`,
+    `${path}:1:${outputLine}`,
     "```",
     "",
   ].join("\n");
@@ -115,6 +205,45 @@ describe("auditSynthesisClassifier", () => {
     expect(outcome.substantiveNoFindingsReportCount).toBe(2);
   });
 
+  it("keeps ledger-backed no-findings source reports trusted during synthesis revalidation", () => {
+    const root = initRepo();
+    const snapshot = gitSnapshot(root);
+    const body = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-config-timeout for `src/config.ts` timeoutMs configuration was covered and is absent.",
+      "",
+      "## Checked Files",
+      "",
+      "- `src/config.ts:1`",
+      "",
+      "## Runtime Ledger Evidence",
+      "",
+      "- search_files audit evidence `ev-1` inspected `src/config.ts:1` for timeoutMs configuration.",
+      "",
+    ].join("\n");
+
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      reports: [
+        {
+          artifactPath: "audit/source.md",
+          taskId: "task-source",
+          roadmapBatchId: "batch-1",
+          roadmapAlias: "audit-runtime",
+          auditPlanId: "batch:batch-1:task:task-source",
+          auditEvidenceUnits: [sourceEvidenceUnit(snapshot)],
+          content: sourceManifest({ body, snapshot }),
+        },
+      ],
+    });
+
+    expect(outcome.kind).toBe("validated_no_findings");
+    expect(outcome.substantiveNoFindingsReportCount).toBe(1);
+    expect(outcome.inventoryOnlyNoFindingsReportCount).toBe(0);
+  });
+
   it("classifies inventory-only no-findings source reports as inconclusive", () => {
     const root = initRepo();
     const outcome = classifyAuditSynthesisSourceReports({
@@ -129,6 +258,74 @@ describe("auditSynthesisClassifier", () => {
     expect(outcome.kind).toBe("source_inconclusive");
     expect(outcome.inventoryOnlyNoFindingsReportCount).toBe(6);
     expect(outcome.reason).toContain("did not include enough substantive inspection evidence");
+  });
+
+  it("does not synthesize generic grep dump no-findings as validated", () => {
+    const root = initRepo();
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      reports: [
+        {
+          artifactPath: "audit/source.md",
+          taskId: "task-source",
+          content: [
+            "# Runtime Audit",
+            "",
+            "No validated findings.",
+            "Scoped no-findings claim: `src/config.ts` timeout drift is absent.",
+            "",
+            "## Checked Files",
+            "- `src/config.ts:1`",
+            "",
+            "## Checked Commands",
+            '- Command `git grep -n "." -- src/config.ts` output:',
+            "```",
+            "src/config.ts:1:export const timeoutMs = 1000;",
+            "```",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(outcome.kind).toBe("source_inconclusive");
+    expect(outcome.substantiveNoFindingsReportCount).toBe(0);
+    expect(outcome.inventoryOnlyNoFindingsReportCount).toBe(1);
+  });
+
+  it("does not synthesize unrelated no-risk scoped command evidence as validated", () => {
+    const root = initRepo();
+    writeFileSync(
+      join(root, "src", "config.ts"),
+      ["export const timeoutMs = 1000;", 'export const authMode = "strict";', ""].join("\n"),
+      "utf8",
+    );
+
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      reports: [
+        {
+          artifactPath: "audit/source.md",
+          taskId: "task-source",
+          content: [
+            "# Runtime Audit",
+            "",
+            "No validated findings.",
+            "Scoped no-findings claim: `src/config.ts` timeout configuration risk is absent.",
+            "",
+            "## Checked Files",
+            "- `src/config.ts:1`",
+            "",
+            "## Checked Commands",
+            '- Command `rg -n "authMode" src/config.ts` output: `src/config.ts:2:export const authMode = "strict";`',
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(outcome.kind).toBe("source_inconclusive");
+    expect(outcome.substantiveNoFindingsReportCount).toBe(0);
   });
 
   it("classifies empty source batches conservatively as inconclusive", () => {

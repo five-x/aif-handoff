@@ -13,9 +13,47 @@ const repoRoot = resolve(__dir, "..", "..", "..");
 const k6Dir = join(__dir, "k6");
 const reportsDir = join(__dir, "reports");
 
-const API_URL = process.env.AIF_API_URL || "http://localhost:3009";
-const SKIP_DEV_SERVER = process.env.AIF_SKIP_DEV_SERVER === "1";
+const LOCAL_API_URL = "http://localhost:3009";
+const REMOTE_API_URL = "http://192.168.88.67/api";
+const LOCAL_DEV_OPT_IN = process.env.AIF_SKIP_DEV_SERVER === "0";
+const API_URL = process.env.AIF_API_URL || (LOCAL_DEV_OPT_IN ? LOCAL_API_URL : REMOTE_API_URL);
+const SKIP_DEV_SERVER = !LOCAL_DEV_OPT_IN;
 const HEALTH_TIMEOUT_MS = 120_000;
+const K6_HELPER_MODULES = new Set(["common.js", "target-guard.js"]);
+
+export function isLocalUrl(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const ipv4MappedDottedLoopback = /^::ffff:127(?:\.\d{1,3}){3}$/.test(hostname);
+    const ipv4MappedHexLoopback = hostname.match(/^::ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}$/);
+    const ipv4MappedHexFirstHextet = ipv4MappedHexLoopback
+      ? Number.parseInt(ipv4MappedHexLoopback[1], 16)
+      : Number.NaN;
+    return (
+      hostname === "localhost" ||
+      /^127(?:\.\d{1,3}){3}$/.test(hostname) ||
+      hostname === "0.0.0.0" ||
+      hostname === "::1" ||
+      hostname === "::" ||
+      hostname === "0:0:0:0:0:0:0:0" ||
+      ipv4MappedDottedLoopback ||
+      (Number.isFinite(ipv4MappedHexFirstHextet) &&
+        ipv4MappedHexFirstHextet >= 0x7f00 &&
+        ipv4MappedHexFirstHextet <= 0x7fff)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function assertValidationTargetAllowed() {
+  if (SKIP_DEV_SERVER && isLocalUrl(API_URL)) {
+    console.error(
+      "[ai:load] Local API validation requires explicit local opt-in: set AIF_SKIP_DEV_SERVER=0.",
+    );
+    process.exit(1);
+  }
+}
 
 /** Ping `/health` until it returns 200 or the deadline elapses. */
 async function waitForApi(url, deadline) {
@@ -47,6 +85,12 @@ function runK6(scriptPath) {
       resolvePromise({ scriptPath, code: 127, summaryPath });
     });
   });
+}
+
+export function discoverK6Scripts(directory = k6Dir) {
+  return readdirSync(directory)
+    .filter((file) => file.endsWith(".js") && !K6_HELPER_MODULES.has(file))
+    .map((file) => join(directory, file));
 }
 
 async function ensureK6Installed() {
@@ -89,6 +133,13 @@ function stopDevStack(child) {
 }
 
 async function main() {
+  assertValidationTargetAllowed();
+
+  if (SKIP_DEV_SERVER && !(await waitForApi(API_URL, Date.now() + 2_000))) {
+    console.error(`[ai:load] API not reachable at ${API_URL}. Local dev stack is opt-in only.`);
+    process.exit(1);
+  }
+
   if (!(await ensureK6Installed())) {
     console.error(
       "[ai:load] k6 binary not found on PATH. Install via `brew install k6` (macOS) or " +
@@ -103,7 +154,7 @@ async function main() {
   const alreadyUp = await waitForApi(API_URL, Date.now() + 2_000);
   if (!alreadyUp) {
     if (SKIP_DEV_SERVER) {
-      console.error(`[ai:load] API not reachable at ${API_URL} and AIF_SKIP_DEV_SERVER=1. Abort.`);
+      console.error(`[ai:load] API not reachable at ${API_URL}. Local dev stack is opt-in only.`);
       process.exit(1);
     }
     console.log("[ai:load] API not reachable — booting dev stack...");
@@ -118,9 +169,7 @@ async function main() {
 
   if (!existsSync(reportsDir)) mkdirSync(reportsDir, { recursive: true });
 
-  const scripts = readdirSync(k6Dir)
-    .filter((file) => file.endsWith(".js") && file !== "common.js")
-    .map((file) => join(k6Dir, file));
+  const scripts = discoverK6Scripts(k6Dir);
 
   const results = [];
   for (const script of scripts) {
@@ -153,7 +202,9 @@ async function main() {
   console.log(`[ai:load] all ${results.length} k6 scripts passed thresholds.`);
 }
 
-main().catch((error) => {
-  console.error(`[ai:load] orchestrator crashed: ${error.stack ?? error.message}`);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`[ai:load] orchestrator crashed: ${error.stack ?? error.message}`);
+    process.exit(1);
+  });
+}

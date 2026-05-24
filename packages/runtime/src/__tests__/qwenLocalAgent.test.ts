@@ -3746,6 +3746,162 @@ describe("qwen-local-agent adapter", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(maxActive).toBe(1);
   });
+  it("fails queued protected endpoint requests before fetch when the queue timeout expires", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-queue-timeout-"));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    let releaseFirst: (() => void) | null = null;
+    const firstStarted = new Promise<void>((resolve) => {
+      fetchMock.mockImplementationOnce(() => {
+        resolve();
+        return new Promise((resolveFetch) => {
+          releaseFirst = () =>
+            resolveFetch(
+              jsonResponse({
+                id: "chat-queue-timeout-first",
+                choices: [{ message: { role: "assistant", content: "first done" } }],
+              }),
+            );
+        });
+      });
+    });
+
+    const input = createRunInput(root, {
+      profileId: "profile-qwen-8003",
+      model: "Qwen3-32B-Q4_K_M.gguf",
+      options: {
+        baseUrl: "http://192.168.88.62:8003/v1",
+        endpointQueueTimeoutMs: 10,
+        endpointCooldownMs: 1_000,
+        endpointCooldownWaitMaxMs: 0,
+      },
+      usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-queue-timeout" },
+    });
+    const first = runQwenLocalAgentApi(input, logger);
+    await firstStarted;
+
+    await expect(runQwenLocalAgentApi(input, logger)).rejects.toMatchObject({
+      category: "timeout",
+      providerMeta: expect.objectContaining({
+        status: "endpoint_queue_timeout",
+        profileId: "profile-qwen-8003",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8003",
+      }),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-queue-timeout",
+        profileId: "profile-qwen-8003",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8003",
+        durationMs: expect.any(Number),
+        failureClass: "endpoint_queue_timeout",
+      }),
+      "qwen-local-agent request queue timeout",
+    );
+
+    releaseFirst?.();
+    await expect(first).resolves.toMatchObject({ outputText: "first done" });
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-after-queue-timeout",
+        choices: [{ message: { role: "assistant", content: "after queue timeout" } }],
+      }),
+    );
+    await expect(runQwenLocalAgentApi(input, logger)).resolves.toMatchObject({
+      outputText: "after queue timeout",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "http://192.168.88.62:8003/v1/chat/completions",
+    );
+  });
+  it("fails protected endpoint requests before fetch when the process-local queue is full", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-queue-full-"));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    let releaseFirst: (() => void) | null = null;
+    const firstStarted = new Promise<void>((resolve) => {
+      fetchMock.mockImplementationOnce(() => {
+        resolve();
+        return new Promise((resolveFetch) => {
+          releaseFirst = () =>
+            resolveFetch(
+              jsonResponse({
+                id: "chat-queue-full-first",
+                choices: [{ message: { role: "assistant", content: "first done" } }],
+              }),
+            );
+        });
+      });
+    });
+
+    const input = createRunInput(root, {
+      profileId: "profile-qwen-8005",
+      options: {
+        baseUrl: "http://192.168.88.62:8005/v1",
+        endpointQueueLimit: 1,
+        endpointQueueTimeoutMs: 1_000,
+        endpointCooldownMs: 1_000,
+        endpointCooldownWaitMaxMs: 0,
+      },
+      usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-queue-full" },
+    });
+    const first = runQwenLocalAgentApi(input, logger);
+    await firstStarted;
+    const queued = runQwenLocalAgentApi(input, logger);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-queue-full-second",
+        choices: [{ message: { role: "assistant", content: "queued done" } }],
+      }),
+    );
+
+    try {
+      await expect(runQwenLocalAgentApi(input, logger)).rejects.toMatchObject({
+        category: "timeout",
+        providerMeta: expect.objectContaining({
+          status: "endpoint_queue_full",
+          profileId: "profile-qwen-8005",
+          baseUrl: "http://192.168.88.62:8005/v1",
+          endpointKey: "http://192.168.88.62:8005",
+        }),
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskId: "task-queue-full",
+          profileId: "profile-qwen-8005",
+          baseUrl: "http://192.168.88.62:8005/v1",
+          model: "Qwen3-32B-Q4_K_M.gguf",
+          endpointKey: "http://192.168.88.62:8005",
+          durationMs: expect.any(Number),
+          failureClass: "endpoint_queue_full",
+        }),
+        "qwen-local-agent request queue full",
+      );
+    } finally {
+      releaseFirst?.();
+    }
+    await expect(first).resolves.toMatchObject({ outputText: "first done" });
+    await expect(queued).resolves.toMatchObject({ outputText: "queued done" });
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-after-queue-full",
+        choices: [{ message: { role: "assistant", content: "after queue full" } }],
+      }),
+    );
+    await expect(runQwenLocalAgentApi(input, logger)).resolves.toMatchObject({
+      outputText: "after queue full",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe(
+      "http://192.168.88.62:8005/v1/chat/completions",
+    );
+  });
   it("cancels a request while it is waiting for the protected endpoint semaphore", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-semaphore-abort-"));
     let releaseFirst: (() => void) | null = null;
@@ -3786,6 +3942,83 @@ describe("qwen-local-agent adapter", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     releaseFirst?.();
     await expect(first).resolves.toMatchObject({ outputText: "done" });
+  });
+  it("releases the protected endpoint slot when a queued waiter aborts during dequeue handoff", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-handoff-abort-"));
+    const abort = new AbortController();
+    const logger = {
+      info: vi.fn((_metadata, message) => {
+        if (message === "qwen-local-agent request dequeued") {
+          abort.abort(new Error("handoff abort"));
+        }
+      }),
+      warn: vi.fn(),
+    };
+    let releaseFirst: (() => void) | null = null;
+    const firstStarted = new Promise<void>((resolve) => {
+      fetchMock.mockImplementationOnce(() => {
+        resolve();
+        return new Promise((resolveFetch) => {
+          releaseFirst = () =>
+            resolveFetch(
+              jsonResponse({
+                id: "chat-handoff-first",
+                choices: [{ message: { role: "assistant", content: "first done" } }],
+              }),
+            );
+        });
+      });
+    });
+    const input = createRunInput(root, {
+      profileId: "profile-qwen-8003",
+      options: {
+        baseUrl: "http://192.168.88.62:8003/v1",
+        endpointQueueLimit: 1,
+        endpointQueueTimeoutMs: 25,
+        endpointCooldownMs: 1_000,
+        endpointCooldownWaitMaxMs: 0,
+      },
+      usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-handoff-abort" },
+    });
+
+    const first = runQwenLocalAgentApi(input, logger);
+    await firstStarted;
+    const queued = runQwenLocalAgentApi(
+      {
+        ...input,
+        execution: { abortController: abort },
+      },
+      logger,
+    );
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const queuedFailure = expect(queued).rejects.toMatchObject({
+      category: "timeout",
+      providerMeta: expect.objectContaining({
+        status: "endpoint_request_cancelled",
+        profileId: "profile-qwen-8003",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        endpointKey: "http://192.168.88.62:8003",
+      }),
+    });
+    releaseFirst?.();
+    await expect(first).resolves.toMatchObject({ outputText: "first done" });
+    await queuedFailure;
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-after-handoff-abort",
+        choices: [{ message: { role: "assistant", content: "after handoff abort" } }],
+      }),
+    );
+    await expect(runQwenLocalAgentApi(input, logger)).resolves.toMatchObject({
+      outputText: "after handoff abort",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "http://192.168.88.62:8003/v1/chat/completions",
+    );
   });
   it("waits for short endpoint cooldowns before health-checking and retrying a new request", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-cooldown-"));
@@ -4013,11 +4246,14 @@ describe("qwen-local-agent adapter", () => {
   it("keeps long endpoint cooldowns bounded instead of sleeping indefinitely", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-long-cooldown-"));
     const input = createRunInput(root, {
+      profileId: "profile-qwen-8003",
+      model: "Qwen3-32B-Q4_K_M.gguf",
       options: {
         baseUrl: "http://192.168.88.62:8003/v1",
         endpointCooldownMs: 5_000,
         endpointCooldownWaitMaxMs: 0,
       },
+      usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-open-circuit" },
     });
     fetchMock.mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"));
 
@@ -4028,6 +4264,15 @@ describe("qwen-local-agent adapter", () => {
     await expect(runQwenLocalAgentApi(input)).rejects.toMatchObject({
       category: "transport",
       retryAfterSeconds: expect.any(Number),
+      providerMeta: expect.objectContaining({
+        status: "endpoint_cooldown",
+        profileId: "profile-qwen-8003",
+        taskId: "task-open-circuit",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8003",
+        retryAfterSeconds: expect.any(Number),
+      }),
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -4035,6 +4280,7 @@ describe("qwen-local-agent adapter", () => {
   it("propagates external aborts to the upstream chat completion request", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-external-abort-"));
     const abort = new AbortController();
+    const logger = { info: vi.fn(), warn: vi.fn() };
     let requestSignal: AbortSignal | null = null;
     const requestStarted = new Promise<void>((resolve) => {
       fetchMock.mockImplementationOnce((_url, init = {}) => {
@@ -4050,14 +4296,120 @@ describe("qwen-local-agent adapter", () => {
 
     const run = runQwenLocalAgentApi(
       createRunInput(root, {
+        profileId: "profile-qwen-8003",
+        options: {
+          baseUrl: "http://192.168.88.62:8003/v1",
+          endpointCooldownMs: 1_000,
+          endpointCooldownWaitMaxMs: 0,
+        },
         execution: { abortController: abort },
+        usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-external-abort" },
       }),
+      logger,
     );
     await requestStarted;
     abort.abort(new Error("stage timeout"));
 
-    await expect(run).rejects.toMatchObject({ category: "timeout" });
+    await expect(run).rejects.toMatchObject({
+      category: "timeout",
+      providerMeta: expect.objectContaining({
+        status: "endpoint_request_cancelled",
+        profileId: "profile-qwen-8003",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8003",
+      }),
+    });
     expect(requestSignal?.aborted).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-external-abort",
+        profileId: "profile-qwen-8003",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8003",
+        timeoutMs: null,
+      }),
+      "qwen-local-agent request start",
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-external-abort",
+        profileId: "profile-qwen-8003",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8003",
+        durationMs: expect.any(Number),
+        failureClass: "endpoint_request_cancelled",
+      }),
+      "qwen-local-agent request cancel",
+    );
+  });
+  it("aborts in-flight fetch when the run timeout fires and logs lifecycle metadata", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-inflight-run-timeout-"));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    let requestSignal: AbortSignal | null = null;
+    fetchMock.mockImplementationOnce((_url, init = {}) => {
+      requestSignal = init.signal ?? null;
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted", "TimeoutError"));
+        });
+      });
+    });
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          profileId: "profile-qwen-8005",
+          options: {
+            baseUrl: "http://192.168.88.62:8005/v1",
+            endpointCooldownMs: 1_000,
+            endpointCooldownWaitMaxMs: 0,
+          },
+          execution: { runTimeoutMs: 10 },
+          usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-inflight-timeout" },
+        }),
+        logger,
+      ),
+    ).rejects.toMatchObject({
+      category: "timeout",
+      providerMeta: expect.objectContaining({
+        status: "endpoint_cooldown",
+        previousStatus: "endpoint_request_timeout",
+        profileId: "profile-qwen-8005",
+        baseUrl: "http://192.168.88.62:8005/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8005",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-inflight-timeout",
+        profileId: "profile-qwen-8005",
+        baseUrl: "http://192.168.88.62:8005/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8005",
+        timeoutMs: 10,
+      }),
+      "qwen-local-agent request start",
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-inflight-timeout",
+        profileId: "profile-qwen-8005",
+        baseUrl: "http://192.168.88.62:8005/v1",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        endpointKey: "http://192.168.88.62:8005",
+        durationMs: expect.any(Number),
+        timeoutMs: 10,
+        failureClass: "endpoint_request_timeout",
+      }),
+      "qwen-local-agent request timeout",
+    );
   });
   it("does not write tool files after the run timeout has already fired", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-timeout-before-tool-"));

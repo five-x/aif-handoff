@@ -185,6 +185,33 @@ describe("TaskListTable", () => {
     expect(screen.getByText(/Starts/)).toBeDefined();
   });
 
+  it("renders hierarchy metadata and hides order controls for containers", () => {
+    const t = makeTask({
+      id: "container",
+      title: "Container row",
+      hierarchyRole: "container",
+      childSummary: {
+        childCount: 2,
+        activeChildCount: 0,
+        blockedChildCount: 1,
+        verifiedChildCount: 1,
+      },
+      parentTask: {
+        id: "parent-abcdef",
+        title: "Parent row",
+        status: "backlog",
+        hierarchyRole: "container",
+      },
+      hierarchyDepth: 1,
+    });
+    render(<TaskListTable tasks={[t]} isCompact={false} onTaskClick={vi.fn()} />);
+
+    expect(screen.getByText("Container")).toBeDefined();
+    expect(screen.getByText("2 children / 1 blocked / 1 verified")).toBeDefined();
+    expect(screen.getByText("Parent row")).toBeDefined();
+    expect(screen.queryByLabelText("Move task up")).toBeNull();
+  });
+
   it("renders compact artifact trust status in the status cell", () => {
     const t = makeTask({
       id: "t1",
