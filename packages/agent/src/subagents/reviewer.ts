@@ -634,7 +634,7 @@ function auditReportValidationIssueCodes(
   validation: ReturnType<typeof validateAuditReportArtifact> | null,
 ): string[] {
   if (!validation) return [];
-  return [...new Set(validation.issues.map((issue) => issue.code))].sort();
+  return validation.issueCodes ?? [...new Set(validation.issues.map((issue) => issue.code))].sort();
 }
 
 type TrustedAuditSourceClassification = "validated_no_findings" | "validated_findings_present";
@@ -699,6 +699,8 @@ function formatAuditArtifactReviewScopeBlock(input: {
         `manifestStatus=${input.validation.manifestStatus}`,
         `sourceClassification=${input.validation.sourceClassification}`,
         `issueCodes=${issueCodes.join(", ") || "none"}`,
+        `repairMode=${input.validation.repairMode}`,
+        `validationFingerprint=${input.validation.validationFingerprint}`,
       ].join("; ")
     : "validation unavailable before sidecar review";
 
@@ -730,6 +732,7 @@ function buildDeterministicAuditReportReviewComments(input: {
     `audit report validation accepted \`${input.artifactPath}\``,
     `manifestStatus=${input.validation.manifestStatus}`,
     `sourceClassification=${input.validation.sourceClassification}`,
+    `validationFingerprint=${input.validation.validationFingerprint}`,
   ].join("; ");
 
   return [
@@ -768,13 +771,13 @@ function buildDeterministicAuditReportInvalidReviewComments(input: {
   validation: ReturnType<typeof validateAuditReportArtifact>;
   previousFindings: AutoReviewFinding[];
 }): string {
-  const issueCodes = [
-    ...new Set(input.validation.issues.map((issue) => issue.code).filter(Boolean)),
-  ].sort();
+  const issueCodes = auditReportValidationIssueCodes(input.validation);
   const validationSummary = [
     `manifestStatus=${input.validation.manifestStatus}`,
     `sourceClassification=${input.validation.sourceClassification}`,
     `issueCodes=${issueCodes.join(", ") || "unknown"}`,
+    `repairMode=${input.validation.repairMode}`,
+    `validationFingerprint=${input.validation.validationFingerprint}`,
   ].join("; ");
   const previousFindingLines =
     input.previousFindings.length > 0
@@ -786,7 +789,17 @@ function buildDeterministicAuditReportInvalidReviewComments(input: {
   const blockingLines =
     input.validation.issues.length > 0
       ? input.validation.issues.map((issue) => {
-          const text = `Audit report validator blocked completion (${issue.code}): ${issue.message}`;
+          const routePrefix =
+            input.validation.repairMode === "manual_review_required"
+              ? "manual_review_required: "
+              : input.validation.repairMode === "operator_input_required"
+                ? "operator_input_required: "
+                : "";
+          const text = [
+            `${routePrefix}Audit report validator blocked completion (${issue.code}): ${issue.message}`,
+            `validationFingerprint=${input.validation.validationFingerprint}`,
+            `repairMode=${input.validation.repairMode}`,
+          ].join(" ");
           return `- [${createAutoReviewFindingId("review_gate", text)}] review_gate | ${text}`;
         })
       : [

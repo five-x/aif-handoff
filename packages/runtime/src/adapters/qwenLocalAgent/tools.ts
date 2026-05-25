@@ -1581,7 +1581,7 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   }
   if (issueCodeSet.has("missing_audit_evidence_ref")) {
     actions.push(
-      "missing_audit_evidence_ref => copy exact full runtime ledger evidence IDs; do not abbreviate or invent ev_* IDs.",
+      "missing_audit_evidence_ref => copy exact actual runtime audit ledger IDs (`ev_*`) from the ledger; do not abbreviate or invent ev_* IDs.",
     );
   }
   if (issueCodeSet.has("manifest_outcome_mismatch")) {
@@ -1607,7 +1607,8 @@ function formatAuditReportIssueActions(validation, issueCodes) {
   return actions.slice(0, 10);
 }
 function formatAuditReportValidationResult(validation, content = "") {
-  const issueCodes = [...new Set(validation.issues.map((entry) => entry.code))].sort();
+  const issueCodes =
+    validation.issueCodes ?? [...new Set(validation.issues.map((entry) => entry.code))].sort();
   const issueLines = validation.issues
     .slice(0, 12)
     .map((entry) => {
@@ -1623,6 +1624,9 @@ function formatAuditReportValidationResult(validation, content = "") {
     `sourceClassification=${validation.sourceClassification}`,
     `manifestStatus=${validation.manifestStatus}`,
     `issueCodes=${issueCodes.length > 0 ? issueCodes.join(",") : "none"}`,
+    `repairMode=${validation.repairMode ?? "unknown"}`,
+    `validationFingerprint=${validation.validationFingerprint ?? "unknown"}`,
+    `blockingIssues=${validation.blockingIssues?.length ?? validation.issues.length}`,
     formatAuditReportRepairDirective(validation, issueCodes, content),
     `referencedPaths=${validation.referencedPaths.length}`,
     `missingReferencedPaths=${validation.missingReferencedPaths.length}`,
@@ -1719,6 +1723,15 @@ async function validateAuditReportTool(args, context) {
     ok: validation.ok,
     output: `audit report validation ${validation.ok ? "passed" : "failed"} ${target.relativePath.replaceAll("\\", "/")}\n${formatAuditReportValidationResult(validation, content)}`,
     ...(validation.ok ? {} : { error: "audit report validation failed" }),
+    auditReportValidation: {
+      ok: validation.ok,
+      issueCodes: validation.issueCodes,
+      blockingIssues: validation.blockingIssues,
+      repairMode: validation.repairMode,
+      validationFingerprint: validation.validationFingerprint,
+      sourceClassification: validation.sourceClassification,
+      manifestStatus: validation.manifestStatus,
+    },
     exitCode: validation.ok ? 0 : 1,
     touchedFiles: [],
   };

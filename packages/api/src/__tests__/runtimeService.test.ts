@@ -116,6 +116,15 @@ vi.mock("@aif/data", () => ({
   getAppDefaultRuntimeProfileId: mockGetAppDefaultRuntimeProfileId,
   resolveEffectiveRuntimeProfile: mockResolveEffectiveRuntimeProfile,
   toRuntimeProfileResponse: mockToRuntimeProfileResponse,
+  createDbRuntimeEndpointLeaseStore: () => ({
+    holderId: "api-test-holder",
+    acquire: vi.fn(),
+    heartbeat: vi.fn(),
+    release: vi.fn(),
+    cancel: vi.fn(),
+    readCooldown: vi.fn(),
+    setCooldown: vi.fn(),
+  }),
   createDbUsageSink: () => ({ record: vi.fn() }),
 }));
 

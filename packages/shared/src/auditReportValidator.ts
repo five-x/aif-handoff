@@ -68,6 +68,78 @@ export interface AuditReportValidationIssue {
   paths?: string[];
 }
 
+export const AUDIT_REPORT_VALIDATION_REPAIR_MODES = [
+  "none",
+  "source_inconclusive",
+  "operator_input_required",
+  "manual_review_required",
+  "bounded_deterministic_repair",
+] as const;
+
+export type AuditReportValidationRepairMode = (typeof AUDIT_REPORT_VALIDATION_REPAIR_MODES)[number];
+
+export interface AuditReportValidationBlockingIssue {
+  code: AuditReportValidationIssueCode;
+  message: string;
+  paths?: string[];
+}
+
+export interface AuditReportValidationFingerprintInput {
+  repairMode: AuditReportValidationRepairMode;
+  sourceClassification: AuditSourceClassification;
+  manifestStatus: AuditReportManifestStatus;
+  issueCodes: readonly string[];
+  blockingIssues: readonly AuditReportValidationBlockingIssue[];
+}
+
+export const AUDIT_ARTIFACT_LIFECYCLE_STATES = [
+  "draft_written",
+  "manifest_finalized",
+  "validator_passed",
+  "git_committed",
+  "committed_blob_revalidated",
+  "artifact_state_valid",
+] as const;
+
+export type AuditArtifactLifecycleState = (typeof AUDIT_ARTIFACT_LIFECYCLE_STATES)[number];
+
+export const AUDIT_ARTIFACT_LIFECYCLE_ISSUE_CODES = [
+  "audit_artifact_uncommitted",
+  "committed_blob_mismatch",
+] as const;
+
+export type AuditArtifactLifecycleIssueCode = (typeof AUDIT_ARTIFACT_LIFECYCLE_ISSUE_CODES)[number];
+
+export interface AuditArtifactLifecycleIssue {
+  code: AuditArtifactLifecycleIssueCode | AuditReportValidationIssueCode;
+  message: string;
+  paths?: string[];
+}
+
+export type AuditArtifactLifecycleStateMap = Record<AuditArtifactLifecycleState, boolean>;
+
+export interface AuditArtifactLifecycleEvidence {
+  ok: boolean;
+  artifactPath: string;
+  committedRef: string;
+  states: AuditArtifactLifecycleStateMap;
+  issues: AuditArtifactLifecycleIssue[];
+  worktreeArtifactSha256: string | null;
+  committedArtifactSha256: string | null;
+  worktreeContentSha256: string | null;
+  committedContentSha256: string | null;
+  committedValidation: {
+    ok: boolean;
+    issueCodes: string[];
+    artifactSha256: string;
+    contentSha256: string;
+    manifestStatus: AuditReportManifestStatus;
+    manifestVersion: number | null;
+    sourceClassification: AuditSourceClassification;
+    sourceSnapshot: AuditReportSourceSnapshot | null;
+  } | null;
+}
+
 export interface AuditReportValidationInput {
   text: string;
   projectRoot: string;
@@ -84,6 +156,12 @@ export interface AuditReportValidationInput {
   expectedSourceSnapshot?: AuditReportSourceSnapshot | null;
   auditEvidenceUnits?: AuditEvidenceUnit[];
   requireLedgerEvidence?: boolean;
+}
+
+export interface VerifyAuditArtifactLifecycleInput extends AuditReportValidationInput {
+  artifactPath: string;
+  worktreeValidation?: AuditReportValidationResult;
+  committedRef?: string;
 }
 
 export type AuditReportManifestStatus = "missing" | "valid" | "invalid";
@@ -159,6 +237,10 @@ export interface AuditEvidenceDepthResult {
 export interface AuditReportValidationResult {
   ok: boolean;
   issues: AuditReportValidationIssue[];
+  issueCodes: AuditReportValidationIssueCode[];
+  blockingIssues: AuditReportValidationBlockingIssue[];
+  repairMode: AuditReportValidationRepairMode;
+  validationFingerprint: string;
   artifactSha256: string;
   contentSha256: string;
   manifest: AuditReportManifest | null;
@@ -491,6 +573,62 @@ function runGit(projectRoot: string, args: string[]): string | null {
   }
 }
 
+function runGitText(projectRoot: string, args: string[]): string | null {
+  try {
+    return execFileSync("git", ["-c", `safe.directory=${projectRoot}`, ...args], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+}
+
+function gitStatusForPath(projectRoot: string, artifactPath: string): string | null {
+  return runGitText(projectRoot, [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+    "--",
+    artifactPath,
+  ]);
+}
+
+function lifecycleIssue(
+  code: AuditArtifactLifecycleIssue["code"],
+  message: string,
+  paths?: string[],
+): AuditArtifactLifecycleIssue {
+  return paths ? { code, message, paths } : { code, message };
+}
+
+function emptyLifecycleStates(): AuditArtifactLifecycleStateMap {
+  return {
+    draft_written: false,
+    manifest_finalized: false,
+    validator_passed: false,
+    git_committed: false,
+    committed_blob_revalidated: false,
+    artifact_state_valid: false,
+  };
+}
+
+function summarizeCommittedValidation(
+  validation: AuditReportValidationResult,
+): NonNullable<AuditArtifactLifecycleEvidence["committedValidation"]> {
+  return {
+    ok: validation.ok,
+    issueCodes: validation.issues.map((entry) => entry.code).sort(),
+    artifactSha256: validation.artifactSha256,
+    contentSha256: validation.contentSha256,
+    manifestStatus: validation.manifestStatus,
+    manifestVersion: validation.manifestVersion,
+    sourceClassification: validation.sourceClassification,
+    sourceSnapshot: validation.sourceSnapshot,
+  };
+}
+
 function createLiveSourceReader(projectRoot: string): AuditReportSourceReader {
   return {
     pathExists(path: string): boolean {
@@ -668,6 +806,128 @@ function issue(
   paths?: string[],
 ): AuditReportValidationIssue {
   return paths && paths.length > 0 ? { code, message, paths } : { code, message };
+}
+
+const BOUNDED_DETERMINISTIC_REPAIR_ISSUE_CODES = new Set<AuditReportValidationIssueCode>([
+  "audit_evidence_discovery_only",
+  "audit_evidence_identity_mismatch",
+  "audit_evidence_risk_mismatch",
+  "audit_evidence_scope_mismatch",
+  "audit_evidence_source_snapshot_mismatch",
+  "contradictory_findings_and_no_findings",
+  "governance_observation_as_finding",
+  "invalid_line_reference",
+  "invalid_report_manifest",
+  "irrelevant_audit_evidence",
+  "manifest_content_hash_mismatch",
+  "manifest_identity_mismatch",
+  "manifest_outcome_mismatch",
+  "manifest_source_snapshot_mismatch",
+  "missing_audit_evidence_ref",
+  "missing_report_file_references",
+  "missing_report_manifest",
+  "missing_report_manifest_fields",
+  "missing_risk_hypotheses",
+  "missing_scope_coverage",
+  "missing_substantive_evidence",
+  "non_actionable_audit_observation",
+  "speculative_audit_claim",
+  "unsupported_report_manifest_version",
+  "unverified_inspection_claim",
+]);
+
+function auditReportValidationIssueCodes(
+  issues: readonly AuditReportValidationIssue[],
+): AuditReportValidationIssueCode[] {
+  return [...new Set(issues.map((entry) => entry.code))].sort();
+}
+
+function normalizeBlockingIssuePaths(paths: readonly string[] | undefined): string[] | undefined {
+  const normalized = [...new Set((paths ?? []).map(normalizeRelativePath).filter(Boolean))].sort();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function buildAuditReportValidationBlockingIssues(
+  issues: readonly AuditReportValidationIssue[],
+): AuditReportValidationBlockingIssue[] {
+  return issues
+    .map((entry) => {
+      const paths = normalizeBlockingIssuePaths(entry.paths);
+      return {
+        code: entry.code,
+        message: entry.message,
+        ...(paths ? { paths } : {}),
+      };
+    })
+    .sort((left, right) =>
+      [left.code, (left.paths ?? []).join(","), left.message]
+        .join("|")
+        .localeCompare([right.code, (right.paths ?? []).join(","), right.message].join("|")),
+    );
+}
+
+function selectAuditReportValidationRepairMode(input: {
+  ok: boolean;
+  sourceClassification: AuditSourceClassification;
+  issueCodes: readonly AuditReportValidationIssueCode[];
+  blockingIssues: readonly AuditReportValidationBlockingIssue[];
+}): AuditReportValidationRepairMode {
+  if (input.ok) return "none";
+  const issueCodeSet = new Set(input.issueCodes);
+  if (
+    issueCodeSet.has("missing_declared_scope_root") ||
+    input.blockingIssues.some(
+      (entry) => entry.code === "missing_scope_coverage" && (entry.paths ?? []).includes("."),
+    )
+  ) {
+    return "operator_input_required";
+  }
+  if (
+    input.sourceClassification === "source_inconclusive" ||
+    input.sourceClassification === "inventory_only_invalid"
+  ) {
+    return "source_inconclusive";
+  }
+  if (issueCodeSet.has("false_missing_path_claim")) {
+    return "manual_review_required";
+  }
+  if (input.issueCodes.some((code) => BOUNDED_DETERMINISTIC_REPAIR_ISSUE_CODES.has(code))) {
+    return "bounded_deterministic_repair";
+  }
+  return "manual_review_required";
+}
+
+function normalizeFingerprintIssue(input: AuditReportValidationBlockingIssue): {
+  code: AuditReportValidationIssueCode;
+  paths: string[];
+} {
+  return {
+    code: input.code,
+    paths: normalizeBlockingIssuePaths(input.paths) ?? [],
+  };
+}
+
+export function computeAuditReportValidationFingerprint(
+  input: AuditReportValidationFingerprintInput,
+): string {
+  const issueCodes = [...new Set(input.issueCodes)].sort();
+  const blockingIssues = input.blockingIssues
+    .map(normalizeFingerprintIssue)
+    .sort((left, right) =>
+      [left.code, left.paths.join(",")]
+        .join("|")
+        .localeCompare([right.code, right.paths.join(",")].join("|")),
+    );
+  return sha256(
+    JSON.stringify({
+      validator: "audit_report",
+      repairMode: input.repairMode,
+      sourceClassification: input.sourceClassification,
+      manifestStatus: input.manifestStatus,
+      issueCodes,
+      blockingIssues,
+    }),
+  ).slice(0, 16);
 }
 
 function collectManifestIds(
@@ -3425,21 +3685,42 @@ export function validateAuditReportArtifact(
     )
     .map((entry) => entry.message)
     .sort();
+  const ok = issues.length === 0;
+  const issueCodes = auditReportValidationIssueCodes(issues);
+  const blockingIssues = buildAuditReportValidationBlockingIssues(issues);
+  const manifestStatus: AuditReportManifestStatus = manifest
+    ? hasManifestIssue(issues)
+      ? "invalid"
+      : "valid"
+    : manifestBlockPresent
+      ? "invalid"
+      : "missing";
+  const repairMode = selectAuditReportValidationRepairMode({
+    ok,
+    sourceClassification,
+    issueCodes,
+    blockingIssues,
+  });
+  const validationFingerprint = computeAuditReportValidationFingerprint({
+    repairMode,
+    sourceClassification,
+    manifestStatus,
+    issueCodes,
+    blockingIssues,
+  });
 
   return {
-    ok: issues.length === 0,
+    ok,
     issues,
+    issueCodes,
+    blockingIssues,
+    repairMode,
+    validationFingerprint,
     artifactSha256,
     contentSha256,
     manifest,
     manifestVersion: manifest?.version ?? null,
-    manifestStatus: manifest
-      ? hasManifestIssue(issues)
-        ? "invalid"
-        : "valid"
-      : manifestBlockPresent
-        ? "invalid"
-        : "missing",
+    manifestStatus,
     sourceSnapshot,
     referencedPaths,
     missingReferencedPaths: missing,
@@ -3453,6 +3734,128 @@ export function validateAuditReportArtifact(
     scopeRoots,
     scopeCoverage,
     evidenceDepth,
+  };
+}
+
+export function verifyAuditArtifactLifecycle(
+  input: VerifyAuditArtifactLifecycleInput,
+): AuditArtifactLifecycleEvidence {
+  const artifactPath =
+    safeGitObjectPath(input.artifactPath) ?? normalizeRelativePath(input.artifactPath);
+  const committedRef = input.committedRef ?? "HEAD";
+  const states = emptyLifecycleStates();
+  const issues: AuditArtifactLifecycleIssue[] = [];
+  const reportArtifactPaths =
+    input.reportArtifactPaths && input.reportArtifactPaths.length > 0
+      ? input.reportArtifactPaths
+      : [artifactPath];
+  const worktreeValidation =
+    input.worktreeValidation ??
+    validateAuditReportArtifact({
+      ...input,
+      expectedReportArtifactPath: input.expectedReportArtifactPath ?? artifactPath,
+      reportArtifactPaths,
+    });
+
+  states.draft_written = input.text.trim().length > 0;
+  states.manifest_finalized = worktreeValidation.manifestStatus === "valid";
+  states.validator_passed = worktreeValidation.ok;
+
+  if (!states.draft_written) {
+    issues.push(
+      lifecycleIssue(
+        "audit_artifact_uncommitted",
+        `Audit artifact ${artifactPath} has no report text to validate.`,
+        [artifactPath],
+      ),
+    );
+  }
+  if (!states.manifest_finalized && !hasManifestIssue(worktreeValidation.issues)) {
+    issues.push(
+      lifecycleIssue(
+        "missing_report_manifest",
+        `Audit artifact ${artifactPath} must include a finalized audit report manifest before it can be trusted valid.`,
+        [artifactPath],
+      ),
+    );
+  }
+  if (!states.manifest_finalized || !states.validator_passed) {
+    issues.push(
+      ...worktreeValidation.issues.map((entry) =>
+        lifecycleIssue(entry.code, entry.message, entry.paths),
+      ),
+    );
+  }
+
+  const status = gitStatusForPath(input.projectRoot, artifactPath);
+  const committedText = runGitText(input.projectRoot, ["show", `${committedRef}:${artifactPath}`]);
+  states.git_committed = committedText != null && (status ?? "").trim().length === 0;
+  if (committedText == null || (status ?? "").trim().length > 0) {
+    issues.push(
+      lifecycleIssue(
+        "audit_artifact_uncommitted",
+        committedText == null
+          ? `Audit artifact ${artifactPath} is not present in ${committedRef}.`
+          : `Audit artifact ${artifactPath} has uncommitted worktree or index changes.`,
+        [artifactPath],
+      ),
+    );
+  }
+
+  let committedValidation: AuditReportValidationResult | null = null;
+  if (committedText != null) {
+    committedValidation = validateAuditReportArtifact({
+      ...input,
+      text: committedText,
+      expectedReportArtifactPath: input.expectedReportArtifactPath ?? artifactPath,
+      reportArtifactPaths,
+    });
+    states.committed_blob_revalidated = committedValidation.ok;
+    if (!committedValidation.ok) {
+      issues.push(
+        ...committedValidation.issues.map((entry) =>
+          lifecycleIssue(entry.code, entry.message, entry.paths),
+        ),
+      );
+    }
+    if (
+      committedValidation.artifactSha256 !== worktreeValidation.artifactSha256 ||
+      committedValidation.contentSha256 !== worktreeValidation.contentSha256
+    ) {
+      issues.push(
+        lifecycleIssue(
+          "committed_blob_mismatch",
+          `Committed audit artifact ${committedRef}:${artifactPath} differs from the validated worktree artifact.`,
+          [artifactPath],
+        ),
+      );
+    }
+  }
+
+  const dedupedIssues = [
+    ...new Map(issues.map((entry) => [`${entry.code}:${entry.message}`, entry])).values(),
+  ];
+  states.artifact_state_valid =
+    states.draft_written &&
+    states.manifest_finalized &&
+    states.validator_passed &&
+    states.git_committed &&
+    states.committed_blob_revalidated &&
+    dedupedIssues.length === 0;
+
+  return {
+    ok: states.artifact_state_valid,
+    artifactPath,
+    committedRef,
+    states,
+    issues: dedupedIssues,
+    worktreeArtifactSha256: worktreeValidation.artifactSha256,
+    committedArtifactSha256: committedValidation?.artifactSha256 ?? null,
+    worktreeContentSha256: worktreeValidation.contentSha256,
+    committedContentSha256: committedValidation?.contentSha256 ?? null,
+    committedValidation: committedValidation
+      ? summarizeCommittedValidation(committedValidation)
+      : null,
   };
 }
 

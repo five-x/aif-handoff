@@ -4,7 +4,9 @@ import {
   createAutoReviewFindingId,
   normalizeFindingText,
   parseSpecializedRoleOutput,
+  parseSpecializedRoleOutputResult,
   parseStructuredReviewComments,
+  parseStructuredReviewCommentsResult,
   parseStructuredSidecarOutput,
 } from "../reviewContract.js";
 
@@ -207,6 +209,49 @@ describe("reviewContract", () => {
     ).toBeNull();
   });
 
+  it("returns typed parse errors for specialized reviewer output without verdict", () => {
+    const result = parseSpecializedRoleOutputResult(
+      [
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- packages/agent/src/reviewContract.ts:1 was inspected.",
+        "",
+        "## Previous Findings",
+        "- none",
+      ].join("\n"),
+      "correctness",
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected parse error");
+    expect(result.error.issues.map((issue) => issue.code)).toContain("missing_verdict");
+  });
+
+  it("returns typed parse errors for specialized PASS with blockers", () => {
+    const result = parseSpecializedRoleOutputResult(
+      [
+        "## Verdict",
+        "- PASS",
+        "",
+        "## Blocking Findings",
+        "- A blocker cannot accompany PASS",
+        "",
+        "## Advisories",
+        "- packages/agent/src/reviewContract.ts:1 was inspected.",
+        "",
+        "## Previous Findings",
+        "- none",
+      ].join("\n"),
+      "correctness",
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected parse error");
+    expect(result.error.issues.map((issue) => issue.code)).toContain("pass_with_blockers");
+  });
+
   it("rejects specialized reviewer pass without concrete inspection evidence", () => {
     const withoutAdvisoryEvidence = [
       "## Verdict",
@@ -237,6 +282,31 @@ describe("reviewContract", () => {
 
     expect(parseSpecializedRoleOutput(withoutAdvisoryEvidence, "correctness")).toBeNull();
     expect(parseSpecializedRoleOutput(genericAdvisory, "regression_api_contract")).toBeNull();
+  });
+
+  it("returns typed parse errors for specialized PASS without concrete evidence", () => {
+    const result = parseSpecializedRoleOutputResult(
+      [
+        "## Verdict",
+        "- PASS",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- Everything looks good after review.",
+        "",
+        "## Previous Findings",
+        "- none",
+      ].join("\n"),
+      "regression_api_contract",
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected parse error");
+    expect(result.error.issues.map((issue) => issue.code)).toContain(
+      "pass_without_concrete_evidence",
+    );
   });
 
   it("rejects specialized reviewer output without previous findings section", () => {
@@ -287,6 +357,134 @@ describe("reviewContract", () => {
     expect(parseStructuredReviewComments(withoutSecurityCoverage)).toBeNull();
     expect(parseStructuredReviewComments(duplicateSecurityCoverage)).toBeNull();
   });
+
+  it("returns typed parse errors for missing Security Coverage", () => {
+    const result = parseStructuredReviewCommentsResult(
+      [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Looks good",
+      ].join("\n"),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected parse error");
+    expect(result.error.issues.map((issue) => issue.code)).toContain("missing_security_coverage");
+    expect(result.error.fingerprint).toMatch(/^[a-f0-9]{12}$/);
+    expect(result.error.repairInstructions).toContain('Add a "## Security Coverage" section');
+  });
+
+  it("returns typed parse errors for duplicate Security Coverage area rows", () => {
+    const result = parseStructuredReviewCommentsResult(
+      [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Looks good",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secrets",
+        "- secret_leaks | covered | Checked secrets again",
+        "- permissions_sandbox | covered | Checked permissions",
+        "- unsafe_shell_network_file | covered | Checked operations",
+        "- dependency_config | covered | Checked config",
+      ].join("\n"),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected parse error");
+    expect(result.error.issues.map((issue) => issue.code)).toContain(
+      "duplicate_security_coverage_area",
+    );
+    expect(result.error.issues.map((issue) => issue.row)).toContain(
+      "secret_leaks | covered | Checked secrets again",
+    );
+  });
+
+  it("returns typed parse errors for missing Previous Findings coverage", () => {
+    const result = parseStructuredReviewCommentsResult(
+      [
+        "## Auto Review Metadata",
+        "- Strategy: closure_first",
+        "- Review Iteration: 2",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Looks good",
+        "",
+        ...securityCoverageSection(),
+      ].join("\n"),
+      [
+        {
+          id: "persisted-1",
+          source: "code_review",
+          text: "Fix persisted blocker",
+        },
+      ],
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected parse error");
+    expect(result.error.issues.map((issue) => issue.code)).toContain("missing_previous_finding");
+    expect(result.error.repairInstructions).toContain("persisted-1");
+  });
+
+  it.each(["1abc", "1.5"])(
+    "returns typed parse errors for malformed Review Iteration metadata %s",
+    (iteration) => {
+      const result = parseStructuredReviewCommentsResult(
+        [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          `- Review Iteration: ${iteration}`,
+          "",
+          "## Previous Findings",
+          "- none",
+          "",
+          "## Blocking Findings",
+          "- none",
+          "",
+          "## Advisories",
+          "- code_review | packages/agent/src/reviewContract.ts:1 was inspected.",
+          "",
+          ...securityCoverageSection(),
+        ].join("\n"),
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected parse error");
+      expect(result.error.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "invalid_metadata",
+            detail: expect.stringContaining(`Review Iteration: ${iteration}`),
+          }),
+        ]),
+      );
+    },
+  );
 
   it("round-trips structured review comments with previous, blocking, and advisory sections", () => {
     const previousId = createAutoReviewFindingId(

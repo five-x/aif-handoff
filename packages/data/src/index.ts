@@ -37,6 +37,7 @@ import {
   PERMISSION_EXECUTION_POLICIES,
   PERMISSION_MODES,
   PERMISSION_POLICY_INTENTS,
+  AUDIT_ARTIFACT_LIFECYCLE_STATES,
   findMonorepoRootFromUrl,
   normalizeRuntimeStage,
   runtimeProfileModeForStage,
@@ -62,6 +63,7 @@ import {
   chatMessages,
   usageEvents,
   runtimeWarmupSessions,
+  runtimeEndpointLeases,
   roadmapBatches,
   roadmapBatchArtifacts,
   roadmapBatchArtifactAttempts,
@@ -185,6 +187,7 @@ const AUTO_REVIEW_SECURITY_COVERAGE_AREA_SET = new Set<string>(
   AUTO_REVIEW_SECURITY_COVERAGE_AREAS,
 );
 const APP_SETTINGS_ID = 1;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 
 function resolvePersistedTaskIntent(input: {
   taskIntent?: TaskIntent | null;
@@ -218,6 +221,7 @@ export type ProjectRow = typeof projects.$inferSelect;
 export type AppSettingsRow = typeof appSettings.$inferSelect;
 export type RuntimeProfileRow = typeof runtimeProfiles.$inferSelect;
 export type RuntimeWarmupSessionRow = typeof runtimeWarmupSessions.$inferSelect;
+export type RuntimeEndpointLeaseRow = typeof runtimeEndpointLeases.$inferSelect;
 export type RoadmapBatchRow = typeof roadmapBatches.$inferSelect;
 export type RoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferSelect;
 export type RoadmapBatchArtifactAttemptRow = typeof roadmapBatchArtifactAttempts.$inferSelect;
@@ -254,6 +258,69 @@ export interface CreateRuntimeWarmupSessionInput extends RuntimeWarmupScopeInput
   summary?: string | null;
   createdAt?: string;
 }
+
+export type RuntimeEndpointLeaseAcquireInput = {
+  endpointKey: string;
+  profileId?: string | null;
+  baseUrl: string;
+  runtimeId: string;
+  providerId?: string | null;
+  taskId?: string | null;
+  leaseTtlMs: number;
+};
+
+export type RuntimeEndpointLeaseAcquireResult =
+  | {
+      acquired: true;
+      leaseToken: string;
+      holderId: string;
+      leaseExpiresAt: string;
+      heartbeatAt: string;
+    }
+  | {
+      acquired: false;
+      reason: "held" | "cooldown";
+      holderId?: string | null;
+      leaseExpiresAt?: string | null;
+      cooldownUntil?: string | null;
+      retryAfterMs?: number | null;
+    };
+
+export type RuntimeEndpointLeaseCooldownState = {
+  cooldownUntil: string | null;
+  cooldownFailureCount: number;
+  cooldownReason: string | null;
+};
+
+export type RuntimeEndpointLeaseStore = {
+  holderId: string;
+  acquire(input: RuntimeEndpointLeaseAcquireInput): Promise<RuntimeEndpointLeaseAcquireResult>;
+  heartbeat(input: {
+    endpointKey: string;
+    holderId: string;
+    leaseToken: string;
+    leaseTtlMs: number;
+  }): Promise<boolean>;
+  release(input: {
+    endpointKey: string;
+    holderId: string;
+    leaseToken: string;
+  }): Promise<boolean>;
+  cancel(input: {
+    endpointKey: string;
+    holderId: string;
+    leaseToken?: string | null;
+    taskId?: string | null;
+  }): Promise<number>;
+  readCooldown(input: {
+    endpointKey: string;
+  }): Promise<RuntimeEndpointLeaseCooldownState | null>;
+  setCooldown(input: {
+    endpointKey: string;
+    cooldownUntil: string;
+    cooldownReason?: string | null;
+  }): Promise<void>;
+};
 
 /** DB-level patch: all mutable task columns with their storage types (attachments/tags as JSON strings). */
 export type TaskFieldsPatch = Partial<Omit<TaskRow, "id" | "projectId" | "createdAt">> & {
@@ -5462,7 +5529,54 @@ function hasTrustedAuditEvidenceDepth(value: unknown): boolean {
   return false;
 }
 
+function readLifecycleSha(value: unknown): string | null {
+  return typeof value === "string" && SHA256_PATTERN.test(value) ? value : null;
+}
+
+function validationDetailsHaveValidAuditArtifactLifecycle(validationDetails: unknown): boolean {
+  if (!isObjectRecord(validationDetails)) return false;
+  const lifecycle = validationDetails.auditArtifactLifecycle;
+  if (isObjectRecord(lifecycle)) {
+    const states = lifecycle.states;
+    const committedValidation = lifecycle.committedValidation;
+    const worktreeArtifactSha256 = readLifecycleSha(lifecycle.worktreeArtifactSha256);
+    const committedArtifactSha256 = readLifecycleSha(lifecycle.committedArtifactSha256);
+    const worktreeContentSha256 = readLifecycleSha(lifecycle.worktreeContentSha256);
+    const committedContentSha256 = readLifecycleSha(lifecycle.committedContentSha256);
+    if (
+      lifecycle.ok === true &&
+      typeof lifecycle.artifactPath === "string" &&
+      lifecycle.artifactPath.trim().length > 0 &&
+      typeof lifecycle.committedRef === "string" &&
+      lifecycle.committedRef.trim().length > 0 &&
+      isObjectRecord(states) &&
+      AUDIT_ARTIFACT_LIFECYCLE_STATES.every((state) => states[state] === true) &&
+      Array.isArray(lifecycle.issues) &&
+      lifecycle.issues.length === 0 &&
+      worktreeArtifactSha256 != null &&
+      committedArtifactSha256 != null &&
+      worktreeArtifactSha256 === committedArtifactSha256 &&
+      worktreeContentSha256 != null &&
+      committedContentSha256 != null &&
+      worktreeContentSha256 === committedContentSha256 &&
+      isObjectRecord(committedValidation) &&
+      committedValidation.ok === true &&
+      Array.isArray(committedValidation.issueCodes) &&
+      committedValidation.issueCodes.length === 0 &&
+      committedValidation.artifactSha256 === committedArtifactSha256 &&
+      committedValidation.contentSha256 === committedContentSha256 &&
+      committedValidation.manifestStatus === "valid"
+    ) {
+      return true;
+    }
+  }
+  const evidence = validationDetails.evidence;
+  if (isObjectRecord(evidence)) return validationDetailsHaveValidAuditArtifactLifecycle(evidence);
+  return false;
+}
+
 function validationDetailsHaveTrustedAuditSourceClassification(validationDetails: unknown): boolean {
+  if (!validationDetailsHaveValidAuditArtifactLifecycle(validationDetails)) return false;
   const classification = readAuditSourceClassification(validationDetails);
   if (!classification || !TRUSTED_AUDIT_SOURCE_CLASSIFICATIONS.has(classification)) return false;
   if (classification === "validated_findings_present") return true;
@@ -5482,15 +5596,22 @@ function attemptTrustedForSynthesisInput(
   if (attempt.role === "report") {
     return validationDetailsHaveTrustedAuditSourceClassification(validationDetails);
   }
-  return attempt.state === "valid" && !attempt.failureFamily;
+  return (
+    attempt.state === "valid" &&
+    !attempt.failureFamily &&
+    validationDetailsHaveValidAuditArtifactLifecycle(validationDetails)
+  );
 }
 
 function roadmapArtifactCountsAsValid(artifact: RoadmapBatchArtifactRow): boolean {
   if (artifact.state !== "valid") return false;
   if (artifact.role === "synthesis") {
     return (
+      validationDetailsHaveValidAuditArtifactLifecycle(
+        parseValidationDetails(artifact.validationDetailsJson),
+      ) &&
       readAuditCardDecision(parseValidationDetails(artifact.validationDetailsJson))?.finalStatus !==
-      "audit_inconclusive"
+        "audit_inconclusive"
     );
   }
   if (artifact.role === "report") return hasTrustedAuditSourceClassification(artifact);
@@ -5622,8 +5743,11 @@ function artifactTrustedForSynthesisInput(artifact: RoadmapBatchArtifactRow): bo
     return false;
   }
   return (
+    validationDetailsHaveValidAuditArtifactLifecycle(
+      parseValidationDetails(artifact.validationDetailsJson),
+    ) &&
     readAuditCardDecision(parseValidationDetails(artifact.validationDetailsJson))?.finalStatus !==
-    "audit_inconclusive"
+      "audit_inconclusive"
   );
 }
 
@@ -7324,6 +7448,255 @@ export function listRoadmapReportArtifactsForSynthesis(
 
 export function getRoadmapBatchCreatedTaskIds(batch: RoadmapBatchRow): string[] {
   return parseJsonStringArray(batch.createdTaskIdsJson);
+}
+
+// ── Runtime Endpoint Leases ──────────────────────────────────────────
+
+function retryAfterMs(targetIso: string | null | undefined, nowMs = Date.now()): number | null {
+  if (!targetIso) return null;
+  const targetMs = Date.parse(targetIso);
+  if (!Number.isFinite(targetMs)) return null;
+  return Math.max(0, targetMs - nowMs);
+}
+
+function findRuntimeEndpointLease(endpointKey: string): RuntimeEndpointLeaseRow | undefined {
+  return getDb()
+    .select()
+    .from(runtimeEndpointLeases)
+    .where(eq(runtimeEndpointLeases.endpointKey, endpointKey))
+    .get();
+}
+
+export function releaseStaleRuntimeEndpointLeases(
+  nowIso = new Date().toISOString(),
+): number {
+  const result = getDb()
+    .update(runtimeEndpointLeases)
+    .set({
+      holderId: null,
+      taskId: null,
+      leaseToken: null,
+      heartbeatAt: null,
+      leaseTtlMs: null,
+      leaseExpiresAt: null,
+      updatedAt: nowIso,
+    })
+    .where(
+      and(
+        isNotNull(runtimeEndpointLeases.holderId),
+        isNotNull(runtimeEndpointLeases.leaseExpiresAt),
+        lte(runtimeEndpointLeases.leaseExpiresAt, nowIso),
+      ),
+    )
+    .run();
+  return result.changes;
+}
+
+export function createDbRuntimeEndpointLeaseStore(
+  options: { holderId?: string } = {},
+): RuntimeEndpointLeaseStore {
+  const holderId = options.holderId ?? crypto.randomUUID();
+
+  return {
+    holderId,
+    async acquire(input) {
+      if (input.leaseTtlMs <= 0) {
+        throw new Error("leaseTtlMs must be greater than 0");
+      }
+
+      const nowMs = Date.now();
+      const heartbeatAt = new Date(nowMs).toISOString();
+      const leaseExpiresAt = new Date(nowMs + input.leaseTtlMs).toISOString();
+      const leaseToken = crypto.randomUUID();
+      const result = getDb().run(sql`
+        INSERT INTO runtime_endpoint_leases (
+          endpoint_key,
+          profile_id,
+          base_url,
+          runtime_id,
+          provider_id,
+          holder_id,
+          task_id,
+          lease_token,
+          heartbeat_at,
+          lease_ttl_ms,
+          lease_expires_at,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${input.endpointKey},
+          ${input.profileId ?? null},
+          ${input.baseUrl},
+          ${input.runtimeId},
+          ${input.providerId ?? null},
+          ${holderId},
+          ${input.taskId ?? null},
+          ${leaseToken},
+          ${heartbeatAt},
+          ${input.leaseTtlMs},
+          ${leaseExpiresAt},
+          ${heartbeatAt},
+          ${heartbeatAt}
+        )
+        ON CONFLICT(endpoint_key) DO UPDATE SET
+          profile_id = excluded.profile_id,
+          base_url = excluded.base_url,
+          runtime_id = excluded.runtime_id,
+          provider_id = excluded.provider_id,
+          holder_id = excluded.holder_id,
+          task_id = excluded.task_id,
+          lease_token = excluded.lease_token,
+          heartbeat_at = excluded.heartbeat_at,
+          lease_ttl_ms = excluded.lease_ttl_ms,
+          lease_expires_at = excluded.lease_expires_at,
+          updated_at = excluded.updated_at
+        WHERE
+          (
+            runtime_endpoint_leases.cooldown_until IS NULL
+            OR runtime_endpoint_leases.cooldown_until <= ${heartbeatAt}
+          )
+          AND (
+            runtime_endpoint_leases.holder_id IS NULL
+            OR runtime_endpoint_leases.lease_token IS NULL
+            OR runtime_endpoint_leases.lease_expires_at IS NULL
+            OR runtime_endpoint_leases.lease_expires_at <= ${heartbeatAt}
+          )
+      `);
+
+      if (result.changes > 0) {
+        return { acquired: true, leaseToken, holderId, leaseExpiresAt, heartbeatAt };
+      }
+
+      const current = findRuntimeEndpointLease(input.endpointKey);
+      if (current?.cooldownUntil && current.cooldownUntil > heartbeatAt) {
+        return {
+          acquired: false,
+          reason: "cooldown",
+          cooldownUntil: current.cooldownUntil,
+          retryAfterMs: retryAfterMs(current.cooldownUntil, nowMs),
+        };
+      }
+      return {
+        acquired: false,
+        reason: "held",
+        holderId: current?.holderId ?? null,
+        leaseExpiresAt: current?.leaseExpiresAt ?? null,
+        retryAfterMs: retryAfterMs(current?.leaseExpiresAt, nowMs),
+      };
+    },
+    async heartbeat(input) {
+      if (input.leaseTtlMs <= 0) {
+        throw new Error("leaseTtlMs must be greater than 0");
+      }
+      const nowMs = Date.now();
+      const heartbeatAt = new Date(nowMs).toISOString();
+      const leaseExpiresAt = new Date(nowMs + input.leaseTtlMs).toISOString();
+      const result = getDb()
+        .update(runtimeEndpointLeases)
+        .set({
+          heartbeatAt,
+          leaseTtlMs: input.leaseTtlMs,
+          leaseExpiresAt,
+          updatedAt: heartbeatAt,
+        })
+        .where(
+          and(
+            eq(runtimeEndpointLeases.endpointKey, input.endpointKey),
+            eq(runtimeEndpointLeases.holderId, input.holderId),
+            eq(runtimeEndpointLeases.leaseToken, input.leaseToken),
+          ),
+        )
+        .run();
+      return result.changes > 0;
+    },
+    async release(input) {
+      const nowIso = new Date().toISOString();
+      const result = getDb()
+        .update(runtimeEndpointLeases)
+        .set({
+          holderId: null,
+          taskId: null,
+          leaseToken: null,
+          heartbeatAt: null,
+          leaseTtlMs: null,
+          leaseExpiresAt: null,
+          updatedAt: nowIso,
+        })
+        .where(
+          and(
+            eq(runtimeEndpointLeases.endpointKey, input.endpointKey),
+            eq(runtimeEndpointLeases.holderId, input.holderId),
+            eq(runtimeEndpointLeases.leaseToken, input.leaseToken),
+          ),
+        )
+        .run();
+      return result.changes > 0;
+    },
+    async cancel(input) {
+      const conditions = [
+        eq(runtimeEndpointLeases.endpointKey, input.endpointKey),
+        eq(runtimeEndpointLeases.holderId, input.holderId),
+      ];
+      if (input.leaseToken != null) {
+        conditions.push(eq(runtimeEndpointLeases.leaseToken, input.leaseToken));
+      }
+      if (input.taskId != null) {
+        conditions.push(eq(runtimeEndpointLeases.taskId, input.taskId));
+      }
+
+      const nowIso = new Date().toISOString();
+      const result = getDb()
+        .update(runtimeEndpointLeases)
+        .set({
+          holderId: null,
+          taskId: null,
+          leaseToken: null,
+          heartbeatAt: null,
+          leaseTtlMs: null,
+          leaseExpiresAt: null,
+          updatedAt: nowIso,
+        })
+        .where(and(...conditions))
+        .run();
+      return result.changes;
+    },
+    async readCooldown(input) {
+      const row = findRuntimeEndpointLease(input.endpointKey);
+      if (!row) return null;
+      return {
+        cooldownUntil: row.cooldownUntil ?? null,
+        cooldownFailureCount: row.cooldownFailureCount ?? 0,
+        cooldownReason: row.cooldownReason ?? null,
+      };
+    },
+    async setCooldown(input) {
+      const nowIso = new Date().toISOString();
+      getDb().run(sql`
+        INSERT INTO runtime_endpoint_leases (
+          endpoint_key,
+          cooldown_until,
+          cooldown_failure_count,
+          cooldown_reason,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${input.endpointKey},
+          ${input.cooldownUntil},
+          1,
+          ${input.cooldownReason ?? null},
+          ${nowIso},
+          ${nowIso}
+        )
+        ON CONFLICT(endpoint_key) DO UPDATE SET
+          cooldown_until = excluded.cooldown_until,
+          cooldown_failure_count = runtime_endpoint_leases.cooldown_failure_count + 1,
+          cooldown_reason = excluded.cooldown_reason,
+          updated_at = excluded.updated_at
+      `);
+    },
+  };
 }
 
 // ── Runtime Warmup Sessions ──────────────────────────────────────────

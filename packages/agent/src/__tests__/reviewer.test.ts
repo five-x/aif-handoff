@@ -258,6 +258,42 @@ function trustedAuditReportValidationDetails(
           }
         : {}),
     },
+    auditArtifactLifecycle: validAuditArtifactLifecycleEvidence(sourceClassification),
+  };
+}
+
+function validAuditArtifactLifecycleEvidence(
+  sourceClassification: string,
+): Record<string, unknown> {
+  const artifactSha = "a".repeat(64);
+  const contentSha = "b".repeat(64);
+  return {
+    ok: true,
+    artifactPath: "audit/valid.md",
+    committedRef: "HEAD",
+    states: {
+      draft_written: true,
+      manifest_finalized: true,
+      validator_passed: true,
+      git_committed: true,
+      committed_blob_revalidated: true,
+      artifact_state_valid: true,
+    },
+    issues: [],
+    worktreeArtifactSha256: artifactSha,
+    committedArtifactSha256: artifactSha,
+    worktreeContentSha256: contentSha,
+    committedContentSha256: contentSha,
+    committedValidation: {
+      ok: true,
+      issueCodes: [],
+      artifactSha256: artifactSha,
+      contentSha256: contentSha,
+      manifestStatus: "valid",
+      manifestVersion: 1,
+      sourceClassification,
+      sourceSnapshot: { id: "git:commit:tree", commit: "commit", tree: "tree", dirty: false },
+    },
   };
 }
 
@@ -1327,6 +1363,7 @@ describe("runReviewer", () => {
           manifestStatus: "valid",
           sourceClassification: "validated_findings_present",
         },
+        auditArtifactLifecycle: validAuditArtifactLifecycleEvidence("validated_findings_present"),
       },
     });
 

@@ -50,6 +50,79 @@ function jsonResponse(payload, status = 200) {
     headers: { "Content-Type": "application/json" },
   });
 }
+function createEndpointLeaseStore(overrides = {}) {
+  return {
+    holderId: "holder-a",
+    acquire: vi.fn(async () => ({
+      acquired: true,
+      holderId: "holder-a",
+      leaseToken: "lease-token-a",
+      heartbeatAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })),
+    heartbeat: vi.fn(async () => true),
+    release: vi.fn(async () => true),
+    cancel: vi.fn(async () => 1),
+    readCooldown: vi.fn(async () => null),
+    setCooldown: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
+function createSharedEndpointLeaseStore(holderId, state) {
+  return {
+    holderId,
+    acquire: vi.fn(async (input) => {
+      const now = Date.now();
+      if (state.holderId && state.leaseExpiresAtMs <= now) {
+        state.holderId = null;
+        state.leaseToken = null;
+      }
+      if (!state.holderId) {
+        state.holderId = holderId;
+        state.leaseToken = `${holderId}-token`;
+        state.leaseExpiresAtMs = now + input.leaseTtlMs;
+        return {
+          acquired: true,
+          holderId,
+          leaseToken: state.leaseToken,
+          heartbeatAt: new Date(now).toISOString(),
+          leaseExpiresAt: new Date(state.leaseExpiresAtMs).toISOString(),
+        };
+      }
+      if (state.holderId === holderId) {
+        return {
+          acquired: true,
+          holderId,
+          leaseToken: state.leaseToken,
+          heartbeatAt: new Date(now).toISOString(),
+          leaseExpiresAt: new Date(state.leaseExpiresAtMs).toISOString(),
+        };
+      }
+      return {
+        acquired: false,
+        reason: "held",
+        holderId: state.holderId,
+        leaseExpiresAt: new Date(state.leaseExpiresAtMs).toISOString(),
+        retryAfterMs: Math.max(0, state.leaseExpiresAtMs - now),
+      };
+    }),
+    heartbeat: vi.fn(async (input) => {
+      if (state.holderId !== holderId || state.leaseToken !== input.leaseToken) return false;
+      state.leaseExpiresAtMs = Date.now() + input.leaseTtlMs;
+      return true;
+    }),
+    release: vi.fn(async (input) => {
+      if (state.holderId !== holderId || state.leaseToken !== input.leaseToken) return false;
+      state.holderId = null;
+      state.leaseToken = null;
+      state.leaseExpiresAtMs = 0;
+      return true;
+    }),
+    cancel: vi.fn(async () => 0),
+    readCooldown: vi.fn(async () => null),
+    setCooldown: vi.fn(async () => undefined),
+  };
+}
 async function tryCreateDirectoryLink(target, linkPath) {
   try {
     await symlink(target, linkPath, process.platform === "win32" ? "junction" : "dir");
@@ -2238,7 +2311,7 @@ describe("qwen-local-agent adapter", () => {
     );
   }, 15_000);
 
-  it("stops repeated audit report validation loops before stage timeout", async () => {
+  it("stops repeated audit report validation fingerprints before generic tool-loop suppression", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-loop-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
     await writeFile(
@@ -2299,11 +2372,511 @@ describe("qwen-local-agent adapter", () => {
       }),
     );
 
-    expect(result.outputText).toContain("repeated validate_audit_report tool-call loop");
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    expect(JSON.stringify(result.events)).toContain(
+    expect(result.outputText).toContain(
+      "Stopped after repeated audit report validation fingerprint",
+    );
+    expect(result.outputText).toContain("deterministicRoute=");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(result.events)).not.toContain(
       "Repeated identical validate_audit_report call suppressed",
     );
+  });
+
+  it("stops repeated same audit validation fingerprint before generic tool-loop suppression", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-fingerprint-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      "# Audit\n\nEvidence: `missing-one.ts:1`\n",
+      "utf8",
+    );
+
+    for (const [index, toolName] of ["validate_audit_report", "validate_audit_report"].entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-fingerprint",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-${index + 1}`,
+                    type: "function",
+                    function: {
+                      name: toolName,
+                      arguments:
+                        toolName === "validate_audit_report"
+                          ? JSON.stringify({ path: "audit/report.md" })
+                          : JSON.stringify({}),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          repeatedToolCallLimit: 6,
+          maxToolTurns: 20,
+        },
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain(
+      "Stopped after repeated audit report validation fingerprint",
+    );
+    expect(result.outputText).toContain("validationFingerprint=");
+    expect(result.outputText).toContain("repairMode=bounded_deterministic_repair");
+    expect(result.outputText).toContain("deterministicRoute=bounded_deterministic_repair");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(result.events)).not.toContain(
+      "Repeated identical validate_audit_report call suppressed",
+    );
+  });
+
+  it("routes repeated source-inconclusive audit validation fingerprints deterministically", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-source-inconclusive-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "auth" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+        "",
+        "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    for (const index of [1, 2]) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-source-inconclusive",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-validate-${index}`,
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          maxToolTurns: 20,
+        },
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain(
+      "Stopped after repeated audit report validation fingerprint",
+    );
+    expect(result.outputText).toContain("repairMode=source_inconclusive");
+    expect(result.outputText).toContain("deterministicRoute=source_inconclusive");
+    expect(result.outputText).toContain("sourceClassification=source_inconclusive");
+    expect(result.outputText).toContain("issueCodes=");
+    expect(result.outputText).toContain("shallow_evidence");
+    expect(result.outputText).toContain("validationFingerprint=");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(result.events)).not.toContain(
+      "Repeated identical validate_audit_report call suppressed",
+    );
+  });
+
+  it("routes repeated operator-input audit validation fingerprints deterministically", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-operator-input-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      [
+        "# Runtime Audit",
+        "",
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `src/config.ts:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    for (const index of [1, 2]) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-operator-input",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-validate-${index}`,
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          maxToolTurns: 20,
+        },
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+          auditReportTaskDescription: "Scope: .",
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain(
+      "Stopped after repeated audit report validation fingerprint",
+    );
+    expect(result.outputText).toContain("repairMode=operator_input_required");
+    expect(result.outputText).toContain("deterministicRoute=operator_input_required");
+    expect(result.outputText).toContain("issueCodes=");
+    expect(result.outputText).toContain("missing_scope_coverage");
+    expect(result.outputText).toContain("validationFingerprint=");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(result.events)).not.toContain(
+      "Repeated identical validate_audit_report call suppressed",
+    );
+  });
+
+  it("allows changed audit validation fingerprints after report repair", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-changed-fingerprint-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      "# Audit\n\nEvidence: `missing-one.ts:1`\n",
+      "utf8",
+    );
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-changed-fingerprint",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-validate-1",
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-changed-fingerprint",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-write",
+                    type: "function",
+                    function: {
+                      name: "write_file",
+                      arguments: JSON.stringify({
+                        path: "audit/report.md",
+                        content: "# Audit\n\nEvidence: `missing-two.ts:1`\n",
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-changed-fingerprint",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-validate-2",
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-changed-fingerprint",
+          choices: [{ message: { role: "assistant", content: "final after changed fingerprint" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          maxToolTurns: 20,
+        },
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("final after changed fingerprint");
+    expect(result.outputText).not.toContain(
+      "Stopped after repeated audit report validation fingerprint",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("stops after max audit validation failure passes even when fingerprints change", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-max-passes-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      "# Audit\n\nEvidence: `missing-one.ts:1`\n",
+      "utf8",
+    );
+
+    for (const [index, pathToken] of [
+      "missing-one.ts",
+      "missing-two.ts",
+      "missing-three.ts",
+      "missing-four.ts",
+    ].entries()) {
+      if (index > 0) {
+        fetchMock.mockResolvedValueOnce(
+          jsonResponse({
+            id: "chat-audit-validate-max-passes",
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: `call-write-${index}`,
+                      type: "function",
+                      function: {
+                        name: "write_file",
+                        arguments: JSON.stringify({
+                          path: "audit/report.md",
+                          content: `# Audit\n\nEvidence: \`${pathToken}:1\`\n`,
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        );
+      }
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-max-passes",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-validate-${index + 1}`,
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          maxToolTurns: 20,
+        },
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("Audit report validation pass limit exhausted");
+    expect(result.outputText).toContain("validationFingerprint=");
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+  });
+
+  it("routes repeated manual-review audit validation fingerprints fail-closed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-manual-review-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "# test\n", "utf8");
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding",
+        "Evidence: `README.md:1` documents the project.",
+        "Risk: `README.md` does not exist, so operators cannot read the project overview.",
+        "Proposed fix: Restore `README.md`.",
+        'Verification: Command `rg -n "test" README.md` output:',
+        "```",
+        "README.md:1:# test",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    for (const index of [1, 2]) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-manual-review",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-validate-${index}`,
+                    type: "function",
+                    function: {
+                      name: "validate_audit_report",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        workflowKind: "audit",
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          maxToolTurns: 20,
+        },
+        execution: {
+          allowedWritePaths: ["audit/report.md"],
+          auditReportArtifactPath: "audit/report.md",
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain(
+      "Stopped after repeated audit report validation fingerprint",
+    );
+    expect(result.outputText).toContain("repairMode=manual_review_required");
+    expect(result.outputText).toContain("deterministicRoute=manual_review_required");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("directs low-quality audit report repairs to delete weak findings", async () => {
@@ -3745,6 +4318,364 @@ describe("qwen-local-agent adapter", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(maxActive).toBe(1);
+  });
+  it("acquires and releases a shared endpoint lease around protected endpoint dispatch", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-lease-"));
+    const leaseStore = createEndpointLeaseStore();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-lease",
+        choices: [{ message: { role: "assistant", content: "leased done" } }],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          profileId: "profile-qwen-8003",
+          options: { baseUrl: "http://192.168.88.62:8003/v1" },
+          execution: { runtimeEndpointLeaseStore: leaseStore },
+          usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-lease" },
+        }),
+      ),
+    ).resolves.toMatchObject({ outputText: "leased done" });
+
+    expect(leaseStore.acquire).toHaveBeenCalledWith(
+      expect.objectContaining({
+        endpointKey: "http://192.168.88.62:8003",
+        profileId: "profile-qwen-8003",
+        baseUrl: "http://192.168.88.62:8003/v1",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        taskId: "task-lease",
+        leaseTtlMs: expect.any(Number),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(leaseStore.release).toHaveBeenCalledWith({
+      endpointKey: "http://192.168.88.62:8003",
+      holderId: "holder-a",
+      leaseToken: "lease-token-a",
+    });
+  });
+  it("holds a shared endpoint lease until the response body is consumed across contenders", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-lease-body-"));
+    const state = { holderId: null, leaseToken: null, leaseExpiresAtMs: 0 };
+    const firstStore = createSharedEndpointLeaseStore("holder-a", state);
+    const secondStore = createSharedEndpointLeaseStore("holder-b", state);
+    const encoder = new TextEncoder();
+    let releaseFirstBody = null;
+    let activeBodies = 0;
+    let maxActiveBodies = 0;
+    const firstHeadersReturned = new Promise((resolve) => {
+      fetchMock.mockImplementationOnce(async () => {
+        activeBodies += 1;
+        maxActiveBodies = Math.max(maxActiveBodies, activeBodies);
+        const stream = new ReadableStream({
+          start(controller) {
+            resolve();
+            releaseFirstBody = () => {
+              controller.enqueue(
+                encoder.encode(
+                  JSON.stringify({
+                    id: "chat-first",
+                    choices: [{ message: { role: "assistant", content: "first done" } }],
+                  }),
+                ),
+              );
+              controller.close();
+              activeBodies -= 1;
+            };
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+    });
+    fetchMock.mockImplementationOnce(async () => {
+      activeBodies += 1;
+      maxActiveBodies = Math.max(maxActiveBodies, activeBodies);
+      activeBodies -= 1;
+      return jsonResponse({
+        id: "chat-second",
+        choices: [{ message: { role: "assistant", content: "second done" } }],
+      });
+    });
+
+    const first = runQwenLocalAgentApi(
+      createRunInput(root, {
+        profileId: "profile-qwen-8003-a",
+        options: {
+          baseUrl: "http://192.168.88.62:8003/v1",
+          endpointQueueTimeoutMs: 1_000,
+        },
+        execution: { runtimeEndpointLeaseStore: firstStore },
+      }),
+    );
+    await firstHeadersReturned;
+    const second = runQwenLocalAgentApi(
+      createRunInput(root, {
+        profileId: "profile-qwen-8003-b",
+        options: {
+          baseUrl: "http://127.0.0.1:8003/v1",
+          endpointQueueTimeoutMs: 1_000,
+        },
+        execution: { runtimeEndpointLeaseStore: secondStore },
+      }),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    releaseFirstBody?.();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ outputText: "first done" }),
+      expect.objectContaining({ outputText: "second done" }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(maxActiveBodies).toBe(1);
+    expect(secondStore.acquire.mock.results.length).toBeGreaterThan(1);
+  });
+  it("fails before fetch when a shared endpoint lease holder exceeds queue wait", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-lease-timeout-"));
+    const leaseStore = createEndpointLeaseStore({
+      acquire: vi.fn(async () => ({
+        acquired: false,
+        reason: "held",
+        holderId: "remote-holder",
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })),
+    });
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          profileId: "profile-qwen-8003",
+          options: {
+            baseUrl: "http://192.168.88.62:8003/v1",
+            endpointQueueTimeoutMs: 10,
+            endpointCooldownMs: 1_000,
+            endpointCooldownWaitMaxMs: 0,
+          },
+          execution: { runtimeEndpointLeaseStore: leaseStore },
+          usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-lease-timeout" },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "timeout",
+      providerMeta: expect.objectContaining({
+        status: "endpoint_queue_timeout",
+        endpointKey: "http://192.168.88.62:8003",
+        holderId: "remote-holder",
+        distributedLease: true,
+      }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(leaseStore.release).not.toHaveBeenCalled();
+    expect(leaseStore.setCooldown).not.toHaveBeenCalled();
+  });
+  it("records cooldown before releasing a shared endpoint lease after in-flight timeout", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-lease-timeout-release-"));
+    const order = [];
+    const leaseStore = createEndpointLeaseStore({
+      release: vi.fn(async () => {
+        order.push("release");
+        return true;
+      }),
+      setCooldown: vi.fn(async () => {
+        order.push("cooldown");
+      }),
+    });
+    fetchMock.mockImplementationOnce((_url, init) => {
+      return new Promise((_resolve, reject) => {
+        init.signal.addEventListener(
+          "abort",
+          () => reject(init.signal.reason ?? new DOMException("timeout", "TimeoutError")),
+          { once: true },
+        );
+      });
+    });
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          profileId: "profile-qwen-8005",
+          options: {
+            baseUrl: "http://192.168.88.62:8005/v1",
+            endpointCooldownMs: 1_000,
+            endpointCooldownWaitMaxMs: 0,
+          },
+          execution: { runTimeoutMs: 10, runtimeEndpointLeaseStore: leaseStore },
+          usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-lease-runtime-timeout" },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "timeout",
+      providerMeta: expect.objectContaining({
+        status: "endpoint_cooldown",
+        previousStatus: "endpoint_request_timeout",
+        endpointKey: "http://192.168.88.62:8005",
+      }),
+    });
+
+    expect(leaseStore.release).toHaveBeenCalledWith({
+      endpointKey: "http://192.168.88.62:8005",
+      holderId: "holder-a",
+      leaseToken: "lease-token-a",
+    });
+    expect(leaseStore.setCooldown).toHaveBeenCalledWith(
+      expect.objectContaining({
+        endpointKey: "http://192.168.88.62:8005",
+        cooldownReason: "timeout",
+      }),
+    );
+    expect(order).toEqual(["cooldown", "release"]);
+  });
+  it("aborts and cools down when shared endpoint lease heartbeat loses ownership", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-lease-heartbeat-false-"));
+      const leaseStore = createEndpointLeaseStore({
+        heartbeat: vi.fn(async () => false),
+      });
+      fetchMock.mockImplementationOnce((_url, init) => {
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+        });
+      });
+
+      const run = runQwenLocalAgentApi(
+        createRunInput(root, {
+          profileId: "profile-qwen-8005",
+          options: {
+            baseUrl: "http://192.168.88.62:8005/v1",
+            endpointLeaseHeartbeatMs: 1_000,
+            endpointLeaseTtlMs: 5_000,
+            endpointCooldownMs: 1_000,
+            endpointCooldownWaitMaxMs: 0,
+          },
+          execution: { runtimeEndpointLeaseStore: leaseStore },
+        }),
+      );
+      const rejection = run.then(
+        () => {
+          throw new Error("expected heartbeat lease loss to reject");
+        },
+        (error) => error,
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await rejection;
+      expect(error).toMatchObject({
+        category: "timeout",
+        providerMeta: expect.objectContaining({
+          status: "endpoint_cooldown",
+          previousStatus: "endpoint_lease_lost",
+          endpointKey: "http://192.168.88.62:8005",
+        }),
+      });
+      expect(error.providerMeta).not.toHaveProperty("leaseToken");
+      expect(JSON.stringify(error)).not.toContain("lease-token-a");
+      expect(leaseStore.setCooldown).toHaveBeenCalledWith(
+        expect.objectContaining({
+          endpointKey: "http://192.168.88.62:8005",
+          cooldownReason: "timeout",
+        }),
+      );
+      expect(leaseStore.release).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("aborts and cools down when shared endpoint lease heartbeat throws", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-lease-heartbeat-throw-"));
+      const leaseStore = createEndpointLeaseStore({
+        heartbeat: vi.fn(async () => {
+          throw new Error("lease store unavailable");
+        }),
+      });
+      fetchMock.mockImplementationOnce((_url, init) => {
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+        });
+      });
+
+      const run = runQwenLocalAgentApi(
+        createRunInput(root, {
+          profileId: "profile-qwen-8005",
+          options: {
+            baseUrl: "http://192.168.88.62:8005/v1",
+            endpointLeaseHeartbeatMs: 1_000,
+            endpointLeaseTtlMs: 5_000,
+            endpointCooldownMs: 1_000,
+            endpointCooldownWaitMaxMs: 0,
+          },
+          execution: { runtimeEndpointLeaseStore: leaseStore },
+        }),
+      );
+      const rejection = run.then(
+        () => {
+          throw new Error("expected heartbeat lease loss to reject");
+        },
+        (error) => error,
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await rejection;
+      expect(error).toMatchObject({
+        category: "timeout",
+        providerMeta: expect.objectContaining({
+          status: "endpoint_cooldown",
+          previousStatus: "endpoint_lease_lost",
+          endpointKey: "http://192.168.88.62:8005",
+        }),
+      });
+      expect(error.providerMeta).not.toHaveProperty("leaseToken");
+      expect(JSON.stringify(error)).not.toContain("lease-token-a");
+      expect(leaseStore.setCooldown).toHaveBeenCalledWith(
+        expect.objectContaining({
+          endpointKey: "http://192.168.88.62:8005",
+          cooldownReason: "timeout",
+        }),
+      );
+      expect(leaseStore.release).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("honors shared endpoint cooldown before dispatching a protected request", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-shared-cooldown-"));
+    const leaseStore = createEndpointLeaseStore({
+      readCooldown: vi.fn(async () => ({
+        cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+        cooldownFailureCount: 1,
+        cooldownReason: "timeout",
+      })),
+    });
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          profileId: "profile-qwen-8003",
+          options: {
+            baseUrl: "http://192.168.88.62:8003/v1",
+            endpointCooldownWaitMaxMs: 0,
+          },
+          execution: { runtimeEndpointLeaseStore: leaseStore },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "transport",
+      providerMeta: expect.objectContaining({
+        status: "endpoint_cooldown",
+        endpointKey: "http://192.168.88.62:8003",
+      }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(leaseStore.acquire).not.toHaveBeenCalled();
   });
   it("fails queued protected endpoint requests before fetch when the queue timeout expires", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-endpoint-queue-timeout-"));

@@ -386,6 +386,26 @@ function ensureTables(sqlite: Database.Database): void {
     )
   `);
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS runtime_endpoint_leases (
+      endpoint_key TEXT PRIMARY KEY,
+      profile_id TEXT,
+      base_url TEXT,
+      runtime_id TEXT,
+      provider_id TEXT,
+      holder_id TEXT,
+      task_id TEXT,
+      lease_token TEXT,
+      heartbeat_at TEXT,
+      lease_ttl_ms INTEGER,
+      lease_expires_at TEXT,
+      cooldown_until TEXT,
+      cooldown_failure_count INTEGER NOT NULL DEFAULT 0,
+      cooldown_reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS codex_sessions (
       session_id TEXT PRIMARY KEY,
       file_path TEXT NOT NULL UNIQUE,
@@ -1129,6 +1149,30 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE tasks ADD COLUMN parent_closeout_policy TEXT;
     `,
   },
+  {
+    version: 35,
+    description: "Add runtime endpoint lease and cooldown persistence",
+    sql: `
+      CREATE TABLE IF NOT EXISTS runtime_endpoint_leases (
+        endpoint_key TEXT PRIMARY KEY,
+        profile_id TEXT,
+        base_url TEXT,
+        runtime_id TEXT,
+        provider_id TEXT,
+        holder_id TEXT,
+        task_id TEXT,
+        lease_token TEXT,
+        heartbeat_at TEXT,
+        lease_ttl_ms INTEGER,
+        lease_expires_at TEXT,
+        cooldown_until TEXT,
+        cooldown_failure_count INTEGER NOT NULL DEFAULT 0,
+        cooldown_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -1491,6 +1535,11 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_active_lookup ON runtime_warmup_sessions(project_id, runtime_profile_id, runtime_id, provider_id, transport, model, status, expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_stage_lookup ON runtime_warmup_sessions(project_id, stage, runtime_profile_id, runtime_id, provider_id, transport, model, status, expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_warmup_expires ON runtime_warmup_sessions(status, expires_at)",
+    // Runtime endpoint lease ownership and cooldown scans.
+    "CREATE INDEX IF NOT EXISTS idx_runtime_endpoint_leases_holder ON runtime_endpoint_leases(holder_id, lease_token)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_endpoint_leases_task ON runtime_endpoint_leases(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_endpoint_leases_expires ON runtime_endpoint_leases(lease_expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_endpoint_leases_cooldown ON runtime_endpoint_leases(cooldown_until)",
     // Codex index: project session listing and session detail lookup.
     "CREATE INDEX IF NOT EXISTS idx_codex_sessions_project_root_updated ON codex_sessions(project_root, source_updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_codex_sessions_file_path ON codex_sessions(file_path)",

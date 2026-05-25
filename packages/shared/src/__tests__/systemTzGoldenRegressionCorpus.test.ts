@@ -22,7 +22,6 @@ import {
   initAuditContractRepo,
   invalidAuditReportCases,
   validNoFindingsAuditReportCases,
-  withAuditManifest,
 } from "./fixtures/auditContractCorpus.js";
 
 function initRepo(): string {
@@ -328,29 +327,17 @@ describe("System TZ golden regression corpus", () => {
 
   it("keeps source_inconclusive outside trusted audit synthesis", () => {
     const root = initAuditContractRepo();
-    const snapshot = auditSnapshot(root);
-    const body = [
-      "Audit inconclusive.",
-      "Checked files:",
-      "- `src/config.ts:1`",
-      "Checked commands:",
-      '- Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
-      "",
-    ].join("\n");
-    const content = withAuditManifest({
-      body,
-      taskId: "source-inconclusive",
-      artifactPath: "audit/source-inconclusive.md",
-      snapshot,
-      outcome: "source_inconclusive",
-      scopeIds: ["src/config.ts"],
-      riskHypothesisIds: ["risk-security-config"],
-    });
-
     const outcome = classifyAuditSynthesisSourceReports({
       projectRoot: root,
-      reports: [
-        { artifactPath: "audit/source-inconclusive.md", taskId: "source-inconclusive", content },
+      blockingSourceArtifacts: [
+        {
+          artifactPath: "audit/source-inconclusive.md",
+          taskId: "source-inconclusive",
+          required: true,
+          state: "source_inconclusive",
+          sourceClassification: "source_inconclusive",
+          reasonCodes: ["source_inconclusive"],
+        },
       ],
     });
 

@@ -112,6 +112,15 @@ vi.mock("@aif/data", () => ({
   isRuntimeProfileEligibleForAppDefaults: (runtimeProfileId: string | null) =>
     runtimeProfileId == null || eligibleAppDefaultProfileIds.has(runtimeProfileId),
   createDbUsageSink: () => ({ record: vi.fn() }),
+  createDbRuntimeEndpointLeaseStore: () => ({
+    holderId: "settings-test-runtime-endpoint-lease-holder",
+    acquire: vi.fn(),
+    heartbeat: vi.fn(),
+    release: vi.fn(),
+    cancel: vi.fn(),
+    readCooldown: vi.fn(),
+    setCooldown: vi.fn(),
+  }),
 }));
 
 vi.mock("../ws.js", () => ({

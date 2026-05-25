@@ -102,6 +102,8 @@ const {
   expireStaleRuntimeWarmupSessions,
   findActiveReadyRuntimeWarmupSession,
   findRuntimeWarmupSessionById,
+  createDbRuntimeEndpointLeaseStore,
+  releaseStaleRuntimeEndpointLeases,
   upsertCodexSessions,
   upsertCodexSessionFiles,
   upsertCodexLimitHeads,
@@ -147,6 +149,39 @@ function makeCodexSnapshot(checkedAt = "2026-04-23T10:00:00.000Z") {
   };
 }
 
+function validAuditArtifactLifecycleEvidence(sourceClassification = "validated_no_findings") {
+  const artifactSha = "a".repeat(64);
+  const contentSha = "b".repeat(64);
+  return {
+    ok: true,
+    artifactPath: "audit/valid.md",
+    committedRef: "HEAD",
+    states: {
+      draft_written: true,
+      manifest_finalized: true,
+      validator_passed: true,
+      git_committed: true,
+      committed_blob_revalidated: true,
+      artifact_state_valid: true,
+    },
+    issues: [],
+    worktreeArtifactSha256: artifactSha,
+    committedArtifactSha256: artifactSha,
+    worktreeContentSha256: contentSha,
+    committedContentSha256: contentSha,
+    committedValidation: {
+      ok: true,
+      issueCodes: [],
+      artifactSha256: artifactSha,
+      contentSha256: contentSha,
+      manifestStatus: "valid",
+      manifestVersion: 1,
+      sourceClassification,
+      sourceSnapshot: { id: "git:commit:tree", commit: "commit", tree: "tree", dirty: false },
+    },
+  };
+}
+
 function trustedNoFindingsValidationDetails() {
   return {
     evidence: {
@@ -160,6 +195,7 @@ function trustedNoFindingsValidationDetails() {
           reasonCodes: [],
         },
       },
+      auditArtifactLifecycle: validAuditArtifactLifecycleEvidence(),
     },
   };
 }
@@ -1338,6 +1374,7 @@ describe("data layer", () => {
             sourceClassification: "validated_findings_present",
             manifestStatus: "valid",
           },
+          auditArtifactLifecycle: validAuditArtifactLifecycleEvidence("validated_findings_present"),
         },
       });
       updateRoadmapBatchArtifactState({
@@ -1577,6 +1614,9 @@ describe("data layer", () => {
         validationDetails: {
           evidence: {
             auditReportValidation: { sourceClassification: "validated_findings_present" },
+            auditArtifactLifecycle: validAuditArtifactLifecycleEvidence(
+              "validated_findings_present",
+            ),
           },
         },
       });
@@ -1820,6 +1860,77 @@ describe("data layer", () => {
         }),
       );
       expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+
+      const lifecycleMissing = updateRoadmapBatchArtifactState({
+        taskId: reportTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          evidence: {
+            auditReportValidation: {
+              sourceClassification: "validated_no_findings",
+              manifestStatus: "valid",
+              manifestVersion: 1,
+              evidenceDepth: {
+                status: "substantive",
+                trustedNoFindingsSupported: true,
+                reasonCodes: [],
+              },
+            },
+          },
+        },
+      });
+
+      expect(lifecycleMissing?.counts.valid).toBe(0);
+      expect(lifecycleMissing?.synthesisReady).toBe(false);
+      expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+      expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
+      expect(buildTaskWorkflowTimeline(reportTask!.id)?.attempts.at(-1)).toEqual(
+        expect.objectContaining({
+          outcome: "not_evaluated",
+          trustLevel: "untrusted",
+        }),
+      );
+
+      const partialLifecycle = updateRoadmapBatchArtifactState({
+        taskId: reportTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          evidence: {
+            ...trustedNoFindingsValidationDetails().evidence,
+            auditArtifactLifecycle: {
+              ok: true,
+              states: { artifact_state_valid: true },
+            },
+          },
+        },
+      });
+
+      expect(partialLifecycle?.counts.valid).toBe(0);
+      expect(partialLifecycle?.synthesisReady).toBe(false);
+      expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+      expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
+
+      const legacyLifecycle = updateRoadmapBatchArtifactState({
+        taskId: reportTask!.id,
+        state: "valid",
+        failureFamily: null,
+        validationDetails: {
+          evidence: {
+            ...trustedNoFindingsValidationDetails().evidence,
+            auditArtifactLifecycle: {
+              state: "valid",
+              stages: [{ stage: "artifact_state_valid", ok: true }],
+            },
+          },
+        },
+      });
+
+      expect(legacyLifecycle?.counts.valid).toBe(0);
+      expect(legacyLifecycle?.synthesisReady).toBe(false);
+      expect(listValidatedRoadmapReportArtifacts(summary.batchId)).toEqual([]);
+      expect(listRoadmapReportArtifactsForSynthesis(summary.batchId)).toEqual([]);
 
       const trusted = updateRoadmapBatchArtifactState({
         taskId: reportTask!.id,
@@ -4258,6 +4369,153 @@ describe("data layer", () => {
       const loaded = findCodexIndexCursor("codex:reconcile");
       expect(loaded).toBeDefined();
       expect(loaded?.cursorJson).toEqual({ watermark: "w1", pass: 2 });
+    });
+  });
+
+  describe("runtime endpoint leases", () => {
+    const acquireInput = {
+      endpointKey: "endpoint:local:11434",
+      profileId: "profile-local",
+      baseUrl: "http://127.0.0.1:11434",
+      runtimeId: "codex",
+      providerId: "local",
+      taskId: "task-1",
+      leaseTtlMs: 60_000,
+    };
+
+    it("acquires one endpoint lease and reports contention", async () => {
+      const first = createDbRuntimeEndpointLeaseStore({ holderId: "holder-1" });
+      const second = createDbRuntimeEndpointLeaseStore({ holderId: "holder-2" });
+
+      const acquired = await first.acquire(acquireInput);
+      expect(acquired.acquired).toBe(true);
+
+      const contended = await second.acquire(acquireInput);
+      expect(contended).toMatchObject({
+        acquired: false,
+        reason: "held",
+        holderId: "holder-1",
+      });
+
+      if (!acquired.acquired) throw new Error("expected lease acquisition");
+      expect(
+        await first.release({
+          endpointKey: acquireInput.endpointKey,
+          holderId: acquired.holderId,
+          leaseToken: acquired.leaseToken,
+        }),
+      ).toBe(true);
+      expect((await second.acquire(acquireInput)).acquired).toBe(true);
+    });
+
+    it("requires the owner token for heartbeat and release", async () => {
+      const owner = createDbRuntimeEndpointLeaseStore({ holderId: "holder-owner" });
+      const acquired = await owner.acquire(acquireInput);
+      if (!acquired.acquired) throw new Error("expected lease acquisition");
+
+      expect(
+        await owner.heartbeat({
+          endpointKey: acquireInput.endpointKey,
+          holderId: acquired.holderId,
+          leaseToken: "wrong-token",
+          leaseTtlMs: 60_000,
+        }),
+      ).toBe(false);
+      expect(
+        await owner.release({
+          endpointKey: acquireInput.endpointKey,
+          holderId: "wrong-holder",
+          leaseToken: acquired.leaseToken,
+        }),
+      ).toBe(false);
+      expect((await createDbRuntimeEndpointLeaseStore({ holderId: "other" }).acquire(acquireInput)).acquired).toBe(false);
+      expect(
+        await owner.release({
+          endpointKey: acquireInput.endpointKey,
+          holderId: acquired.holderId,
+          leaseToken: acquired.leaseToken,
+        }),
+      ).toBe(true);
+    });
+
+    it("extends lease expiry on heartbeat", async () => {
+      const owner = createDbRuntimeEndpointLeaseStore({ holderId: "holder-heartbeat" });
+      const acquired = await owner.acquire({ ...acquireInput, leaseTtlMs: 1_000 });
+      if (!acquired.acquired) throw new Error("expected lease acquisition");
+
+      expect(
+        await owner.heartbeat({
+          endpointKey: acquireInput.endpointKey,
+          holderId: acquired.holderId,
+          leaseToken: acquired.leaseToken,
+          leaseTtlMs: 120_000,
+        }),
+      ).toBe(true);
+
+      const contended = await createDbRuntimeEndpointLeaseStore({ holderId: "holder-contender" })
+        .acquire(acquireInput);
+      expect(contended.acquired).toBe(false);
+      if (contended.acquired) throw new Error("expected contention");
+      expect(Date.parse(contended.leaseExpiresAt ?? "")).toBeGreaterThan(
+        Date.parse(acquired.leaseExpiresAt),
+      );
+    });
+
+    it("releases stale holders and allows recovery", async () => {
+      const stale = createDbRuntimeEndpointLeaseStore({ holderId: "holder-stale" });
+      const acquired = await stale.acquire({ ...acquireInput, leaseTtlMs: 1_000 });
+      expect(acquired.acquired).toBe(true);
+
+      expect(releaseStaleRuntimeEndpointLeases("2099-01-01T00:00:00.000Z")).toBe(1);
+      const recovered = await createDbRuntimeEndpointLeaseStore({ holderId: "holder-recovered" })
+        .acquire(acquireInput);
+      expect(recovered.acquired).toBe(true);
+    });
+
+    it("scopes shared cooldowns by endpoint key", async () => {
+      const store = createDbRuntimeEndpointLeaseStore({ holderId: "holder-cooldown" });
+      const cooldownUntil = new Date(Date.now() + 60_000).toISOString();
+
+      await store.setCooldown({
+        endpointKey: "endpoint:cooldown",
+        cooldownUntil,
+        cooldownReason: "rate_limited",
+      });
+
+      expect(await store.readCooldown({ endpointKey: "endpoint:cooldown" })).toMatchObject({
+        cooldownUntil,
+        cooldownFailureCount: 1,
+        cooldownReason: "rate_limited",
+      });
+      expect(await store.readCooldown({ endpointKey: "endpoint:other" })).toBeNull();
+      expect(
+        await store.acquire({ ...acquireInput, endpointKey: "endpoint:cooldown" }),
+      ).toMatchObject({ acquired: false, reason: "cooldown", cooldownUntil });
+      expect((await store.acquire({ ...acquireInput, endpointKey: "endpoint:other" })).acquired).toBe(true);
+    });
+
+    it("cancels by holder plus task and token", async () => {
+      const owner = createDbRuntimeEndpointLeaseStore({ holderId: "holder-cancel" });
+      const acquired = await owner.acquire(acquireInput);
+      if (!acquired.acquired) throw new Error("expected lease acquisition");
+
+      expect(
+        await owner.cancel({
+          endpointKey: acquireInput.endpointKey,
+          holderId: acquired.holderId,
+          leaseToken: acquired.leaseToken,
+          taskId: "other-task",
+        }),
+      ).toBe(0);
+      expect(
+        await owner.cancel({
+          endpointKey: acquireInput.endpointKey,
+          holderId: acquired.holderId,
+          leaseToken: acquired.leaseToken,
+          taskId: acquireInput.taskId,
+        }),
+      ).toBe(1);
+      expect((await createDbRuntimeEndpointLeaseStore({ holderId: "holder-next" }).acquire(acquireInput)).acquired).toBe(true);
     });
   });
 

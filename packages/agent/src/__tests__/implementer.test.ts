@@ -14,6 +14,7 @@ import {
   evaluateTaskCompletionEvidence,
   validateImplementationManifest,
   validateAuditReportArtifact,
+  computeAuditReportArtifactSha256,
   computeAuditReportContentSha256,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
@@ -51,15 +52,27 @@ const {
   updateRoadmapBatchArtifactState,
 } = await import("@aif/data");
 
-function trustedFindingsValidationDetails(): Record<string, unknown> {
+function trustedFindingsValidationDetails(input?: {
+  artifactPath?: string;
+  artifactSha256?: string;
+  contentSha256?: string;
+}): Record<string, unknown> {
   return {
     evidence: {
       auditReportValidation: { sourceClassification: "validated_findings_present" },
+      auditArtifactLifecycle: validAuditArtifactLifecycleEvidence(
+        "validated_findings_present",
+        input,
+      ),
     },
   };
 }
 
-function trustedNoFindingsValidationDetails(): Record<string, unknown> {
+function trustedNoFindingsValidationDetails(input?: {
+  artifactPath?: string;
+  artifactSha256?: string;
+  contentSha256?: string;
+}): Record<string, unknown> {
   return {
     evidence: {
       auditReportValidation: {
@@ -72,6 +85,43 @@ function trustedNoFindingsValidationDetails(): Record<string, unknown> {
           reasonCodes: [],
         },
       },
+      auditArtifactLifecycle: validAuditArtifactLifecycleEvidence("validated_no_findings", input),
+    },
+  };
+}
+
+function validAuditArtifactLifecycleEvidence(
+  sourceClassification: string,
+  input?: { artifactPath?: string; artifactSha256?: string; contentSha256?: string },
+): Record<string, unknown> {
+  const artifactSha = input?.artifactSha256 ?? "a".repeat(64);
+  const contentSha = input?.contentSha256 ?? "b".repeat(64);
+  return {
+    ok: true,
+    artifactPath: input?.artifactPath ?? "audit/valid.md",
+    committedRef: "HEAD",
+    states: {
+      draft_written: true,
+      manifest_finalized: true,
+      validator_passed: true,
+      git_committed: true,
+      committed_blob_revalidated: true,
+      artifact_state_valid: true,
+    },
+    issues: [],
+    worktreeArtifactSha256: artifactSha,
+    committedArtifactSha256: artifactSha,
+    worktreeContentSha256: contentSha,
+    committedContentSha256: contentSha,
+    committedValidation: {
+      ok: true,
+      issueCodes: [],
+      artifactSha256: artifactSha,
+      contentSha256: contentSha,
+      manifestStatus: "valid",
+      manifestVersion: 1,
+      sourceClassification,
+      sourceSnapshot: { id: "git:commit:tree", commit: "commit", tree: "tree", dirty: false },
     },
   };
 }
@@ -1141,7 +1191,15 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-synthesis-report",
       state: "valid",
       failureFamily: null,
-      validationDetails: trustedFindingsValidationDetails(),
+      validationDetails: trustedFindingsValidationDetails({
+        artifactPath: "audit/config.md",
+        artifactSha256: computeAuditReportArtifactSha256(
+          readFileSync(join(projectRoot, "audit", "config.md"), "utf8"),
+        ),
+        contentSha256: computeAuditReportContentSha256(
+          readFileSync(join(projectRoot, "audit", "config.md"), "utf8"),
+        ),
+      }),
     });
 
     await runImplementer("task-synthesis", projectRoot);
@@ -1246,7 +1304,21 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-branch-report",
       state: "valid",
       failureFamily: null,
-      validationDetails: trustedFindingsValidationDetails(),
+      validationDetails: trustedFindingsValidationDetails({
+        artifactPath: "audit/config.md",
+        artifactSha256: computeAuditReportArtifactSha256(
+          execFileSync("git", ["show", "audit/config-report:audit/config.md"], {
+            cwd: projectRoot,
+            encoding: "utf8",
+          }),
+        ),
+        contentSha256: computeAuditReportContentSha256(
+          execFileSync("git", ["show", "audit/config-report:audit/config.md"], {
+            cwd: projectRoot,
+            encoding: "utf8",
+          }),
+        ),
+      }),
     });
 
     await runImplementer("task-branch-synthesis", projectRoot);
@@ -1470,7 +1542,15 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-report-for-deterministic-synthesis",
       state: "valid",
       failureFamily: null,
-      validationDetails: trustedFindingsValidationDetails(),
+      validationDetails: trustedFindingsValidationDetails({
+        artifactPath: "audit/config.md",
+        artifactSha256: computeAuditReportArtifactSha256(
+          readFileSync(join(projectRoot, "audit", "config.md"), "utf8"),
+        ),
+        contentSha256: computeAuditReportContentSha256(
+          readFileSync(join(projectRoot, "audit", "config.md"), "utf8"),
+        ),
+      }),
     });
 
     await runImplementer("task-deterministic-synthesis", projectRoot);
@@ -1851,7 +1931,15 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-report-no-findings-source",
       state: "valid",
       failureFamily: null,
-      validationDetails: trustedNoFindingsValidationDetails(),
+      validationDetails: trustedNoFindingsValidationDetails({
+        artifactPath: "audit/runtime.md",
+        artifactSha256: computeAuditReportArtifactSha256(
+          readFileSync(join(projectRoot, "audit", "runtime.md"), "utf8"),
+        ),
+        contentSha256: computeAuditReportContentSha256(
+          readFileSync(join(projectRoot, "audit", "runtime.md"), "utf8"),
+        ),
+      }),
     });
 
     await runImplementer("task-no-findings-synthesis", projectRoot);
@@ -2095,7 +2183,11 @@ describe("runImplementer rework behavior", () => {
       state: "valid",
       failureFamily: null,
       sourceSnapshotId: sourceSnapshot.id,
-      validationDetails: trustedNoFindingsValidationDetails(),
+      validationDetails: trustedNoFindingsValidationDetails({
+        artifactPath: "audit/runtime.md",
+        artifactSha256: sourceValidation.artifactSha256,
+        contentSha256: sourceValidation.contentSha256,
+      }),
     });
 
     await runImplementer("task-ledger-synthesis", projectRoot);
@@ -2108,6 +2200,113 @@ describe("runImplementer rework behavior", () => {
     expect(summary).toContain(
       "Absence reasoning: risk-deterministic-synthesis-no-findings trusted source report `audit/runtime.md` was classified as validated_no_findings with substantive child evidence",
     );
+  });
+
+  it("blocks trusted source synthesis when an accepted artifact is mutated afterward", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    const acceptedSource = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "## Checked Files",
+      "",
+      "- `README.md:1`",
+      "",
+    ].join("\n");
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(join(projectRoot, "audit", "runtime.md"), acceptedSource, "utf8");
+    execFileSync("git", ["add", "README.md", "audit/runtime.md"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "accepted source report", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-mutated-source",
+          projectId: "project-1",
+          title: "Audit runtime",
+          description: "Report artifact: audit/runtime.md",
+          taskIntent: "audit",
+          status: "done",
+        },
+        {
+          id: "task-mutated-synthesis",
+          projectId: "project-1",
+          title: "Synthesize audit findings",
+          description: "Report artifact: audit/summary.md",
+          taskIntent: "audit",
+          status: "implementing",
+          plan: "## Plan\n- [ ] Synthesize validated audit reports",
+          reworkRequested: true,
+          blockedReason:
+            "Completion evidence guard (missing_substantive_evidence): Report artifact lacks substantive evidence markers.",
+        },
+      ])
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-mutated-source",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-mutated-source", "task-mutated-synthesis"],
+      synthesisTaskId: "task-mutated-synthesis",
+      artifacts: [
+        {
+          taskId: "task-mutated-source",
+          role: "report",
+          artifactPath: "audit/runtime.md",
+          projectRoot,
+        },
+        {
+          taskId: "task-mutated-synthesis",
+          role: "synthesis",
+          artifactPath: "audit/summary.md",
+          projectRoot,
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-mutated-source",
+      state: "valid",
+      failureFamily: null,
+      validationDetails: trustedNoFindingsValidationDetails({
+        artifactPath: "audit/runtime.md",
+        artifactSha256: computeAuditReportArtifactSha256(acceptedSource),
+        contentSha256: computeAuditReportContentSha256(acceptedSource),
+      }),
+    });
+    writeFileSync(
+      join(projectRoot, "audit", "runtime.md"),
+      `${acceptedSource}\n\n## Late Mutation\n\nThis text was added after acceptance.\n`,
+      "utf8",
+    );
+
+    await runImplementer("task-mutated-synthesis", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const summary = readFileSync(join(projectRoot, "audit", "summary.md"), "utf8");
+    expect(summary).toContain("# Audit Inconclusive");
+    expect(summary).toContain('"kind":"source_inconclusive"');
+    expect(summary).toContain("committed_blob_mismatch");
+    expect(summary).not.toContain("Audit outcome: Validated no-findings");
+    expect(summary).toContain("| `audit/runtime.md` | `task-mutated-source` | failed |");
   });
 
   it("writes inconclusive synthesis when all source reports are inventory-only no-findings", async () => {
@@ -2222,12 +2421,17 @@ describe("runImplementer rework behavior", () => {
         },
       ],
     });
-    reportTaskIds.forEach((taskId) => {
+    reportTaskIds.forEach((taskId, index) => {
+      const sourceText = readFileSync(join(projectRoot, reportPaths[index]!), "utf8");
       updateRoadmapBatchArtifactState({
         taskId,
         state: "valid",
         failureFamily: null,
-        validationDetails: trustedNoFindingsValidationDetails(),
+        validationDetails: trustedNoFindingsValidationDetails({
+          artifactPath: reportPaths[index],
+          artifactSha256: computeAuditReportArtifactSha256(sourceText),
+          contentSha256: computeAuditReportContentSha256(sourceText),
+        }),
       });
     });
 
@@ -4460,10 +4664,30 @@ describe("runImplementer rework behavior", () => {
       expect(artifact.state).toBe("source_inconclusive");
       expect(artifact.failureFamily).toBe("source_inconclusive");
       const validationDetails = JSON.parse(artifact.validationDetailsJson ?? "{}") as {
-        evidence?: { auditReportValidation?: { sourceClassification?: string } };
+        evidence?: {
+          auditReportValidation?: {
+            sourceClassification?: string;
+            repairMode?: string;
+            validationFingerprint?: string;
+            issueCodes?: string[];
+            blockingIssues?: unknown[];
+          };
+        };
       };
       expect(validationDetails.evidence?.auditReportValidation?.sourceClassification).toBe(
         "source_inconclusive",
+      );
+      expect(validationDetails.evidence?.auditReportValidation?.repairMode).toBe(
+        "operator_input_required",
+      );
+      expect(validationDetails.evidence?.auditReportValidation?.validationFingerprint).toMatch(
+        /^[a-f0-9]{16}$/,
+      );
+      expect(validationDetails.evidence?.auditReportValidation?.issueCodes).toEqual(
+        expect.any(Array),
+      );
+      expect(validationDetails.evidence?.auditReportValidation?.blockingIssues).toEqual(
+        expect.any(Array),
       );
       const attempts = listRoadmapBatchArtifactAttempts(artifact.id);
       expect(attempts).toHaveLength(1);
@@ -4474,11 +4698,23 @@ describe("runImplementer rework behavior", () => {
         reworkStatus: "terminal_inconclusive",
       });
       const attemptValidationDetails = JSON.parse(attempts[0]!.validationDetailsJson ?? "{}") as {
-        evidence?: { auditReportValidation?: { sourceClassification?: string } };
+        evidence?: {
+          auditReportValidation?: {
+            sourceClassification?: string;
+            repairMode?: string;
+            validationFingerprint?: string;
+          };
+        };
       };
       expect(attemptValidationDetails.evidence?.auditReportValidation?.sourceClassification).toBe(
         "source_inconclusive",
       );
+      expect(attemptValidationDetails.evidence?.auditReportValidation?.repairMode).toBe(
+        "operator_input_required",
+      );
+      expect(
+        attemptValidationDetails.evidence?.auditReportValidation?.validationFingerprint,
+      ).toMatch(/^[a-f0-9]{16}$/);
     }
 
     const batch = summarizeRoadmapBatch(summary.batchId);

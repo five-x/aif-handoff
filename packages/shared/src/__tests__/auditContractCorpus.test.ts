@@ -4,6 +4,7 @@ import {
   validateAuditReportArtifact,
 } from "../auditReportValidator.js";
 import { classifyAuditSynthesisSourceReports } from "../auditSynthesisClassifier.js";
+import type { TrustedSourceAuditArtifact } from "../auditSynthesisClassifier.js";
 import { selectAuditArtifactFailureFamily } from "../auditRoadmapContract.js";
 import {
   auditSnapshot,
@@ -58,6 +59,31 @@ function expectFixtureEvidenceDepth(
       );
     }
   }
+}
+
+function trustedCorpusArtifact(input: {
+  artifactPath: string;
+  taskId: string;
+  auditPlanId?: string;
+  auditEvidenceUnits?: TrustedSourceAuditArtifact["auditEvidenceUnits"];
+  content: string;
+  sourceClassification: TrustedSourceAuditArtifact["sourceClassification"];
+  substantiveNoFindingsSupported?: boolean;
+}): TrustedSourceAuditArtifact {
+  return {
+    artifactPath: input.artifactPath,
+    taskId: input.taskId,
+    auditPlanId: input.auditPlanId,
+    auditEvidenceUnits: input.auditEvidenceUnits,
+    content: input.content,
+    sourceClassification: input.sourceClassification,
+    substantiveNoFindingsSupported: input.substantiveNoFindingsSupported,
+    manifestValid: true,
+    ledgerValid: true,
+    sourceSnapshotValid: true,
+    committedBlobVerified: true,
+    completionGuardTrusted: true,
+  };
 }
 
 describe("audit contract corpus", () => {
@@ -150,40 +176,48 @@ describe("audit contract corpus", () => {
     );
     const noFindingReports = synthesisNoFindingsFixtures.map((fixture) => {
       const report = buildManifestBackedReport({ report: fixture, snapshot: corpusSnapshot });
-      return {
+      return trustedCorpusArtifact({
         artifactPath: report.artifactPath,
         taskId: report.taskId,
         auditPlanId: report.auditPlanId,
         auditEvidenceUnits: report.evidenceUnits,
+        sourceClassification: "validated_no_findings",
+        substantiveNoFindingsSupported: true,
         content: report.text,
-      };
+      });
     });
     const noFindings = classifyAuditSynthesisSourceReports({
       projectRoot: corpusRoot,
-      reports: noFindingReports,
+      trustedSourceArtifacts: noFindingReports,
     });
     expect(noFindings.kind).toBe("validated_no_findings");
     expect(noFindings.substantiveNoFindingsReportCount).toBe(synthesisNoFindingsFixtures.length);
 
     const findings = classifyAuditSynthesisSourceReports({
       projectRoot: corpusRoot,
-      reports: validFindingsAuditReportCases.map((fixture) => ({
-        artifactPath: fixture.artifactPath,
-        taskId: fixture.id,
-        content: fixture.body,
-      })),
+      trustedSourceArtifacts: validFindingsAuditReportCases.map((fixture) =>
+        trustedCorpusArtifact({
+          artifactPath: fixture.artifactPath,
+          taskId: fixture.id,
+          sourceClassification: "validated_findings_present",
+          content: fixture.body,
+        }),
+      ),
     });
     expect(findings.kind).toBe("validated_findings_present");
     expect(findings.validatedFindingCount).toBe(validFindingsAuditReportCases.length);
 
     const weak = classifyAuditSynthesisSourceReports({
       projectRoot: corpusRoot,
-      reports: invalidAuditReportCases
+      blockingSourceArtifacts: invalidAuditReportCases
         .filter((fixture) => fixture.expectedClassification === "inventory_only_invalid")
         .map((fixture) => ({
           artifactPath: fixture.artifactPath,
           taskId: fixture.id,
-          content: fixture.body,
+          required: true,
+          state: "invalid",
+          sourceClassification: "inventory_only_invalid",
+          reasonCodes: fixture.expectedEvidenceDepthReasonCodes ?? ["inventory_only_evidence"],
         })),
     });
     expect(weak.kind).toBe("source_inconclusive");

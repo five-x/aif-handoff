@@ -9,6 +9,8 @@ import {
   redactProviderText,
   resolveAuditPlanId,
   SPECIALIZED_REVIEWER_ROLES,
+  type AuditReportValidationIssue,
+  type AuditReportValidationResult,
   type AutoReviewFinding,
   type AutoReviewStrategy,
   type TaskCompletionEvidenceTask,
@@ -21,8 +23,10 @@ import {
 import {
   createAutoReviewFindingId,
   parseStructuredReviewComments,
+  parseStructuredReviewCommentsResult,
   toAutoReviewState,
   type ParsedStructuredReviewComments,
+  type StructuredReviewParseError,
 } from "./reviewContract.js";
 import { executeSubagentQuery } from "./subagentQuery.js";
 
@@ -328,12 +332,11 @@ function collectDeterministicReviewGateFindings(input: ReviewGateInput): AutoRev
     );
   }
 
-  const auditValidationIssues = taskEvidence.evidence.auditReportValidation.issues;
+  const auditValidation = taskEvidence.evidence.auditReportValidation;
+  const auditValidationIssues = auditValidation.issues;
   if (auditValidationIssues.length > 0) {
     return auditValidationIssues.map((entry) =>
-      reviewGateFinding(
-        `Audit report validator blocked completion (${entry.code}): ${entry.message}`,
-      ),
+      reviewGateFinding(formatAuditValidationBlockerText(entry, auditValidation)),
     );
   }
 
@@ -342,6 +345,23 @@ function collectDeterministicReviewGateFindings(input: ReviewGateInput): AutoRev
       `Audit completion evidence blocked review gate (${entry.code}): ${entry.message}`,
     ),
   );
+}
+
+function formatAuditValidationBlockerText(
+  issue: AuditReportValidationIssue,
+  validation: AuditReportValidationResult,
+): string {
+  const routePrefix =
+    validation.repairMode === "manual_review_required"
+      ? "manual_review_required: "
+      : validation.repairMode === "operator_input_required"
+        ? "operator_input_required: "
+        : "";
+  return [
+    `${routePrefix}Audit report validator blocked completion (${issue.code}): ${issue.message}`,
+    `validationFingerprint=${validation.validationFingerprint}`,
+    `repairMode=${validation.repairMode}`,
+  ].join(" ");
 }
 
 function auditArtifactRequiresLedgerEvidence(input: {
@@ -1152,6 +1172,84 @@ function buildMalformedStructuredReviewContractHandoff(
   };
 }
 
+function buildStructuredParseErrorFinding(error: StructuredReviewParseError): AutoReviewFinding {
+  const issueCodes = [...new Set(error.issues.map((issue) => issue.code))].sort();
+  const text = [
+    `Structured review parse error (${error.fingerprint}): ${issueCodes.join(", ")}.`,
+    error.repairInstructions,
+  ].join("\n");
+  return {
+    id: createAutoReviewFindingId(
+      "review_gate",
+      `structured_review_parse_error:${error.fingerprint}`,
+    ),
+    source: "review_gate",
+    text,
+    closureEvidence: `Structured parser rejected ${error.kind} with fingerprint ${error.fingerprint}.`,
+  };
+}
+
+function isStructuredParseErrorFinding(finding: AutoReviewFinding): boolean {
+  return (
+    finding.source === "review_gate" &&
+    /^Structured review parse error \([a-f0-9]{12}\):/i.test(finding.text.trim())
+  );
+}
+
+function buildStructuredParseErrorDecision(
+  input: ReviewGateInput,
+  error: StructuredReviewParseError,
+  deterministicFindings: AutoReviewFinding[],
+): ReviewGateResult {
+  const parseErrorFinding = buildStructuredParseErrorFinding(error);
+  const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
+  const mergedFindings =
+    input.previousFindings.length > 0
+      ? mergeFindings(input.previousFindings, [parseErrorFinding], deterministicFindings)
+      : mergeFindings([parseErrorFinding], deterministicFindings);
+  const enrichedFindings = enrichBlockingFindings({
+    findings: mergedFindings,
+    previousFindings: input.previousFindings,
+    iteration: input.iteration,
+  });
+  const newBlockingCount = enrichedFindings.filter(
+    (finding) => !previousIds.has(finding.id),
+  ).length;
+  const metrics = buildMetrics({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    previousBlockingCount: input.previousFindings.length,
+    stillBlockingCount: input.previousFindings.length,
+    newBlockingCount,
+    totalBlockingCount: enrichedFindings.length,
+    parserMode: "structured",
+  });
+  const autoReviewState = toAutoReviewState({
+    strategy: input.strategy,
+    iteration: input.iteration,
+    findings: enrichedFindings,
+  });
+
+  if (previousIds.has(parseErrorFinding.id)) {
+    return {
+      status: "manual_review_required",
+      handoffReason: "malformed_structured_review_contract",
+      metrics,
+      blockingFindings: enrichedFindings,
+      fixesMarkdown: formatFixesMarkdown(enrichedFindings),
+      autoReviewState,
+    };
+  }
+
+  return {
+    status: "request_changes",
+    metrics,
+    blockingFindings: enrichedFindings,
+    fixesMarkdown: formatFixesMarkdown(enrichedFindings),
+    autoReviewState,
+  };
+}
+
 function extractSpecializedContractFailureFindings(
   reviewComments: string | null,
 ): AutoReviewFinding[] {
@@ -1168,12 +1266,29 @@ export async function evaluateReviewCommentsForAutoMode(
   if (isStructuredReviewContractFailure(input.reviewComments)) {
     return buildMalformedStructuredReviewContractHandoff(input, deterministicFindings);
   }
-  const parsedStructuredComments = parseStructuredReviewComments(input.reviewComments);
-  if (parsedStructuredComments) {
-    return buildStructuredDecision(input, parsedStructuredComments, deterministicFindings);
-  }
   if (isStructuredReviewContractAttempt(input.reviewComments)) {
-    return buildMalformedStructuredReviewContractHandoff(input, deterministicFindings);
+    const previousFindingsForParser = input.previousFindings.filter(
+      (finding) => !isStructuredParseErrorFinding(finding),
+    );
+    const parsedStructuredComments = parseStructuredReviewCommentsResult(
+      input.reviewComments,
+      previousFindingsForParser,
+    );
+    if (parsedStructuredComments.ok) {
+      return buildStructuredDecision(
+        {
+          ...input,
+          previousFindings: previousFindingsForParser,
+        },
+        parsedStructuredComments.value,
+        deterministicFindings,
+      );
+    }
+    return buildStructuredParseErrorDecision(
+      input,
+      parsedStructuredComments.error,
+      deterministicFindings,
+    );
   }
 
   const legacyBlockingFindings = parseLegacyBlockingFindings(input);

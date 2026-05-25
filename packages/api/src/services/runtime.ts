@@ -40,6 +40,7 @@ import type { RuntimeStageOrProfileMode, WarmupTarget } from "@aif/shared";
 import {
   appendTaskActivityLog,
   clearRuntimeProfileLimitSnapshot,
+  createDbRuntimeEndpointLeaseStore,
   createDbUsageSink,
   type DbUsageEvent,
   findProjectById,
@@ -55,6 +56,9 @@ import { broadcast } from "../ws.js";
 
 const log = logger("api-runtime");
 const UNBOUNDED_API_RUNTIME_WORKFLOWS = new Set(["roadmap-generate", "roadmap-extract"]);
+const runtimeEndpointLeaseStore = createDbRuntimeEndpointLeaseStore({
+  holderId: `api:${process.pid}:${crypto.randomUUID()}`,
+});
 
 let runtimeRegistryPromise: Promise<RuntimeRegistry> | null = null;
 let modelDiscoveryService: RuntimeModelDiscoveryService | null = null;
@@ -103,6 +107,7 @@ export async function getApiRuntimeRegistry(): Promise<RuntimeRegistry> {
         },
       },
       runtimeModules: getEnv().AIF_RUNTIME_MODULES ?? [],
+      runtimeEndpointLeaseStore,
       // DB-backed sink persists every successful run through the registry
       // wrapper. Structurally matches @aif/runtime's RuntimeUsageSink —
       // no cross-package type import needed.

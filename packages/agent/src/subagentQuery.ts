@@ -1,5 +1,6 @@
 import {
   clearRuntimeProfileLimitSnapshot,
+  createDbRuntimeEndpointLeaseStore,
   createDbUsageSink,
   expireStaleRuntimeWarmupSessions,
   findActiveReadyRuntimeWarmupSession,
@@ -476,6 +477,9 @@ function sessionIdSuffix(sessionId: string | null | undefined): string | null {
 // codex uses `modelReasoningEffort`, opencode uses `reasoningEffort`.
 // Mirrors MANAGED_OPTION_KEYS in packages/web/src/components/settings/RuntimeProfileForm.tsx.
 const EFFORT_OPTION_KEYS = ["effort", "modelReasoningEffort", "reasoningEffort"] as const;
+const runtimeEndpointLeaseStore = createDbRuntimeEndpointLeaseStore({
+  holderId: `agent-subagent:${process.pid}:${crypto.randomUUID()}`,
+});
 
 function pickEffort(options: Record<string, unknown>): string | null {
   for (const key of EFFORT_OPTION_KEYS) {
@@ -505,6 +509,7 @@ async function getRuntimeRegistry(): Promise<RuntimeRegistry> {
   runtimeRegistryPromise = bootstrapRuntimeRegistry({
     logger: createRuntimeRegistryLogger(),
     runtimeModules: getEnv().AIF_RUNTIME_MODULES,
+    runtimeEndpointLeaseStore,
     usageSink: createDbUsageSink({
       onRecorded: (event) => {
         if (event.outcome && event.outcome !== "success") return;

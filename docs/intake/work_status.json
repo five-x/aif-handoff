@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-23",
+  "updated": "2026-05-25",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -651,6 +651,78 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260523-add-specialized-reviewer-fanout-gates",
       "updated": "2026-05-23"
+    },
+    {
+      "taskId": "work-20260525-trusted-audit-artifact-lifecycle",
+      "title": "Trusted Audit Artifact Lifecycle",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-trusted-audit-artifact-lifecycle",
+      "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260525-ledger-only-audit-completion-evidence",
+      "title": "Ledger-Only Audit Completion Evidence",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-ledger-only-audit-completion-evidence",
+      "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260525-trusted-source-audit-synthesis",
+      "title": "Trusted Source Audit Synthesis",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-trusted-source-audit-synthesis",
+      "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260525-typed-structured-review-errors",
+      "title": "Typed Structured Review Errors",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-typed-structured-review-errors",
+      "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260525-audit-validation-fingerprint-guard",
+      "title": "Audit Validation Fingerprint Guard",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-audit-validation-fingerprint-guard",
+      "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260525-distributed-runtime-endpoint-leases",
+      "title": "Distributed Runtime Endpoint Leases",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-distributed-runtime-endpoint-leases",
+      "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260525-remote-audit-quality-trust-canary",
+      "title": "Remote Audit Quality Trust Canary",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-remote-audit-quality-trust-canary",
+      "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260525-clear-remote-botintevra-dirty-audit-worktree",
+      "title": "Clear Remote botIntevra Dirty Audit Worktree Blocker",
+      "status": "done",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260525-clear-remote-botintevra-dirty-audit-worktree",
+      "updated": "2026-05-25"
     }
   ]
 }

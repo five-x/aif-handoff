@@ -9,6 +9,7 @@ import {
   formatAuditSynthesisOutcomeForArtifact,
   parseAuditSynthesisOutcomeFromText,
 } from "../auditSynthesisClassifier.js";
+import type { TrustedSourceAuditArtifact } from "../auditSynthesisClassifier.js";
 import { computeAuditReportContentSha256 } from "../auditReportValidator.js";
 import type { AuditEvidenceUnit } from "../auditEvidenceLedger.js";
 
@@ -110,6 +111,40 @@ function sourceEvidenceUnit(snapshot: {
   };
 }
 
+function trustedSourceArtifact(input: {
+  artifactPath?: string;
+  taskId?: string;
+  content: string;
+  sourceClassification: TrustedSourceAuditArtifact["sourceClassification"];
+  substantiveNoFindingsSupported?: boolean;
+  manifestValid?: boolean;
+  ledgerValid?: boolean;
+  sourceSnapshotValid?: boolean;
+  committedBlobVerified?: boolean;
+  completionGuardTrusted?: boolean;
+  auditEvidenceUnits?: AuditEvidenceUnit[];
+  auditPlanId?: string;
+  roadmapBatchId?: string;
+  roadmapAlias?: string;
+}): TrustedSourceAuditArtifact {
+  return {
+    artifactPath: input.artifactPath ?? "audit/source.md",
+    taskId: input.taskId ?? "task-source",
+    sourceClassification: input.sourceClassification,
+    content: input.content,
+    substantiveNoFindingsSupported: input.substantiveNoFindingsSupported,
+    manifestValid: input.manifestValid ?? true,
+    ledgerValid: input.ledgerValid ?? true,
+    sourceSnapshotValid: input.sourceSnapshotValid ?? true,
+    committedBlobVerified: input.committedBlobVerified ?? true,
+    completionGuardTrusted: input.completionGuardTrusted ?? true,
+    auditEvidenceUnits: input.auditEvidenceUnits,
+    auditPlanId: input.auditPlanId,
+    roadmapBatchId: input.roadmapBatchId,
+    roadmapAlias: input.roadmapAlias,
+  };
+}
+
 function substantiveNoFindingsReport(path = "src/config.ts"): string {
   const isWorker = path.endsWith("worker.ts");
   const riskId = isWorker ? "risk-worker-run" : "risk-config-timeout";
@@ -163,10 +198,11 @@ describe("auditSynthesisClassifier", () => {
     const root = initRepo();
     const outcome = classifyAuditSynthesisSourceReports({
       projectRoot: root,
-      reports: [
-        {
+      trustedSourceArtifacts: [
+        trustedSourceArtifact({
           artifactPath: "audit/source.md",
           taskId: "task-source",
+          sourceClassification: "validated_findings_present",
           content: [
             "## Finding: Missing timeout ownership",
             "Evidence: `src/config.ts:1` defines the timeout.",
@@ -175,7 +211,7 @@ describe("auditSynthesisClassifier", () => {
             'Verification: Command `rg -n "timeoutMs" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
             "",
           ].join("\n"),
-        },
+        }),
       ],
     });
 
@@ -187,22 +223,128 @@ describe("auditSynthesisClassifier", () => {
     const root = initRepo();
     const outcome = classifyAuditSynthesisSourceReports({
       projectRoot: root,
-      reports: [
-        {
+      trustedSourceArtifacts: [
+        trustedSourceArtifact({
           artifactPath: "audit/runtime.md",
           taskId: "task-runtime",
+          sourceClassification: "validated_no_findings",
+          substantiveNoFindingsSupported: true,
           content: substantiveNoFindingsReport("src/config.ts"),
-        },
-        {
+        }),
+        trustedSourceArtifact({
           artifactPath: "audit/worker.md",
           taskId: "task-worker",
+          sourceClassification: "validated_no_findings",
+          substantiveNoFindingsSupported: true,
           content: substantiveNoFindingsReport("src/worker.ts"),
-        },
+        }),
       ],
     });
 
     expect(outcome.kind).toBe("validated_no_findings");
     expect(outcome.substantiveNoFindingsReportCount).toBe(2);
+    expect(outcome.blockingSourceArtifacts).toEqual([]);
+  });
+
+  it("blocks invalid manifest trusted-source records even with strong no-findings prose", () => {
+    const root = initRepo();
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      trustedSourceArtifacts: [
+        trustedSourceArtifact({
+          artifactPath: "audit/source-invalid-manifest.md",
+          taskId: "task-source-invalid-manifest",
+          sourceClassification: "validated_no_findings",
+          substantiveNoFindingsSupported: true,
+          manifestValid: false,
+          content: substantiveNoFindingsReport("src/config.ts"),
+        }),
+      ],
+    });
+
+    expect(outcome.kind).toBe("source_inconclusive");
+    expect(outcome.reasonCodes).toContain("invalid_manifest");
+    expect(outcome.blockingSourceArtifacts?.[0]).toMatchObject({
+      artifactPath: "audit/source-invalid-manifest.md",
+      required: true,
+      reasonCodes: ["invalid_manifest"],
+    });
+  });
+
+  it("blocks no-findings when a required source artifact is missing committed-source proof", () => {
+    const root = initRepo();
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      trustedSourceArtifacts: [
+        trustedSourceArtifact({
+          artifactPath: "audit/source-uncommitted.md",
+          taskId: "task-source-uncommitted",
+          sourceClassification: "validated_no_findings",
+          substantiveNoFindingsSupported: true,
+          committedBlobVerified: false,
+          content: substantiveNoFindingsReport("src/config.ts"),
+        }),
+      ],
+    });
+
+    expect(outcome.kind).toBe("source_inconclusive");
+    expect(outcome.reasonCodes).toContain("missing_committed_source");
+    expect(outcome.blockingSourceArtifacts?.[0]?.artifactPath).toBe("audit/source-uncommitted.md");
+  });
+
+  it("blocks no-findings when a required source artifact is source-inconclusive", () => {
+    const root = initRepo();
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      blockingSourceArtifacts: [
+        {
+          artifactPath: "audit/source-inconclusive.md",
+          taskId: "task-source-inconclusive",
+          required: true,
+          state: "source_inconclusive",
+          sourceClassification: "source_inconclusive",
+          reasonCodes: ["source_inconclusive"],
+        },
+      ],
+    });
+
+    expect(outcome.kind).toBe("source_inconclusive");
+    expect(outcome.reasonCodes).toContain("source_inconclusive");
+    expect(outcome.blockingSourceArtifacts?.[0]).toMatchObject({
+      artifactPath: "audit/source-inconclusive.md",
+      state: "source_inconclusive",
+    });
+  });
+
+  it("does not synthesize green from mixed valid and invalid required reports", () => {
+    const root = initRepo();
+    const outcome = classifyAuditSynthesisSourceReports({
+      projectRoot: root,
+      trustedSourceArtifacts: [
+        trustedSourceArtifact({
+          artifactPath: "audit/source-valid.md",
+          taskId: "task-source-valid",
+          sourceClassification: "validated_no_findings",
+          substantiveNoFindingsSupported: true,
+          content: substantiveNoFindingsReport("src/config.ts"),
+        }),
+      ],
+      blockingSourceArtifacts: [
+        {
+          artifactPath: "audit/source-invalid.md",
+          taskId: "task-source-invalid",
+          required: true,
+          state: "invalid",
+          sourceClassification: "inventory_only_invalid",
+          reasonCodes: ["inventory_only_evidence"],
+        },
+      ],
+    });
+
+    expect(outcome.kind).toBe("source_inconclusive");
+    expect(outcome.substantiveNoFindingsReportCount).toBe(1);
+    expect(outcome.inventoryOnlyNoFindingsReportCount).toBe(1);
+    expect(outcome.reasonCodes).toContain("inventory_only_evidence");
   });
 
   it("keeps ledger-backed no-findings source reports trusted during synthesis revalidation", () => {
@@ -226,16 +368,18 @@ describe("auditSynthesisClassifier", () => {
 
     const outcome = classifyAuditSynthesisSourceReports({
       projectRoot: root,
-      reports: [
-        {
+      trustedSourceArtifacts: [
+        trustedSourceArtifact({
           artifactPath: "audit/source.md",
           taskId: "task-source",
           roadmapBatchId: "batch-1",
           roadmapAlias: "audit-runtime",
           auditPlanId: "batch:batch-1:task:task-source",
+          sourceClassification: "validated_no_findings",
+          substantiveNoFindingsSupported: true,
           auditEvidenceUnits: [sourceEvidenceUnit(snapshot)],
           content: sourceManifest({ body, snapshot }),
-        },
+        }),
       ],
     });
 
@@ -248,16 +392,19 @@ describe("auditSynthesisClassifier", () => {
     const root = initRepo();
     const outcome = classifyAuditSynthesisSourceReports({
       projectRoot: root,
-      reports: Array.from({ length: 6 }, (_, index) => ({
+      blockingSourceArtifacts: Array.from({ length: 6 }, (_, index) => ({
         artifactPath: `audit/source-${index + 1}.md`,
         taskId: `task-source-${index + 1}`,
-        content: inventoryOnlyNoFindingsReport("src/config.ts"),
+        required: true,
+        state: "invalid",
+        sourceClassification: "inventory_only_invalid",
+        reasonCodes: ["inventory_only_evidence"],
       })),
     });
 
     expect(outcome.kind).toBe("source_inconclusive");
     expect(outcome.inventoryOnlyNoFindingsReportCount).toBe(6);
-    expect(outcome.reason).toContain("did not include enough substantive inspection evidence");
+    expect(outcome.reasonCodes).toContain("inventory_only_evidence");
   });
 
   it("does not synthesize generic grep dump no-findings as validated", () => {
@@ -290,7 +437,7 @@ describe("auditSynthesisClassifier", () => {
 
     expect(outcome.kind).toBe("source_inconclusive");
     expect(outcome.substantiveNoFindingsReportCount).toBe(0);
-    expect(outcome.inventoryOnlyNoFindingsReportCount).toBe(1);
+    expect(outcome.reasonCodes).toContain("untrusted_source_artifact");
   });
 
   it("does not synthesize unrelated no-risk scoped command evidence as validated", () => {

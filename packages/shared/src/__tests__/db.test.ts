@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { chatSessions, tasks } from "../schema.js";
 import { closeDb, createTestDb, getDb } from "../db.js";
 
-const CURRENT_DB_USER_VERSION = 34;
+const CURRENT_DB_USER_VERSION = 35;
 
 function removeSqliteArtifacts(dbPath: string): void {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
@@ -755,6 +755,73 @@ describe("db", () => {
         "idx_runtime_warmup_stage_lookup",
       ]);
       expect(columns.map((column) => column.name)).toContain("stage");
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
+  });
+
+  it("creates runtime endpoint lease table and indexes for fresh databases", () => {
+    closeDb();
+    const dbPath = join(
+      tmpdir(),
+      `aif-shared-runtime-endpoint-leases-${Date.now()}-${Math.random()}.sqlite`,
+    );
+
+    try {
+      getDb(dbPath);
+      closeDb();
+
+      const sqlite = new Database(dbPath, { readonly: true });
+      const table = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name = 'runtime_endpoint_leases'
+        `,
+        )
+        .get() as { name: string } | undefined;
+      const indexes = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (
+              'idx_runtime_endpoint_leases_holder',
+              'idx_runtime_endpoint_leases_task',
+              'idx_runtime_endpoint_leases_expires',
+              'idx_runtime_endpoint_leases_cooldown'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const columns = sqlite.prepare(`PRAGMA table_info(runtime_endpoint_leases)`).all() as Array<{
+        name: string;
+      }>;
+      const userVersion = sqlite.pragma("user_version", { simple: true }) as number;
+      sqlite.close();
+
+      expect(table?.name).toBe("runtime_endpoint_leases");
+      expect(indexes.map((row) => row.name).sort()).toEqual([
+        "idx_runtime_endpoint_leases_cooldown",
+        "idx_runtime_endpoint_leases_expires",
+        "idx_runtime_endpoint_leases_holder",
+        "idx_runtime_endpoint_leases_task",
+      ]);
+      expect(columns.map((column) => column.name)).toEqual(
+        expect.arrayContaining([
+          "endpoint_key",
+          "holder_id",
+          "lease_token",
+          "lease_expires_at",
+          "cooldown_until",
+          "cooldown_failure_count",
+        ]),
+      );
       expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {
       closeDb();

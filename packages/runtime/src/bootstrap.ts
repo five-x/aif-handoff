@@ -9,6 +9,7 @@ import {
   type RuntimeRegistryLogger,
 } from "./registry.js";
 import type { RuntimeUsageSink } from "./usageSink.js";
+import type { RuntimeEndpointLeaseStore } from "./types.js";
 
 export interface BootstrapRuntimeRegistryOptions {
   logger?: RuntimeRegistryLogger;
@@ -20,6 +21,7 @@ export interface BootstrapRuntimeRegistryOptions {
    * usage is silently dropped — only suitable for tests and CLI tools.
    */
   usageSink?: RuntimeUsageSink;
+  runtimeEndpointLeaseStore?: RuntimeEndpointLeaseStore;
 }
 
 /**
@@ -37,7 +39,9 @@ export async function bootstrapRuntimeRegistry(
       createCodexRuntimeAdapter(),
       createOpenCodeRuntimeAdapter(),
       createOpenRouterRuntimeAdapter(),
-      createQwenLocalAgentRuntimeAdapter(),
+      createQwenLocalAgentRuntimeAdapter({
+        runtimeEndpointLeaseStore: options.runtimeEndpointLeaseStore,
+      }),
     ],
     logger: options.logger,
     usageSink: options.usageSink,

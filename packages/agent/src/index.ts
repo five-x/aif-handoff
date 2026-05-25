@@ -1,4 +1,4 @@
-import { createDbUsageSink, listProjects } from "@aif/data";
+import { createDbRuntimeEndpointLeaseStore, createDbUsageSink, listProjects } from "@aif/data";
 import { getEnv, logger } from "@aif/shared";
 import { bootstrapRuntimeRegistry } from "@aif/runtime";
 import { COORDINATOR_ID, pollAndProcess, setRuntimeRegistry } from "./coordinator.js";
@@ -10,6 +10,9 @@ import { startPollScheduler } from "./pollScheduler.js";
 import { startLoginBroker, type BrokerServer } from "./codex/loginBroker.js";
 
 const log = logger("agent");
+const runtimeEndpointLeaseStore = createDbRuntimeEndpointLeaseStore({
+  holderId: `agent:${process.pid}:${COORDINATOR_ID}`,
+});
 
 // Validate env
 const env = getEnv();
@@ -28,6 +31,7 @@ const pollScheduler = startPollScheduler(async () => {
 // Pre-load runtime registry so project init includes all adapters
 bootstrapRuntimeRegistry({
   runtimeModules: env.AIF_RUNTIME_MODULES,
+  runtimeEndpointLeaseStore,
   usageSink: createDbUsageSink({
     onRecorded: (event) => {
       if (!event.context.projectId || !event.profileId) return;

@@ -39,6 +39,8 @@ export {
   RuntimeTransport,
   type RuntimeUsage,
   type RuntimeUsageContext,
+  type RuntimeEndpointLeaseAcquireResult,
+  type RuntimeEndpointLeaseStore,
   UsageReporting,
   UsageSource,
 } from "./types.js";

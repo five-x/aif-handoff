@@ -520,6 +520,32 @@ export const runtimeWarmupSessions = sqliteTable("runtime_warmup_sessions", {
 export type RuntimeWarmupSessionRow = typeof runtimeWarmupSessions.$inferSelect;
 export type NewRuntimeWarmupSessionRow = typeof runtimeWarmupSessions.$inferInsert;
 
+export const runtimeEndpointLeases = sqliteTable("runtime_endpoint_leases", {
+  endpointKey: text("endpoint_key").primaryKey(),
+  profileId: text("profile_id"),
+  baseUrl: text("base_url"),
+  runtimeId: text("runtime_id"),
+  providerId: text("provider_id"),
+  holderId: text("holder_id"),
+  taskId: text("task_id"),
+  leaseToken: text("lease_token"),
+  heartbeatAt: text("heartbeat_at"),
+  leaseTtlMs: integer("lease_ttl_ms"),
+  leaseExpiresAt: text("lease_expires_at"),
+  cooldownUntil: text("cooldown_until"),
+  cooldownFailureCount: integer("cooldown_failure_count").notNull().default(0),
+  cooldownReason: text("cooldown_reason"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type RuntimeEndpointLeaseRow = typeof runtimeEndpointLeases.$inferSelect;
+export type NewRuntimeEndpointLeaseRow = typeof runtimeEndpointLeases.$inferInsert;
+
 /**
  * Rebuildable Codex session index used by hot request paths.
  * Source of truth stays on disk (~/.codex/sessions/*.jsonl).

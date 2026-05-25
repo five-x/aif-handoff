@@ -255,6 +255,43 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(result.status).toBe("manual_review_required");
   });
 
+  it("routes manual-review audit validator fingerprints fail-closed", async () => {
+    const root = initReportRepoWithReport(
+      [
+        "## Finding",
+        "Evidence: `README.md:1` contains the repository root documentation.",
+        "Risk: `README.md` does not exist, so operators cannot read the project overview.",
+        "Proposed fix: Restore `README.md`.",
+        'Verification: Command `rg -n "reviewed" README.md` output: `README.md:1:# reviewed`',
+        "",
+      ].join("\n"),
+    );
+    findRoadmapBatchArtifactByTaskIdMock.mockReturnValue({
+      taskId: "audit-task",
+      role: "report",
+      artifactPath: "reports/audit.md",
+      batchId: "batch-1",
+    });
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      taskId: "audit-task",
+      projectRoot: root,
+      task: {
+        id: "audit-task",
+        title: "Audit report",
+        description: "Scope: README.md\nReport artifact: reports/audit.md",
+        agentActivityLog: agentActivityLog(),
+      },
+    });
+
+    expect(result.status).toBe("manual_review_required");
+    const text = result.blockingFindings.map((finding) => finding.text).join("\n");
+    expect(text).toContain("manual_review_required: Audit report validator blocked completion");
+    expect(text).toContain("validationFingerprint=");
+    expect(text).toContain("repairMode=manual_review_required");
+  });
+
   function structuredAdvisoryOnlyReviewComments(): string {
     return [
       "## Auto Review Metadata",
@@ -503,10 +540,10 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "- dependency_config | covered | Checked dependency configuration",
       ],
     },
-  ])("fails closed for structured review comments with $name", async ({ securityCoverage }) => {
-    const result = await evaluateReviewCommentsForAutoMode({
-      ...baseInput,
-      reviewComments: [
+  ])(
+    "requests exact rework for first malformed structured comments with $name",
+    async ({ securityCoverage }) => {
+      const reviewComments = [
         "## Auto Review Metadata",
         "- Strategy: full_re_review",
         "- Review Iteration: 1",
@@ -520,23 +557,126 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "## Advisories",
         "- code_review | Looks good",
         ...(securityCoverage.length > 0 ? ["", ...securityCoverage] : []),
+      ].join("\n");
+      const result = await evaluateReviewCommentsForAutoMode({
+        ...baseInput,
+        reviewComments,
+      });
+
+      expect(result.status).toBe("request_changes");
+      if (result.status !== "request_changes") {
+        throw new Error("expected request_changes");
+      }
+      expect(result.metrics.parserMode).toBe("structured");
+      expect(result.blockingFindings).toEqual([
+        expect.objectContaining({
+          source: "review_gate",
+          text: expect.stringContaining("Structured review parse error"),
+        }),
+      ]);
+      expect(result.fixesMarkdown).toContain(
+        "Repair the structured review output exactly as follows",
+      );
+      expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("manual-handoffs repeated same malformed structured parse fingerprint", async () => {
+    const reviewComments = [
+      "## Auto Review Metadata",
+      "- Strategy: full_re_review",
+      "- Review Iteration: 2",
+      "",
+      "## Previous Findings",
+      "- none",
+      "",
+      "## Blocking Findings",
+      "- none",
+      "",
+      "## Advisories",
+      "- code_review | Looks good",
+    ].join("\n");
+    const firstResult = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 2,
+      reviewComments,
+    });
+    expect(firstResult.status).toBe("request_changes");
+    if (firstResult.status !== "request_changes") {
+      throw new Error("expected first request_changes");
+    }
+
+    const repeatedResult = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      iteration: 3,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 3",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- code_review | Looks good",
       ].join("\n"),
+      previousFindings: firstResult.blockingFindings,
     });
 
-    expect(result.status).toBe("manual_review_required");
-    if (result.status !== "manual_review_required") {
+    expect(repeatedResult.status).toBe("manual_review_required");
+    if (repeatedResult.status !== "manual_review_required") {
       throw new Error("expected manual_review_required");
     }
-    expect(result.handoffReason).toBe("malformed_structured_review_contract");
-    expect(result.metrics.parserMode).toBe("structured");
-    expect(result.blockingFindings).toEqual([
-      expect.objectContaining({
-        source: "review_gate",
-        text: expect.stringContaining("complete unique Security Coverage rows"),
-      }),
-    ]);
+    expect(repeatedResult.handoffReason).toBe("malformed_structured_review_contract");
+    expect(repeatedResult.blockingFindings.map((finding) => finding.id)).toContain(
+      firstResult.blockingFindings[0]?.id,
+    );
     expect(executeSubagentQueryMock).not.toHaveBeenCalled();
   });
+
+  it.each(["1abc", "1.5"])(
+    "fails closed instead of accepting malformed Review Iteration metadata %s",
+    async (iteration) => {
+      const result = await evaluateReviewCommentsForAutoMode({
+        ...baseInput,
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          `- Review Iteration: ${iteration}`,
+          "",
+          "## Previous Findings",
+          "- none",
+          "",
+          "## Blocking Findings",
+          "- none",
+          "",
+          "## Advisories",
+          "- code_review | packages/agent/src/reviewGate.ts:1 was inspected.",
+          "",
+          "## Security Coverage",
+          "- secret_leaks | covered | Checked secret handling",
+          "- permissions_sandbox | covered | Checked sandbox boundaries",
+          "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+          "- dependency_config | covered | Checked dependency configuration",
+        ].join("\n"),
+      });
+
+      expect(result.status).toBe("request_changes");
+      if (result.status !== "request_changes") {
+        throw new Error("expected request_changes");
+      }
+      expect(result.autoReviewState.findings).toEqual([
+        expect.objectContaining({
+          source: "review_gate",
+          text: expect.stringContaining("invalid_metadata"),
+        }),
+      ]);
+      expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("manual-handoffs reviewer-generated sidecar contract failure comments", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
@@ -1326,17 +1466,24 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       ].join("\n"),
     });
 
-    expect(result.status).toBe("manual_review_required");
-    if (result.status !== "manual_review_required") {
-      throw new Error("expected manual_review_required");
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
     }
-    expect(result.handoffReason).toBe("malformed_review_output_fallback");
-    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual([blockerId]);
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).toContain(blockerId);
+    expect(result.autoReviewState.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "review_gate",
+          text: expect.stringContaining("missing_previous_finding"),
+        }),
+      ]),
+    );
     expect(result.metrics).toEqual(
       expect.objectContaining({
         previousBlockingCount: 1,
         stillBlockingCount: 1,
-        totalBlockingCount: 1,
+        totalBlockingCount: 2,
       }),
     );
   });
@@ -1381,14 +1528,21 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       ].join("\n"),
     });
 
-    expect(result.status).toBe("manual_review_required");
-    if (result.status !== "manual_review_required") {
-      throw new Error("expected manual_review_required");
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
     }
-    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual([
-      firstId,
-      secondId,
-    ]);
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).toEqual(
+      expect.arrayContaining([firstId, secondId]),
+    );
+    expect(result.autoReviewState.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "review_gate",
+          text: expect.stringContaining("missing_previous_finding"),
+        }),
+      ]),
+    );
   });
 
   it("does not accept structured success when a previous finding has the wrong source", async () => {
@@ -1425,19 +1579,25 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       ].join("\n"),
     });
 
-    expect(result.status).toBe("manual_review_required");
-    if (result.status !== "manual_review_required") {
-      throw new Error("expected manual_review_required");
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
     }
-    expect(result.autoReviewState.findings).toEqual([
-      expect.objectContaining({
-        id: blockerId,
-        source: "code_review",
-      }),
-    ]);
+    expect(result.autoReviewState.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: blockerId,
+          source: "code_review",
+        }),
+        expect.objectContaining({
+          source: "review_gate",
+          text: expect.stringContaining("malformed_previous_finding"),
+        }),
+      ]),
+    );
   });
 
-  it("preserves current specialized manual blockers when previous finding rows are missing", async () => {
+  it("requests parser rework when specialized manual blockers omit previous finding rows", async () => {
     const previousId = createAutoReviewFindingId(
       "security_data_loss",
       "Verify local service validation cannot run by default",
@@ -1478,11 +1638,10 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       ].join("\n"),
     });
 
-    expect(result.status).toBe("manual_review_required");
-    if (result.status !== "manual_review_required") {
-      throw new Error("expected manual_review_required");
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
     }
-    expect(result.handoffReason).toBe("malformed_review_output_fallback");
     expect(result.autoReviewState.findings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1491,13 +1650,15 @@ describe("evaluateReviewCommentsForAutoMode", () => {
           text: "Verify local service validation cannot run by default",
         }),
         expect.objectContaining({
-          id: unavailableId,
-          source: "security_data_loss",
-          text: unavailableText,
+          source: "review_gate",
+          text: expect.stringContaining("missing_previous_finding"),
         }),
       ]),
     );
     expect(result.autoReviewState.findings).toHaveLength(2);
+    expect(result.autoReviewState.findings.map((finding) => finding.id)).not.toContain(
+      unavailableId,
+    );
   });
 
   it("starts a fresh streak for a new blocker", async () => {

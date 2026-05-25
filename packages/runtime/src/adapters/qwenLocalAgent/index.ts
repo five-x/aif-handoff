@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 import { RuntimeTransport, UsageReporting } from "../../types.js";
-import type { RuntimeAdapter } from "../../types.js";
+import type { RuntimeAdapter, RuntimeEndpointLeaseStore } from "../../types.js";
 import { redactProviderTextForLogs } from "@aif/shared";
 import { RuntimeExecutionError } from "../../errors.js";
 import {
@@ -22,6 +22,7 @@ export interface CreateQwenLocalAgentRuntimeAdapterOptions {
   providerId?: string;
   displayName?: string;
   logger?: QwenLocalAgentAdapterLogger;
+  runtimeEndpointLeaseStore?: RuntimeEndpointLeaseStore;
 }
 const API_CAPABILITIES = {
   supportsResume: false,
@@ -102,7 +103,17 @@ export function createQwenLocalAgentRuntimeAdapter(
     },
     async run(input) {
       try {
-        return await runQwenLocalAgentApi(input, logger);
+        const runInput = options.runtimeEndpointLeaseStore
+          ? {
+              ...input,
+              execution: {
+                ...input.execution,
+                runtimeEndpointLeaseStore:
+                  input.execution?.runtimeEndpointLeaseStore ?? options.runtimeEndpointLeaseStore,
+              },
+            }
+          : input;
+        return await runQwenLocalAgentApi(runInput, logger);
       } catch (error) {
         throw classifyQwenLocalAgentRuntimeError(error);
       }

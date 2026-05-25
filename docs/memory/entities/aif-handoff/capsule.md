@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260524-runtime-profile-backpressure-queue::entity-capsule
+memory_id: task::aif-handoff::work::work-20260525-remote-audit-quality-trust-canary::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260524-runtime-profile-backpressure-queue
-source_path: docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue
+task_id: work-20260525-remote-audit-quality-trust-canary
+source_path: docs/rdpi/work/work-20260525-remote-audit-quality-trust-canary
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-05-24
+updated_at: 2026-05-25
 supersedes:
 expires_at:
 tags:
@@ -25,18 +25,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/research.md
-- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/design.md
-- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/plan.md
-- docs/rdpi/work/work-20260524-runtime-profile-backpressure-queue/result.md
-  created_at: 2026-05-24
-  last_verified_at: 2026-05-24
+- docs/rdpi/work/work-20260525-remote-audit-quality-trust-canary/research.md
+- docs/rdpi/work/work-20260525-remote-audit-quality-trust-canary/design.md
+- docs/rdpi/work/work-20260525-remote-audit-quality-trust-canary/plan.md
+- docs/rdpi/work/work-20260525-remote-audit-quality-trust-canary/result.md
+  created_at: 2026-05-25
+  last_verified_at: 2026-05-25
 
 ---
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260524-runtime-profile-backpressure-queue.
+Current capsule for entity aif-handoff, refreshed by task work-20260525-remote-audit-quality-trust-canary.
 
 # Why it matters
 

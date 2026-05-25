@@ -52,6 +52,40 @@ function trustedNoFindingsValidationDetails(): Record<string, unknown> {
           reasonCodes: [],
         },
       },
+      auditArtifactLifecycle: validAuditArtifactLifecycleEvidence(),
+    },
+  };
+}
+
+function validAuditArtifactLifecycleEvidence(): Record<string, unknown> {
+  const artifactSha = "a".repeat(64);
+  const contentSha = "b".repeat(64);
+  return {
+    ok: true,
+    artifactPath: "audit/valid.md",
+    committedRef: "HEAD",
+    states: {
+      draft_written: true,
+      manifest_finalized: true,
+      validator_passed: true,
+      git_committed: true,
+      committed_blob_revalidated: true,
+      artifact_state_valid: true,
+    },
+    issues: [],
+    worktreeArtifactSha256: artifactSha,
+    committedArtifactSha256: artifactSha,
+    worktreeContentSha256: contentSha,
+    committedContentSha256: contentSha,
+    committedValidation: {
+      ok: true,
+      issueCodes: [],
+      artifactSha256: artifactSha,
+      contentSha256: contentSha,
+      manifestStatus: "valid",
+      manifestVersion: 1,
+      sourceClassification: "validated_no_findings",
+      sourceSnapshot: { id: "git:commit:tree", commit: "commit", tree: "tree", dirty: false },
     },
   };
 }

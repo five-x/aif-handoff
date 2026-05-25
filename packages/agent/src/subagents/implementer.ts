@@ -26,9 +26,11 @@ import {
   getProjectConfig,
   validateAuditReportArtifact,
   buildAuditEvidencePayload,
+  verifyAuditArtifactLifecycle,
   classifyAuditCardDecision,
   classifyAuditSourceEvidence,
   classifyAuditSynthesisSourceReports,
+  computeAuditReportArtifactSha256,
   computeAuditReportContentSha256,
   formatAuditSynthesisOutcomeForArtifact,
   hashAifPlanManifest,
@@ -40,6 +42,9 @@ import {
   type AuditEvidenceUnit,
   type AuditPublicReportOutcome,
   type AuditReportSourceSnapshot,
+  type AuditSourceClassification,
+  type AuditSynthesisBlockingSourceArtifact,
+  type TrustedSourceAuditArtifact,
 } from "@aif/shared";
 import { createRuntimeWorkflowSpec, RuntimeExecutionError } from "@aif/runtime";
 import { flushActivityQueue, logActivity, persistAuditEvidencePayload } from "../hooks.js";
@@ -543,7 +548,7 @@ function readValidatedArtifactContent(input: {
   projectRoot: string;
   branchName: string | null;
   worktreePath: string | null;
-}): { content: string; source: string } {
+}): { content: string; source: string; artifactSha256: string; contentSha256: string } {
   const gitPath = normalizeArtifactGitPath(input.artifactPath);
 
   if (input.worktreePath) {
@@ -563,25 +568,31 @@ function readValidatedArtifactContent(input: {
         }),
       );
     }
+    const content = readFileSync(artifactPath, "utf8");
     return {
-      content: readFileSync(artifactPath, "utf8").trim(),
+      content,
       source: input.worktreePath,
+      artifactSha256: computeAuditReportArtifactSha256(content),
+      contentSha256: computeAuditReportContentSha256(content),
     };
   }
 
   if (input.branchName) {
     try {
+      const content = execFileSync(
+        "git",
+        ["-c", `safe.directory=${input.projectRoot}`, "show", `${input.branchName}:${gitPath}`],
+        {
+          cwd: input.projectRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
       return {
-        content: execFileSync(
-          "git",
-          ["-c", `safe.directory=${input.projectRoot}`, "show", `${input.branchName}:${gitPath}`],
-          {
-            cwd: input.projectRoot,
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "pipe"],
-          },
-        ).trim(),
+        content,
         source: `${input.branchName}:${gitPath}`,
+        artifactSha256: computeAuditReportArtifactSha256(content),
+        contentSha256: computeAuditReportContentSha256(content),
       };
     } catch {
       const reason = `synthesis_not_ready: missing_report_artifact: validated artifact is unavailable on branch ${input.branchName}: ${input.artifactPath}`;
@@ -616,9 +627,12 @@ function readValidatedArtifactContent(input: {
       }),
     );
   }
+  const content = readFileSync(artifactPath, "utf8");
   return {
-    content: readFileSync(artifactPath, "utf8").trim(),
+    content,
     source: input.projectRoot,
+    artifactSha256: computeAuditReportArtifactSha256(content),
+    contentSha256: computeAuditReportContentSha256(content),
   };
 }
 
@@ -627,6 +641,7 @@ interface ValidatedAuditArtifactContent {
   taskId: string;
   source: string;
   content: string;
+  sourceClassification: TrustedSourceAuditArtifact["sourceClassification"];
   roadmapBatchId?: string | null;
   roadmapAlias?: string | null;
   auditPlanId?: string | null;
@@ -636,8 +651,10 @@ interface ValidatedAuditArtifactContent {
 interface WeakAuditArtifactSummary {
   artifactPath: string;
   taskId: string;
-  state: RoadmapBatchArtifactRow["state"];
+  state: RoadmapBatchArtifactRow["state"] | "untrusted";
   failureFamily: string | null;
+  sourceClassification: AuditSourceClassification | null;
+  reasonCodes: string[];
   validationDetails: string | null;
 }
 
@@ -971,6 +988,111 @@ function formatArtifactValidationDetails(raw: string | null): string | null {
   }
 }
 
+function parseArtifactValidationDetails(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readAuditSourceClassification(value: unknown): AuditSourceClassification | null {
+  if (!isObjectRecord(value)) return null;
+  const direct = value.sourceClassification;
+  if (typeof direct === "string") return direct as AuditSourceClassification;
+  const auditReportValidation = value.auditReportValidation;
+  if (isObjectRecord(auditReportValidation)) {
+    const nested = auditReportValidation.sourceClassification;
+    if (typeof nested === "string") return nested as AuditSourceClassification;
+  }
+  const evidence = value.evidence;
+  if (isObjectRecord(evidence)) return readAuditSourceClassification(evidence);
+  return null;
+}
+
+function toTrustedAuditSourceClassification(
+  value: AuditSourceClassification | null,
+): TrustedSourceAuditArtifact["sourceClassification"] | null {
+  if (value === "validated_findings_present" || value === "validated_no_findings") return value;
+  return null;
+}
+
+function readSha256(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
+}
+
+function readNestedObject(value: unknown, key: string): Record<string, unknown> | null {
+  if (!isObjectRecord(value)) return null;
+  const nested = value[key];
+  return isObjectRecord(nested) ? nested : null;
+}
+
+function readAuditArtifactLifecycle(value: unknown): Record<string, unknown> | null {
+  if (!isObjectRecord(value)) return null;
+  const direct = readNestedObject(value, "auditArtifactLifecycle");
+  if (direct) return direct;
+  const evidence = readNestedObject(value, "evidence");
+  return readNestedObject(evidence, "auditArtifactLifecycle");
+}
+
+function verifyTrustedSourceArtifactRead(input: {
+  artifact: RoadmapBatchArtifactRow;
+  validationDetails: unknown;
+  artifactSha256: string;
+  contentSha256: string;
+}): string[] {
+  const lifecycle = readAuditArtifactLifecycle(input.validationDetails);
+  const committedValidation = readNestedObject(lifecycle, "committedValidation");
+  const expectedArtifactSha256 =
+    readSha256(lifecycle?.committedArtifactSha256) ??
+    readSha256(committedValidation?.artifactSha256) ??
+    readSha256(input.artifact.contentSha);
+  const expectedContentSha256 =
+    readSha256(lifecycle?.committedContentSha256) ?? readSha256(committedValidation?.contentSha256);
+
+  if (!expectedArtifactSha256 && !expectedContentSha256) {
+    return ["missing_committed_source"];
+  }
+
+  const mismatched =
+    (expectedArtifactSha256 !== null && expectedArtifactSha256 !== input.artifactSha256) ||
+    (expectedContentSha256 !== null && expectedContentSha256 !== input.contentSha256);
+  return mismatched ? ["committed_blob_mismatch"] : [];
+}
+
+function collectArtifactValidationReasonCodes(value: unknown): string[] {
+  const codes: Array<string | null | undefined> = [];
+  const visit = (candidate: unknown) => {
+    if (Array.isArray(candidate)) {
+      candidate.forEach(visit);
+      return;
+    }
+    if (!isObjectRecord(candidate)) return;
+    for (const [key, nested] of Object.entries(candidate)) {
+      if (
+        ["reason", "code", "kind", "category", "failureFamily"].includes(key) &&
+        typeof nested === "string" &&
+        nested.trim().length > 0
+      ) {
+        codes.push(nested.trim());
+      }
+      if (key === "reasonCodes" && Array.isArray(nested)) {
+        nested.forEach((entry) => {
+          if (typeof entry === "string" && entry.trim().length > 0) codes.push(entry.trim());
+        });
+      }
+      if (Array.isArray(nested) || isObjectRecord(nested)) visit(nested);
+    }
+  };
+  visit(value);
+  return uniqueSortedStrings(codes);
+}
+
 function formatAuditEvidenceCommandForPrompt(command: AuditEvidenceUnit["command"]): string {
   if (!command) return "none";
   const commandText = command.command?.trim();
@@ -1137,26 +1259,56 @@ function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSy
     throw new Error("synthesis_not_ready: no terminal audit report artifacts are available");
   }
 
-  const validatedArtifacts = reports
+  const validatedArtifacts: ValidatedAuditArtifactContent[] = [];
+  const weakArtifacts: WeakAuditArtifactSummary[] = [];
+
+  reports
     .filter((artifact) => artifact.state === "valid")
-    .map((artifact) => {
+    .forEach((artifact) => {
+      const validationDetails = parseArtifactValidationDetails(artifact.validationDetailsJson);
+      const sourceClassification = toTrustedAuditSourceClassification(
+        readAuditSourceClassification(validationDetails),
+      );
+      if (!sourceClassification) {
+        throw new Error(
+          `synthesis_not_ready: trusted artifact is missing source classification: ${artifact.artifactPath}`,
+        );
+      }
       const root = artifact.projectRoot ?? fallbackRoot;
-      const { content, source } = readValidatedArtifactContent({
+      const read = readValidatedArtifactContent({
         artifactPath: artifact.artifactPath,
         branchName: artifact.branchName,
         worktreePath: artifact.worktreePath,
         projectRoot: root,
       });
-      if (!content) {
+      if (!read.content.trim()) {
         throw new Error(
           `synthesis_not_ready: validated artifact is empty: ${artifact.artifactPath}`,
         );
+      }
+      const sourceProofReasonCodes = verifyTrustedSourceArtifactRead({
+        artifact,
+        validationDetails,
+        artifactSha256: read.artifactSha256,
+        contentSha256: read.contentSha256,
+      });
+      if (sourceProofReasonCodes.length > 0) {
+        weakArtifacts.push({
+          artifactPath: artifact.artifactPath,
+          taskId: artifact.taskId,
+          state: "untrusted",
+          failureFamily: sourceProofReasonCodes[0] ?? "missing_committed_source",
+          sourceClassification,
+          reasonCodes: sourceProofReasonCodes,
+          validationDetails: formatArtifactValidationDetails(artifact.validationDetailsJson),
+        });
+        return;
       }
       const auditPlanId = resolveAuditPlanId({
         taskId: artifact.taskId,
         roadmapBatchId: artifact.batchId,
       });
-      return {
+      validatedArtifacts.push({
         artifactPath: artifact.artifactPath,
         taskId: artifact.taskId,
         roadmapBatchId: artifact.batchId,
@@ -1166,19 +1318,32 @@ function readAuditSynthesisInputs(taskId: string, fallbackRoot: string): AuditSy
           taskId: artifact.taskId,
           auditPlanId,
         }),
-        source,
-        content,
-      };
+        sourceClassification,
+        source: read.source,
+        content: read.content,
+      });
     });
-  const weakArtifacts = reports
-    .filter((artifact) => artifact.state !== "valid")
-    .map((artifact) => ({
-      artifactPath: artifact.artifactPath,
-      taskId: artifact.taskId,
-      state: artifact.state,
-      failureFamily: artifact.failureFamily,
-      validationDetails: formatArtifactValidationDetails(artifact.validationDetailsJson),
-    }));
+  weakArtifacts.push(
+    ...reports
+      .filter((artifact) => artifact.state !== "valid")
+      .map((artifact) => {
+        const validationDetails = parseArtifactValidationDetails(artifact.validationDetailsJson);
+        return {
+          artifactPath: artifact.artifactPath,
+          taskId: artifact.taskId,
+          state: artifact.state,
+          failureFamily: artifact.failureFamily,
+          sourceClassification: readAuditSourceClassification(validationDetails),
+          reasonCodes: uniqueSortedStrings([
+            artifact.state,
+            artifact.failureFamily,
+            readAuditSourceClassification(validationDetails),
+            ...collectArtifactValidationReasonCodes(validationDetails),
+          ]),
+          validationDetails: formatArtifactValidationDetails(artifact.validationDetailsJson),
+        };
+      }),
+  );
 
   return { validatedArtifacts, weakArtifacts };
 }
@@ -2862,6 +3027,40 @@ function deterministicAuditSynthesisCommand(artifactPath: string): string {
   return `node deterministic-audit-synthesis --artifact ${artifactPath}`;
 }
 
+function trustedSourceArtifactForSynthesis(
+  artifact: ValidatedAuditArtifactContent,
+): TrustedSourceAuditArtifact {
+  return {
+    artifactPath: artifact.artifactPath,
+    taskId: artifact.taskId,
+    roadmapBatchId: artifact.roadmapBatchId,
+    roadmapAlias: artifact.roadmapAlias,
+    auditPlanId: artifact.auditPlanId,
+    auditEvidenceUnits: artifact.auditEvidenceUnits,
+    content: artifact.content,
+    sourceClassification: artifact.sourceClassification,
+    manifestValid: true,
+    ledgerValid: true,
+    sourceSnapshotValid: true,
+    committedBlobVerified: true,
+    completionGuardTrusted: true,
+  };
+}
+
+function blockingSourceArtifactForSynthesis(
+  artifact: WeakAuditArtifactSummary,
+): AuditSynthesisBlockingSourceArtifact {
+  return {
+    artifactPath: artifact.artifactPath,
+    taskId: artifact.taskId,
+    required: true,
+    state: artifact.state,
+    sourceClassification: artifact.sourceClassification,
+    reasonCodes:
+      artifact.reasonCodes.length > 0 ? artifact.reasonCodes : ["untrusted_source_artifact"],
+  };
+}
+
 function summarizeValidatedAuditArtifactsForSynthesis(
   artifacts: ValidatedAuditArtifactContent[],
 ): AuditSourceReportSummary[] {
@@ -2934,16 +3133,8 @@ function buildDeterministicAuditSynthesisContent(
 ): string {
   const sourceOutcome = classifyAuditSynthesisSourceReports({
     projectRoot,
-    reports: artifacts.map((artifact) => ({
-      artifactPath: artifact.artifactPath,
-      taskId: artifact.taskId,
-      roadmapBatchId: artifact.roadmapBatchId,
-      roadmapAlias: artifact.roadmapAlias,
-      auditPlanId: artifact.auditPlanId,
-      auditEvidenceUnits: artifact.auditEvidenceUnits,
-      content: artifact.content,
-    })),
-    weakReportCount: weakArtifacts.length,
+    trustedSourceArtifacts: artifacts.map(trustedSourceArtifactForSynthesis),
+    blockingSourceArtifacts: weakArtifacts.map(blockingSourceArtifactForSynthesis),
   });
   const sourceSummaries = summarizeValidatedAuditArtifactsForSynthesis(artifacts);
   const totalIncluded = sourceSummaries.reduce(
@@ -3368,9 +3559,35 @@ function runDeterministicAuditReportRepair(input: {
   if (!validation) {
     throw new Error(`deterministic audit report repair could not read ${input.artifactPath}`);
   }
+  const roadmapArtifactForLifecycle = findRoadmapBatchArtifactByTaskId(input.task.id);
+  const auditPlanIdForLifecycle = resolveAuditPlanId({
+    taskId: input.task.id,
+    roadmapBatchId: roadmapArtifactForLifecycle?.batchId ?? null,
+  });
+  const lifecycleEvidenceUnits = listAuditEvidenceEvents({
+    taskId: input.task.id,
+    auditPlanId: auditPlanIdForLifecycle,
+  });
+  const lifecycle = verifyAuditArtifactLifecycle({
+    text: readFileSync(resolveSafeArtifactPath(input.projectRoot, gitPath), "utf8"),
+    projectRoot: input.projectRoot,
+    taskId: input.task.id,
+    roadmapBatchId: roadmapArtifactForLifecycle?.batchId ?? null,
+    roadmapAlias: input.task.roadmapAlias,
+    auditPlanId: auditPlanIdForLifecycle,
+    taskDescription: input.task.description,
+    reportArtifactPaths: [gitPath],
+    expectedReportArtifactPath: gitPath,
+    allowedEvidenceArtifactPaths: [],
+    requireProposedFix: true,
+    auditEvidenceUnits: lifecycleEvidenceUnits,
+    requireLedgerEvidence: true,
+    artifactPath: gitPath,
+    worktreeValidation: validation,
+  });
   let status: DeterministicAuditReportRepairResult["status"];
   let terminalReason: string | null = null;
-  if (isTrustedValidAuditReportValidation(validation)) {
+  if (isTrustedValidAuditReportValidation(validation) && lifecycle.ok) {
     const roadmapArtifact = findRoadmapBatchArtifactByTaskId(input.task.id);
     updateRoadmapBatchArtifactState({
       taskId: input.task.id,
@@ -3383,6 +3600,22 @@ function runDeterministicAuditReportRepair(input: {
       projectRoot: input.projectRoot,
       contentSha: validation.artifactSha256,
       validationDetails: buildAuditReportValidationDetails(validation, {
+        evidence: {
+          auditReportValidation: {
+            ok: validation.ok,
+            issueCodes: auditReportValidationIssueCodes(validation),
+            blockingIssues: validation.blockingIssues,
+            repairMode: validation.repairMode,
+            validationFingerprint: validation.validationFingerprint,
+            artifactSha256: validation.artifactSha256,
+            contentSha256: validation.contentSha256,
+            sourceClassification: validation.sourceClassification,
+            manifestStatus: validation.manifestStatus,
+            manifestVersion: validation.manifestVersion,
+            evidenceDepth: validation.evidenceDepth,
+          },
+          auditArtifactLifecycle: lifecycle,
+        },
         deterministicRepair: {
           outcome: repair.decision.outcome,
           reasons: repair.decision.reasons,
@@ -3421,7 +3654,7 @@ function runDeterministicAuditReportRepair(input: {
     const validationDetails = buildAuditReportValidationDetails(validation, {
       deterministicRepair: {
         outcome: repair.decision.outcome,
-        reasons: repair.decision.reasons,
+        reasons: [...repair.decision.reasons, ...lifecycle.issues.map((entry) => entry.code)],
         terminalHandling:
           "Strict validation failed after deterministic repair; source_inconclusive is terminal and runtime implementation rework is not allowed.",
       },
@@ -3472,7 +3705,7 @@ function runDeterministicAuditReportRepair(input: {
 function auditReportValidationIssueCodes(
   validation: ReturnType<typeof validateAuditReportArtifact>,
 ): string[] {
-  return [...new Set(validation.issues.map((issue) => issue.code))].sort();
+  return validation.issueCodes ?? [...new Set(validation.issues.map((issue) => issue.code))].sort();
 }
 
 function buildAuditReportValidationDetails(
@@ -3481,10 +3714,17 @@ function buildAuditReportValidationDetails(
 ): Record<string, unknown> {
   return {
     issues: validation.issues,
+    issueCodes: auditReportValidationIssueCodes(validation),
+    blockingIssues: validation.blockingIssues,
+    repairMode: validation.repairMode,
+    validationFingerprint: validation.validationFingerprint,
     evidence: {
       auditReportValidation: {
         ok: validation.ok,
         issueCodes: auditReportValidationIssueCodes(validation),
+        blockingIssues: validation.blockingIssues,
+        repairMode: validation.repairMode,
+        validationFingerprint: validation.validationFingerprint,
         artifactSha256: validation.artifactSha256,
         contentSha256: validation.contentSha256,
         sourceClassification: validation.sourceClassification,

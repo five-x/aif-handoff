@@ -2,9 +2,9 @@
 
 # Windows Codex Bootstrap Validation
 
-- Generated at: `2026-05-24`
-- Repo: `C:\Users\apron\source\aif-handoff`
-- Global home: `C:\Users\apron\.codex`
+- Generated at: `2026-05-25`
+- Repo: `repository root`
+- Global home: `$CODEX_HOME`
 
 ## Result
 

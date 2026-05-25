@@ -192,6 +192,8 @@ export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailure
   generic_plan: "rework_needed",
   missing_report_artifact: "missing_artifact",
   uncommitted_report_artifact: "missing_artifact",
+  audit_artifact_uncommitted: "invalid_artifact_integrity",
+  committed_blob_mismatch: "invalid_artifact_integrity",
   deterministic_fallback_report: "invalid_artifact_content",
   missing_implementation_tool_activity: "missing_tool_evidence",
   missing_review_tool_activity: "missing_tool_evidence",
@@ -248,6 +250,8 @@ const INTEGRITY_ISSUE_CODES = new Set([
   "audit_evidence_scope_mismatch",
   "audit_evidence_risk_mismatch",
   "audit_evidence_discovery_only",
+  "audit_artifact_uncommitted",
+  "committed_blob_mismatch",
 ]);
 
 export function mapTaskCompletionIssueCodeToAuditFailureFamily(code: string): AuditFailureFamily {
@@ -260,6 +264,7 @@ export function mapTaskCompletionIssueCodeToAuditFailureFamily(code: string): Au
 
 export function selectTaskCompletionAuditFailureFamily(issueCodes: string[]): AuditFailureFamily {
   if (issueCodes.includes("branch_isolation")) return "external_blocker";
+  if (issueCodes.includes("audit_inconclusive")) return "inconclusive_batch_evidence";
   if (issueCodes.some((code) => CONTRACT_ISSUE_CODES.has(code))) {
     return "invalid_artifact_contract";
   }

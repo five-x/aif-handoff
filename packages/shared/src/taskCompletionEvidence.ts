@@ -15,6 +15,9 @@ import { countValidatedAuditFindings } from "./auditSourceEvidence.js";
 import {
   stripNonBlockingWeakFindingSections,
   validateAuditReportArtifact,
+  verifyAuditArtifactLifecycle,
+  type AuditArtifactLifecycleEvidence,
+  type AuditReportSourceSnapshot,
   type AuditReportValidationIssueCode,
   type AuditReportValidationResult,
 } from "./auditReportValidator.js";
@@ -38,6 +41,9 @@ export type TaskCompletionIssueCode =
   | "generic_plan"
   | "missing_report_artifact"
   | "uncommitted_report_artifact"
+  | "audit_artifact_uncommitted"
+  | "committed_blob_mismatch"
+  | "legacy_text_evidence_untrusted"
   | "deterministic_fallback_report"
   | "missing_implementation_tool_activity"
   | "missing_review_tool_activity"
@@ -80,6 +86,8 @@ export interface TaskCompletionEvidenceIssue {
   message: string;
 }
 
+export type AuditTrustMode = "diagnostic" | "trusted_artifact";
+
 export interface TaskCompletionEvidenceResult {
   ok: boolean;
   issues: TaskCompletionEvidenceIssue[];
@@ -98,7 +106,10 @@ export interface TaskCompletionEvidenceResult {
     deterministicFallbackReport: boolean;
     implementationToolActivityCount: number;
     reviewStageToolActivityCount: number;
+    auditTrustMode: AuditTrustMode;
     substantiveReportEvidence: boolean;
+    legacySubstantiveReportEvidence: boolean;
+    trustedAuditArtifact: boolean;
     reportQualityIssues: string[];
     referencedPaths: string[];
     missingReferencedPaths: string[];
@@ -107,6 +118,7 @@ export interface TaskCompletionEvidenceResult {
     missingReportReferencedPaths: string[];
     existingReportReferencedPaths: string[];
     auditReportValidation: AuditReportValidationResult;
+    auditArtifactLifecycle: AuditArtifactLifecycleEvidence | null;
     auditSynthesisOutcome: AuditSynthesisOutcome | null;
     expectedReportArtifactPath: string | null;
     intentPolicyIssues: TaskIntentChangedFilesIssue[];
@@ -122,6 +134,8 @@ export interface TaskCompletionEvidenceInput {
   branchIsolationReason?: string | null;
   requireManualReview?: boolean;
   phase?: TaskCompletionEvidencePhase;
+  auditTrustMode?: AuditTrustMode;
+  expectedSourceSnapshot?: AuditReportSourceSnapshot | null;
   auditEvidenceUnits?: AuditEvidenceUnit[];
   requireAuditLedgerEvidence?: boolean;
 }
@@ -1244,6 +1258,86 @@ function isLedgerOrManifestValidationIssue(code: string): boolean {
   );
 }
 
+function isTrustedAuditSourceClassification(sourceClassification: string): boolean {
+  return (
+    sourceClassification === "validated_findings_present" ||
+    sourceClassification === "validated_no_findings"
+  );
+}
+
+function isTrustedAuditArtifactTask(task: TaskCompletionEvidenceTask): boolean {
+  return (
+    task.roadmapBatchId != null ||
+    task.auditArtifactRole === "report" ||
+    task.auditArtifactRole === "synthesis"
+  );
+}
+
+function resolveAuditTrustMode(input: TaskCompletionEvidenceInput): AuditTrustMode {
+  return (
+    input.auditTrustMode ??
+    (isTrustedAuditArtifactTask(input.task) ? "trusted_artifact" : "diagnostic")
+  );
+}
+
+function gitSnapshotForRef(projectRoot: string, ref: string): AuditReportSourceSnapshot | null {
+  const commit = runGit(projectRoot, ["rev-parse", ref]);
+  const tree = runGit(projectRoot, ["rev-parse", `${ref}^{tree}`]);
+  if (!commit || !tree) return null;
+  const branch = runGit(projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  return {
+    id: `git:${commit}:${tree}`,
+    commit,
+    tree,
+    branch: branch && branch !== "HEAD" ? branch : null,
+    dirty: false,
+  };
+}
+
+function isHeadReportArtifactOnlyCommit(
+  projectRoot: string,
+  reportArtifactFiles: string[],
+): boolean {
+  if (reportArtifactFiles.length === 0) return false;
+  const changed = runGit(projectRoot, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]);
+  if (!changed) return false;
+  const reportArtifactSet = new Set(reportArtifactFiles.map(normalizePathForComparison));
+  const changedFiles = changed.split(/\r?\n/).map(normalizePathForComparison).filter(Boolean);
+  return (
+    changedFiles.length > 0 &&
+    changedFiles.every((file) => reportArtifactSet.has(file)) &&
+    runGit(projectRoot, ["rev-parse", "HEAD^"]) != null
+  );
+}
+
+function deriveTrustedAuditSourceSnapshot(
+  projectRoot: string,
+  reportArtifactFiles: string[],
+): AuditReportSourceSnapshot | null {
+  const ref = isHeadReportArtifactOnlyCommit(projectRoot, reportArtifactFiles) ? "HEAD^" : "HEAD";
+  return gitSnapshotForRef(projectRoot, ref);
+}
+
+function hasTrustedAuditArtifactProof(input: {
+  requireAuditLedgerEvidence?: boolean;
+  auditReportValidation: AuditReportValidationResult;
+  auditArtifactLifecycle: AuditArtifactLifecycleEvidence | null;
+}): boolean {
+  const { auditReportValidation, auditArtifactLifecycle } = input;
+  return (
+    auditReportValidation.ok &&
+    auditReportValidation.manifestStatus === "valid" &&
+    isTrustedAuditSourceClassification(auditReportValidation.sourceClassification) &&
+    input.requireAuditLedgerEvidence === true &&
+    auditArtifactLifecycle?.ok === true &&
+    auditArtifactLifecycle.states.artifact_state_valid === true &&
+    auditArtifactLifecycle.committedValidation?.ok === true &&
+    isTrustedAuditSourceClassification(
+      auditArtifactLifecycle.committedValidation.sourceClassification,
+    )
+  );
+}
+
 function hasVisibleValidatedFindingSection(text: string): boolean {
   return /(^|\n)\s*#{2,6}\s+(?:Validated\s+)?Finding\s+\d+(?:[.:)\s-]|$)/i.test(text);
 }
@@ -1327,6 +1421,9 @@ export function evaluateTaskCompletionEvidence(
 ): TaskCompletionEvidenceResult {
   const { task, projectRoot } = input;
   const phase = input.phase ?? "completion";
+  const auditTrustMode = resolveAuditTrustMode(input);
+  const effectiveRequireAuditLedgerEvidence =
+    input.requireAuditLedgerEvidence || auditTrustMode === "trusted_artifact";
   const inferenceTask = taskForEvidenceInference(task);
   const riskyTask = isRiskyTask(task);
   const genericPlan = hasGenericPlan(task);
@@ -1370,6 +1467,12 @@ export function evaluateTaskCompletionEvidence(
       )
     : gitEvidence.files.filter((file) => isReportArtifactPath(file, task));
   const reportText = collectReportText(projectRoot, reportArtifactFiles);
+  const hasReportArtifactForValidation = reportArtifactFiles.length > 0;
+  const expectedSourceSnapshot =
+    input.expectedSourceSnapshot ??
+    (hasReportArtifactForValidation && auditTrustMode === "trusted_artifact"
+      ? deriveTrustedAuditSourceSnapshot(projectRoot, reportArtifactFiles)
+      : null);
   const reportClassificationText = stripNonBlockingWeakFindingSections(reportText);
   const committedReportRequired = riskyTask || requiresCommittedReport(task);
   const committedFileSet = new Set(gitEvidence.committedFiles.map(normalizePathForComparison));
@@ -1431,13 +1534,51 @@ export function evaluateTaskCompletionEvidence(
     expectedReportArtifactPath,
     allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
     requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
-    auditEvidenceUnits: input.auditEvidenceUnits,
-    requireLedgerEvidence: input.requireAuditLedgerEvidence,
+    expectedSourceSnapshot,
+    auditEvidenceUnits: hasReportArtifactForValidation ? input.auditEvidenceUnits : undefined,
+    requireLedgerEvidence: hasReportArtifactForValidation && effectiveRequireAuditLedgerEvidence,
   });
+  const lifecycleArtifactPath = reportArtifactFiles[0] ?? null;
+  const requiresAuditArtifactLifecycle =
+    phase === "completion" &&
+    lifecycleArtifactPath != null &&
+    (auditTrustMode === "trusted_artifact" ||
+      task.auditArtifactRole === "report" ||
+      task.auditArtifactRole === "synthesis" ||
+      task.roadmapBatchId != null);
+  const auditArtifactLifecycle = requiresAuditArtifactLifecycle
+    ? verifyAuditArtifactLifecycle({
+        text: reportText,
+        projectRoot,
+        taskId: task.id,
+        roadmapBatchId: task.roadmapBatchId,
+        roadmapAlias: task.roadmapAlias,
+        auditPlanId: task.auditPlanId,
+        taskDescription: task.description,
+        reportArtifactPaths: [lifecycleArtifactPath],
+        expectedReportArtifactPath: lifecycleArtifactPath,
+        allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
+        requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
+        expectedSourceSnapshot,
+        auditEvidenceUnits: hasReportArtifactForValidation ? input.auditEvidenceUnits : undefined,
+        requireLedgerEvidence: effectiveRequireAuditLedgerEvidence,
+        artifactPath: lifecycleArtifactPath,
+        worktreeValidation: auditReportValidation,
+      })
+    : null;
   const auditSynthesisTask = task.auditArtifactRole === "synthesis";
   const auditSynthesisOutcome =
     riskyTask && auditSynthesisTask && reportText.trim()
-      ? classifyAuditSynthesisOutput({ text: reportText, projectRoot })
+      ? classifyAuditSynthesisOutput({
+          text: reportText,
+          projectRoot,
+          artifactPath: lifecycleArtifactPath,
+          taskId: task.id,
+          roadmapBatchId: task.roadmapBatchId,
+          roadmapAlias: task.roadmapAlias,
+          auditPlanId: task.auditPlanId,
+          auditEvidenceUnits: hasReportArtifactForValidation ? input.auditEvidenceUnits : undefined,
+        })
       : null;
   const terminalAuditInconclusiveSynthesis =
     auditSynthesisTask &&
@@ -1479,9 +1620,16 @@ export function evaluateTaskCompletionEvidence(
     allowedEvidenceArtifactPaths: [...allowedEvidenceArtifactPaths],
     requireProposedFix: /\bProposed fix\s*:/i.test(combinedTaskText(task)),
   });
+  const trustedAuditArtifact = hasTrustedAuditArtifactProof({
+    requireAuditLedgerEvidence: input.requireAuditLedgerEvidence,
+    auditReportValidation,
+    auditArtifactLifecycle,
+  });
   const substantiveReportEvidence =
-    validatorEvidenceBlockingIssues.length === 0 &&
-    (auditReportValidation.substantiveEvidence || legacySubstantiveReportEvidence);
+    auditTrustMode === "trusted_artifact"
+      ? trustedAuditArtifact
+      : validatorEvidenceBlockingIssues.length === 0 &&
+        (auditReportValidation.substantiveEvidence || legacySubstantiveReportEvidence);
   const reportQualityIssues = [
     ...new Set([
       ...collectLowQualityReportEvidenceIssues(reportClassificationText, projectRoot),
@@ -1527,6 +1675,33 @@ export function evaluateTaskCompletionEvidence(
           `Task requires a committed report, but these report artifacts are not committed cleanly on the task branch: ${uncommittedReportArtifactFiles.join(", ")}.`,
         ),
       );
+    }
+    if (
+      auditArtifactLifecycle?.issues.some((entry) => entry.code === "audit_artifact_uncommitted")
+    ) {
+      issues.push(
+        issue(
+          "audit_artifact_uncommitted",
+          `Audit artifact ${auditArtifactLifecycle.artifactPath ?? "(unknown)"} must be committed cleanly before it can be trusted valid.`,
+        ),
+      );
+    }
+    if (auditArtifactLifecycle?.issues.some((entry) => entry.code === "committed_blob_mismatch")) {
+      issues.push(
+        issue(
+          "committed_blob_mismatch",
+          `Committed audit artifact blob for ${auditArtifactLifecycle.artifactPath ?? "(unknown)"} differs from the validated worktree artifact.`,
+        ),
+      );
+    }
+    for (const validationIssue of auditArtifactLifecycle?.issues ?? []) {
+      if (
+        validationIssue.code === "audit_artifact_uncommitted" ||
+        validationIssue.code === "committed_blob_mismatch"
+      ) {
+        continue;
+      }
+      issues.push(issue(validationIssue.code, validationIssue.message));
     }
     if (deterministicFallbackReport) {
       issues.push(
@@ -1596,10 +1771,35 @@ export function evaluateTaskCompletionEvidence(
     for (const validationIssue of ledgerOrManifestBlockingIssues) {
       issues.push(issue(validationIssue.code, validationIssue.message));
     }
+    if (
+      auditTrustMode === "trusted_artifact" &&
+      hasReportArtifactForValidation &&
+      input.requireAuditLedgerEvidence !== true &&
+      !issues.some((entry) => entry.code === "missing_audit_evidence_ref")
+    ) {
+      issues.push(
+        issue(
+          "missing_audit_evidence_ref",
+          "Trusted audit artifact mode requires ledger-backed audit evidence to be enabled.",
+        ),
+      );
+    }
     for (const validationIssue of validatorEvidenceBlockingIssues.filter(
       (entry) => entry.code === "malformed_report_artifact",
     )) {
       issues.push(issue(validationIssue.code, validationIssue.message));
+    }
+    if (
+      auditTrustMode === "trusted_artifact" &&
+      legacySubstantiveReportEvidence &&
+      !trustedAuditArtifact
+    ) {
+      issues.push(
+        issue(
+          "legacy_text_evidence_untrusted",
+          "Legacy text-only audit evidence is diagnostic only and cannot satisfy trusted audit artifact completion.",
+        ),
+      );
     }
     if (
       riskyTask &&
@@ -1677,7 +1877,10 @@ export function evaluateTaskCompletionEvidence(
       deterministicFallbackReport,
       implementationToolActivityCount,
       reviewStageToolActivityCount,
+      auditTrustMode,
       substantiveReportEvidence,
+      legacySubstantiveReportEvidence,
+      trustedAuditArtifact,
       reportQualityIssues,
       referencedPaths,
       missingReferencedPaths: missing,
@@ -1686,6 +1889,7 @@ export function evaluateTaskCompletionEvidence(
       missingReportReferencedPaths: reportMissing,
       existingReportReferencedPaths: reportExisting,
       auditReportValidation,
+      auditArtifactLifecycle,
       auditSynthesisOutcome,
       expectedReportArtifactPath,
       intentPolicyIssues: intentPolicyResult?.issues ?? [],

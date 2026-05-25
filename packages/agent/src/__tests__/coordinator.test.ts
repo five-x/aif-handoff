@@ -178,10 +178,183 @@ function withAuditManifest(input: {
   return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
 }
 
+function appendRuntimeAuditEvidenceUnit(input: {
+  taskId: string;
+  batchId: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): void {
+  appendEvidenceUnitEvent(
+    buildAuditEvidenceUnit(
+      {
+        taskId: input.taskId,
+        auditPlanId: `batch:${input.batchId}:task:${input.taskId}`,
+        sourceSnapshotId: input.snapshot.id,
+        scopeIds: ["README.md"],
+        riskHypothesisIds: ["risk-1"],
+      },
+      buildAuditEvidencePayload({
+        id: "ev-1",
+        toolName: "rg",
+        evidenceKind: "shell_command",
+        evidenceGrade: "substantive",
+        riskHypothesisIds: ["risk-1"],
+        paths: ["README.md"],
+        pathRanges: [{ path: "README.md", startLine: 2, endLine: 2 }],
+        command: 'rg -n "runtime audit" README.md',
+        exitCode: 0,
+        output: "README.md:2:runtime audit evidence",
+      }),
+    ),
+  );
+}
+
+function validNoFindingsAuditReport(input: {
+  taskId: string;
+  batchId: string;
+  artifactPath: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): string {
+  const body = [
+    "# Audit",
+    "",
+    "## No validated findings",
+    "No validated findings.",
+    "Risk hypotheses: risk-1 for `README.md:2` runtime evidence refs were covered and absent.",
+    "",
+    "Checked files:",
+    "- `README.md:2`",
+    "",
+    "Checked commands:",
+    '- Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`',
+    "",
+  ].join("\n");
+  return withAuditManifest({ ...input, body });
+}
+
+function validFindingAuditReport(input: {
+  taskId: string;
+  batchId: string;
+  artifactPath: string;
+  snapshot: { id: string; commit: string; tree: string };
+  bodyPrefix?: string;
+}): string {
+  const body = [
+    input.bodyPrefix ?? "",
+    "## Finding 1",
+    "Evidence: `README.md:2` records the validated source audit report.",
+    "Risk: Re-running the synthesis implementer can loop after the report is already committed.",
+    "Proposed fix: Keep committed synthesis rework bounded.",
+    'Verification: Command `rg -n "runtime audit" README.md` output: `README.md:2:runtime audit evidence`.',
+    "",
+  ]
+    .filter((line, index) => index !== 0 || line.length > 0)
+    .join("\n");
+  const manifest = {
+    version: 1,
+    auditPlanId: `batch:${input.batchId}:task:${input.taskId}`,
+    taskId: input.taskId,
+    batchId: input.batchId,
+    artifactPath: input.artifactPath,
+    contentSha256: computeAuditReportContentSha256(body),
+    sourceSnapshot: { ...input.snapshot, dirty: false },
+    outcome: "validated_findings_present",
+    scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: ["ev-1"] }],
+    riskHypotheses: [
+      { id: "risk-1", description: "Runtime evidence refs must be captured", status: "covered" },
+    ],
+    findings: [{ id: "finding-1", evidenceRefs: ["ev-1"], riskIds: ["risk-1"] }],
+    noFindingsClaims: [],
+    evidenceRefs: ["ev-1"],
+  };
+  return `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+}
+
+function appendSrcAuditEvidenceUnit(input: {
+  taskId: string;
+  batchId: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): void {
+  appendEvidenceUnitEvent(
+    buildAuditEvidenceUnit(
+      {
+        taskId: input.taskId,
+        auditPlanId: `batch:${input.batchId}:task:${input.taskId}`,
+        sourceSnapshotId: input.snapshot.id,
+        scopeIds: ["src"],
+        riskHypothesisIds: ["risk-1"],
+      },
+      buildAuditEvidencePayload({
+        id: "ev-1",
+        toolName: "git grep",
+        evidenceKind: "shell_command",
+        evidenceGrade: "substantive",
+        riskHypothesisIds: ["risk-1"],
+        paths: ["src/index.ts", "src/worker.ts"],
+        pathRanges: [
+          { path: "src/index.ts", startLine: 1, endLine: 1 },
+          { path: "src/worker.ts", startLine: 1, endLine: 1 },
+        ],
+        command: 'git grep -n "export" -- src',
+        exitCode: 0,
+        output: [
+          'src/index.ts:1:export const entry = "ok";',
+          'src/worker.ts:1:export function runWorker() { return "ok"; }',
+        ].join("\n"),
+      }),
+    ),
+  );
+}
+
+function validSrcNoFindingsAuditReport(input: {
+  taskId: string;
+  batchId: string;
+  artifactPath: string;
+  snapshot: { id: string; commit: string; tree: string };
+}): string {
+  const body = [
+    "# Audit",
+    "",
+    "## No validated findings",
+    "No validated findings.",
+    "Risk hypotheses: risk-1 for `src/index.ts:1` and `src/worker.ts:1` export wiring were covered and absent.",
+    "",
+    "Checked files:",
+    "- `src/index.ts:1`",
+    "- `src/worker.ts:1`",
+    "",
+    "Checked commands:",
+    '- Command `git grep -n "export" -- src` output:',
+    "```",
+    'src/index.ts:1:export const entry = "ok";',
+    'src/worker.ts:1:export function runWorker() { return "ok"; }',
+    "```",
+    "",
+  ].join("\n");
+  const manifest = {
+    version: 1,
+    auditPlanId: `batch:${input.batchId}:task:${input.taskId}`,
+    taskId: input.taskId,
+    batchId: input.batchId,
+    artifactPath: input.artifactPath,
+    contentSha256: computeAuditReportContentSha256(body),
+    sourceSnapshot: { ...input.snapshot, dirty: false },
+    outcome: "validated_no_findings",
+    scopeCoverage: [{ root: "src", covered: true, evidenceRefs: ["ev-1"] }],
+    riskHypotheses: [
+      { id: "risk-1", description: "Source export wiring must be covered", status: "covered" },
+    ],
+    findings: [],
+    noFindingsClaims: [{ id: "nf-1", riskIds: ["risk-1"], evidenceRefs: ["ev-1"] }],
+    evidenceRefs: ["ev-1"],
+  };
+  return `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+}
+
 function trustedFindingsValidationDetails(): Record<string, unknown> {
   return {
     evidence: {
       auditReportValidation: { sourceClassification: "validated_findings_present" },
+      auditArtifactLifecycle: validAuditArtifactLifecycleEvidence("validated_findings_present"),
     },
   };
 }
@@ -199,6 +372,42 @@ function trustedNoFindingsValidationDetails(): Record<string, unknown> {
           reasonCodes: [],
         },
       },
+      auditArtifactLifecycle: validAuditArtifactLifecycleEvidence("validated_no_findings"),
+    },
+  };
+}
+
+function validAuditArtifactLifecycleEvidence(
+  sourceClassification: string,
+): Record<string, unknown> {
+  const artifactSha = "a".repeat(64);
+  const contentSha = "b".repeat(64);
+  return {
+    ok: true,
+    artifactPath: "audit/valid.md",
+    committedRef: "HEAD",
+    states: {
+      draft_written: true,
+      manifest_finalized: true,
+      validator_passed: true,
+      git_committed: true,
+      committed_blob_revalidated: true,
+      artifact_state_valid: true,
+    },
+    issues: [],
+    worktreeArtifactSha256: artifactSha,
+    committedArtifactSha256: artifactSha,
+    worktreeContentSha256: contentSha,
+    committedContentSha256: contentSha,
+    committedValidation: {
+      ok: true,
+      issueCodes: [],
+      artifactSha256: artifactSha,
+      contentSha256: contentSha,
+      manifestStatus: "valid",
+      manifestVersion: 1,
+      sourceClassification,
+      sourceSnapshot: { id: "git:commit:tree", commit: "commit", tree: "tree", dirty: false },
     },
   };
 }
@@ -827,11 +1036,12 @@ describe("coordinator", () => {
     let report = db.select().from(tasks).where(eq(tasks.id, "task-canary-report")).get();
     expect(report?.status).toBe("implementing");
     expect(report?.reworkRequested).toBe(true);
-    expect(report?.blockedReason).toContain("invalid_inventory_only");
+    expect(report?.blockedReason).toContain("invalid_artifact_contract");
+    expect(report?.blockedReason).toContain("inventory_only_evidence");
     let artifacts = listRoadmapBatchArtifacts(batch.batchId);
     let reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
     expect(reportArtifact?.state).toBe("invalid");
-    expect(reportArtifact?.failureFamily).toBe("invalid_inventory_only");
+    expect(reportArtifact?.failureFamily).toBe("invalid_artifact_contract");
     const weakDetails = JSON.parse(reportArtifact?.validationDetailsJson ?? "{}");
     expect(reportArtifact?.contentSha).toMatch(/^[a-f0-9]{64}$/);
     expect(reportArtifact?.contentSha).toBe(
@@ -861,7 +1071,8 @@ describe("coordinator", () => {
     expect(report?.status).toBe("implementing");
     expect(report?.reworkRequested).toBe(true);
     expect(report?.manualReviewRequired).toBe(false);
-    expect(report?.blockedReason).toContain("invalid_inventory_only");
+    expect(report?.blockedReason).toContain("invalid_artifact_contract");
+    expect(report?.blockedReason).toContain("inventory_only_evidence");
     expect(report?.blockedReason).toContain(
       "Rework requested again for repeated audit artifact failure signature",
     );
@@ -874,27 +1085,20 @@ describe("coordinator", () => {
     expect(repeatedAttempts.length).toBeGreaterThanOrEqual(2);
 
     vi.clearAllMocks();
+    const repairedSnapshot = currentGitSnapshot(rootPath);
+    appendSrcAuditEvidenceUnit({
+      taskId: "task-canary-report",
+      batchId: batch.batchId,
+      snapshot: repairedSnapshot,
+    });
     writeFileSync(
       join(rootPath, "audit", "source.md"),
-      [
-        "# Audit",
-        "",
-        "## Coverage",
-        "| Scope | Evidence | Verification |",
-        "| --- | --- | --- |",
-        '| `src` | `src/index.ts:1`, `src/worker.ts:1` | Command `git grep -n "export" -- src` output cited below. |',
-        "",
-        "## Finding: Worker output is unchecked",
-        "Evidence: `src/worker.ts:1` returns a string without downstream validation.",
-        "Risk: A caller can rely on unchecked worker output.",
-        "Proposed fix: Add validation before consuming worker output.",
-        'Verification: Command `git grep -n "export" -- src` output:',
-        "```",
-        'src/index.ts:1:export const entry = "ok";',
-        'src/worker.ts:1:export function runWorker() { return "ok"; }',
-        "```",
-        "",
-      ].join("\n"),
+      validSrcNoFindingsAuditReport({
+        taskId: "task-canary-report",
+        batchId: batch.batchId,
+        artifactPath: "audit/source.md",
+        snapshot: repairedSnapshot,
+      }),
       "utf8",
     );
     execFileSync("git", ["add", "audit/source.md"], { cwd: rootPath, stdio: "ignore" });
@@ -1363,7 +1567,7 @@ describe("coordinator", () => {
         ].join("\n"),
       })
       .run();
-    createRoadmapBatchContract({
+    const batch = createRoadmapBatchContract({
       projectId: "audit-rework-project",
       roadmapAlias: "audit",
       taskIntent: "audit",
@@ -1380,6 +1584,36 @@ describe("coordinator", () => {
       state: "valid",
       failureFamily: null,
       validationDetails: trustedFindingsValidationDetails(),
+    });
+    const snapshot = currentGitSnapshot(rootPath);
+    appendRuntimeAuditEvidenceUnit({
+      taskId: "task-synthesis-ready",
+      batchId: batch.batchId,
+      snapshot,
+    });
+    writeFileSync(
+      join(rootPath, "audit", "summary.md"),
+      validFindingAuditReport({
+        taskId: "task-synthesis-ready",
+        batchId: batch.batchId,
+        artifactPath: "audit/summary.md",
+        snapshot,
+        bodyPrefix: `${formatAuditSynthesisOutcomeForArtifact({
+          kind: "validated_findings_present",
+          reason: "Validated findings were present in source audit reports.",
+          sourceReportCount: 1,
+          validatedFindingCount: 1,
+          substantiveNoFindingsReportCount: 0,
+          inventoryOnlyNoFindingsReportCount: 0,
+          weakReportCount: 0,
+        })}\n`,
+      }),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/summary.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "refresh valid audit summary", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
     });
 
     await pollAndProcess();
@@ -1464,6 +1698,27 @@ describe("coordinator", () => {
       state: "valid",
       failureFamily: null,
       validationDetails: trustedFindingsValidationDetails(),
+    });
+    const snapshot = currentGitSnapshot(rootPath);
+    appendRuntimeAuditEvidenceUnit({
+      taskId: "task-report-rework-ready",
+      batchId: batch.batchId,
+      snapshot,
+    });
+    writeFileSync(
+      join(rootPath, "audit", "report.md"),
+      validNoFindingsAuditReport({
+        taskId: "task-report-rework-ready",
+        batchId: batch.batchId,
+        artifactPath: "audit/report.md",
+        snapshot,
+      }),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/report.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "refresh valid audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
     });
 
     await pollAndProcess();
@@ -1796,8 +2051,8 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("placeholder commit hashes");
     expect(task!.blockedReason).toContain("failed after 3/3 review iterations");
     const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
-    expect(artifact?.state).toBe("source_inconclusive");
-    expect(artifact?.failureFamily).toBe("insufficient_substantive_evidence");
+    expect(artifact?.state).toBe("invalid");
+    expect(artifact?.failureFamily).toBe("invalid_artifact_contract");
   });
 
   it("should route repeated weak audit evidence failures into repair mode before max iterations", async () => {
@@ -1902,7 +2157,7 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("low_quality_report_evidence");
     const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
     expect(artifact?.state).toBe("invalid");
-    expect(artifact?.failureFamily).toBe("insufficient_substantive_evidence");
+    expect(artifact?.failureFamily).toBe("invalid_artifact_contract");
   });
 
   it("should surface missing runtime ledger refs for manifest-backed audit artifacts", async () => {

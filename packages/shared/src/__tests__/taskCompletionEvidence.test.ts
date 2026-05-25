@@ -185,6 +185,79 @@ function withAuditManifest(input: {
   return `${input.body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
 }
 
+function auditEvidenceUnit(input: {
+  taskId: string;
+  snapshot: { id: string; commit: string; tree: string };
+}) {
+  return {
+    id: "ev-1",
+    taskId: input.taskId,
+    auditPlanId: `task:${input.taskId}`,
+    sourceSnapshotId: input.snapshot.id,
+    toolName: "Grep",
+    evidenceKind: "search" as const,
+    evidenceGrade: "substantive" as const,
+    scopeIds: ["README.md"],
+    riskHypothesisIds: ["risk-1"],
+    pathHashes: [],
+    pathRangeHashes: [],
+    command: { command: 'rg -n "runtime evidence" README.md', args: [], cwd: null },
+    exitCode: 0,
+    outputSha256: null,
+    outputPreview: "README.md:2:runtime evidence marker",
+    outputPreviewTruncated: false,
+    parsedSummary: null,
+    redactionStatus: "clean" as const,
+    createdAt: "2026-05-12T00:00:00.000Z",
+  };
+}
+
+function validAuditReport(input: {
+  taskId: string;
+  artifactPath: string;
+  snapshot: { id: string; commit: string; tree: string };
+  marker?: string;
+}): string {
+  const body = [
+    "No validated findings.",
+    "",
+    `Risk hypotheses: risk-1 for runtime evidence marker integrity in \`README.md:2\` was covered and is absent.${input.marker ? ` ${input.marker}` : ""}`,
+    "",
+    "Checked files:",
+    "- `README.md:2`",
+    "",
+    "Checked commands:",
+    '- Command `rg -n "runtime evidence" README.md` output: `README.md:2:runtime evidence marker`',
+    "",
+  ].join("\n");
+  return withAuditManifest({
+    body,
+    taskId: input.taskId,
+    artifactPath: input.artifactPath,
+    snapshot: input.snapshot,
+  });
+}
+
+function auditTask(input: { taskId: string; artifactPath: string }) {
+  return {
+    id: input.taskId,
+    title: "Audit committed report lifecycle",
+    description: `Report artifact: ${input.artifactPath}`,
+    taskIntent: "audit" as const,
+    auditArtifactRole: "report" as const,
+    agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+  };
+}
+
+function commitRuntimeEvidenceMarker(root: string): void {
+  writeFileSync(join(root, "README.md"), "# test\nruntime evidence marker\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "add runtime evidence marker", "--no-verify"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+}
+
 const IMPLEMENTATION_TOOL_ACTIVITY = [
   "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started (runtime=qwen-local-agent, transport=api, model=Qwen3)",
   "[2026-05-09T00:00:01.000Z] Tool: read_file README.md",
@@ -398,6 +471,7 @@ describe("taskCompletionEvidence", () => {
       },
     });
 
+    expect(result.issues).toEqual([]);
     expect(result.ok).toBe(true);
     expect(result.evidence.meaningfulChangedFiles).toContain("src/form.ts");
     expect(codes(result)).not.toContain("missing_report_artifact");
@@ -3967,51 +4041,47 @@ describe("taskCompletionEvidence", () => {
 
   it("allows audit synthesis with persisted substantive no-findings outcome", () => {
     const root = initRepo();
-    writeFileSync(join(root, "README.md"), "# test\nruntime evidence marker\n", "utf8");
-    execFileSync("git", ["add", "README.md"], {
-      cwd: root,
-      stdio: "ignore",
-    });
-    execFileSync("git", ["commit", "-m", "add substantive readme evidence", "--no-verify"], {
-      cwd: root,
-      stdio: "ignore",
-    });
+    const taskId = "audit-substantive-no-findings-synthesis";
+    const artifactPath = "audit/summary.md";
+    commitRuntimeEvidenceMarker(root);
+    const snapshot = gitSnapshot(root);
     execFileSync("git", ["checkout", "-b", "feature/audit-substantive-no-findings"], {
       cwd: root,
       stdio: "ignore",
     });
     mkdirSync(join(root, "audit"), { recursive: true });
+    const body = [
+      "# Audit Summary",
+      "",
+      formatAuditSynthesisOutcomeForArtifact({
+        kind: "validated_no_findings",
+        reason:
+          "No findings survived validation and all source reports included substantive no-findings evidence.",
+        sourceReportCount: 1,
+        validatedFindingCount: 0,
+        substantiveNoFindingsReportCount: 1,
+        inventoryOnlyNoFindingsReportCount: 0,
+        weakReportCount: 0,
+      }),
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for runtime evidence marker audit batch integrity in `README.md:2` was covered and absent.",
+      "",
+      "## Checked Files",
+      "",
+      "- `README.md:2`",
+      "",
+      "## Checked Commands",
+      "",
+      '- Runtime ledger evidence ev-1 (Grep) ran command `rg -n "runtime evidence" README.md` with output: `README.md:2:runtime evidence marker`',
+      "",
+    ].join("\n");
     writeFileSync(
-      join(root, "audit", "summary.md"),
-      [
-        "# Audit Summary",
-        "",
-        formatAuditSynthesisOutcomeForArtifact({
-          kind: "validated_no_findings",
-          reason:
-            "No findings survived validation and all source reports included substantive no-findings evidence.",
-          sourceReportCount: 1,
-          validatedFindingCount: 0,
-          substantiveNoFindingsReportCount: 1,
-          inventoryOnlyNoFindingsReportCount: 0,
-          weakReportCount: 0,
-        }),
-        "",
-        "No validated findings.",
-        "Risk hypotheses: risk-readme-1 for runtime evidence marker audit batch integrity in `README.md:2` was covered and absent.",
-        "",
-        "## Checked Files",
-        "",
-        "- `README.md:2`",
-        "",
-        "## Checked Commands",
-        "",
-        '- Command `rg -n "runtime evidence" README.md` output: `README.md:2:runtime evidence marker`',
-        "",
-      ].join("\n"),
+      join(root, artifactPath),
+      withAuditManifest({ body, taskId, artifactPath, snapshot }),
       "utf8",
     );
-    execFileSync("git", ["add", "audit/summary.md"], {
+    execFileSync("git", ["add", artifactPath], {
       cwd: root,
       stdio: "ignore",
     });
@@ -4022,17 +4092,21 @@ describe("taskCompletionEvidence", () => {
 
     const result = evaluateTaskCompletionEvidence({
       projectRoot: root,
+      auditTrustMode: "trusted_artifact",
       task: {
-        id: "audit-substantive-no-findings-synthesis",
+        id: taskId,
         title: "Synthesize audit findings",
-        description: "Report artifact: audit/summary.md",
+        description: `Report artifact: ${artifactPath}`,
         taskIntent: "audit",
         auditArtifactRole: "synthesis",
         agentActivityLog: RISKY_COMPLETION_ACTIVITY,
       },
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot })],
     });
 
     expect(result.ok).toBe(true);
+    expect(result.evidence.trustedAuditArtifact).toBe(true);
     expect(result.evidence.auditSynthesisOutcome?.kind).toBe("validated_no_findings");
     expect(codes(result)).not.toContain("audit_inconclusive");
   });
@@ -4662,6 +4736,386 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).toContain("missing_audit_evidence_ref");
     expect(codes(result)).toContain("insufficient_report_evidence");
     expect(codes(result)).toContain("low_quality_report_evidence");
+  });
+
+  it("treats legacy text evidence as diagnostic-only in trusted mode", () => {
+    const root = initRepo();
+    const taskId = "audit-legacy-text-trusted";
+    const artifactPath = "reports/audit.md";
+    execFileSync("git", ["checkout", "-b", "feature/audit-legacy-text-trusted"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `README.md:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add legacy audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditTrustMode: "trusted_artifact",
+      requireAuditLedgerEvidence: true,
+      task: {
+        id: taskId,
+        title: "Audit legacy text evidence",
+        description: `Report artifact: ${artifactPath}`,
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.auditTrustMode).toBe("trusted_artifact");
+    expect(result.evidence.legacySubstantiveReportEvidence).toBe(true);
+    expect(result.evidence.substantiveReportEvidence).toBe(false);
+    expect(result.evidence.trustedAuditArtifact).toBe(false);
+    expect(codes(result)).toContain("legacy_text_evidence_untrusted");
+  });
+
+  it("surfaces legacy evidence in diagnostic mode without marking a trusted artifact", () => {
+    const root = initRepo();
+    const artifactPath = "reports/audit.md";
+    execFileSync("git", ["checkout", "-b", "feature/audit-legacy-text-diagnostic"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      [
+        "No validated findings.",
+        "",
+        "Checked files:",
+        "- `README.md:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "test" README.md` output: `README.md:1:# test`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add diagnostic audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditTrustMode: "diagnostic",
+      task: {
+        id: "audit-legacy-text-diagnostic",
+        title: "Audit legacy text evidence",
+        description: `Report artifact: ${artifactPath}`,
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.evidence.auditTrustMode).toBe("diagnostic");
+    expect(result.evidence.legacySubstantiveReportEvidence).toBe(true);
+    expect(result.evidence.trustedAuditArtifact).toBe(false);
+    expect(codes(result)).not.toContain("legacy_text_evidence_untrusted");
+  });
+
+  it("rejects trusted audit artifacts when ledger-required mode is not enabled", () => {
+    const root = initRepo();
+    const taskId = "audit-trusted-missing-ledger-mode";
+    const artifactPath = "reports/audit.md";
+    commitRuntimeEvidenceMarker(root);
+    const snapshot = gitSnapshot(root);
+    execFileSync("git", ["checkout", "-b", "feature/audit-trusted-missing-ledger-mode"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      validAuditReport({ taskId, artifactPath, snapshot }),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditTrustMode: "trusted_artifact",
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot })],
+      task: auditTask({ taskId, artifactPath }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.trustedAuditArtifact).toBe(false);
+    expect(codes(result)).toContain("missing_audit_evidence_ref");
+  });
+
+  it("rejects trusted audit artifacts with placeholder manifest content hashes", () => {
+    const root = initRepo();
+    const taskId = "audit-trusted-placeholder-hash";
+    const artifactPath = "reports/audit.md";
+    commitRuntimeEvidenceMarker(root);
+    const snapshot = gitSnapshot(root);
+    execFileSync("git", ["checkout", "-b", "feature/audit-trusted-placeholder-hash"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    const body = validAuditReport({ taskId, artifactPath, snapshot }).replace(
+      computeAuditReportContentSha256(
+        [
+          "No validated findings.",
+          "",
+          "Risk hypotheses: risk-1 for runtime evidence marker integrity in `README.md:2` was covered and is absent.",
+          "",
+          "Checked files:",
+          "- `README.md:2`",
+          "",
+          "Checked commands:",
+          '- Command `rg -n "runtime evidence" README.md` output: `README.md:2:runtime evidence marker`',
+          "",
+        ].join("\n"),
+      ),
+      "0".repeat(64),
+    );
+    writeFileSync(join(root, artifactPath), body, "utf8");
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add placeholder hash audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditTrustMode: "trusted_artifact",
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot })],
+      task: auditTask({ taskId, artifactPath }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.trustedAuditArtifact).toBe(false);
+    expect(codes(result)).toContain("manifest_content_hash_mismatch");
+  });
+
+  it("rejects trusted audit artifacts with stale manifest source snapshots", () => {
+    const root = initRepo();
+    const taskId = "audit-trusted-stale-snapshot";
+    const artifactPath = "reports/audit.md";
+    commitRuntimeEvidenceMarker(root);
+    const snapshot = gitSnapshot(root);
+    const staleSnapshot = {
+      ...snapshot,
+      id: `git:${snapshot.commit}:${"1".repeat(40)}`,
+      tree: "1".repeat(40),
+    };
+    execFileSync("git", ["checkout", "-b", "feature/audit-trusted-stale-snapshot"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      validAuditReport({ taskId, artifactPath, snapshot: staleSnapshot }),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add stale snapshot audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditTrustMode: "trusted_artifact",
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot: staleSnapshot })],
+      task: auditTask({ taskId, artifactPath }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.evidence.trustedAuditArtifact).toBe(false);
+    expect(codes(result)).toContain("manifest_source_snapshot_mismatch");
+    expect(codes(result)).not.toContain("missing_report_manifest");
+  });
+
+  it("rejects trusted audit artifacts bound to an older valid source snapshot", () => {
+    const root = initRepo();
+    const taskId = "audit-trusted-old-valid-snapshot";
+    const artifactPath = "reports/audit.md";
+    commitRuntimeEvidenceMarker(root);
+    const staleSnapshot = gitSnapshot(root);
+    writeFileSync(
+      join(root, "README.md"),
+      "# test\nruntime evidence marker\ncurrent source marker\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "advance audited source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    const currentSnapshot = gitSnapshot(root);
+    execFileSync("git", ["checkout", "-b", "feature/audit-trusted-old-valid-snapshot"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      validAuditReport({ taskId, artifactPath, snapshot: staleSnapshot }),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add stale valid snapshot report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditTrustMode: "trusted_artifact",
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot: staleSnapshot })],
+      task: auditTask({ taskId, artifactPath }),
+    });
+
+    expect(staleSnapshot.id).not.toBe(currentSnapshot.id);
+    expect(result.ok).toBe(false);
+    expect(result.evidence.trustedAuditArtifact).toBe(false);
+    expect(codes(result)).toContain("manifest_source_snapshot_mismatch");
+    expect(result.evidence.auditReportValidation.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "manifest_source_snapshot_mismatch",
+          message: expect.stringContaining(currentSnapshot.commit),
+        }),
+      ]),
+    );
+  });
+
+  it("rejects a valid worktree-only audit artifact as uncommitted lifecycle evidence", () => {
+    const root = initRepo();
+    const taskId = "audit-lifecycle-uncommitted";
+    const artifactPath = "reports/audit.md";
+    commitRuntimeEvidenceMarker(root);
+    const snapshot = gitSnapshot(root);
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      validAuditReport({ taskId, artifactPath, snapshot }),
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot })],
+      task: auditTask({ taskId, artifactPath }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("audit_artifact_uncommitted");
+    expect(result.evidence.auditArtifactLifecycle?.ok).toBe(false);
+    expect(result.evidence.auditArtifactLifecycle?.states.git_committed).toBe(false);
+  });
+
+  it("detects committed blob mismatch even when the artifact is also dirty", () => {
+    const root = initRepo();
+    const taskId = "audit-lifecycle-mismatch";
+    const artifactPath = "reports/audit.md";
+    commitRuntimeEvidenceMarker(root);
+    const snapshot = gitSnapshot(root);
+    execFileSync("git", ["checkout", "-b", "feature/audit-lifecycle-mismatch"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      validAuditReport({ taskId, artifactPath, snapshot, marker: "committed" }),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    writeFileSync(
+      join(root, artifactPath),
+      validAuditReport({ taskId, artifactPath, snapshot, marker: "worktree" }),
+      "utf8",
+    );
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot })],
+      task: auditTask({ taskId, artifactPath }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("audit_artifact_uncommitted");
+    expect(codes(result)).toContain("committed_blob_mismatch");
+    expect(result.evidence.auditArtifactLifecycle?.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining(["audit_artifact_uncommitted", "committed_blob_mismatch"]),
+    );
+  });
+
+  it("accepts lifecycle evidence for a fully valid committed audit artifact", () => {
+    const root = initRepo();
+    const taskId = "audit-lifecycle-valid";
+    const artifactPath = "reports/audit.md";
+    commitRuntimeEvidenceMarker(root);
+    const snapshot = gitSnapshot(root);
+    execFileSync("git", ["checkout", "-b", "feature/audit-lifecycle-valid"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, artifactPath),
+      validAuditReport({ taskId, artifactPath, snapshot }),
+      "utf8",
+    );
+    execFileSync("git", ["add", artifactPath], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      auditTrustMode: "trusted_artifact",
+      requireAuditLedgerEvidence: true,
+      auditEvidenceUnits: [auditEvidenceUnit({ taskId, snapshot })],
+      task: auditTask({ taskId, artifactPath }),
+    });
+
+    expect(result.issues).toEqual([]);
+    expect(result.ok).toBe(true);
+    expect(result.evidence.auditTrustMode).toBe("trusted_artifact");
+    expect(result.evidence.trustedAuditArtifact).toBe(true);
+    expect(result.evidence.auditArtifactLifecycle?.ok).toBe(true);
+    expect(result.evidence.auditArtifactLifecycle?.states.artifact_state_valid).toBe(true);
   });
 
   it("surfaces manifest and audit evidence validation failures as top-level completion codes", () => {

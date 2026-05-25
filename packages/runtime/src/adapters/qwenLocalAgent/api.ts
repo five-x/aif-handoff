@@ -25,6 +25,7 @@ const DEFAULT_MODEL_ENV_VAR = "QWEN_MODEL";
 const DEFAULT_MAX_TOOL_TURNS = 12;
 const MAX_CONFIGURED_TOOL_TURNS = 400;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
+const AUDIT_REPORT_VALIDATION_FAILURE_PASS_LIMIT = 4;
 const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 const REPOSITORY_INSPECTION_BUDGET_FINAL_DENIALS = 3;
 const DEFAULT_REPOSITORY_INSPECTION_BUDGET_FINAL_RESPONSE_TIMEOUT_MS = 3 * 60 * 1000;
@@ -38,6 +39,9 @@ const MAX_ENDPOINT_HTTP_RETRY_LIMIT = 3;
 const DEFAULT_ENDPOINT_QUEUE_LIMIT = 1;
 const MAX_ENDPOINT_QUEUE_LIMIT = 50;
 const DEFAULT_ENDPOINT_QUEUE_TIMEOUT_MS = 30_000;
+const DEFAULT_ENDPOINT_LEASE_TTL_MS = 120_000;
+const DEFAULT_ENDPOINT_LEASE_HEARTBEAT_MS = 15_000;
+const MIN_ENDPOINT_LEASE_HEARTBEAT_MS = 1_000;
 const REPOSITORY_INSPECTION_BUDGET_EXHAUSTED_STATUS = "repository_inspection_budget_exhausted";
 const LOCAL_ENDPOINT_NON_FAILURE_STATUSES = new Set([
   "endpoint_queue_timeout",
@@ -622,13 +626,16 @@ function readRepeatedToolCallLimit(input) {
   return Math.max(2, Math.min(Math.floor(raw), 12));
 }
 function repeatedToolCallLimitForTool(workflowKind, toolName, fallbackLimit) {
-  if (
-    workflowKind === "audit" &&
-    (toolName === "finalize_audit_report_manifest" || toolName === "validate_audit_report")
-  ) {
+  if (workflowKind === "audit" && toolName === "validate_audit_report") {
+    return fallbackLimit;
+  }
+  if (workflowKind === "audit" && toolName === "finalize_audit_report_manifest") {
     return Math.min(fallbackLimit, AUDIT_REPORT_REPEATED_TOOL_CALL_LIMIT);
   }
   return fallbackLimit;
+}
+function usesAuditValidationFingerprintGuard(workflowKind, toolName) {
+  return workflowKind === "audit" && toolName === "validate_audit_report";
 }
 function parseToolArguments(raw) {
   if (raw == null) return {};
@@ -784,6 +791,58 @@ function repeatedToolCallResult(toolName, repeatedCount, repeatedToolCallLimit) 
     exitCode: null,
     touchedFiles: [],
   };
+}
+function auditReportValidationFailurePayload(toolName, result) {
+  if (toolName !== "validate_audit_report" || result?.ok !== false) return null;
+  const validation = asRecord(result.auditReportValidation);
+  const fingerprint = readString(validation.validationFingerprint);
+  if (!fingerprint) return null;
+  return {
+    fingerprint,
+    repairMode: readString(validation.repairMode) ?? "manual_review_required",
+    sourceClassification: readString(validation.sourceClassification) ?? "unknown",
+    manifestStatus: readString(validation.manifestStatus) ?? "unknown",
+    issueCodes: Array.isArray(validation.issueCodes)
+      ? validation.issueCodes.filter((entry) => typeof entry === "string").sort()
+      : [],
+  };
+}
+function deterministicAuditValidationRoute(repairMode) {
+  if (
+    repairMode === "source_inconclusive" ||
+    repairMode === "operator_input_required" ||
+    repairMode === "manual_review_required" ||
+    repairMode === "bounded_deterministic_repair"
+  ) {
+    return repairMode;
+  }
+  return "manual_review_required";
+}
+function repeatedAuditValidationFingerprintText(payload, count) {
+  const route = deterministicAuditValidationRoute(payload.repairMode);
+  return [
+    `Stopped after repeated audit report validation fingerprint ${payload.fingerprint}.`,
+    "Repeated identical validator failures do not allow another generic repair turn.",
+    `deterministicRoute=${route}`,
+    `repairMode=${payload.repairMode}`,
+    `sourceClassification=${payload.sourceClassification}`,
+    `manifestStatus=${payload.manifestStatus}`,
+    `issueCodes=${payload.issueCodes.length > 0 ? payload.issueCodes.join(",") : "unknown"}`,
+    `validationFingerprint=${payload.fingerprint}`,
+    `repeatCount=${count}`,
+  ].join("\n");
+}
+function maxAuditValidationPassesText(payload, count) {
+  return [
+    `Stopped after ${count} failed audit report validation pass(es).`,
+    "Audit report validation pass limit exhausted; generic repair is no longer allowed in this attempt.",
+    `deterministicRoute=${deterministicAuditValidationRoute(payload?.repairMode)}`,
+    `repairMode=${payload?.repairMode ?? "manual_review_required"}`,
+    `sourceClassification=${payload?.sourceClassification ?? "unknown"}`,
+    `manifestStatus=${payload?.manifestStatus ?? "unknown"}`,
+    `issueCodes=${payload?.issueCodes?.length ? payload.issueCodes.join(",") : "unknown"}`,
+    `validationFingerprint=${payload?.fingerprint ?? "unknown"}`,
+  ].join("\n");
 }
 function repositoryInspectionBudgetExhaustedResult(toolName, budget) {
   const safeToolName = sanitizeQwenToolNameForLog(toolName);
@@ -1081,6 +1140,26 @@ function readEndpointQueueTimeoutMs(input) {
   if (raw == null || raw < 0) return DEFAULT_ENDPOINT_QUEUE_TIMEOUT_MS;
   return Math.floor(raw);
 }
+function readEndpointLeaseTtlMs(input) {
+  const options = asRecord(input.options);
+  const raw = readNumber(options.endpointLeaseTtlMs);
+  if (raw == null || raw <= 0) return DEFAULT_ENDPOINT_LEASE_TTL_MS;
+  return Math.max(5_000, Math.floor(raw));
+}
+function readEndpointLeaseHeartbeatMs(input) {
+  const options = asRecord(input.options);
+  const ttlMs = readEndpointLeaseTtlMs(input);
+  const raw = readNumber(options.endpointLeaseHeartbeatMs);
+  const configured =
+    raw == null || raw <= 0 ? DEFAULT_ENDPOINT_LEASE_HEARTBEAT_MS : Math.floor(raw);
+  return Math.max(MIN_ENDPOINT_LEASE_HEARTBEAT_MS, Math.min(configured, Math.floor(ttlMs / 2)));
+}
+function readRuntimeEndpointLeaseStore(input) {
+  const direct = input.execution?.runtimeEndpointLeaseStore;
+  if (direct && typeof direct === "object") return direct;
+  const hooksStore = asRecord(input.execution?.hooks).runtimeEndpointLeaseStore;
+  return hooksStore && typeof hooksStore === "object" ? hooksStore : null;
+}
 function readRequestTimeoutMs(input) {
   const executionTimeout = readNumber(input.execution?.runTimeoutMs);
   if (executionTimeout != null && executionTimeout > 0) return Math.floor(executionTimeout);
@@ -1205,6 +1284,244 @@ function endpointQueueError(input, policy, status, message, extra = {}) {
     }),
   });
 }
+function endpointLeaseLostError(input, policy, cause, extra = {}) {
+  return new RuntimeExecutionError(
+    "qwen-local-agent endpoint lease heartbeat lost ownership",
+    cause,
+    "timeout",
+    {
+      providerMeta: endpointProviderMeta(input, policy, {
+        status: "endpoint_lease_lost",
+        category: "timeout",
+        distributedLease: true,
+        ...extra,
+      }),
+    },
+  );
+}
+function millisecondsUntilIso(value) {
+  const timestamp = Date.parse(String(value ?? ""));
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, timestamp - Date.now());
+}
+async function readSharedEndpointCooldown(input, policy, logger) {
+  const store = readRuntimeEndpointLeaseStore(input);
+  if (!store?.readCooldown || !policy.endpoint || !policy.budget) return null;
+  try {
+    const cooldown = await store.readCooldown({ endpointKey: policy.endpoint.key });
+    const remainingMs = millisecondsUntilIso(cooldown?.cooldownUntil);
+    return remainingMs != null && remainingMs > 0 ? { ...cooldown, remainingMs } : null;
+  } catch (error) {
+    logger?.warn?.(
+      {
+        runtimeId: input.runtimeId,
+        profileId: input.profileId ?? null,
+        baseUrl: policy.baseUrl,
+        endpointKey: policy.endpoint.key,
+        error: error instanceof Error ? redactProviderTextForLogs(error.message) : String(error),
+      },
+      "Failed to read shared qwen-local-agent endpoint cooldown",
+    );
+    return null;
+  }
+}
+async function assertSharedEndpointCooldownAllowsRequest(input, policy, signal, logger) {
+  const cooldown = await readSharedEndpointCooldown(input, policy, logger);
+  if (!cooldown) return;
+  const maxWaitMs = readEndpointCooldownWaitMaxMs(input);
+  if (cooldown.remainingMs > maxWaitMs) {
+    throw buildEndpointCircuitError(
+      input,
+      policy,
+      Math.max(1, Math.ceil(cooldown.remainingMs / 1000)),
+    );
+  }
+  logger?.info?.(
+    {
+      runtimeId: input.runtimeId,
+      profileId: input.profileId ?? null,
+      baseUrl: policy.baseUrl,
+      endpointKey: policy.endpoint.key,
+      cooldownWaitMs: cooldown.remainingMs,
+      sharedCooldown: true,
+    },
+    "Waiting for shared qwen-local-agent endpoint cooldown",
+  );
+  await delayWithAbort(
+    cooldown.remainingMs,
+    signal,
+    "qwen-local-agent shared endpoint cooldown wait aborted",
+  );
+}
+function endpointLeaseWaitError(input, policy, startedAt, waitTimeoutMs, result) {
+  return endpointQueueError(
+    input,
+    policy,
+    "endpoint_queue_timeout",
+    `qwen-local-agent endpoint ${policy.endpoint.label} lease wait timed out after ${waitTimeoutMs}ms`,
+    {
+      queueWaitMs: Date.now() - startedAt,
+      timeoutMs: waitTimeoutMs,
+      holderId: result?.holderId ?? null,
+      leaseExpiresAt: result?.leaseExpiresAt ?? null,
+      distributedLease: true,
+    },
+  );
+}
+async function acquireDistributedEndpointLease(
+  input,
+  policy,
+  signal,
+  logger,
+  logContext,
+  onLeaseLost,
+) {
+  const store = readRuntimeEndpointLeaseStore(input);
+  if (!store || !policy.endpoint || !policy.budget) return null;
+  const leaseTtlMs = readEndpointLeaseTtlMs(input);
+  const heartbeatMs = readEndpointLeaseHeartbeatMs(input);
+  const waitTimeoutMs = readEndpointQueueTimeoutMs(input);
+  const startedAt = Date.now();
+
+  for (;;) {
+    if (signal?.aborted) {
+      throw localWaitAbortError("qwen-local-agent endpoint lease wait aborted");
+    }
+    await assertSharedEndpointCooldownAllowsRequest(input, policy, signal, logger);
+    let result;
+    try {
+      result = await store.acquire({
+        endpointKey: policy.endpoint.key,
+        profileId: input.profileId ?? null,
+        baseUrl: policy.baseUrl,
+        runtimeId: input.runtimeId,
+        providerId: input.providerId ?? null,
+        taskId: input.usageContext?.taskId ?? null,
+        leaseTtlMs,
+      });
+    } catch (error) {
+      logger?.warn?.(
+        {
+          ...logContext,
+          error: error instanceof Error ? redactProviderTextForLogs(error.message) : String(error),
+        },
+        "Failed to acquire shared qwen-local-agent endpoint lease",
+      );
+      throw error;
+    }
+    if (result?.acquired === true) {
+      logger?.info?.(
+        {
+          ...logContext,
+          holderId: result.holderId,
+          leaseExpiresAt: result.leaseExpiresAt,
+          leaseWaitMs: Date.now() - startedAt,
+          leaseTtlMs,
+        },
+        "qwen-local-agent endpoint lease acquired",
+      );
+      let released = false;
+      let leaseLost = false;
+      let timer;
+      const failLease = (cause) => {
+        if (released || leaseLost) return;
+        leaseLost = true;
+        if (timer) clearInterval(timer);
+        onLeaseLost?.(
+          endpointLeaseLostError(input, policy, cause, {
+            holderId: result.holderId,
+          }),
+        );
+      };
+      const heartbeat = async () => {
+        try {
+          const renewed = await store.heartbeat({
+            endpointKey: policy.endpoint.key,
+            holderId: result.holderId,
+            leaseToken: result.leaseToken,
+            leaseTtlMs,
+          });
+          if (!renewed) {
+            logger?.warn?.(
+              { ...logContext, holderId: result.holderId },
+              "qwen-local-agent endpoint lease heartbeat was not renewed",
+            );
+            failLease();
+          }
+        } catch (error) {
+          logger?.warn?.(
+            {
+              ...logContext,
+              holderId: result.holderId,
+              error:
+                error instanceof Error ? redactProviderTextForLogs(error.message) : String(error),
+            },
+            "qwen-local-agent endpoint lease heartbeat failed",
+          );
+          failLease(error);
+        }
+      };
+      timer = setInterval(() => {
+        void heartbeat();
+      }, heartbeatMs);
+      timer.unref?.();
+      return {
+        holderId: result.holderId,
+        leaseToken: result.leaseToken,
+        leaseWaitMs: Date.now() - startedAt,
+        release: async () => {
+          if (released) return;
+          released = true;
+          clearInterval(timer);
+          try {
+            await store.release({
+              endpointKey: policy.endpoint.key,
+              holderId: result.holderId,
+              leaseToken: result.leaseToken,
+            });
+          } catch (error) {
+            logger?.warn?.(
+              {
+                ...logContext,
+                holderId: result.holderId,
+                error:
+                  error instanceof Error ? redactProviderTextForLogs(error.message) : String(error),
+              },
+              "qwen-local-agent endpoint lease release failed",
+            );
+          }
+        },
+      };
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    if (waitTimeoutMs >= 0 && elapsedMs >= waitTimeoutMs) {
+      throw endpointLeaseWaitError(input, policy, startedAt, waitTimeoutMs, result);
+    }
+
+    const cooldownWaitMs =
+      result?.reason === "cooldown"
+        ? typeof result.retryAfterMs === "number"
+          ? result.retryAfterMs
+          : millisecondsUntilIso(result.cooldownUntil)
+        : null;
+    const remainingMs = waitTimeoutMs >= 0 ? Math.max(0, waitTimeoutMs - elapsedMs) : 1_000;
+    const waitMs = Math.max(25, Math.min(cooldownWaitMs ?? 250, remainingMs || 25, 1_000));
+    logger?.info?.(
+      {
+        ...logContext,
+        holderId: result?.holderId ?? null,
+        leaseExpiresAt: result?.leaseExpiresAt ?? null,
+        cooldownUntil: result?.cooldownUntil ?? null,
+        leaseWaitMs: elapsedMs,
+        waitMs,
+        leaseContentionReason: result?.reason ?? "held",
+      },
+      "qwen-local-agent endpoint lease waiting",
+    );
+    await delayWithAbort(waitMs, signal, "qwen-local-agent endpoint lease wait aborted");
+  }
+}
 function classifyRequestAbort(input, policy, signal, error, startedAt, model) {
   const durationMs = Date.now() - startedAt;
   const reason = signal?.reason ?? input.execution?.abortController?.signal?.reason;
@@ -1314,7 +1631,7 @@ async function assertEndpointCircuitAllowsRequest(input, policy, signal, logger)
     }
   }
 }
-function recordEndpointFailure(input, policy, error, logger) {
+async function recordEndpointFailure(input, policy, error, logger) {
   if (isLocalEndpointNonFailure(error)) return null;
   if (isLocalWaitAbortError(error)) return null;
   if (isEndpointCooldownRuntimeError(error)) return null;
@@ -1328,6 +1645,30 @@ function recordEndpointFailure(input, policy, error, logger) {
     failures,
     cooldownUntilMs: Date.now() + retryAfterSeconds * 1000,
   });
+  const store = readRuntimeEndpointLeaseStore(input);
+  if (store?.setCooldown) {
+    try {
+      await store.setCooldown({
+        endpointKey: policy.endpoint.key,
+        cooldownUntil: new Date(Date.now() + retryAfterSeconds * 1000).toISOString(),
+        cooldownReason: endpointFailureCategory(error),
+      });
+    } catch (cooldownError) {
+      logger?.warn?.(
+        {
+          runtimeId: input.runtimeId,
+          profileId: input.profileId ?? null,
+          baseUrl: policy.baseUrl,
+          endpointKey: policy.endpoint.key,
+          error:
+            cooldownError instanceof Error
+              ? redactProviderTextForLogs(cooldownError.message)
+              : String(cooldownError),
+        },
+        "Failed to persist shared qwen-local-agent endpoint cooldown",
+      );
+    }
+  }
   logger?.warn?.(
     {
       runtimeId: input.runtimeId,
@@ -1466,6 +1807,13 @@ async function withEndpointSemaphore(input, policy, signal, logger, logContext, 
     acquisition.release();
   }
 }
+function bufferedChatCompletionsResponse(response, rawText) {
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: async () => rawText,
+  };
+}
 async function postChatCompletions(input, messages, signal, requestMeta, logger) {
   const policy = resolveEndpointPolicy(input);
   const requestOptions = {
@@ -1524,131 +1872,206 @@ async function postChatCompletions(input, messages, signal, requestMeta, logger)
       retryCount: baseRetryCount + attempt,
     };
     try {
-      const response = await withEndpointSemaphore(
+      const result = await withEndpointSemaphore(
         input,
         policy,
         signal,
         logger,
         logContext,
         async (acquisition) => {
-          await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
-          logger?.info?.(
-            {
-              ...logContext,
-              queueWaitMs: acquisition?.queueWaitMs ?? 0,
-              queued: acquisition?.queued === true,
-            },
-            "qwen-local-agent request start",
-          );
-          return fetch(`${policy.baseUrl}/chat/completions`, {
-            method: "POST",
-            headers: buildHeaders(input),
-            body: JSON.stringify(body),
-            ...(signal ? { signal } : {}),
-          });
+          let lease = null;
+          let leaseLostError = null;
+          const leaseAbort = new AbortController();
+          try {
+            await assertSharedEndpointCooldownAllowsRequest(input, policy, signal, logger);
+            lease = await acquireDistributedEndpointLease(
+              input,
+              policy,
+              signal,
+              logger,
+              logContext,
+              (error) => {
+                leaseLostError = error;
+                leaseAbort.abort(error);
+              },
+            );
+            await assertEndpointCircuitAllowsRequest(input, policy, signal, logger);
+            logger?.info?.(
+              {
+                ...logContext,
+                queueWaitMs: acquisition?.queueWaitMs ?? 0,
+                queued: acquisition?.queued === true,
+                leaseWaitMs: lease?.leaseWaitMs ?? 0,
+                leaseHolderId: lease?.holderId ?? null,
+                distributedLease: Boolean(lease),
+              },
+              "qwen-local-agent request start",
+            );
+            const requestSignal = lease
+              ? signal
+                ? AbortSignal.any([signal, leaseAbort.signal])
+                : leaseAbort.signal
+              : signal;
+            const response = await fetch(`${policy.baseUrl}/chat/completions`, {
+              method: "POST",
+              headers: buildHeaders(input),
+              body: JSON.stringify(body),
+              ...(requestSignal ? { signal: requestSignal } : {}),
+            });
+            const rawText = await response.text();
+            logger?.info?.(
+              {
+                ...logContext,
+                durationMs: Date.now() - startedAt,
+                httpStatus: response.status,
+                ok: response.ok,
+              },
+              "qwen-local-agent request end",
+            );
+            logger?.info?.(
+              {
+                ...logContext,
+                durationMs: Date.now() - startedAt,
+                failureClass: response.ok ? null : `http_${response.status}`,
+              },
+              "qwen-local-agent request estimate",
+            );
+            if (response.ok) {
+              if (policy.endpoint) endpointCircuitBreakers.delete(policy.endpoint.key);
+              return {
+                response: bufferedChatCompletionsResponse(response, rawText),
+                retryAfterSeconds: null,
+                httpError: null,
+              };
+            }
+            const httpError = classifyQwenLocalAgentRuntimeError(
+              new Error(
+                safeProviderErrorMessage(
+                  rawText,
+                  `Qwen local agent request failed with status ${response.status}`,
+                ),
+              ),
+              response.status,
+              {
+                providerMeta: endpointProviderMeta(input, policy, {
+                  status: `http_${response.status}`,
+                  category: response.status >= 500 ? "transport" : "unknown",
+                  httpStatus: response.status,
+                  durationMs: Date.now() - startedAt,
+                  timeoutMs: readRequestTimeoutMs(input),
+                  model: baseLogContext.model,
+                }),
+              },
+            );
+            const retryAfterSeconds = await recordEndpointFailure(input, policy, httpError, logger);
+            return {
+              response: bufferedChatCompletionsResponse(response, rawText),
+              retryAfterSeconds,
+              httpError,
+            };
+          } catch (error) {
+            const thrown = leaseLostError ?? error;
+            const runtimeError =
+              thrown instanceof RuntimeExecutionError
+                ? thrown
+                : isAbortTimeoutError(thrown) || signal?.aborted
+                  ? classifyRequestAbort(
+                      input,
+                      policy,
+                      signal,
+                      thrown,
+                      startedAt,
+                      baseLogContext.model,
+                    )
+                  : thrown;
+            const retryAfterSeconds = await recordEndpointFailure(
+              input,
+              policy,
+              runtimeError,
+              logger,
+            );
+            if (retryAfterSeconds != null) {
+              throw withEndpointCooldown(runtimeError, retryAfterSeconds);
+            }
+            throw runtimeError;
+          } finally {
+            await lease?.release?.();
+          }
         },
       );
-      logger?.info?.(
-        {
-          ...logContext,
-          durationMs: Date.now() - startedAt,
-          httpStatus: response.status,
-          ok: response.ok,
-        },
-        "qwen-local-agent request end",
-      );
-      logger?.info?.(
-        {
-          ...logContext,
-          durationMs: Date.now() - startedAt,
-          failureClass: response.ok ? null : `http_${response.status}`,
-        },
-        "qwen-local-agent request estimate",
-      );
-      if (response.ok) {
-        if (policy.endpoint) endpointCircuitBreakers.delete(policy.endpoint.key);
-        return response;
-      }
-      const httpError = classifyQwenLocalAgentRuntimeError(
-        new Error(`Qwen local agent request failed with status ${response.status}`),
-        response.status,
-        {
-          providerMeta: endpointProviderMeta(input, policy, {
-            status: `http_${response.status}`,
-            category: response.status >= 500 ? "transport" : "unknown",
-            httpStatus: response.status,
-            durationMs: Date.now() - startedAt,
-            timeoutMs: readRequestTimeoutMs(input),
-            model: baseLogContext.model,
-          }),
-        },
-      );
-      const retryAfterSeconds = recordEndpointFailure(input, policy, httpError, logger);
       if (
-        retryAfterSeconds != null &&
+        result.retryAfterSeconds != null &&
         attempt < maxHttpRetries &&
-        isHttp5xxEndpointTransportError(httpError)
+        isHttp5xxEndpointTransportError(result.httpError)
       ) {
         attempt += 1;
         logger?.warn?.(
           {
             ...baseLogContext,
             retryCount: baseRetryCount + attempt,
-            retryAfterSeconds,
-            failureClass: `http_${response.status}`,
+            retryAfterSeconds: result.retryAfterSeconds,
+            failureClass: `http_${result.response.status}`,
           },
           "Retrying qwen-local-agent request after endpoint HTTP 5xx cooldown",
         );
         continue;
       }
-      if (retryAfterSeconds != null) {
-        throw withEndpointCooldown(httpError, retryAfterSeconds);
+      if (result.retryAfterSeconds != null) {
+        throw withEndpointCooldown(result.httpError, result.retryAfterSeconds);
       }
-      return response;
+      return result.response;
     } catch (error) {
       const runtimeError =
-        isAbortTimeoutError(error) || signal?.aborted
-          ? classifyRequestAbort(input, policy, signal, error, startedAt, baseLogContext.model)
-          : error;
+        error instanceof RuntimeExecutionError
+          ? error
+          : isAbortTimeoutError(error) || signal?.aborted
+            ? classifyRequestAbort(input, policy, signal, error, startedAt, baseLogContext.model)
+            : error;
       const status = endpointProviderStatus(runtimeError);
-      if (status === "endpoint_queue_timeout") {
+      const providerMeta =
+        runtimeError instanceof RuntimeExecutionError ? asRecord(runtimeError.providerMeta) : {};
+      const logStatus =
+        status === "endpoint_cooldown"
+          ? (readString(providerMeta.previousStatus) ?? status)
+          : status;
+      if (logStatus === "endpoint_queue_timeout") {
         logger?.warn?.(
           {
             ...logContext,
             durationMs: Date.now() - startedAt,
-            failureClass: status,
+            failureClass: logStatus,
           },
           "qwen-local-agent request queue timeout",
         );
-      } else if (status === "endpoint_queue_full") {
+      } else if (logStatus === "endpoint_queue_full") {
         logger?.warn?.(
           {
             ...logContext,
             durationMs: Date.now() - startedAt,
-            failureClass: status,
+            failureClass: logStatus,
           },
           "qwen-local-agent request queue full",
         );
-      } else if (status === "endpoint_request_cancelled") {
+      } else if (logStatus === "endpoint_request_cancelled") {
         logger?.warn?.(
           {
             ...logContext,
             durationMs: Date.now() - startedAt,
-            failureClass: status,
+            failureClass: logStatus,
           },
           "qwen-local-agent request cancel",
         );
-      } else if (status === "endpoint_request_timeout") {
+      } else if (logStatus === "endpoint_request_timeout") {
         logger?.warn?.(
           {
             ...logContext,
             durationMs: Date.now() - startedAt,
-            failureClass: status,
+            failureClass: logStatus,
           },
           "qwen-local-agent request timeout",
         );
       }
-      const retryAfterSeconds = recordEndpointFailure(input, policy, runtimeError, logger);
+      const retryAfterSeconds = await recordEndpointFailure(input, policy, runtimeError, logger);
       logger?.warn?.(
         {
           ...logContext,
@@ -1697,6 +2120,8 @@ export async function runQwenLocalAgentApi(input, logger) {
   let repositoryInspectionBudgetCompacted = false;
   let toolCallCount = 0;
   let auditLowQualityRepairLock = false;
+  let failedAuditReportValidationPasses = 0;
+  const auditReportValidationFingerprintCounts = new Map();
   const toolCallSignatureCounts = new Map();
   const completeAfterRepositoryInspectionBudgetExhaustion = async () => {
     logger?.warn?.(
@@ -1979,6 +2404,7 @@ export async function runQwenLocalAgentApi(input, logger) {
           repeatedToolCallSuppressions = 0;
         }
         const repeatedNonconsecutiveLoop =
+          !usesAuditValidationFingerprintGuard(input.workflowKind, toolCall.function.name) &&
           NONCONSECUTIVE_LOOP_PRONE_TOOLS.has(toolCall.function.name) &&
           signatureCount > effectiveRepeatedToolCallLimit;
         const shouldSuppressRepeatedCall =
@@ -2070,6 +2496,64 @@ export async function runQwenLocalAgentApi(input, logger) {
           auditEvidenceUnit ?? auditEvidenceResult,
           result,
         );
+        const auditValidationPayload =
+          input.workflowKind === "audit" && toolAllowed && !shouldSuppressRepeatedCall
+            ? auditReportValidationFailurePayload(toolCall.function.name, result)
+            : null;
+        if (auditValidationPayload) {
+          failedAuditReportValidationPasses += 1;
+          const fingerprintCount =
+            (auditReportValidationFingerprintCounts.get(auditValidationPayload.fingerprint) ?? 0) +
+            1;
+          auditReportValidationFingerprintCounts.set(
+            auditValidationPayload.fingerprint,
+            fingerprintCount,
+          );
+          if (fingerprintCount >= 2) {
+            logger?.warn?.(
+              {
+                runtimeId: input.runtimeId,
+                profileId: input.profileId ?? null,
+                validationFingerprint: auditValidationPayload.fingerprint,
+                repairMode: auditValidationPayload.repairMode,
+                issueCodes: auditValidationPayload.issueCodes,
+              },
+              "Stopped qwen-local-agent after repeated audit validation fingerprint",
+            );
+            return {
+              outputText: repeatedAuditValidationFingerprintText(
+                auditValidationPayload,
+                fingerprintCount,
+              ),
+              sessionId,
+              usage,
+              events,
+              raw,
+            };
+          }
+          if (failedAuditReportValidationPasses >= AUDIT_REPORT_VALIDATION_FAILURE_PASS_LIMIT) {
+            logger?.warn?.(
+              {
+                runtimeId: input.runtimeId,
+                profileId: input.profileId ?? null,
+                failedAuditReportValidationPasses,
+                validationFingerprint: auditValidationPayload.fingerprint,
+                repairMode: auditValidationPayload.repairMode,
+              },
+              "Stopped qwen-local-agent after audit validation pass exhaustion",
+            );
+            return {
+              outputText: maxAuditValidationPassesText(
+                auditValidationPayload,
+                failedAuditReportValidationPasses,
+              ),
+              sessionId,
+              usage,
+              events,
+              raw,
+            };
+          }
+        }
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,

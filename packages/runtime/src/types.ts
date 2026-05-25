@@ -229,6 +229,8 @@ export interface RuntimeExecutionIntent {
   onSubagentStart?: RuntimeSubagentStartCallback;
   /** Hard timeout for the entire run/subprocess (ms). Distinct from `timeoutMs` which is the start-of-stream timeout. */
   runTimeoutMs?: number;
+  /** Optional shared lease store for single-slot runtime endpoints. */
+  runtimeEndpointLeaseStore?: RuntimeEndpointLeaseStore;
   /** Whether to bypass runtime permission checks (requires trust token in hooks). */
   bypassPermissions?: boolean;
   /** Provider-neutral permission policy selected from the task intent. */
@@ -268,6 +270,70 @@ export interface RuntimeUsageContext {
   projectId?: string | null;
   taskId?: string | null;
   chatSessionId?: string | null;
+}
+
+export type RuntimeEndpointLeaseAcquireResult =
+  | {
+      acquired: true;
+      leaseToken: string;
+      holderId: string;
+      leaseExpiresAt: string;
+      heartbeatAt: string;
+    }
+  | {
+      acquired: false;
+      reason: "held" | "cooldown";
+      holderId?: string | null;
+      leaseExpiresAt?: string | null;
+      cooldownUntil?: string | null;
+      retryAfterMs?: number | null;
+    };
+
+export interface RuntimeEndpointLeaseStore {
+  holderId: string;
+  acquire(input: {
+    endpointKey: string;
+    profileId?: string | null;
+    baseUrl: string;
+    runtimeId: string;
+    providerId?: string | null;
+    taskId?: string | null;
+    leaseTtlMs: number;
+  }): Promise<RuntimeEndpointLeaseAcquireResult> | RuntimeEndpointLeaseAcquireResult;
+  heartbeat(input: {
+    endpointKey: string;
+    holderId: string;
+    leaseToken: string;
+    leaseTtlMs: number;
+  }): Promise<boolean> | boolean;
+  release(input: {
+    endpointKey: string;
+    holderId: string;
+    leaseToken: string;
+  }): Promise<boolean> | boolean;
+  cancel(input: {
+    endpointKey: string;
+    holderId: string;
+    leaseToken?: string | null;
+    taskId?: string | null;
+  }): Promise<number> | number;
+  readCooldown(input: { endpointKey: string }):
+    | Promise<{
+        cooldownUntil: string | null;
+        cooldownFailureCount: number;
+        cooldownReason: string | null;
+      } | null>
+    | {
+        cooldownUntil: string | null;
+        cooldownFailureCount: number;
+        cooldownReason: string | null;
+      }
+    | null;
+  setCooldown(input: {
+    endpointKey: string;
+    cooldownUntil: string;
+    cooldownReason?: string | null;
+  }): Promise<void> | void;
 }
 
 export interface RuntimeRunInput {

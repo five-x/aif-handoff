@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   computeAuditReportContentSha256,
+  computeAuditReportValidationFingerprint,
   validateAuditReportArtifact,
+  type AuditReportValidationBlockingIssue,
   type AuditReportSourceSnapshot,
 } from "../auditReportValidator.js";
 import type { AuditEvidenceUnit } from "../auditEvidenceLedger.js";
@@ -138,6 +140,149 @@ function manifestEvidenceUnit(input: {
 }
 
 describe("auditReportValidator", () => {
+  it("computes validation fingerprints with stable issue and path ordering", () => {
+    const blockingIssues: AuditReportValidationBlockingIssue[] = [
+      {
+        code: "missing_scope_coverage",
+        message: "First canonical message.",
+        paths: ["src/config.ts", "README.md"],
+      },
+      {
+        code: "invalid_report_manifest",
+        message: "Second canonical message.",
+      },
+    ];
+
+    const first = computeAuditReportValidationFingerprint({
+      repairMode: "bounded_deterministic_repair",
+      sourceClassification: "insufficient_substantive_evidence",
+      manifestStatus: "invalid",
+      issueCodes: ["missing_scope_coverage", "invalid_report_manifest"],
+      blockingIssues,
+    });
+    const second = computeAuditReportValidationFingerprint({
+      repairMode: "bounded_deterministic_repair",
+      sourceClassification: "insufficient_substantive_evidence",
+      manifestStatus: "invalid",
+      issueCodes: ["invalid_report_manifest", "missing_scope_coverage"],
+      blockingIssues: [
+        {
+          code: "invalid_report_manifest",
+          message: "Wording-only churn is not a fingerprint input.",
+        },
+        {
+          code: "missing_scope_coverage",
+          message: "Different wording with identical stable descriptors.",
+          paths: ["README.md", "src/config.ts"],
+        },
+      ],
+    });
+
+    expect(first).toMatch(/^[a-f0-9]{16}$/);
+    expect(first).toBe(second);
+  });
+
+  it("returns fingerprint metadata and changes fingerprints when blocking paths change", () => {
+    const root = initRepo();
+    const first = validateAuditReportArtifact({
+      text: "# Audit\n\nEvidence: `missing-one.ts:1`\n",
+      projectRoot: root,
+      reportArtifactPaths: ["audit/report.md"],
+      requireProposedFix: true,
+    });
+    const second = validateAuditReportArtifact({
+      text: "# Audit\n\nEvidence: `missing-two.ts:1`\n",
+      projectRoot: root,
+      reportArtifactPaths: ["audit/report.md"],
+      requireProposedFix: true,
+    });
+
+    expect(first.ok).toBe(false);
+    expect(first.issueCodes).toEqual([...first.issueCodes].sort());
+    expect(first.blockingIssues.map((issue) => issue.code)).toContain(
+      "missing_report_file_references",
+    );
+    expect(first.validationFingerprint).toMatch(/^[a-f0-9]{16}$/);
+    expect(first.repairMode).toBe("bounded_deterministic_repair");
+    expect(second.validationFingerprint).not.toBe(first.validationFingerprint);
+  });
+
+  it("returns source-inconclusive repair mode for terminal source evidence failures", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-auth for `src/config.ts` auth drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "auth" src/config.ts` output: `src/config.ts:1:export const timeoutMs = 1000;`',
+      "",
+      "Absence reasoning: risk-auth covered `src/config.ts:1`; no auth drift was identified.",
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      scopeRoots: ["src/config.ts"],
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.sourceClassification).toBe("source_inconclusive");
+    expect(result.repairMode).toBe("source_inconclusive");
+    expect(result.validationFingerprint).toMatch(/^[a-f0-9]{16}$/);
+    expect(result.issueCodes).toEqual([...result.issueCodes].sort());
+    expect(result.issueCodes).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+    expect(result.blockingIssues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining(["irrelevant_grep_match", "shallow_evidence"]),
+    );
+  });
+
+  it("returns operator-input repair mode for unverifiable root scope", () => {
+    const root = initRepo();
+    const text = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+
+    const result = validateAuditReportArtifact({
+      text,
+      projectRoot: root,
+      taskDescription: "Scope: .",
+      reportArtifactPaths: ["audit/runtime-audit.md"],
+      requireProposedFix: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.repairMode).toBe("operator_input_required");
+    expect(result.validationFingerprint).toMatch(/^[a-f0-9]{16}$/);
+    expect(result.issueCodes).toContain("missing_scope_coverage");
+    expect(result.blockingIssues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "missing_scope_coverage",
+          paths: expect.arrayContaining(["."]),
+        }),
+      ]),
+    );
+  });
+
   it("rejects the observed bad report contract fixture", () => {
     const root = initRepo();
     const text = [
