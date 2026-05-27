@@ -1936,6 +1936,9 @@ export function qwenToolResultForModel(
             evidenceGrade: auditEvidence.evidenceGrade,
             scopeIds: auditEvidence.scopeIds,
             riskHypothesisIds: auditEvidence.riskHypothesisIds,
+            outputSha256: auditEvidence.outputSha256,
+            outputPreview: auditEvidence.outputPreview,
+            outputPreviewTruncated: auditEvidence.outputPreviewTruncated,
           },
         }
       : {}),

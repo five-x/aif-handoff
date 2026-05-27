@@ -1,13 +1,18 @@
 import { resetEnvCache } from "@aif/shared";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { bootstrapRuntimeRegistry } from "../bootstrap.js";
-import { UsageReporting } from "../types.js";
+import { UsageReporting, type RuntimeEndpointLeaseStore } from "../types.js";
+import { TEST_USAGE_CONTEXT } from "./helpers/usageContext.js";
 
 const VALID_USAGE_REPORTING = new Set<string>(Object.values(UsageReporting));
 
 describe("bootstrapRuntimeRegistry", () => {
   beforeEach(() => {
     delete process.env.AIF_RUNTIME_SESSION_FORK_ENABLED;
+    vi.unstubAllGlobals();
     resetEnvCache();
   });
 
@@ -128,6 +133,64 @@ describe("bootstrapRuntimeRegistry", () => {
         `runtime "${descriptor.id}" is missing supportsSessionFork capability`,
       ).toBeTypeOf("boolean");
     }
+  });
+
+  it("injects the shared endpoint lease store into the qwen runtime adapter", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "chat-bootstrap-lease",
+          choices: [{ message: { role: "assistant", content: "leased via bootstrap" } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const leaseStore: RuntimeEndpointLeaseStore = {
+      holderId: "bootstrap-holder",
+      acquire: vi.fn(async () => ({
+        acquired: true as const,
+        holderId: "bootstrap-holder",
+        leaseToken: "bootstrap-token",
+        heartbeatAt: new Date().toISOString(),
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })),
+      heartbeat: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      cancel: vi.fn(async () => 0),
+      readCooldown: vi.fn(async () => null),
+      setCooldown: vi.fn(async () => undefined),
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "aif-bootstrap-qwen-lease-"));
+    const registry = await bootstrapRuntimeRegistry({ runtimeEndpointLeaseStore: leaseStore });
+
+    await expect(
+      registry.resolveRuntime("qwen-local-agent").run({
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        profileId: "profile-qwen-8003",
+        workflowKind: "implementer",
+        transport: "api",
+        prompt: "Return a short answer.",
+        model: "Qwen3-32B-Q4_K_M.gguf",
+        projectRoot: root,
+        cwd: root,
+        options: { baseUrl: "http://192.168.88.62:8003/v1" },
+        usageContext: { ...TEST_USAGE_CONTEXT, taskId: "task-bootstrap-lease" },
+      }),
+    ).resolves.toMatchObject({ outputText: "leased via bootstrap" });
+
+    expect(leaseStore.acquire).toHaveBeenCalledWith(
+      expect.objectContaining({
+        endpointKey: "http://192.168.88.62:8003",
+        taskId: "task-bootstrap-lease",
+      }),
+    );
+    expect(leaseStore.release).toHaveBeenCalledWith({
+      endpointKey: "http://192.168.88.62:8003",
+      holderId: "bootstrap-holder",
+      leaseToken: "bootstrap-token",
+    });
   });
 });
 it("opencode adapter has expected capabilities", async () => {

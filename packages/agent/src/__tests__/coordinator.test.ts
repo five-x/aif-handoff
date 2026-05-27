@@ -18,7 +18,7 @@ import { createTestDb } from "@aif/shared/server";
 import { RuntimeExecutionError } from "@aif/runtime";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -2273,6 +2273,299 @@ describe("coordinator", () => {
     expect(details.issues?.map((issue) => issue.code)).toContain("missing_audit_evidence_ref");
   });
 
+  it("backs up and removes untrusted untracked audit artifacts on terminal blocks", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-cleanup-");
+    db.insert(projects)
+      .values({ id: "audit-cleanup-project", name: "Audit Cleanup", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-cleanup",
+        projectId: "audit-cleanup-project",
+        title: "Audit cleanup",
+        description:
+          "Scope: README.md\nReport artifact: audit/security.md\nEvidence requirements: every no-findings claim must cite runtime ledger evidence.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        reviewIterationCount: 1,
+        maxReviewIterations: 1,
+        agentActivityLog: [
+          "[2026-05-25T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-25T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-25T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-25T15:54:03.000Z] Agent: implement-coordinator complete",
+          "[2026-05-25T15:54:04.000Z] Agent: review-sidecar started",
+          "[2026-05-25T15:54:05.000Z] Tool: read_file audit/security.md",
+          "[2026-05-25T15:54:06.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-cleanup-project",
+      roadmapAlias: "audit-cleanup",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-cleanup"],
+      artifacts: [
+        {
+          taskId: "task-audit-cleanup",
+          role: "report",
+          artifactPath: "audit/security.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const untrustedReport = [
+      "# Audit",
+      "",
+      "No validated findings.",
+      "Verification: expected command output would show the issue.",
+      "",
+    ].join("\n");
+    writeFileSync(join(rootPath, "audit", "security.md"), untrustedReport, "utf8");
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "accepted",
+      currentIteration: 2,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 2,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      autoReviewState: null,
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-audit-cleanup")).get();
+    expect(task?.status).toBe("blocked_external");
+    expect(task?.manualReviewRequired).toBe(true);
+    expect(existsSync(join(rootPath, "audit", "security.md"))).toBe(false);
+    const status = execFileSync("git", ["status", "--short", "--untracked-files=all"], {
+      cwd: rootPath,
+      encoding: "utf8",
+    }).trim();
+    expect(status).toBe("");
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    const details = JSON.parse(artifact?.validationDetailsJson ?? "{}") as {
+      untrustedArtifactCleanup?: {
+        backupPath?: string;
+        cleanupStatus?: string;
+        gitStatusAfterCleanup?: string;
+        artifactSha256?: string;
+        backupSha256?: string;
+      };
+    };
+    expect(details.untrustedArtifactCleanup?.cleanupStatus).toBe("backed_up_and_removed");
+    expect(details.untrustedArtifactCleanup?.gitStatusAfterCleanup).toBe("clean");
+    const backupPath = details.untrustedArtifactCleanup?.backupPath;
+    if (!backupPath) throw new Error("missing cleanup backup path");
+    expect(existsSync(backupPath)).toBe(true);
+    expect(readFileSync(backupPath, "utf8")).toBe(untrustedReport);
+    expect(details.untrustedArtifactCleanup?.backupSha256).toBe(
+      details.untrustedArtifactCleanup?.artifactSha256,
+    );
+  });
+
+  it("backs up but does not remove staged untrusted audit artifacts on terminal blocks", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-cleanup-staged-");
+    const taskId = "task-audit-cleanup-staged";
+    const artifactPath = "audit/security.md";
+    db.insert(projects)
+      .values({ id: "audit-cleanup-staged-project", name: "Audit Cleanup Staged", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: taskId,
+        projectId: "audit-cleanup-staged-project",
+        title: "Audit cleanup staged",
+        description:
+          "Scope: README.md\nReport artifact: audit/security.md\nEvidence requirements: every no-findings claim must cite runtime ledger evidence.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        reviewIterationCount: 1,
+        maxReviewIterations: 1,
+        agentActivityLog: [
+          "[2026-05-25T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-25T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-25T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-25T15:54:03.000Z] Tool: git add audit/security.md",
+          "[2026-05-25T15:54:04.000Z] Agent: implement-coordinator complete",
+          "[2026-05-25T15:54:05.000Z] Agent: review-sidecar started",
+          "[2026-05-25T15:54:06.000Z] Tool: read_file audit/security.md",
+          "[2026-05-25T15:54:07.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-cleanup-staged-project",
+      roadmapAlias: "audit-cleanup-staged",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: [taskId],
+      artifacts: [{ taskId, role: "report", artifactPath, projectRoot: rootPath }],
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const stagedReport = [
+      "# Audit",
+      "",
+      "No validated findings.",
+      "Verification: expected command output would show the issue.",
+      "",
+    ].join("\n");
+    writeFileSync(join(rootPath, artifactPath), stagedReport, "utf8");
+    execFileSync("git", ["add", artifactPath], { cwd: rootPath, stdio: "ignore" });
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "accepted",
+      currentIteration: 2,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 2,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      autoReviewState: null,
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+    expect(task?.status).toBe("blocked_external");
+    expect(existsSync(join(rootPath, artifactPath))).toBe(true);
+    const status = execFileSync("git", ["status", "--short", "--untracked-files=all"], {
+      cwd: rootPath,
+      encoding: "utf8",
+    }).trim();
+    expect(status).toContain(`A  ${artifactPath}`);
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    const details = JSON.parse(artifact?.validationDetailsJson ?? "{}") as {
+      untrustedArtifactCleanup?: {
+        backupPath?: string;
+        cleanupStatus?: string;
+        gitStatusAfterCleanup?: string;
+      };
+    };
+    expect(details.untrustedArtifactCleanup?.cleanupStatus).toBe("skipped_non_untracked_status");
+    expect(details.untrustedArtifactCleanup?.gitStatusAfterCleanup).toContain(`A  ${artifactPath}`);
+    const backupPath = details.untrustedArtifactCleanup?.backupPath;
+    if (!backupPath) throw new Error("missing cleanup backup path");
+    expect(readFileSync(backupPath, "utf8")).toBe(stagedReport);
+  });
+
+  it("preserves untrusted audit artifacts when cleanup backup fails", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-cleanup-backup-fail-");
+    const taskId = "task-audit-cleanup-backup-fail";
+    const artifactPath = "audit/security.md";
+    db.insert(projects)
+      .values({
+        id: "audit-cleanup-backup-fail-project",
+        name: "Audit Cleanup Backup Fail",
+        rootPath,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: taskId,
+        projectId: "audit-cleanup-backup-fail-project",
+        title: "Audit cleanup backup fail",
+        description:
+          "Scope: README.md\nReport artifact: audit/security.md\nEvidence requirements: every no-findings claim must cite runtime ledger evidence.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        reviewIterationCount: 1,
+        maxReviewIterations: 1,
+        agentActivityLog: [
+          "[2026-05-25T15:54:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-25T15:54:01.000Z] Tool: read_file README.md",
+          "[2026-05-25T15:54:02.000Z] Tool: write_file audit/security.md",
+          "[2026-05-25T15:54:03.000Z] Agent: implement-coordinator complete",
+          "[2026-05-25T15:54:04.000Z] Agent: review-sidecar started",
+          "[2026-05-25T15:54:05.000Z] Tool: read_file audit/security.md",
+          "[2026-05-25T15:54:06.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-cleanup-backup-fail-project",
+      roadmapAlias: "audit-cleanup-backup-fail",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: [taskId],
+      artifacts: [{ taskId, role: "report", artifactPath, projectRoot: rootPath }],
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const report = [
+      "# Audit",
+      "",
+      "No validated findings.",
+      "Verification: expected command output would show the issue.",
+      "",
+    ].join("\n");
+    writeFileSync(join(rootPath, artifactPath), report, "utf8");
+    const badBackupRoot = join(
+      mkdtempSync(join(tmpdir(), "aif-audit-backup-file-")),
+      "backup-root",
+    );
+    writeFileSync(badBackupRoot, "not a directory", "utf8");
+    const previousBackupRoot = process.env.AIF_AUDIT_ARTIFACT_BACKUP_DIR;
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "accepted",
+      currentIteration: 2,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 2,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      autoReviewState: null,
+    });
+
+    process.env.AIF_AUDIT_ARTIFACT_BACKUP_DIR = badBackupRoot;
+    try {
+      await pollAndProcess();
+    } finally {
+      if (previousBackupRoot === undefined) {
+        delete process.env.AIF_AUDIT_ARTIFACT_BACKUP_DIR;
+      } else {
+        process.env.AIF_AUDIT_ARTIFACT_BACKUP_DIR = previousBackupRoot;
+      }
+    }
+
+    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+    expect(task?.status).toBe("blocked_external");
+    expect(existsSync(join(rootPath, artifactPath))).toBe(true);
+    const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+    const details = JSON.parse(artifact?.validationDetailsJson ?? "{}") as {
+      untrustedArtifactCleanup?: {
+        cleanupStatus?: string;
+        backupSha256?: string | null;
+        message?: string;
+      };
+    };
+    expect(details.untrustedArtifactCleanup?.cleanupStatus).toBe("backup_failed");
+    expect(details.untrustedArtifactCleanup?.backupSha256).toBeNull();
+    expect(details.untrustedArtifactCleanup?.message).toBeTruthy();
+  });
+
   it("persists closed_verified audit card decisions for valid no-findings reports with weak sections", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-audit-card-decision-");
@@ -2399,6 +2692,7 @@ describe("coordinator", () => {
     expect(artifact?.state).toBe("valid");
     expect(artifact?.failureFamily).toBeNull();
     const details = JSON.parse(artifact?.validationDetailsJson ?? "{}") as {
+      untrustedArtifactCleanup?: unknown;
       auditCardDecision?: {
         requirementCompletion: string;
         verificationStrength: string;
@@ -2412,6 +2706,8 @@ describe("coordinator", () => {
       };
       issues?: Array<{ code: string }>;
     };
+    expect(existsSync(join(rootPath, artifactPath))).toBe(true);
+    expect(details.untrustedArtifactCleanup).toBeUndefined();
     expect(details.issues ?? []).toEqual([]);
     expect(details.auditCardDecision).toEqual(
       expect.objectContaining({

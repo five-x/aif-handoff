@@ -991,6 +991,12 @@ describe("qwen-local-agent adapter", () => {
       evidence.map((entry) => entry.id),
     );
     expect(toolPayloads.every((payload) => payload.auditEvidence?.evidenceKind)).toBe(true);
+    expect(
+      toolPayloads.every((payload) => /^[a-f0-9]{64}$/.test(payload.auditEvidence?.outputSha256)),
+    ).toBe(true);
+    expect(
+      toolPayloads.every((payload) => typeof payload.auditEvidence?.outputPreview === "string"),
+    ).toBe(true);
     expect(JSON.stringify(auditEvents)).toContain("[REDACTED]");
     expect(JSON.stringify(auditEvents)).not.toContain("sk-SECRETSECRETSECRETSECRET");
   });

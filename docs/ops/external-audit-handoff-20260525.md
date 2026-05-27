@@ -35,6 +35,34 @@ Remote-only service checks passed against `192.168.88.67`:
 
 The root `npm run format:check` is not a clean gate today because it checks unrelated pre-existing generated/documentation drift. Changed files were checked directly with Prettier.
 
+## Generator Quality Follow-Up Status
+
+Follow-up task `work-20260525-improve-audit-report-generation-quality` improved local generator-quality controls but is not Definition-of-Done complete.
+
+Implemented and locally verified:
+
+- Runtime tool audit evidence now exposes bounded output previews and `outputSha256` hashes to the audit report writer.
+- Audit report writer prompts now include a hard allowed-evidence contract with machine-readable `allowedEvidence` entries for exact `ev_*` IDs, scope IDs, risk IDs, command text, output hashes, and output previews.
+- The writer contract tells report generation to emit `source_inconclusive` when scoped evidence is insufficient, rather than expanding scope or fabricating verification.
+- Coordinator terminal-block handling now backs up and removes untrusted untracked report artifacts and records `untrustedArtifactCleanup` details.
+- Runtime bootstrap tests now verify the qwen adapter receives the shared endpoint lease store.
+- A production call-site map was added at `docs/ops/audit-trust-callsite-map-20260525.md`.
+
+Local verification passed for targeted shared/agent/runtime/data suites, full `npm.cmd test`, `npm.cmd run lint`, `npm.cmd run build`, and `git diff --check`.
+
+Remote validation attempt:
+
+- The remote AIF host was temporarily patched with the local source changes, rebuilt with Docker Compose, and health checked successfully.
+- Fresh negative canary task `417342f5-3a96-4af7-8e05-22e8c643bf63` remained in planning and was paused after the plan-quality guard reached `replan 7/100`. It did not reach audit report generation.
+- Fresh positive canary task `44c79a68-60ef-4465-a88c-a6bafbaf9e9b` remained in planning and was paused after the plan-quality guard reached `replan 9/100`. It did not produce a trusted positive report artifact.
+- Existing negative control `cec8f23d-71a2-47dd-bb41-6dffb73b1ab4` remained fail-closed and untrusted.
+- Existing positive control `b3de6310-e1bc-4129-92e4-48a32554ed72` currently projects as `artifactState=valid` but `artifactTrustLevel=untrusted`, so it does not satisfy the trusted positive canary acceptance criteria.
+- The temporary remote source patch was reverted, the service was rebuilt back to clean commit `772ba2df08b5725decdbbeff15e7676fee6b1ba9`, and remote project worktrees ended clean.
+
+Current conclusion:
+
+> Audit trust promotion is hardened, bad reports still fail closed, and local generator-quality controls have been improved and tested. The remote Definition of Done is still blocked because fresh positive and negative generator canaries did not reach report production/trusted validation. Remaining open work is upstream audit planner/routing quality for direct audit canary tasks, followed by a fresh roadmap-backed positive trusted canary.
+
 ## Remote Worktree Cleanup Evidence
 
 The failing canary task `5fd1ace1-ba50-4bc0-b604-56e65c7ca59d` originally blocked on:
@@ -68,9 +96,9 @@ Final container `git status --short --untracked-files=all` for `/home/www/botInt
 
 Please review these areas critically:
 
-- The generator can still write a bad audit report; the new trust gates reject it, but positive audit report quality still depends on improving report generation and scoped evidence behavior.
-- The negative canary description requested `README.md`, but the deterministic diagnostic plan used `config` and `tests`; this scope drift should be reviewed.
-- The implementer produced an uncommitted report artifact during the negative canary. The guard caught it, but the workflow should ideally avoid leaving dirty report artifacts after blocked diagnostic runs.
+- The generator-quality follow-up added local allowed-evidence and cleanup controls, but fresh remote canaries were blocked upstream in planning before report generation. The next review should focus on planner/routing conditions that prevent direct audit canaries from producing child report work.
+- The negative canary description requested `README.md`, but the deterministic diagnostic plan used `config` and `tests`; local prompt contracts now emphasize declared scope, but remote confirmation is still pending.
+- The workflow now backs up and removes untrusted untracked audit artifacts during terminal blocked paths, but remote canary confirmation is still pending because the new canaries did not reach report generation.
 - Runtime routing improved through endpoint leases, but live canary logs still showed implementer work on `8003` and reviewer work on `8005`; review whether long audit jobs should be forced to `8005` earlier in the lifecycle.
 - The root format gate has unrelated baseline drift; decide whether to fix or narrow the repository-level format script.
 

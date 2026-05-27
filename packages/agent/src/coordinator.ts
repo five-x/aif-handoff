@@ -1,7 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmdirSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   assertSafeRoadmapArtifactPath,
   clearTaskRuntimeLimitSnapshot,
@@ -1662,6 +1671,183 @@ function sha256Buffer(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
+type UntrustedArtifactCleanupDetails = {
+  artifactPath: string;
+  backupPath: string | null;
+  cleanupStatus:
+    | "backed_up_and_removed"
+    | "skipped_missing_artifact"
+    | "skipped_clean_artifact"
+    | "skipped_trusted_artifact"
+    | "skipped_non_untracked_status"
+    | "backup_failed"
+    | "remove_failed";
+  gitStatusBeforeCleanup: string;
+  gitStatusAfterCleanup: string | null;
+  artifactSha256: string | null;
+  backupSha256: string | null;
+  message?: string;
+};
+
+function sha256File(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function gitStatusForArtifactPath(projectRoot: string, artifactPath: string): string {
+  return execFileSync("git", ["status", "--short", "--untracked-files=all", "--", artifactPath], {
+    cwd: projectRoot,
+    encoding: "utf8",
+  }).trim();
+}
+
+function statusIsUntrackedOnly(status: string): boolean {
+  const lines = status
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+  return lines.length > 0 && lines.every((line) => line.startsWith("?? "));
+}
+
+function defaultAuditArtifactBackupRoot(projectRoot: string): string {
+  const configured = process.env.AIF_AUDIT_ARTIFACT_BACKUP_DIR?.trim();
+  if (configured) return resolve(configured);
+  return resolve(projectRoot, "..", ".aif-audit-artifact-backups");
+}
+
+function safeBackupSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "") || "artifact";
+}
+
+function removeEmptyArtifactParents(projectRoot: string, filePath: string): void {
+  const root = resolve(projectRoot);
+  let current = dirname(filePath);
+  for (;;) {
+    const relativePath = relative(root, current);
+    if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) return;
+    try {
+      if (readdirSync(current).length > 0) return;
+      rmdirSync(current);
+      current = dirname(current);
+    } catch {
+      return;
+    }
+  }
+}
+
+function cleanupUntrustedAuditArtifactAfterTerminalBlock(input: {
+  task: TaskRow;
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+  projectRoot: string;
+}): UntrustedArtifactCleanupDetails | null {
+  if (input.artifact.role !== "report") return null;
+  const artifactPath = input.artifact.artifactPath;
+  const gitPath = normalizeArtifactGitPath(artifactPath);
+  if (!gitPath) return null;
+  const artifactFile = resolveSafeArtifactPath(input.projectRoot, gitPath);
+  if (!artifactFile || !existsSync(artifactFile)) {
+    return {
+      artifactPath,
+      backupPath: null,
+      cleanupStatus: "skipped_missing_artifact",
+      gitStatusBeforeCleanup: "",
+      gitStatusAfterCleanup: null,
+      artifactSha256: null,
+      backupSha256: null,
+    };
+  }
+
+  const artifactSha256 = sha256File(artifactFile);
+  const statusBefore = gitStatusForArtifactPath(input.projectRoot, gitPath);
+  if (input.result.evidence.trustedAuditArtifact === true) {
+    return {
+      artifactPath,
+      backupPath: null,
+      cleanupStatus: "skipped_trusted_artifact",
+      gitStatusBeforeCleanup: statusBefore,
+      gitStatusAfterCleanup: null,
+      artifactSha256,
+      backupSha256: null,
+    };
+  }
+  if (!statusBefore) {
+    return {
+      artifactPath,
+      backupPath: null,
+      cleanupStatus: "skipped_clean_artifact",
+      gitStatusBeforeCleanup: statusBefore,
+      gitStatusAfterCleanup: statusBefore,
+      artifactSha256,
+      backupSha256: null,
+    };
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupDir = join(
+    defaultAuditArtifactBackupRoot(input.projectRoot),
+    safeBackupSegment(input.task.id),
+    timestamp,
+  );
+  const backupPath = join(backupDir, `${safeBackupSegment(basename(gitPath))}.bak`);
+  try {
+    mkdirSync(backupDir, { recursive: true });
+    copyFileSync(artifactFile, backupPath);
+  } catch (error) {
+    return {
+      artifactPath,
+      backupPath,
+      cleanupStatus: "backup_failed",
+      gitStatusBeforeCleanup: statusBefore,
+      gitStatusAfterCleanup: null,
+      artifactSha256,
+      backupSha256: null,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const backupSha256 = sha256File(backupPath);
+  if (!statusIsUntrackedOnly(statusBefore)) {
+    return {
+      artifactPath,
+      backupPath,
+      cleanupStatus: "skipped_non_untracked_status",
+      gitStatusBeforeCleanup: statusBefore,
+      gitStatusAfterCleanup: gitStatusForArtifactPath(input.projectRoot, gitPath),
+      artifactSha256,
+      backupSha256,
+      message:
+        "Cleanup removes only untracked audit artifacts; tracked or staged artifacts require operator review.",
+    };
+  }
+
+  try {
+    if (!statSync(artifactFile).isFile()) throw new Error("artifact path is not a file");
+    unlinkSync(artifactFile);
+    removeEmptyArtifactParents(input.projectRoot, artifactFile);
+  } catch (error) {
+    return {
+      artifactPath,
+      backupPath,
+      cleanupStatus: "remove_failed",
+      gitStatusBeforeCleanup: statusBefore,
+      gitStatusAfterCleanup: gitStatusForArtifactPath(input.projectRoot, gitPath),
+      artifactSha256,
+      backupSha256,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return {
+    artifactPath,
+    backupPath,
+    cleanupStatus: "backed_up_and_removed",
+    gitStatusBeforeCleanup: statusBefore,
+    gitStatusAfterCleanup: gitStatusForArtifactPath(input.projectRoot, gitPath) || "clean",
+    artifactSha256,
+    backupSha256,
+  };
+}
+
 function readAuditArtifact(
   projectRoot: string,
   artifact: ReturnType<typeof findRoadmapBatchArtifactByTaskId>,
@@ -2368,6 +2554,12 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     });
   }
   if (artifact) {
+    const untrustedArtifactCleanup = cleanupUntrustedAuditArtifactAfterTerminalBlock({
+      task: input.task,
+      artifact,
+      result,
+      projectRoot: input.projectRoot,
+    });
     updateRoadmapBatchArtifactState({
       taskId: input.task.id,
       state: artifactStateForFailureFamily(family, { terminal: auditReworkLimitReached }),
@@ -2378,12 +2570,25 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
         "terminal_inconclusive"
           ? "terminal_inconclusive"
           : "manual_review_required",
-      validationDetails: auditValidationDetails(result),
+      validationDetails: {
+        ...auditValidationDetails(result),
+        ...(untrustedArtifactCleanup ? { untrustedArtifactCleanup } : {}),
+      },
       contentSha: result.evidence.auditReportValidation.artifactSha256,
       branchName: input.task.branchName,
       worktreePath: input.task.worktreePath,
       projectRoot: input.projectRoot,
     });
+    if (untrustedArtifactCleanup) {
+      appendTaskActivityLog(
+        input.task.id,
+        `[${new Date().toISOString()}] Untrusted audit artifact cleanup ${untrustedArtifactCleanup.cleanupStatus} for ${untrustedArtifactCleanup.artifactPath}${
+          untrustedArtifactCleanup.backupPath
+            ? `; backup=${untrustedArtifactCleanup.backupPath}`
+            : ""
+        }`,
+      );
+    }
   }
   const nowIso = new Date().toISOString();
   clearTaskRuntimeLimitSnapshot(input.task.id);

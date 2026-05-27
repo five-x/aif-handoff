@@ -1120,7 +1120,9 @@ function formatAuditEvidenceLedgerForPrompt(input: {
   const lines = [
     "Runtime-captured audit evidence IDs available to cite in `audit-report-manifest.evidenceRefs`:",
     "Use only these exact full `ev_*` IDs when the report relies on the listed evidence. Copy the complete ID, including every hyphenated UUID segment; do not abbreviate it to an `ev_XXXXXXXX` prefix and do not invent evidence IDs.",
+    "Allowed audit report evidence contract: report body citations, manifest `evidenceRefs`, `scopeCoverage[].evidenceRefs`, findings, and noFindingsClaims may use only the IDs listed below. If a needed scoped output is not listed here, choose `source_inconclusive` for that gap instead of inventing command output.",
   ];
+  const allowedEvidence: Array<Record<string, unknown>> = [];
   for (const unit of units) {
     const preview = compactTextForPrompt(
       "AUDIT_EVIDENCE_LEDGER_PREVIEW",
@@ -1141,12 +1143,24 @@ function formatAuditEvidenceLedgerForPrompt(input: {
         `scope=${unit.scopeIds.join(", ") || "none"}`,
         `risks=${unit.riskHypothesisIds.join(", ") || "none"}`,
         `command=${formatAuditEvidenceCommandForPrompt(unit.command)}`,
+        unit.outputSha256 ? `outputSha256=${unit.outputSha256}` : null,
         preview ? `preview=${preview}` : null,
       ]
         .filter(Boolean)
         .join(" | "),
     );
+    allowedEvidence.push({
+      id: unit.id,
+      tool: unit.toolName,
+      scopeIds: unit.scopeIds,
+      riskHypothesisIds: unit.riskHypothesisIds,
+      command: formatAuditEvidenceCommandForPrompt(unit.command),
+      outputSha256: unit.outputSha256,
+      outputPreview: unit.outputPreview,
+      outputPreviewTruncated: unit.outputPreviewTruncated,
+    });
   }
+  lines.push("Machine-readable allowedEvidence:", JSON.stringify({ allowedEvidence }, null, 2));
   return lines.join("\n");
 }
 

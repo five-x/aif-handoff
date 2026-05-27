@@ -3057,8 +3057,11 @@ describe("runImplementer rework behavior", () => {
     expect(repaired).not.toContain("nf-deterministic-repair");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repeated-validator-repair");
     if (!artifact) throw new Error("missing repeated validator repair artifact");
-    expect(artifact.state).toBe("expected");
-    expect(artifact.failureFamily).toBeNull();
+    const updatedArtifact = findRoadmapBatchArtifactByTaskId(
+      "task-audit-repeated-validator-repair",
+    );
+    expect(updatedArtifact?.state).toBe("expected");
+    expect(updatedArtifact?.failureFamily).toBeNull();
     expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()
@@ -4988,16 +4991,41 @@ describe("runImplementer rework behavior", () => {
         },
       ],
     });
+    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-scoped-config-repair");
+    if (!artifact) throw new Error("missing scoped config repair artifact");
+    appendAuditEvidenceEvent({
+      id: "ev_config_repair_00000000-0000-4000-8000-000000000001",
+      taskId: "task-audit-scoped-config-repair",
+      auditPlanId: `batch:${artifact.batchId}:task:task-audit-scoped-config-repair`,
+      sourceSnapshotId: "workspace:scoped-config-repair",
+      toolName: "read_file",
+      evidenceKind: "file_read",
+      evidenceGrade: "substantive",
+      scopeIds: [".ai-factory/config.yaml"],
+      riskHypothesisIds: ["risk-config"],
+      pathHashes: [],
+      pathRangeHashes: [],
+      command: null,
+      exitCode: null,
+      outputSha256: "d".repeat(64),
+      outputPreview:
+        "[read_file .ai-factory/config.yaml lines 1-2 of 4]\nowner-area: runtime-audit\naudit_mode: strict",
+      outputPreviewTruncated: false,
+      parsedSummary: { outputBytes: 96, outputLineCount: 3, previewChars: 96, exitCode: null },
+      redactionStatus: "clean",
+      createdAt: "2026-05-25T00:00:00.000Z",
+    });
 
     await runImplementer("task-audit-scoped-config-repair", projectRoot);
 
     expect(queryMock).toHaveBeenCalledTimes(1);
     const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
     expect(call.prompt).toContain("AUDIT_EVIDENCE_LEDGER");
-    expect(call.prompt).toContain(
-      "No runtime-captured substantive audit evidence IDs are available yet",
-    );
-    expect(call.prompt).toContain("If it lists `ev_*` IDs for evidence you use");
+    expect(call.prompt).toContain("Allowed audit report evidence contract");
+    expect(call.prompt).toContain("Machine-readable allowedEvidence");
+    expect(call.prompt).toContain("ev_config_repair_00000000-0000-4000-8000-000000000001");
+    expect(call.prompt).toContain(`outputSha256=${"d".repeat(64)}`);
+    expect(call.prompt).toContain('"outputPreview"');
     expect(call.prompt).toContain("Scope: .ai-factory/config.yaml");
     expect(call.prompt).toContain("risk-config");
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
@@ -5008,10 +5036,9 @@ describe("runImplementer rework behavior", () => {
     expect(repaired).not.toContain("Audit source inconclusive.");
     expect(repaired).not.toContain(".ai-factory/DESCRIPTION.md");
     expect(repaired).not.toContain(".ai-factory/ARCHITECTURE.md");
-    const artifact = findRoadmapBatchArtifactByTaskId("task-audit-scoped-config-repair");
-    if (!artifact) throw new Error("missing scoped config repair artifact");
-    expect(artifact.state).toBe("expected");
-    expect(artifact.failureFamily).toBeNull();
+    const updatedArtifact = findRoadmapBatchArtifactByTaskId("task-audit-scoped-config-repair");
+    expect(updatedArtifact?.state).toBe("expected");
+    expect(updatedArtifact?.failureFamily).toBeNull();
     expect(summarizeRoadmapBatch(artifact.batchId)?.counts.valid).toBe(0);
     const updatedTask = db
       .select()

@@ -11,19 +11,28 @@ Operational notes, rollout procedures, migration steps, and validation commands 
 - Runtime files are managed through `codex-bootstrap-repo.py` and `codex-gpti-compile.py`.
 - Memory curation runs through `codex-memsync.py`.
 
-## Source Validation
+## Local Validation
+
+Local commands validate source health only:
 
 - Build: npm.cmd run build
 - Test: npm.cmd test
 - Lint: npm.cmd run lint
-
-These commands validate local source code only. They do not validate the deployed AIF service.
+- Run: npm.cmd run dev
 
 ## Validation Boundaries
 
-- Deployed service, UI, API, browser, perf, load, canary, audit-quality, and e2e validation must target the remote AIF service at `http://192.168.88.67` with API checks through `http://192.168.88.67/api`.
-- Do not start or use a local AIF service, local browser target, local perf target, or local e2e service target for this deployment path unless the operator explicitly authorizes local validation for the current task.
-- For Playwright/perf checks, set `AIF_SKIP_DEV_SERVER=1`, `AIF_WEB_URL=http://192.168.88.67`, and `AIF_API_URL=http://192.168.88.67/api`.
+Deployed service, UI, API, browser, perf, load, canary, audit-quality, and e2e validation must target the remote AIF environment unless an RDPI plan or operator decision explicitly waives remote-only validation.
+
+Required remote environment:
+
+```text
+AIF_WEB_URL=http://192.168.88.67
+AIF_API_URL=http://192.168.88.67/api
+AIF_SKIP_DEV_SERVER=1
+```
+
+Do not use localhost AIF service checks as acceptance evidence for deployed-service or audit-quality tasks unless the task explicitly scopes validation to local source behavior.
 
 ## Secrets Boundary
 
