@@ -2,7 +2,7 @@
 
 - Task ID: work-20260527-roadmap-audit-decomposition-ordered-e2e
 - Lane: work
-- Status: queued
+- Status: done
 - Priority: critical
 - Created: 2026-05-27
 - Due: unset
