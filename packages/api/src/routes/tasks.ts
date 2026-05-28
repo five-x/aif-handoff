@@ -4,6 +4,7 @@ import { internalBroadcastAuth } from "../middleware/internalBroadcastAuth.js";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   logger,
+  applyHumanTaskEvent,
   parseAttachments,
   getProjectConfig,
   defaultsForMode,
@@ -24,6 +25,9 @@ import {
   updateTaskSchema,
   taskEventSchema,
   createTaskCommentSchema,
+  createRequirementQuestionSchema,
+  answerRequirementQuestionSchema,
+  answerRequirementQuestionBatchSchema,
   reorderTaskSchema,
   broadcastTaskSchema,
   manualExceptionSchema,
@@ -65,8 +69,12 @@ import {
   findProjectById,
   appendConfigAuditEvent,
   appendTaskActivityLog,
+  answerTaskRequirementQuestion,
+  answerTaskRequirementQuestionBatch,
   createMemoryCandidateForVerifiedTask,
+  createTaskRequirementQuestion,
   getAppDefaultRuntimeProfileId,
+  getTaskRequirementQuestionsResponse,
   resolveEffectiveRuntimeProfile,
   resolveEffectiveRuntimeProfilesForTasks,
   updateTaskPositionOnly,
@@ -439,6 +447,21 @@ tasksRouter.post(
       );
     } else if (TASK_OPERATOR_BROADCAST_TYPES.has(type)) {
       broadcast({ type, payload: taskOperatorPayload(task, type) });
+    } else if (type === "task:questions_created" || type === "task:needs_input") {
+      const questionState = getTaskRequirementQuestionsResponse(id);
+      const activeBatch =
+        questionState?.batches.find((batch) => batch.batchId === task.needsInputBatchId) ??
+        questionState?.batches.find((batch) => batch.status === "open");
+      broadcast({
+        type,
+        payload: {
+          taskId: task.id,
+          projectId: task.projectId,
+          batchId: activeBatch?.batchId,
+          stage: activeBatch?.stage ?? task.needsInputStage ?? undefined,
+          openBlockingCount: questionState?.openBlockingCount ?? 0,
+        },
+      });
     } else {
       broadcast({ type, payload: toTaskBroadcastPayload(task) });
       if (type === "task:updated" || type === "task:moved") {
@@ -888,6 +911,175 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
 });
 
 // GET /tasks/:id — full detail
+function requirementQuestionRouteError(error: unknown): {
+  status: ContentfulStatusCode;
+  body: { error: string };
+} {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("Task not found") || message.includes("Question not found")) {
+    return { status: 404, body: { error: message } };
+  }
+  if (
+    message.includes("cannot be answered") ||
+    message.includes("Duplicate") ||
+    message.includes("Invalid answer") ||
+    message.includes("Answer") ||
+    message.includes("Question")
+  ) {
+    return { status: 400, body: { error: message } };
+  }
+  return { status: 500, body: { error: message } };
+}
+
+tasksRouter.get("/:id/questions", (c) => {
+  const { id } = c.req.param();
+  const response = getTaskRequirementQuestionsResponse(id);
+  if (!response) return c.json({ error: "Task not found" }, 404);
+  return c.json(response);
+});
+
+tasksRouter.post("/:id/questions", jsonValidator(createRequirementQuestionSchema), (c) => {
+  const { id } = c.req.param();
+  const body = c.req.valid("json");
+  try {
+    const result = createTaskRequirementQuestion({
+      taskId: id,
+      question: body,
+      reason: `${body.stage} questions required`,
+    });
+    if (result.batchId) {
+      broadcast({
+        type: "task:questions_created",
+        payload: {
+          taskId: id,
+          projectId: result.task?.projectId,
+          batchId: result.batchId,
+          stage: body.stage,
+          openBlockingCount: result.response?.openBlockingCount ?? 0,
+        },
+      });
+      if (result.task?.status === "needs_input") {
+        broadcast({
+          type: "task:needs_input",
+          payload: {
+            taskId: id,
+            projectId: result.task.projectId,
+            batchId: result.batchId,
+            stage: body.stage,
+            openBlockingCount: result.response?.openBlockingCount ?? 0,
+          },
+        });
+        broadcast({ type: "task:moved", payload: toTaskBroadcastPayload(result.task) });
+      }
+    }
+    return c.json(result.response, 201);
+  } catch (error) {
+    const routeError = requirementQuestionRouteError(error);
+    return c.json(routeError.body, routeError.status);
+  }
+});
+
+tasksRouter.post(
+  "/:id/questions/:questionId/answer",
+  jsonValidator(answerRequirementQuestionSchema),
+  (c) => {
+    const { id, questionId } = c.req.param();
+    const body = c.req.valid("json");
+    try {
+      const question = answerTaskRequirementQuestion({
+        taskId: id,
+        questionId,
+        answer: body.answer,
+        attachments: body.attachments,
+      });
+      broadcast({
+        type: "task:question_answered",
+        payload: {
+          taskId: id,
+          projectId: question.projectId,
+          batchId: question.batchId,
+          questionId,
+          stage: question.stage,
+        },
+      });
+      return c.json(question);
+    } catch (error) {
+      const routeError = requirementQuestionRouteError(error);
+      return c.json(routeError.body, routeError.status);
+    }
+  },
+);
+
+tasksRouter.post(
+  "/:id/question-batches/:batchId/answers",
+  jsonValidator(answerRequirementQuestionBatchSchema),
+  (c) => {
+    const { id, batchId } = c.req.param();
+    const body = c.req.valid("json");
+    try {
+      const result = answerTaskRequirementQuestionBatch({
+        taskId: id,
+        batchId,
+        answers: body.answers,
+        autoResume: body.autoResume,
+      });
+      const projectId = result.task?.projectId;
+      broadcast({
+        type: "task:question_batch_answered",
+        payload: {
+          taskId: id,
+          projectId,
+          batchId,
+          openBlockingCount: result.response?.openBlockingCount ?? 0,
+          resumed: result.resumed,
+          resumeStatus: result.resumeStatus,
+        },
+      });
+      if (result.task) {
+        broadcast({
+          type: result.resumed ? "task:moved" : "task:updated",
+          payload: toTaskBroadcastPayload(result.task),
+        });
+      }
+      if (result.resumed) {
+        broadcast({ type: "agent:wake", payload: { id } });
+      }
+      return c.json(result);
+    } catch (error) {
+      const routeError = requirementQuestionRouteError(error);
+      return c.json(routeError.body, routeError.status);
+    }
+  },
+);
+
+tasksRouter.post("/:id/requirements/reanalyze", (c) => {
+  const { id } = c.req.param();
+  if (!getEnv().AIF_REQUIREMENTS_INTAKE_ENABLED) {
+    return c.json({ error: "Requirements intake is disabled" }, 409);
+  }
+  const task = findTaskById(id);
+  if (!task) return c.json({ error: "Task not found" }, 404);
+  const nowIso = new Date().toISOString();
+  const transition = applyHumanTaskEvent(task, "request_requirements_reanalysis", {
+    requirementsIntakeEnabled: true,
+  });
+  if (!transition.ok) {
+    return c.json({ error: transition.error }, 409);
+  }
+  const updated = updateTask(id, {
+    ...transition.patch,
+    needsInputBatchId: null,
+    needsInputStage: null,
+    needsInputReason: null,
+    lastHeartbeatAt: nowIso,
+  } as TaskFieldsUpdate);
+  if (!updated) return c.json({ error: "Task not found" }, 404);
+  appendTaskActivityLog(id, `[${nowIso}] Requirements reanalysis requested`);
+  broadcast({ type: "task:moved", payload: toTaskBroadcastPayload(updated) });
+  broadcast({ type: "agent:wake", payload: { id } });
+  return c.json(toTaskRouteResponse(updated));
+});
+
 tasksRouter.get("/:id", (c) => {
   const { id } = c.req.param();
   const task = findTaskById(id);

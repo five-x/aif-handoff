@@ -56,6 +56,7 @@ import {
   projects,
   resolveTaskIntentDefaults,
   taskComments,
+  taskRequirementQuestions,
   tasks,
   runtimeProfiles,
   configAuditEvents,
@@ -127,6 +128,15 @@ import {
   type ImplementationManifest,
   type TaskIntent,
   type TaskStatus,
+  type RequirementAnswerType,
+  type RequirementQuestionStage,
+  type RequirementQuestionStatus,
+  type TaskRequirementQuestion,
+  type TaskRequirementQuestionBatch,
+  type TaskRequirementQuestionInput,
+  type TaskRequirementQuestionsResponse,
+  asksForRawSecret,
+  validateRequirementAnswer,
   type WorkflowTimeline,
   type WorkflowTimelineArtifact,
   type WorkflowTimelineArtifactState,
@@ -216,6 +226,7 @@ function resolveInferredTaskIntent(input: {
 }
 
 export type TaskRow = typeof tasks.$inferSelect;
+export type RequirementQuestionRow = typeof taskRequirementQuestions.$inferSelect;
 export type CommentRow = typeof taskComments.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type AppSettingsRow = typeof appSettings.$inferSelect;
@@ -388,6 +399,14 @@ export type TaskFieldsUpdate = {
   runtimeProfileId?: string | null;
   modelOverride?: string | null;
   runtimeOptions?: Record<string, unknown> | null;
+  requirementsCycleCount?: number;
+  requirementsConfidence?: number | null;
+  requirementsSnapshotId?: string | null;
+  needsInputBatchId?: string | null;
+  needsInputStage?: string | null;
+  needsInputReason?: string | null;
+  lastHumanAnswerAt?: string | null;
+  lastAutoResumeAt?: string | null;
   position?: number;
   scheduledAt?: string | null;
   worktreePath?: string | null;
@@ -401,8 +420,16 @@ const DEFAULT_HIERARCHY_POSITION = 1000;
 const TASK_HIERARCHY_ROLE_SET = new Set<string>(TASK_HIERARCHY_ROLES);
 const TASK_PARENT_CLOSEOUT_POLICY_SET = new Set<string>(TASK_PARENT_CLOSEOUT_POLICIES);
 const ACTIVE_CHILD_STATUSES = new Set<TaskStatus>([
+  "requirements_analysis",
+  "needs_input",
   "planning",
   "plan_ready",
+  "implementing",
+  "review",
+]);
+const REQUIREMENT_RESUME_STATUS_SET = new Set<TaskStatus>([
+  "requirements_analysis",
+  "planning",
   "implementing",
   "review",
 ]);
@@ -851,6 +878,145 @@ function parseRuntimeObject(raw: string | null | undefined): Record<string, unkn
   } catch {
     return null;
   }
+}
+
+function parseStringArrayJson(raw: string | null | undefined): string[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const values = parsed.filter((item): item is string => typeof item === "string");
+    return values.length === parsed.length ? values : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseUnknownArrayJson(raw: string | null | undefined): unknown[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function taskStatusForRequirementResume(stage: RequirementQuestionStage): TaskStatus {
+  return REQUIREMENT_RESUME_STATUS_SET.has(stage as TaskStatus)
+    ? (stage as TaskStatus)
+    : "requirements_analysis";
+}
+
+function toRequirementQuestionResponse(row: RequirementQuestionRow): TaskRequirementQuestion {
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    projectId: row.projectId,
+    stage: row.stage,
+    targetResumeStage: row.targetResumeStage,
+    cycleNumber: row.cycleNumber,
+    batchId: row.batchId,
+    idempotencyKey: row.idempotencyKey ?? null,
+    question: row.question,
+    whyNeeded: row.whyNeeded,
+    blocking: Boolean(row.blocking),
+    answerType: row.answerType,
+    options: parseStringArrayJson(row.optionsJson),
+    defaultAnswer: row.defaultAnswer ?? null,
+    placeholder: row.placeholder ?? null,
+    status: row.status,
+    answer: row.answer ?? null,
+    answerAttachments: parseUnknownArrayJson(row.answerAttachmentsJson),
+    answerAuthor: row.answerAuthor ?? null,
+    answeredAt: row.answeredAt ?? null,
+    resolvedAt: row.resolvedAt ?? null,
+    resolutionNote: row.resolutionNote ?? null,
+    sourceAgent: row.sourceAgent,
+    sourcePromptHash: row.sourcePromptHash ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function buildRequirementQuestionsResponse(
+  task: Pick<TaskRow, "id" | "projectId">,
+  rows: RequirementQuestionRow[],
+): TaskRequirementQuestionsResponse {
+  const questions = rows.map(toRequirementQuestionResponse);
+  const batchMap = new Map<string, TaskRequirementQuestion[]>();
+  for (const question of questions) {
+    batchMap.set(question.batchId, [...(batchMap.get(question.batchId) ?? []), question]);
+  }
+
+  const batches: TaskRequirementQuestionBatch[] = [...batchMap.entries()]
+    .map(([batchId, batchQuestions]) => {
+      const openBlockingCount = batchQuestions.filter(
+        (question) => question.status === "open" && question.blocking,
+      ).length;
+      const openNonBlockingCount = batchQuestions.filter(
+        (question) => question.status === "open" && !question.blocking,
+      ).length;
+      const first = batchQuestions[0];
+      const status: TaskRequirementQuestionBatch["status"] =
+        openBlockingCount + openNonBlockingCount > 0
+          ? "open"
+          : batchQuestions.every((question) => question.status === "resolved")
+            ? "resolved"
+            : "answered";
+      return {
+        batchId,
+        stage: first.stage,
+        targetResumeStage: first.targetResumeStage,
+        cycleNumber: first.cycleNumber,
+        status,
+        openBlockingCount,
+        openNonBlockingCount,
+        questions: batchQuestions,
+      };
+    })
+    .sort((a, b) => b.cycleNumber - a.cycleNumber || a.batchId.localeCompare(b.batchId));
+
+  return {
+    taskId: task.id,
+    projectId: task.projectId,
+    openBlockingCount: questions.filter(
+      (question) => question.status === "open" && question.blocking,
+    ).length,
+    openNonBlockingCount: questions.filter(
+      (question) => question.status === "open" && !question.blocking,
+    ).length,
+    batches,
+  };
+}
+
+function assertRequirementQuestionInput(
+  question: TaskRequirementQuestionInput,
+): TaskRequirementQuestionInput {
+  if (!question.question.trim()) throw new Error("Question text is required");
+  if (!question.whyNeeded.trim()) throw new Error("Question whyNeeded is required");
+  if (asksForRawSecret(question.question)) {
+    throw new Error("Question appears to request a raw secret; ask for a credential reference");
+  }
+  const answerType = question.answerType ?? "textarea";
+  if (
+    (answerType === "single_choice" || answerType === "multi_choice") &&
+    (!question.options || question.options.length === 0)
+  ) {
+    throw new Error("Choice questions require options");
+  }
+  return {
+    ...question,
+    question: question.question.trim(),
+    whyNeeded: question.whyNeeded.trim(),
+    answerType,
+    blocking: question.blocking ?? true,
+    sourceAgent: question.sourceAgent ?? "requirements-analyst",
+    sourcePromptHash: question.sourcePromptHash ?? null,
+    targetResumeStage: question.targetResumeStage ?? question.stage,
+    options: question.options ?? null,
+    idempotencyKey: question.idempotencyKey?.trim() || null,
+  };
 }
 
 interface RuntimeProfileUsageState {
@@ -1905,6 +2071,418 @@ export function updateTask(id: string, fields: TaskFieldsUpdate): TaskRow | unde
   return findTaskById(id);
 }
 
+export function listTaskRequirementQuestions(taskId: string): TaskRequirementQuestion[] {
+  return getDb()
+    .select()
+    .from(taskRequirementQuestions)
+    .where(eq(taskRequirementQuestions.taskId, taskId))
+    .orderBy(desc(taskRequirementQuestions.cycleNumber), asc(taskRequirementQuestions.createdAt))
+    .all()
+    .map(toRequirementQuestionResponse);
+}
+
+export function getTaskRequirementQuestionsResponse(
+  taskId: string,
+): TaskRequirementQuestionsResponse | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const rows = getDb()
+    .select()
+    .from(taskRequirementQuestions)
+    .where(eq(taskRequirementQuestions.taskId, taskId))
+    .orderBy(desc(taskRequirementQuestions.cycleNumber), asc(taskRequirementQuestions.createdAt))
+    .all();
+  return buildRequirementQuestionsResponse(task, rows);
+}
+
+export function hasAnsweredRequirementQuestionKey(taskId: string, idempotencyKey: string): boolean {
+  const key = idempotencyKey.trim();
+  if (!key) return false;
+  const row = getDb()
+    .select({ id: taskRequirementQuestions.id })
+    .from(taskRequirementQuestions)
+    .where(
+      and(
+        eq(taskRequirementQuestions.taskId, taskId),
+        eq(taskRequirementQuestions.idempotencyKey, key),
+        inArray(taskRequirementQuestions.status, ["answered", "resolved"]),
+      ),
+    )
+    .get();
+  return Boolean(row);
+}
+
+function hasActiveRequirementQuestionKey(taskId: string, idempotencyKey: string): boolean {
+  const key = idempotencyKey.trim();
+  if (!key) return false;
+  const row = getDb()
+    .select({ id: taskRequirementQuestions.id })
+    .from(taskRequirementQuestions)
+    .where(
+      and(
+        eq(taskRequirementQuestions.taskId, taskId),
+        eq(taskRequirementQuestions.idempotencyKey, key),
+        inArray(taskRequirementQuestions.status, ["open", "answered", "resolved"]),
+      ),
+    )
+    .get();
+  return Boolean(row);
+}
+
+export interface CreateTaskRequirementQuestionBatchInput {
+  taskId: string;
+  stage: RequirementQuestionStage;
+  targetResumeStage?: RequirementQuestionStage;
+  reason?: string | null;
+  questions: TaskRequirementQuestionInput[];
+  sourceAgent?: string;
+  sourcePromptHash?: string | null;
+}
+
+export interface CreateTaskRequirementQuestionBatchResult {
+  batchId: string | null;
+  questions: TaskRequirementQuestion[];
+  response: TaskRequirementQuestionsResponse | null;
+  task: TaskRow | undefined;
+}
+
+export function createTaskRequirementQuestionBatch(
+  input: CreateTaskRequirementQuestionBatchInput,
+): CreateTaskRequirementQuestionBatchResult {
+  const task = findTaskById(input.taskId);
+  if (!task) throw new Error("Task not found");
+
+  const batchId = crypto.randomUUID();
+  const nowIso = new Date().toISOString();
+  const cycleNumber = (task.requirementsCycleCount ?? 0) + 1;
+  const normalized = input.questions.map((question) =>
+    assertRequirementQuestionInput({
+      ...question,
+      stage: question.stage ?? input.stage,
+      targetResumeStage: question.targetResumeStage ?? input.targetResumeStage ?? input.stage,
+      sourceAgent: question.sourceAgent ?? input.sourceAgent ?? "requirements-analyst",
+      sourcePromptHash: question.sourcePromptHash ?? input.sourcePromptHash ?? null,
+    }),
+  );
+  const deduped = normalized.filter(
+    (question) =>
+      !question.idempotencyKey ||
+      !hasActiveRequirementQuestionKey(input.taskId, question.idempotencyKey),
+  );
+
+  if (deduped.length === 0) {
+    return {
+      batchId: null,
+      questions: [],
+      response: getTaskRequirementQuestionsResponse(input.taskId),
+      task,
+    };
+  }
+
+  getDb()
+    .insert(taskRequirementQuestions)
+    .values(
+      deduped.map((question) => ({
+        id: crypto.randomUUID(),
+        taskId: task.id,
+        projectId: task.projectId,
+        stage: question.stage,
+        targetResumeStage: question.targetResumeStage ?? input.targetResumeStage ?? input.stage,
+        cycleNumber,
+        batchId,
+        idempotencyKey: question.idempotencyKey ?? null,
+        question: question.question,
+        whyNeeded: question.whyNeeded,
+        blocking: question.blocking ?? true,
+        answerType: question.answerType ?? "textarea",
+        optionsJson: question.options ? JSON.stringify(question.options) : null,
+        defaultAnswer: question.defaultAnswer ?? null,
+        placeholder: question.placeholder ?? null,
+        status: "open" as RequirementQuestionStatus,
+        answer: null,
+        answerAttachmentsJson: null,
+        answerAuthor: null,
+        answeredAt: null,
+        resolvedAt: null,
+        resolutionNote: null,
+        sourceAgent: question.sourceAgent ?? input.sourceAgent ?? "requirements-analyst",
+        sourcePromptHash: question.sourcePromptHash ?? input.sourcePromptHash ?? null,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      })),
+    )
+    .run();
+
+  const hasBlocking = deduped.some((question) => question.blocking ?? true);
+  if (hasBlocking) {
+    setTaskFields(task.id, {
+      status: "needs_input",
+      needsInputBatchId: batchId,
+      needsInputStage: input.stage,
+      needsInputReason: input.reason ?? "requirements questions required",
+      requirementsCycleCount: cycleNumber,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+  } else {
+    setTaskFields(task.id, {
+      requirementsCycleCount: cycleNumber,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+  }
+
+  appendTaskActivityLog(
+    task.id,
+    `[${nowIso}] Requirements questions created: batch=${batchId} count=${deduped.length} blocking=${hasBlocking ? "yes" : "no"}`,
+  );
+
+  const response = getTaskRequirementQuestionsResponse(input.taskId);
+  const createdQuestions =
+    response?.batches.find((batch) => batch.batchId === batchId)?.questions ?? [];
+  return {
+    batchId,
+    questions: createdQuestions,
+    response,
+    task: findTaskById(task.id),
+  };
+}
+
+export function createTaskRequirementQuestion(input: {
+  taskId: string;
+  question: TaskRequirementQuestionInput;
+  reason?: string | null;
+}): CreateTaskRequirementQuestionBatchResult {
+  return createTaskRequirementQuestionBatch({
+    taskId: input.taskId,
+    stage: input.question.stage,
+    targetResumeStage: input.question.targetResumeStage ?? input.question.stage,
+    reason: input.reason,
+    questions: [input.question],
+    sourceAgent: input.question.sourceAgent,
+    sourcePromptHash: input.question.sourcePromptHash,
+  });
+}
+
+function findRequirementQuestionForAnswer(input: {
+  taskId: string;
+  questionId: string;
+  batchId?: string;
+}): RequirementQuestionRow {
+  const conditions = [
+    eq(taskRequirementQuestions.taskId, input.taskId),
+    eq(taskRequirementQuestions.id, input.questionId),
+  ];
+  if (input.batchId) {
+    conditions.push(eq(taskRequirementQuestions.batchId, input.batchId));
+  }
+  const question = getDb()
+    .select()
+    .from(taskRequirementQuestions)
+    .where(and(...conditions))
+    .get();
+  if (!question) throw new Error("Question not found for task");
+  if (question.status !== "open") {
+    throw new Error(`Question cannot be answered from status ${question.status}`);
+  }
+  return question;
+}
+
+function answerRequirementQuestionRow(input: {
+  question: RequirementQuestionRow;
+  answer: string;
+  attachments?: unknown[];
+  nowIso: string;
+}): void {
+  const validation = validateRequirementAnswer(
+    input.question.answerType as RequirementAnswerType,
+    input.answer,
+    parseStringArrayJson(input.question.optionsJson),
+  );
+  if (!validation.ok) throw new Error(validation.error ?? "Invalid answer");
+
+  getDb()
+    .update(taskRequirementQuestions)
+    .set({
+      status: "answered",
+      answer: input.answer.trim(),
+      answerAttachmentsJson: JSON.stringify(input.attachments ?? []),
+      answerAuthor: "human",
+      answeredAt: input.nowIso,
+      updatedAt: input.nowIso,
+    })
+    .where(eq(taskRequirementQuestions.id, input.question.id))
+    .run();
+}
+
+export function answerTaskRequirementQuestion(input: {
+  taskId: string;
+  questionId: string;
+  answer: string;
+  attachments?: unknown[];
+}): TaskRequirementQuestion {
+  const task = findTaskById(input.taskId);
+  if (!task) throw new Error("Task not found");
+  const nowIso = new Date().toISOString();
+  const question = findRequirementQuestionForAnswer({
+    taskId: input.taskId,
+    questionId: input.questionId,
+  });
+  answerRequirementQuestionRow({
+    question,
+    answer: input.answer,
+    attachments: input.attachments,
+    nowIso,
+  });
+  setTaskFields(input.taskId, {
+    lastHumanAnswerAt: nowIso,
+    updatedAt: nowIso,
+  });
+  appendTaskActivityLog(
+    input.taskId,
+    `[${nowIso}] Requirement question answered: question=${input.questionId}`,
+  );
+  const updated = getDb()
+    .select()
+    .from(taskRequirementQuestions)
+    .where(eq(taskRequirementQuestions.id, input.questionId))
+    .get();
+  if (!updated) throw new Error("Question not found after answer");
+  return toRequirementQuestionResponse(updated);
+}
+
+export interface AnswerTaskRequirementQuestionBatchResult {
+  task: TaskRow | undefined;
+  response: TaskRequirementQuestionsResponse | null;
+  resumed: boolean;
+  resumeStatus: TaskStatus | null;
+}
+
+export function answerTaskRequirementQuestionBatch(input: {
+  taskId: string;
+  batchId: string;
+  answers: Array<{ questionId: string; answer: string; attachments?: unknown[] }>;
+  autoResume?: boolean;
+}): AnswerTaskRequirementQuestionBatchResult {
+  const task = findTaskById(input.taskId);
+  if (!task) throw new Error("Task not found");
+  if (input.answers.length === 0) throw new Error("At least one answer is required");
+
+  const nowIso = new Date().toISOString();
+  const seen = new Set<string>();
+  const questions = input.answers.map((answer) => {
+    if (seen.has(answer.questionId)) throw new Error("Duplicate question answer in batch");
+    seen.add(answer.questionId);
+    return {
+      answer,
+      question: findRequirementQuestionForAnswer({
+        taskId: input.taskId,
+        batchId: input.batchId,
+        questionId: answer.questionId,
+      }),
+    };
+  });
+
+  for (const entry of questions) {
+    const validation = validateRequirementAnswer(
+      entry.question.answerType as RequirementAnswerType,
+      entry.answer.answer,
+      parseStringArrayJson(entry.question.optionsJson),
+    );
+    if (!validation.ok) throw new Error(validation.error ?? "Invalid answer");
+  }
+
+  for (const entry of questions) {
+    answerRequirementQuestionRow({
+      question: entry.question,
+      answer: entry.answer.answer,
+      attachments: entry.answer.attachments,
+      nowIso,
+    });
+  }
+
+  const batchOpenBlockingCount =
+    getDb()
+      .select({ cnt: count() })
+      .from(taskRequirementQuestions)
+      .where(
+        and(
+          eq(taskRequirementQuestions.taskId, input.taskId),
+          eq(taskRequirementQuestions.batchId, input.batchId),
+          eq(taskRequirementQuestions.status, "open"),
+          eq(taskRequirementQuestions.blocking, true),
+        ),
+      )
+      .get()?.cnt ?? 0;
+  const taskOpenBlockingCount =
+    getDb()
+      .select({ cnt: count() })
+      .from(taskRequirementQuestions)
+      .where(
+        and(
+          eq(taskRequirementQuestions.taskId, input.taskId),
+          eq(taskRequirementQuestions.status, "open"),
+          eq(taskRequirementQuestions.blocking, true),
+        ),
+      )
+      .get()?.cnt ?? 0;
+
+  let resumed = false;
+  let resumeStatus: TaskStatus | null = null;
+  const batchQuestion = getDb()
+    .select()
+    .from(taskRequirementQuestions)
+    .where(
+      and(
+        eq(taskRequirementQuestions.taskId, input.taskId),
+        eq(taskRequirementQuestions.batchId, input.batchId),
+      ),
+    )
+    .orderBy(asc(taskRequirementQuestions.createdAt))
+    .get();
+
+  const autoResume = input.autoResume ?? getEnv().AIF_REQUIREMENTS_AUTO_RESUME_ON_ANSWER;
+  const taskPatch: TaskFieldsPatch = {
+    lastHumanAnswerAt: nowIso,
+    updatedAt: nowIso,
+  };
+  if (
+    autoResume &&
+    task.needsInputBatchId === input.batchId &&
+    batchOpenBlockingCount === 0 &&
+    taskOpenBlockingCount === 0 &&
+    task.status === "needs_input"
+  ) {
+    const target = taskStatusForRequirementResume(
+      batchQuestion?.targetResumeStage ?? "requirements_analysis",
+    );
+    taskPatch.status = target;
+    taskPatch.needsInputBatchId = null;
+    taskPatch.needsInputStage = null;
+    taskPatch.needsInputReason = null;
+    taskPatch.lastAutoResumeAt = nowIso;
+    taskPatch.lastHeartbeatAt = nowIso;
+    taskPatch.lockedBy = null;
+    taskPatch.lockedUntil = null;
+    taskPatch.coordinatorId = null;
+    taskPatch.lockStage = null;
+    resumed = true;
+    resumeStatus = target;
+  }
+  setTaskFields(input.taskId, taskPatch);
+  appendTaskActivityLog(
+    input.taskId,
+    `[${nowIso}] Requirement question batch answered: batch=${input.batchId} answered=${questions.length} batchOpenBlocking=${batchOpenBlockingCount} taskOpenBlocking=${taskOpenBlockingCount} autoResume=${autoResume ? "yes" : "no"} resumed=${resumed ? resumeStatus : "no"}`,
+  );
+
+  return {
+    task: findTaskById(input.taskId),
+    response: getTaskRequirementQuestionsResponse(input.taskId),
+    resumed,
+    resumeStatus,
+  };
+}
+
 /**
  * Write only the `position` column. Does NOT bump `updatedAt` — manual reorder
  * is metadata, not content, and must not disturb "updated at" sort views.
@@ -2405,7 +2983,9 @@ export function findCoordinatorTaskCandidate(stage: CoordinatorStage): TaskRow |
 
 export function findCoordinatorTaskCandidates(stage: CoordinatorStage, limit: number): TaskRow[] {
   const stageFilter =
-    stage === "implementer"
+    stage === "requirements-analyst"
+      ? inArray(tasks.status, ["requirements_analysis"])
+      : stage === "implementer"
       ? or(
           eq(tasks.status, "implementing"),
           and(eq(tasks.status, "plan_ready"), eq(tasks.autoMode, true)),
@@ -2533,7 +3113,10 @@ export function blockTaskForRuntimeGateIfEligible(input: {
  * Clears `scheduledAt` in the same write so the scheduler can't re-fire a
  * task that auto-queue already advanced (or vice versa).
  */
-export function claimBacklogTaskForAdvance(taskId: string): boolean {
+export function claimBacklogTaskForAdvance(
+  taskId: string,
+  targetStatus: TaskStatus = "planning",
+): boolean {
   const task = findTaskById(taskId);
   if (!task || !auditRoadmapTaskDependenciesReleaseReady(task)) return false;
 
@@ -2541,7 +3124,7 @@ export function claimBacklogTaskForAdvance(taskId: string): boolean {
   const result = getDb()
     .update(tasks)
     .set({
-      status: "planning",
+      status: targetStatus,
       scheduledAt: null,
       blockedReason: null,
       blockedFromStatus: null,
@@ -2576,6 +3159,17 @@ export function claimBacklogTaskForAdvance(taskId: string): boolean {
  * source state (backlog).
  */
 export function countActivePipelineTasksForProject(projectId: string): number {
+  const activeStatuses: TaskStatus[] = [
+    "requirements_analysis",
+    "planning",
+    "plan_ready",
+    "implementing",
+    "review",
+    "blocked_external",
+  ];
+  if (getEnv().AIF_AUTO_QUEUE_COUNT_NEEDS_INPUT_AS_ACTIVE) {
+    activeStatuses.splice(1, 0, "needs_input");
+  }
   const rows = getDb()
     .select({
       status: tasks.status,
@@ -2592,7 +3186,7 @@ export function countActivePipelineTasksForProject(projectId: string): number {
       and(
         eq(tasks.projectId, projectId),
         ne(tasks.hierarchyRole, "container"),
-        inArray(tasks.status, ["planning", "plan_ready", "implementing", "review", "blocked_external"]),
+        inArray(tasks.status, activeStatuses),
       ),
     )
     .all();
@@ -2638,6 +3232,8 @@ export function hasActiveBranchBoundTasksForProject(projectId: string): boolean 
         isNull(tasks.worktreePath),
         inArray(tasks.status, [
           "backlog",
+          "requirements_analysis",
+          "needs_input",
           "planning",
           "plan_ready",
           "implementing",
@@ -2729,7 +3325,7 @@ export function releaseStaleTaskClaims(): number {
         lte(tasks.lockedUntil, nowIso),
         // Process died: heartbeat stale, task still in-progress, and not freshly claimed
         and(
-          inArray(tasks.status, ["planning", "implementing", "review"]),
+          inArray(tasks.status, ["requirements_analysis", "planning", "implementing", "review"]),
           // Ensure task was claimed at least 5 min ago (avoid race with fresh claims)
           lte(tasks.updatedAt, heartbeatDeadline),
           or(
@@ -2864,7 +3460,7 @@ export function listStaleInProgressTasks(): TaskRow[] {
     .from(tasks)
     .where(
       and(
-        inArray(tasks.status, ["planning", "implementing", "review"]),
+        inArray(tasks.status, ["requirements_analysis", "planning", "implementing", "review"]),
         ne(tasks.hierarchyRole, "container"),
         eq(tasks.paused, false),
         // Skip tasks with active (non-expired) locks — they're being processed

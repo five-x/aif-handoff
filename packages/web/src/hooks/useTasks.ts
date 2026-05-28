@@ -8,6 +8,8 @@ import type {
   TaskEventInput,
   TaskComment,
   CreateTaskCommentInput,
+  TaskRequirementQuestionsResponse,
+  TaskRequirementQuestionBatchAnswerInput,
 } from "@aif/shared/browser";
 import { api } from "../lib/api.js";
 
@@ -56,6 +58,37 @@ export function useTaskRuntimeUsage(id: string | null) {
     queryKey: ["task-runtime-usage", id],
     queryFn: () => api.getTaskRuntimeUsage(id!),
     enabled: !!id,
+  });
+}
+
+export function useTaskQuestions(id: string | null, enabled = true) {
+  return useQuery<TaskRequirementQuestionsResponse>({
+    queryKey: ["task-questions", id],
+    queryFn: () => api.getTaskQuestions(id!),
+    enabled: !!id && enabled,
+  });
+}
+
+export function useAnswerTaskQuestionBatch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      batchId,
+      input,
+    }: {
+      id: string;
+      batchId: string;
+      input: TaskRequirementQuestionBatchAnswerInput;
+    }) => api.answerTaskQuestionBatch(id, batchId, input),
+    onSuccess: (result, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["task-questions", variables.id] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task", variables.id] });
+      if (result.task) {
+        queryClient.setQueryData(["task", variables.id], result.task);
+      }
+    },
   });
 }
 

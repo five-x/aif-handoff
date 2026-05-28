@@ -108,6 +108,8 @@ export function Board({ projectId, onTaskClick, density, viewMode = "kanban" }: 
   const tasksByStatus = useMemo(() => {
     const grouped: Record<TaskStatus, Task[]> = {
       backlog: [],
+      requirements_analysis: [],
+      needs_input: [],
       planning: [],
       plan_ready: [],
       implementing: [],

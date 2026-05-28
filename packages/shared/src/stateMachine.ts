@@ -15,6 +15,10 @@ type TransitionPatch = Pick<
 
 type TransitionResult = { ok: true; patch: TransitionPatch } | { ok: false; error: string };
 
+export interface TaskTransitionOptions {
+  requirementsIntakeEnabled?: boolean;
+}
+
 /** Default reset values applied when transitioning out of blocked/retry states. */
 export const CLEAN_STATE_RESET = {
   blockedReason: null,
@@ -53,11 +57,43 @@ export function applyHumanTaskEvent(
     | "manualReviewRequired"
   >,
   event: TaskEvent,
+  options: TaskTransitionOptions = {},
 ): TransitionResult {
   switch (event) {
     case "start_ai": {
       if (task.status !== "backlog") {
         return { ok: false, error: "start_ai is only allowed from backlog" };
+      }
+      return {
+        ok: true,
+        patch: {
+          ...CLEAN_STATE_RESET,
+          status: options.requirementsIntakeEnabled ? "requirements_analysis" : "planning",
+        },
+      };
+    }
+    case "request_requirements_reanalysis": {
+      if (!options.requirementsIntakeEnabled) {
+        return {
+          ok: false,
+          error: "request_requirements_reanalysis requires requirements intake to be enabled",
+        };
+      }
+      if (!["backlog", "planning", "plan_ready", "done"].includes(task.status)) {
+        return {
+          ok: false,
+          error:
+            "request_requirements_reanalysis is only allowed from backlog, planning, plan_ready, or done",
+        };
+      }
+      return { ok: true, patch: { ...CLEAN_STATE_RESET, status: "requirements_analysis" } };
+    }
+    case "approve_requirements": {
+      if (task.status !== "requirements_analysis") {
+        return {
+          ok: false,
+          error: "approve_requirements is only allowed from requirements_analysis",
+        };
       }
       return { ok: true, patch: { ...CLEAN_STATE_RESET, status: "planning" } };
     }
@@ -138,6 +174,8 @@ export function applyHumanTaskEvent(
 
 export const HUMAN_ACTIONS_BY_STATUS: Record<TaskStatus, TaskEvent[]> = {
   backlog: ["start_ai"],
+  requirements_analysis: ["approve_requirements"],
+  needs_input: [],
   planning: [],
   plan_ready: ["start_implementation", "request_replanning", "fast_fix"],
   implementing: [],

@@ -319,6 +319,21 @@ export function useWebSocket() {
       }
 
       if (
+        data.type === "task:questions_created" ||
+        data.type === "task:question_answered" ||
+        data.type === "task:question_batch_answered" ||
+        data.type === "task:needs_input"
+      ) {
+        const payload = data.payload as { taskId?: string; projectId?: string };
+        if (payload.taskId) {
+          queryClient.invalidateQueries({ queryKey: ["task-questions", payload.taskId] });
+          queryClient.invalidateQueries({ queryKey: ["task", payload.taskId] });
+          queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        }
+        return;
+      }
+
+      if (
         data.type === "task:timeline_updated" ||
         data.type === "task:evidence_recorded" ||
         data.type === "task:trust_updated" ||

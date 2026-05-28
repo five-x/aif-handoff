@@ -7,6 +7,8 @@ type BroadcastType =
   | "task:moved"
   | "task:activity"
   | "task:scheduled_fired"
+  | "task:questions_created"
+  | "task:needs_input"
   | "task:timeline_updated"
   | "task:evidence_recorded"
   | "task:trust_updated"

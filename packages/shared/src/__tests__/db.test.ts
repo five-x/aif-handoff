@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { chatSessions, tasks } from "../schema.js";
 import { closeDb, createTestDb, getDb } from "../db.js";
 
-const CURRENT_DB_USER_VERSION = 35;
+const CURRENT_DB_USER_VERSION = 36;
 
 function removeSqliteArtifacts(dbPath: string): void {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {

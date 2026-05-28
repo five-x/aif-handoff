@@ -11,6 +11,8 @@ import {
   TASK_PARENT_CLOSEOUT_POLICIES,
   TASK_INTENTS,
   TASK_STATUSES,
+  REQUIREMENT_ANSWER_TYPES,
+  REQUIREMENT_QUESTION_STAGES,
   ATTACHMENT_CONTENT_MAX_CHARS,
   ATTACHMENT_MAX_BYTES,
   getEnv,
@@ -195,6 +197,38 @@ export const taskEventSchema = z.object({
   manualExceptionJustification: z.string().min(1).max(20_000).optional(),
 });
 
+export const createRequirementQuestionSchema = z.object({
+  stage: z.enum(REQUIREMENT_QUESTION_STAGES),
+  targetResumeStage: z.enum(REQUIREMENT_QUESTION_STAGES).optional(),
+  idempotencyKey: z.string().min(1).max(200).nullable().optional(),
+  question: z.string().min(1).max(20_000),
+  whyNeeded: z.string().min(1).max(20_000),
+  blocking: z.boolean().default(true),
+  answerType: z.enum(REQUIREMENT_ANSWER_TYPES).default("textarea"),
+  options: z.array(z.string().min(1).max(1000)).max(50).nullable().optional(),
+  defaultAnswer: z.string().max(20_000).nullable().optional(),
+  placeholder: z.string().max(1000).nullable().optional(),
+  sourceAgent: z.string().min(1).max(200).optional(),
+  sourcePromptHash: z.string().max(200).nullable().optional(),
+});
+
+export const answerRequirementQuestionSchema = z.object({
+  answer: z.string().min(1).max(50_000),
+  attachments: z.array(taskAttachmentSchema).max(20).default([]),
+});
+
+export const answerRequirementQuestionBatchSchema = z.object({
+  answers: z
+    .array(
+      answerRequirementQuestionSchema.extend({
+        questionId: z.string().min(1),
+      }),
+    )
+    .min(1)
+    .max(50),
+  autoResume: z.boolean().optional(),
+});
+
 export const manualExceptionSchema = z.object({
   justification: z.string().min(1).max(20_000),
 });
@@ -228,6 +262,8 @@ export const broadcastTaskSchema = z.object({
       "task:moved",
       "task:activity",
       "task:scheduled_fired",
+      "task:questions_created",
+      "task:needs_input",
       "task:timeline_updated",
       "task:evidence_recorded",
       "task:trust_updated",

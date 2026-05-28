@@ -12,6 +12,7 @@ import {
   isRecoverableAuditFailureFamily,
   isBranchIsolationError,
   looksLikeFullPlanUpdate,
+  getEnv,
   getProjectConfig,
   selectAuditArtifactFailureFamily,
   selectTaskCompletionAuditFailureFamily,
@@ -667,7 +668,9 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         "operator_input_required tasks need a newer human answer comment before retry_from_blocked can resume",
     };
   }
-  const transition = applyHumanTaskEvent(task, event);
+  const transition = applyHumanTaskEvent(task, event, {
+    requirementsIntakeEnabled: getEnv().AIF_REQUIREMENTS_INTAKE_ENABLED,
+  });
   if (!transition.ok) {
     return { ok: false, status: 409, error: transition.error };
   }

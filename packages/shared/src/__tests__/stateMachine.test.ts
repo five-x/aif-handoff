@@ -17,6 +17,14 @@ function makeTask(status: Task["status"]): Task {
     skipReview: false,
     useSubagents: true,
     status,
+    requirementsCycleCount: 0,
+    requirementsConfidence: null,
+    requirementsSnapshotId: null,
+    needsInputBatchId: null,
+    needsInputStage: null,
+    needsInputReason: null,
+    lastHumanAnswerAt: null,
+    lastAutoResumeAt: null,
     priority: 0,
     position: 1000,
     plan: null,
@@ -58,6 +66,31 @@ describe("task state machine", () => {
     if (result.ok) {
       expect(result.patch.status).toBe("planning");
     }
+  });
+
+  it("routes start_ai to requirements_analysis when requirements intake is enabled", () => {
+    const result = applyHumanTaskEvent(makeTask("backlog"), "start_ai", {
+      requirementsIntakeEnabled: true,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("requirements_analysis");
+    }
+  });
+
+  it("rejects requirements reanalysis from active implementation and verified statuses", () => {
+    const implementing = applyHumanTaskEvent(
+      makeTask("implementing"),
+      "request_requirements_reanalysis",
+      {
+        requirementsIntakeEnabled: true,
+      },
+    );
+    const verified = applyHumanTaskEvent(makeTask("verified"), "request_requirements_reanalysis", {
+      requirementsIntakeEnabled: true,
+    });
+    expect(implementing.ok).toBe(false);
+    expect(verified.ok).toBe(false);
   });
 
   it("rejects start_ai from non-backlog statuses", () => {

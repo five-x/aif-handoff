@@ -12,6 +12,7 @@ import {
   useTask,
   useTaskEvidence,
   useTaskMemoryCandidates,
+  useTaskQuestions,
   useTaskRuntimeUsage,
   useTaskTimeline,
   useTaskWorktree,
@@ -25,6 +26,7 @@ import { WorkflowTimelinePanel } from "./WorkflowTimelinePanel";
 import { TaskComments } from "./TaskComments";
 import { TaskAttachments } from "./TaskAttachments";
 import { TaskSettings } from "./TaskSettings";
+import { QuestionsPanel } from "./QuestionsPanel";
 import { PlanChangeDialog } from "./PlanChangeDialog";
 import { TaskDetailHeader, type TaskDetailTab } from "./TaskDetailHeader";
 import { Section } from "./Section";
@@ -587,6 +589,10 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
   const { data: evidenceResponse, isLoading: isEvidenceLoading } = useTaskEvidence(taskId);
   const { data: memoryCandidates, isLoading: isMemoryLoading } = useTaskMemoryCandidates(taskId);
   const { data: taskRuntimeUsage } = useTaskRuntimeUsage(taskId);
+  const { data: taskQuestions, isLoading: isQuestionsLoading } = useTaskQuestions(
+    taskId,
+    Boolean(taskId),
+  );
   const { data: worktree } = useTaskWorktree(
     taskId,
     Boolean(task?.worktreePath || task?.branchName),
@@ -655,6 +661,17 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
                       }
                     />
                   </Section>
+
+                  {(task.status === "needs_input" ||
+                    (taskQuestions?.openBlockingCount ?? 0) > 0) && (
+                    <Section title="Clarification">
+                      <QuestionsPanel
+                        taskId={task.id}
+                        questions={taskQuestions}
+                        isLoading={isQuestionsLoading}
+                      />
+                    </Section>
+                  )}
 
                   <Section title="Attachments">
                     <TaskAttachments

@@ -80,6 +80,7 @@ import {
   type EffectiveRuntimeProfileSource,
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
+import { runRequirementsAnalyst } from "./subagents/requirementsAnalyst.js";
 import { runPlanChecker } from "./subagents/planChecker.js";
 import { runImplementer } from "./subagents/implementer.js";
 import { runReviewer, taskRequiresSpecializedReviewerFanout } from "./subagents/reviewer.js";
@@ -146,6 +147,13 @@ interface StatusTransition {
 }
 
 const PIPELINE: StatusTransition[] = [
+  {
+    from: ["requirements_analysis"],
+    inProgress: "requirements_analysis",
+    onSuccess: "planning",
+    runner: runRequirementsAnalyst,
+    label: "requirements-analyst",
+  },
   {
     from: ["planning"],
     inProgress: "planning",
@@ -268,6 +276,7 @@ function updateTaskStatus(
 }
 
 function runtimeStageForCoordinatorStage(stage: CoordinatorStage): RuntimeStage {
+  if (stage === "requirements-analyst") return "planner";
   if (stage === "plan-checker") return "plan_checker";
   return stage;
 }
@@ -284,6 +293,10 @@ function runtimeStageForCoordinatorTask(stage: CoordinatorStage, task: TaskRow):
 function fallbackStagesForCoordinatorTask(stage: CoordinatorStage, task: TaskRow): RuntimeStage[] {
   if (stage === "reviewer") return ["reviewer", "security"];
   return [runtimeStageForCoordinatorTask(stage, task)];
+}
+
+function backlogAdvanceTargetStatus(): TaskStatus {
+  return env.AIF_REQUIREMENTS_INTAKE_ENABLED ? "requirements_analysis" : "planning";
 }
 
 function shouldBlockOnRuntimeLimit(stage: RuntimeStage): boolean {
@@ -3016,6 +3029,27 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     flushActivityQueue(task.id);
     let latestTask: TaskWithHydratedFields = findTaskById(task.id) ?? task;
 
+    if (stage.label === "requirements-analyst" && latestTask.status !== stage.inProgress) {
+      log.info(
+        {
+          taskId: task.id,
+          from: stage.inProgress,
+          to: latestTask.status,
+        },
+        "Requirements analyst updated task status before coordinator handoff",
+      );
+      if (latestTask.status === "needs_input") {
+        void notifyTaskBroadcast(task.id, "task:questions_created");
+        void notifyTaskBroadcast(task.id, "task:needs_input");
+        void notifyTaskBroadcast(task.id, "task:moved", {
+          title: taskTitle,
+          fromStatus: stage.inProgress,
+          toStatus: latestTask.status,
+        });
+      }
+      return latestTask.status === "needs_input" || latestTask.status === "blocked_external";
+    }
+
     if (stage.label === "implementer" && latestTask.status === "blocked_external") {
       log.info(
         {
@@ -3504,6 +3538,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 export function processDueScheduledTasks(): number {
   const nowIso = new Date().toISOString();
   const due = listDueScheduledTasks(nowIso);
+  const targetStatus = backlogAdvanceTargetStatus();
   if (due.length === 0) {
     log.debug({ nowIso }, "No due scheduled tasks");
     return 0;
@@ -3517,7 +3552,7 @@ export function processDueScheduledTasks(): number {
       // CAS-style claim: only proceed if the row is still backlog+unpaused
       // at the moment of the write. Prevents racing with auto-queue or with
       // a parallel coordinator instance.
-      if (!claimBacklogTaskForAdvance(task.id)) {
+      if (!claimBacklogTaskForAdvance(task.id, targetStatus)) {
         log.debug({ taskId: task.id }, "Scheduler: task no longer backlog/unpaused, skipped");
         continue;
       }
@@ -3528,7 +3563,7 @@ export function processDueScheduledTasks(): number {
       void notifyTaskBroadcast(task.id, "task:scheduled_fired", {
         title: task.title,
         fromStatus: task.status,
-        toStatus: "planning",
+        toStatus: targetStatus,
       });
       // Mirror the standard status broadcast that updateTaskStatus would
       // have sent, so kanban columns re-render through the existing
@@ -3536,7 +3571,7 @@ export function processDueScheduledTasks(): number {
       void notifyTaskBroadcast(task.id, "task:moved", {
         title: task.title,
         fromStatus: task.status,
-        toStatus: "planning",
+        toStatus: targetStatus,
       });
       fired += 1;
       log.info(
@@ -3570,6 +3605,7 @@ export function processDueScheduledTasks(): number {
  */
 export function processAutoQueueAdvance(): number {
   const projects = listAutoQueueProjects();
+  const targetStatus = backlogAdvanceTargetStatus();
   if (projects.length === 0) {
     log.debug("No projects with auto-queue mode enabled");
     return 0;
@@ -3648,7 +3684,7 @@ export function processAutoQueueAdvance(): number {
         // CAS-style claim: only proceed if the row is still backlog+unpaused.
         // If false, another pass (scheduler / parallel coordinator / human
         // start_ai click) won the race — re-read pool counters and continue.
-        if (!claimBacklogTaskForAdvance(next.id)) {
+        if (!claimBacklogTaskForAdvance(next.id, targetStatus)) {
           log.debug(
             { taskId: next.id, projectId: project.id },
             "Auto-queue: task no longer backlog/unpaused, skipped",
@@ -3661,7 +3697,7 @@ export function processAutoQueueAdvance(): number {
         void notifyTaskBroadcast(next.id, "task:moved", {
           title: next.title,
           fromStatus: next.status,
-          toStatus: "planning",
+          toStatus: targetStatus,
         });
         appendTaskActivityLog(
           next.id,

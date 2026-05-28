@@ -4,6 +4,8 @@ import type { TaskIntent } from "./taskIntent.js";
 
 export const TASK_STATUSES = [
   "backlog",
+  "requirements_analysis",
+  "needs_input",
   "planning",
   "plan_ready",
   "implementing",
@@ -29,7 +31,13 @@ export const TASK_PARENT_CLOSEOUT_POLICIES = [
 
 export type TaskParentCloseoutPolicy = (typeof TASK_PARENT_CLOSEOUT_POLICIES)[number];
 
-export const COORDINATOR_STAGES = ["planner", "plan-checker", "implementer", "reviewer"] as const;
+export const COORDINATOR_STAGES = [
+  "requirements-analyst",
+  "planner",
+  "plan-checker",
+  "implementer",
+  "reviewer",
+] as const;
 
 export type CoordinatorStage = (typeof COORDINATOR_STAGES)[number];
 
@@ -222,6 +230,14 @@ export interface Task {
   skipReview: boolean;
   useSubagents: boolean;
   status: TaskStatus;
+  requirementsCycleCount?: number;
+  requirementsConfidence?: number | null;
+  requirementsSnapshotId?: string | null;
+  needsInputBatchId?: string | null;
+  needsInputStage?: string | null;
+  needsInputReason?: string | null;
+  lastHumanAnswerAt?: string | null;
+  lastAutoResumeAt?: string | null;
   priority: number;
   position: number;
   parentTaskId?: string | null;
@@ -563,6 +579,14 @@ export interface UpdateTaskInput {
   planTests?: boolean;
   skipReview?: boolean;
   useSubagents?: boolean;
+  requirementsCycleCount?: number;
+  requirementsConfidence?: number | null;
+  requirementsSnapshotId?: string | null;
+  needsInputBatchId?: string | null;
+  needsInputStage?: string | null;
+  needsInputReason?: string | null;
+  lastHumanAnswerAt?: string | null;
+  lastAutoResumeAt?: string | null;
   plan?: string | null;
   implementationLog?: string | null;
   implementationManifest?: ImplementationManifest | null;
@@ -597,6 +621,8 @@ export interface UpdateTaskInput {
 export const TASK_EVENTS = [
   "start_ai",
   "accept_existing_plan",
+  "request_requirements_reanalysis",
+  "approve_requirements",
   "start_implementation",
   "request_replanning",
   "fast_fix",
@@ -920,6 +946,12 @@ export type WsEventType =
   | "task:deleted"
   | "task:moved"
   | "task:comment_created"
+  | "task:questions_created"
+  | "task:question_answered"
+  | "task:question_batch_answered"
+  | "task:needs_input"
+  | "task:requirements_snapshot_created"
+  | "task:requirements_snapshot_updated"
   | "agent:wake"
   | "roadmap:complete"
   | "roadmap:error"
@@ -1073,6 +1105,17 @@ export interface TaskCommentCreatedPayload {
   projectId: string;
 }
 
+export interface TaskQuestionWsPayload {
+  taskId: string;
+  projectId?: string;
+  questionId?: string;
+  batchId?: string;
+  stage?: string;
+  openBlockingCount?: number;
+  resumed?: boolean;
+  resumeStatus?: string | null;
+}
+
 export interface WsEvent {
   type: WsEventType;
   payload:
@@ -1084,6 +1127,7 @@ export interface WsEvent {
     | ProjectScopedIdPayload
     | SettingsConfigUpdatedPayload
     | TaskCommentCreatedPayload
+    | TaskQuestionWsPayload
     | RoadmapCompletePayload
     | RoadmapErrorPayload
     | ChatStreamTokenPayload

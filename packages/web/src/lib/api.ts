@@ -36,6 +36,10 @@ import type {
   ProjectQueueStateResponse,
   TaskWorktreeInspection,
   TaskWorktreeCleanupResult,
+  TaskRequirementQuestion,
+  TaskRequirementQuestionsResponse,
+  TaskRequirementQuestionAnswerInput,
+  TaskRequirementQuestionBatchAnswerInput,
 } from "@aif/shared/browser";
 
 export type {
@@ -47,6 +51,10 @@ export type {
   ProjectQueueStateResponse,
   TaskWorktreeInspection,
   TaskWorktreeCleanupResult,
+  TaskRequirementQuestion,
+  TaskRequirementQuestionsResponse,
+  TaskRequirementQuestionAnswerInput,
+  TaskRequirementQuestionBatchAnswerInput,
 } from "@aif/shared/browser";
 
 export class ApiError extends Error {
@@ -727,6 +735,40 @@ export const api = {
   getTaskRuntimeUsage(id: string): Promise<TaskRuntimeUsageResponse> {
     console.debug("[api] GET /tasks/%s/runtime-usage", id);
     return request<TaskRuntimeUsageResponse>(`${API_BASE}/${id}/runtime-usage`);
+  },
+
+  getTaskQuestions(id: string): Promise<TaskRequirementQuestionsResponse> {
+    console.debug("[api] GET /tasks/%s/questions", id);
+    return request<TaskRequirementQuestionsResponse>(`${API_BASE}/${id}/questions`);
+  },
+
+  answerTaskQuestion(
+    id: string,
+    questionId: string,
+    input: TaskRequirementQuestionAnswerInput,
+  ): Promise<TaskRequirementQuestion> {
+    console.debug("[api] POST /tasks/%s/questions/%s/answer", id, questionId);
+    return request<TaskRequirementQuestion>(`${API_BASE}/${id}/questions/${questionId}/answer`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  answerTaskQuestionBatch(
+    id: string,
+    batchId: string,
+    input: TaskRequirementQuestionBatchAnswerInput,
+  ): Promise<{
+    task?: Task;
+    response: TaskRequirementQuestionsResponse | null;
+    resumed: boolean;
+    resumeStatus: string | null;
+  }> {
+    console.debug("[api] POST /tasks/%s/question-batches/%s/answers", id, batchId);
+    return request(`${API_BASE}/${id}/question-batches/${batchId}/answers`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   },
 
   getTaskWorktree(id: string): Promise<TaskWorktreeInspection> {

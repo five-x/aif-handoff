@@ -140,12 +140,33 @@ export {
   USAGE_EVENT_OUTCOMES,
   type UsageEventOutcome,
   type WarmupBroadcastPayload,
+  type TaskQuestionWsPayload,
   type ChatSessionSource,
   type ChatSession,
   type CreateChatSessionInput,
   type UpdateChatSessionInput,
   type ChatSessionMessage,
 } from "./types.js";
+
+export {
+  REQUIREMENT_ANSWER_TYPES,
+  REQUIREMENT_QUESTION_STAGES,
+  REQUIREMENT_QUESTION_STATUSES,
+  asksForRawSecret,
+  containsSecretLikeAnswer,
+  validateRequirementAnswer,
+  type RequirementAnswerType,
+  type RequirementAnswerValidationResult,
+  type RequirementQuestionAnswerAuthor,
+  type RequirementQuestionStage,
+  type RequirementQuestionStatus,
+  type TaskRequirementQuestion,
+  type TaskRequirementQuestionAnswerInput,
+  type TaskRequirementQuestionBatch,
+  type TaskRequirementQuestionBatchAnswerInput,
+  type TaskRequirementQuestionInput,
+  type TaskRequirementQuestionsResponse,
+} from "./requirementsQuestions.js";
 
 export {
   TASK_INTENTS,

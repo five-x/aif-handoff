@@ -19,6 +19,12 @@ import type {
 import type { RuntimeStage } from "./constants.js";
 import type { TaskIntent } from "./taskIntent.js";
 import type {
+  RequirementAnswerType,
+  RequirementQuestionAnswerAuthor,
+  RequirementQuestionStage,
+  RequirementQuestionStatus,
+} from "./requirementsQuestions.js";
+import type {
   AuditEvidenceGrade,
   AuditEvidenceKind,
   AuditEvidenceRedactionStatus,
@@ -91,6 +97,14 @@ export const tasks = sqliteTable("tasks", {
   skipReview: integer("skip_review", { mode: "boolean" }).notNull().default(false),
   useSubagents: integer("use_subagents", { mode: "boolean" }).notNull().default(false),
   status: text("status").$type<TaskStatus>().notNull().default("backlog"),
+  requirementsCycleCount: integer("requirements_cycle_count").notNull().default(0),
+  requirementsConfidence: real("requirements_confidence"),
+  requirementsSnapshotId: text("requirements_snapshot_id"),
+  needsInputBatchId: text("needs_input_batch_id"),
+  needsInputStage: text("needs_input_stage"),
+  needsInputReason: text("needs_input_reason"),
+  lastHumanAnswerAt: text("last_human_answer_at"),
+  lastAutoResumeAt: text("last_auto_resume_at"),
   priority: integer("priority").notNull().default(0),
   position: real("position").notNull().default(1000.0),
   parentTaskId: text("parent_task_id"),
@@ -147,6 +161,47 @@ export const tasks = sqliteTable("tasks", {
 
 export type TaskRow = typeof tasks.$inferSelect;
 export type NewTaskRow = typeof tasks.$inferInsert;
+
+export const taskRequirementQuestions = sqliteTable("task_requirement_questions", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  taskId: text("task_id").notNull(),
+  projectId: text("project_id").notNull(),
+  stage: text("stage").$type<RequirementQuestionStage>().notNull(),
+  targetResumeStage: text("target_resume_stage")
+    .$type<RequirementQuestionStage>()
+    .notNull()
+    .default("requirements_analysis"),
+  cycleNumber: integer("cycle_number").notNull().default(1),
+  batchId: text("batch_id").notNull(),
+  idempotencyKey: text("idempotency_key"),
+  question: text("question").notNull(),
+  whyNeeded: text("why_needed").notNull(),
+  blocking: integer("blocking", { mode: "boolean" }).notNull().default(true),
+  answerType: text("answer_type").$type<RequirementAnswerType>().notNull().default("textarea"),
+  optionsJson: text("options_json"),
+  defaultAnswer: text("default_answer"),
+  placeholder: text("placeholder"),
+  status: text("status").$type<RequirementQuestionStatus>().notNull().default("open"),
+  answer: text("answer"),
+  answerAttachmentsJson: text("answer_attachments_json"),
+  answerAuthor: text("answer_author").$type<RequirementQuestionAnswerAuthor | null>(),
+  answeredAt: text("answered_at"),
+  resolvedAt: text("resolved_at"),
+  resolutionNote: text("resolution_note"),
+  sourceAgent: text("source_agent").notNull().default("requirements-analyst"),
+  sourcePromptHash: text("source_prompt_hash"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type TaskRequirementQuestionRow = typeof taskRequirementQuestions.$inferSelect;
+export type NewTaskRequirementQuestionRow = typeof taskRequirementQuestions.$inferInsert;
 
 export const taskComments = sqliteTable("task_comments", {
   id: text("id")

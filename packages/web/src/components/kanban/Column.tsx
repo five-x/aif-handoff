@@ -18,6 +18,12 @@ const OWNER_BADGES: Record<TaskStatus, Array<{ label: string; className: string 
   backlog: [
     { label: "Human controlled", className: "text-cyan-300 border-cyan-500/35 bg-cyan-500/10" },
   ],
+  requirements_analysis: [
+    { label: "AI controlled", className: "text-sky-300 border-sky-500/35 bg-sky-500/10" },
+  ],
+  needs_input: [
+    { label: "Human controlled", className: "text-cyan-300 border-cyan-500/35 bg-cyan-500/10" },
+  ],
   planning: [
     { label: "AI controlled", className: "text-amber-300 border-amber-500/35 bg-amber-500/10" },
   ],

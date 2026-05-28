@@ -87,6 +87,14 @@ function ensureTables(sqlite: Database.Database): void {
       skip_review INTEGER NOT NULL DEFAULT 0,
       use_subagents INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'backlog',
+      requirements_cycle_count INTEGER NOT NULL DEFAULT 0,
+      requirements_confidence REAL,
+      requirements_snapshot_id TEXT,
+      needs_input_batch_id TEXT,
+      needs_input_stage TEXT,
+      needs_input_reason TEXT,
+      last_human_answer_at TEXT,
+      last_auto_resume_at TEXT,
       priority INTEGER NOT NULL DEFAULT 0,
       position REAL NOT NULL DEFAULT 1000.0,
       parent_task_id TEXT,
@@ -131,6 +139,36 @@ function ensureTables(sqlite: Database.Database): void {
       scheduled_at TEXT,
       branch_name TEXT,
       worktree_path TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS task_requirement_questions (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      target_resume_stage TEXT NOT NULL DEFAULT 'requirements_analysis',
+      cycle_number INTEGER NOT NULL DEFAULT 1,
+      batch_id TEXT NOT NULL,
+      idempotency_key TEXT,
+      question TEXT NOT NULL,
+      why_needed TEXT NOT NULL,
+      blocking INTEGER NOT NULL DEFAULT 1,
+      answer_type TEXT NOT NULL DEFAULT 'textarea',
+      options_json TEXT,
+      default_answer TEXT,
+      placeholder TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      answer TEXT,
+      answer_attachments_json TEXT,
+      answer_author TEXT,
+      answered_at TEXT,
+      resolved_at TEXT,
+      resolution_note TEXT,
+      source_agent TEXT NOT NULL DEFAULT 'requirements-analyst',
+      source_prompt_hash TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
@@ -1173,6 +1211,48 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 36,
+    description: "Add requirements intake task fields and questions table",
+    sql: `
+      ALTER TABLE tasks ADD COLUMN requirements_cycle_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE tasks ADD COLUMN requirements_confidence REAL;
+      ALTER TABLE tasks ADD COLUMN requirements_snapshot_id TEXT;
+      ALTER TABLE tasks ADD COLUMN needs_input_batch_id TEXT;
+      ALTER TABLE tasks ADD COLUMN needs_input_stage TEXT;
+      ALTER TABLE tasks ADD COLUMN needs_input_reason TEXT;
+      ALTER TABLE tasks ADD COLUMN last_human_answer_at TEXT;
+      ALTER TABLE tasks ADD COLUMN last_auto_resume_at TEXT;
+      CREATE TABLE IF NOT EXISTS task_requirement_questions (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        target_resume_stage TEXT NOT NULL DEFAULT 'requirements_analysis',
+        cycle_number INTEGER NOT NULL DEFAULT 1,
+        batch_id TEXT NOT NULL,
+        idempotency_key TEXT,
+        question TEXT NOT NULL,
+        why_needed TEXT NOT NULL,
+        blocking INTEGER NOT NULL DEFAULT 1,
+        answer_type TEXT NOT NULL DEFAULT 'textarea',
+        options_json TEXT,
+        default_answer TEXT,
+        placeholder TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        answer TEXT,
+        answer_attachments_json TEXT,
+        answer_author TEXT,
+        answered_at TEXT,
+        resolved_at TEXT,
+        resolution_note TEXT,
+        source_agent TEXT NOT NULL DEFAULT 'requirements-analyst',
+        source_prompt_hash TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -1489,6 +1569,11 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_tasks_hierarchy_role ON tasks(project_id, hierarchy_role, status)",
     // Task comments lookup by task
     "CREATE INDEX IF NOT EXISTS idx_task_comments_task_id ON task_comments(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_task_id ON task_requirement_questions(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_project_id ON task_requirement_questions(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_status ON task_requirement_questions(status)",
+    "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_batch_id ON task_requirement_questions(batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_task_status ON task_requirement_questions(task_id, status)",
     // Task locking: find unlocked or stale-locked tasks
     "CREATE INDEX IF NOT EXISTS idx_tasks_locked ON tasks(locked_by, locked_until)",
     // Coordinator scheduled-task scan: backlog tasks with due scheduled_at

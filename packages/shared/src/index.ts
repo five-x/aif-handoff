@@ -23,6 +23,7 @@ export {
   codexLimitHeads,
   codexLimitHistory,
   codexIndexCursors,
+  taskRequirementQuestions,
 } from "./schema.js";
 export type {
   ProjectRow,
@@ -72,6 +73,8 @@ export type {
   NewCodexLimitHistoryRow,
   CodexIndexCursorRow,
   NewCodexIndexCursorRow,
+  TaskRequirementQuestionRow,
+  NewTaskRequirementQuestionRow,
 } from "./schema.js";
 export {
   CONFIG_AUDIT_ACTIONS,
@@ -247,7 +250,28 @@ export {
   type CreateChatSessionInput,
   type UpdateChatSessionInput,
   type ChatSessionMessage,
+  type TaskQuestionWsPayload,
 } from "./types.js";
+
+export {
+  REQUIREMENT_ANSWER_TYPES,
+  REQUIREMENT_QUESTION_STAGES,
+  REQUIREMENT_QUESTION_STATUSES,
+  asksForRawSecret,
+  containsSecretLikeAnswer,
+  validateRequirementAnswer,
+  type RequirementAnswerType,
+  type RequirementAnswerValidationResult,
+  type RequirementQuestionAnswerAuthor,
+  type RequirementQuestionStage,
+  type RequirementQuestionStatus,
+  type TaskRequirementQuestion,
+  type TaskRequirementQuestionAnswerInput,
+  type TaskRequirementQuestionBatch,
+  type TaskRequirementQuestionBatchAnswerInput,
+  type TaskRequirementQuestionInput,
+  type TaskRequirementQuestionsResponse,
+} from "./requirementsQuestions.js";
 
 // Task intent contract
 export {
