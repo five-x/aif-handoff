@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260527-roadmap-audit-decomposition-ordered-e2e::entity-capsule
+memory_id: task::aif-handoff::work::work-20260528-requirements-intake-remaining-phases::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260527-roadmap-audit-decomposition-ordered-e2e
-source_path: docs/rdpi/work/work-20260527-roadmap-audit-decomposition-ordered-e2e
+task_id: work-20260528-requirements-intake-remaining-phases
+source_path: docs/rdpi/work/work-20260528-requirements-intake-remaining-phases
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -25,10 +25,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260527-roadmap-audit-decomposition-ordered-e2e/research.md
-- docs/rdpi/work/work-20260527-roadmap-audit-decomposition-ordered-e2e/design.md
-- docs/rdpi/work/work-20260527-roadmap-audit-decomposition-ordered-e2e/plan.md
-- docs/rdpi/work/work-20260527-roadmap-audit-decomposition-ordered-e2e/result.md
+- docs/rdpi/work/work-20260528-requirements-intake-remaining-phases/research.md
+- docs/rdpi/work/work-20260528-requirements-intake-remaining-phases/design.md
+- docs/rdpi/work/work-20260528-requirements-intake-remaining-phases/plan.md
+- docs/rdpi/work/work-20260528-requirements-intake-remaining-phases/result.md
   created_at: 2026-05-28
   last_verified_at: 2026-05-28
 
@@ -36,7 +36,7 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task work-20260527-roadmap-audit-decomposition-ordered-e2e.
+Current capsule for entity aif-handoff, refreshed by task work-20260528-requirements-intake-remaining-phases.
 
 # Why it matters
 
@@ -49,3 +49,11 @@ Reuse before editing the same component or domain.
 # When not to reuse
 
 Do not reuse if the entity boundary or ownership changed.
+
+## Active decisions
+
+- accepted RDPI research/design/plan artifacts;
+- queued child intake cards for the remaining Requirements Intake lifecycle slices;
+- empty RDPI scaffolds for those child cards;
+- result and memory-review artifacts after gates pass;
+- matching intake status/index updates.
