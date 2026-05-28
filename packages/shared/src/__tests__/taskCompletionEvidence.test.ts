@@ -4365,6 +4365,61 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("missing_report_artifact");
   });
 
+  it("detects committed HEAD audit reports when the configured base branch is absent", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "app.ts"), "export const value = 1;\n", "utf8");
+    execFileSync("git", ["add", "src/app.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/no-base-report"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    mkdirSync(join(root, "reports"), { recursive: true });
+    writeFileSync(
+      join(root, "reports", "audit.md"),
+      [
+        "No validated findings.",
+        "Risk hypotheses: risk-src-1 for `src/app.ts:1` source value drift was covered and absent.",
+        "",
+        "Checked files:",
+        "- `src/app.ts:1`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "value" src/app.ts` output: `src/app.ts:1:export const value = 1;`',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "reports/audit.md"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add audit report", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["branch", "-D", "main"], { cwd: root, stdio: "ignore" });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      task: {
+        id: "audit-no-base-report",
+        title: "Audit source scope",
+        description: "Scope: src\nReport artifact: reports/audit.md",
+        taskIntent: "audit",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.evidence.reportArtifactFiles).toEqual(["reports/audit.md"]);
+    expect(codes(result)).not.toContain("missing_report_artifact");
+    expect(result.evidence.auditReportValidation.issues.map((issue) => issue.code)).not.toContain(
+      "missing_scope_coverage",
+    );
+  });
+
   it("passes task scope into audit report validation for committed reports", () => {
     const root = initRepo();
     mkdirSync(join(root, "src"), { recursive: true });

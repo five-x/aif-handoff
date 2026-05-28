@@ -415,6 +415,19 @@ function collectChangedFiles(projectRoot: string): {
       }
     }
   }
+  const headCommitFiles = runGit(projectRoot, [
+    "diff-tree",
+    "--no-commit-id",
+    "--name-only",
+    "-r",
+    "HEAD",
+  ]);
+  if (headCommitFiles) {
+    for (const file of headCommitFiles.split(/\r?\n/).map(normalizeRelativePath).filter(Boolean)) {
+      committedFiles.add(file);
+      files.add(file);
+    }
+  }
 
   return {
     gitAvailable: true,

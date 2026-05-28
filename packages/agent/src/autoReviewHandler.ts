@@ -285,6 +285,7 @@ export async function handleAutoReviewGate(
   const currentIteration = (refreshedTask.reviewIterationCount ?? 0) + 1;
   const maxIterations = refreshedTask.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
   const stallThreshold = env.AGENT_AUTO_REVIEW_STALL_THRESHOLD;
+  const reviewProjectRoot = refreshedTask.worktreePath ?? input.projectRoot;
 
   logActivity(
     input.taskId,
@@ -294,7 +295,7 @@ export async function handleAutoReviewGate(
 
   const reviewGate = await evaluateReviewCommentsForAutoMode({
     taskId: input.taskId,
-    projectRoot: input.projectRoot,
+    projectRoot: reviewProjectRoot,
     reviewComments: refreshedTask.reviewComments,
     strategy: env.AGENT_AUTO_REVIEW_STRATEGY,
     iteration: currentIteration,
@@ -483,7 +484,7 @@ export async function handleAutoReviewGate(
   if (reviewGate.status === "request_changes") {
     const autoReviewState = withReworkSnapshot({
       taskId: input.taskId,
-      projectRoot: input.projectRoot,
+      projectRoot: reviewProjectRoot,
       iteration: currentIteration,
       autoReviewState: reviewGate.autoReviewState,
     });

@@ -11,6 +11,10 @@ import {
   resolveTaskIntentDefaults,
   getEnv,
   classifyAuditDecompositionRequest,
+  parseExpectedAuditReportArtifactPath,
+  isGitRepo,
+  projectSupportsTaskWorktrees,
+  projectUsesSharedBranchIsolation,
   findSecretLikeKeys,
   isManualReviewBlockedTask,
   summarizeTaskRuntimeOverride,
@@ -74,6 +78,10 @@ import {
   listConfigAuditEvents,
   listProjectConfigWorkBlockers,
   collectTaskRuntimeOverrideBlockers,
+  createRoadmapBatchContract,
+  findRoadmapBatchArtifactByTaskId,
+  type RoadmapBatchExecutionPolicy,
+  type TaskFieldsUpdate,
   type TaskRow,
 } from "@aif/data";
 import { validateProjectScopedRuntimeProfileSelections } from "../services/runtimeProfileScope.js";
@@ -94,6 +102,66 @@ function parseRuntimeOptionsForAudit(
   } catch {
     return null;
   }
+}
+
+function parseStoredObjectForTaskRollback(
+  raw: string | null | undefined,
+): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function taskUpdateRollbackFields(existing: TaskRow): TaskFieldsUpdate {
+  return {
+    title: existing.title,
+    description: existing.description ?? "",
+    sourceRef: existing.sourceRef ?? null,
+    attachments: parseAttachments(existing.attachments),
+    priority: existing.priority,
+    autoMode: existing.autoMode,
+    taskIntent: existing.taskIntent,
+    isFix: existing.isFix,
+    plannerMode: existing.plannerMode,
+    planPath: existing.planPath,
+    planDocs: existing.planDocs,
+    planTests: existing.planTests,
+    skipReview: existing.skipReview,
+    useSubagents: existing.useSubagents,
+    implementationLog: existing.implementationLog,
+    implementationManifest: parseStoredObjectForTaskRollback(existing.implementationManifestJson),
+    reviewComments: existing.reviewComments,
+    agentActivityLog: existing.agentActivityLog,
+    blockedReason: existing.blockedReason,
+    blockedFromStatus: existing.blockedFromStatus,
+    retryAfter: existing.retryAfter,
+    retryCount: existing.retryCount,
+    roadmapAlias: existing.roadmapAlias,
+    tags: parseStoredTagsForAuditRoute(existing.tags),
+    reworkRequested: existing.reworkRequested,
+    reviewIterationCount: existing.reviewIterationCount,
+    maxReviewIterations: existing.maxReviewIterations,
+    manualReviewRequired: existing.manualReviewRequired,
+    autoReviewState: parseStoredObjectForTaskRollback(
+      existing.autoReviewStateJson,
+    ) as TaskFieldsUpdate["autoReviewState"],
+    paused: existing.paused,
+    lastHeartbeatAt: existing.lastHeartbeatAt,
+    runtimeProfileId: existing.runtimeProfileId,
+    modelOverride: existing.modelOverride,
+    runtimeOptions: parseRuntimeOptionsForAudit(existing.runtimeOptionsJson),
+    scheduledAt: existing.scheduledAt,
+    worktreePath: existing.worktreePath,
+    parentTaskId: existing.parentTaskId,
+    hierarchyRole: existing.hierarchyRole,
+    parentCloseoutPolicy: existing.parentCloseoutPolicy,
+  };
 }
 
 function taskHierarchyContractError(
@@ -135,6 +203,86 @@ function taskRuntimeOptionsSecretLikeKeys(
   runtimeOptions: Record<string, unknown> | null | undefined,
 ) {
   return findSecretLikeKeys(runtimeOptions ?? {});
+}
+
+function resolveDirectAuditExecutionPolicy(
+  projectRoot: string | null | undefined,
+): RoadmapBatchExecutionPolicy {
+  if (
+    projectRoot &&
+    isGitRepo(projectRoot) &&
+    projectUsesSharedBranchIsolation(projectRoot) &&
+    getEnv().AIF_TASK_WORKTREES_ENABLED &&
+    projectSupportsTaskWorktrees(projectRoot)
+  ) {
+    return "worktree_isolated";
+  }
+  return "serialized_shared_checkout";
+}
+
+function directAuditRoadmapAlias(
+  taskId: string,
+  requestedAlias: string | null | undefined,
+): string {
+  const normalized = requestedAlias?.trim();
+  return normalized || `direct-audit-${taskId.slice(0, 8)}`;
+}
+
+function parseStoredTagsForAuditRoute(tags: string | string[] | null | undefined): string[] {
+  if (Array.isArray(tags)) return tags;
+  if (!tags) return [];
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    return Array.isArray(parsed)
+      ? parsed.filter((tag): tag is string => typeof tag === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function validateDirectAuditTaskContract(input: {
+  title: string;
+  description: string | null | undefined;
+  roadmapAlias?: string | null;
+  tags?: string[] | string | null;
+}):
+  | { ok: true; reportArtifactPath: string }
+  | { ok: false; body: Record<string, unknown>; status: ContentfulStatusCode } {
+  const description = input.description ?? "";
+  const auditDecomposition = classifyAuditDecompositionRequest({
+    title: input.title,
+    description: [
+      description,
+      input.roadmapAlias ? `Roadmap alias: ${input.roadmapAlias}` : "",
+      ...parseStoredTagsForAuditRoute(input.tags).map((tag) => `Tag: ${tag}`),
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  });
+  if (auditDecomposition.requiresDecomposition) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "Broad audit requests must be decomposed into an audit roadmap before execution.",
+        code: "AUDIT_DECOMPOSITION_REQUIRED",
+        decomposition: auditDecomposition,
+      },
+    };
+  }
+  const reportArtifactPath = parseExpectedAuditReportArtifactPath(description);
+  if (!reportArtifactPath) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: "Direct audit tasks must declare a concrete Report artifact path.",
+        code: "AUDIT_REPORT_ARTIFACT_REQUIRED",
+      },
+    };
+  }
+  return { ok: true, reportArtifactPath };
 }
 
 function hasTaskRuntimeOverrideInput(input: object): boolean {
@@ -563,27 +711,17 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
       : (body.useSubagents ??
         (taskIntent === "general" ? envUseSubagents : intentDefaults.useSubagents));
 
-  if (taskIntent === "audit") {
-    const auditDecomposition = classifyAuditDecompositionRequest({
-      title: body.title,
-      description: [
-        body.description,
-        body.roadmapAlias ? `Roadmap alias: ${body.roadmapAlias}` : "",
-        body.tags.length > 0 ? `Tags: ${body.tags.join(", ")}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    });
-    if (auditDecomposition.requiresDecomposition) {
-      return c.json(
-        {
-          error: "Broad audit requests must be decomposed into an audit roadmap before execution.",
-          code: "AUDIT_DECOMPOSITION_REQUIRED",
-          decomposition: auditDecomposition,
-        },
-        400,
-      );
-    }
+  const directAuditContract =
+    taskIntent === "audit"
+      ? validateDirectAuditTaskContract({
+          title: body.title,
+          description: body.description,
+          roadmapAlias: body.roadmapAlias,
+          tags: body.tags,
+        })
+      : null;
+  if (directAuditContract?.ok === false) {
+    return c.json(directAuditContract.body, directAuditContract.status);
   }
   if (
     body.plannerMode === undefined ||
@@ -650,6 +788,52 @@ tasksRouter.post("/", jsonValidator(createTaskSchema), async (c) => {
     throw error;
   }
   if (!created) return c.json({ error: "Failed to create task" }, 500);
+
+  if (taskIntent === "audit") {
+    if (!directAuditContract?.ok) {
+      deleteTask(created.id, { allowAttachedChild: true });
+      return c.json(
+        {
+          error: "Direct audit tasks must declare a concrete Report artifact path.",
+          code: "AUDIT_REPORT_ARTIFACT_REQUIRED",
+        },
+        400,
+      );
+    }
+    try {
+      createRoadmapBatchContract({
+        projectId: body.projectId,
+        roadmapAlias: directAuditRoadmapAlias(created.id, body.roadmapAlias),
+        taskIntent: "audit",
+        executionPolicy: resolveDirectAuditExecutionPolicy(project?.rootPath),
+        createdTaskIds: [created.id],
+        artifacts: [
+          {
+            taskId: created.id,
+            role: "report",
+            artifactPath: directAuditContract.reportArtifactPath,
+            projectRoot: project?.rootPath ?? null,
+          },
+        ],
+      });
+    } catch (error) {
+      deleteTask(created.id, { allowAttachedChild: true });
+      log.error(
+        {
+          taskId: created.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to create direct audit report artifact contract",
+      );
+      return c.json(
+        {
+          error: "Failed to create direct audit report artifact contract",
+          code: "AUDIT_ARTIFACT_CONTRACT_CREATE_FAILED",
+        },
+        500,
+      );
+    }
+  }
 
   // Persist attachments to project files and update the task with path-based metadata
   if (body.attachments.length > 0) {
@@ -891,6 +1075,59 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
     }
   }
 
+  let resultingTaskIntent = existing.taskIntent;
+  if (body.taskIntent !== undefined) {
+    resultingTaskIntent = normalizeTaskIntent(body.taskIntent, existing.taskIntent);
+  }
+  if (body.isFix === true) {
+    resultingTaskIntent = "fix";
+  } else if (
+    body.isFix === false &&
+    body.taskIntent === undefined &&
+    existing.taskIntent === "fix"
+  ) {
+    resultingTaskIntent = "general";
+  }
+
+  let directAuditUpdateContract: {
+    reportArtifactPath: string;
+    roadmapAlias: string | null | undefined;
+  } | null = null;
+  if (resultingTaskIntent === "audit") {
+    const effectiveRoadmapAlias = Object.prototype.hasOwnProperty.call(body, "roadmapAlias")
+      ? body.roadmapAlias
+      : existing.roadmapAlias;
+    const directAuditValidation = validateDirectAuditTaskContract({
+      title: body.title ?? existing.title,
+      description: body.description ?? existing.description,
+      roadmapAlias: effectiveRoadmapAlias,
+      tags: body.tags ?? existing.tags,
+    });
+    if (!directAuditValidation.ok) {
+      return c.json(directAuditValidation.body, directAuditValidation.status);
+    }
+    const existingAuditArtifact = findRoadmapBatchArtifactByTaskId(id);
+    if (existingAuditArtifact) {
+      if (
+        existingAuditArtifact.role !== "report" ||
+        existingAuditArtifact.artifactPath !== directAuditValidation.reportArtifactPath
+      ) {
+        return c.json(
+          {
+            error: "Existing audit artifact contract does not match the requested report artifact.",
+            code: "AUDIT_ARTIFACT_CONTRACT_CONFLICT",
+          },
+          409,
+        );
+      }
+    } else {
+      directAuditUpdateContract = {
+        reportArtifactPath: directAuditValidation.reportArtifactPath,
+        roadmapAlias: effectiveRoadmapAlias,
+      };
+    }
+  }
+
   const { plan, attachments: incomingAttachments, ...updatePayload } = body;
 
   // Mirror POST /tasks: when plannerMode changes, fill omitted flags from mode defaults.
@@ -973,6 +1210,62 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
     throw error;
   }
   if (!updated) return c.json({ error: "Task not found after update" }, 500);
+  if (directAuditUpdateContract) {
+    try {
+      createRoadmapBatchContract({
+        projectId: existing.projectId,
+        roadmapAlias: directAuditRoadmapAlias(id, directAuditUpdateContract.roadmapAlias),
+        taskIntent: "audit",
+        executionPolicy: resolveDirectAuditExecutionPolicy(project?.rootPath),
+        createdTaskIds: [id],
+        artifacts: [
+          {
+            taskId: id,
+            role: "report",
+            artifactPath: directAuditUpdateContract.reportArtifactPath,
+            projectRoot: project?.rootPath ?? null,
+          },
+        ],
+      });
+      updated = findTaskById(id) ?? updated;
+    } catch (error) {
+      log.error(
+        {
+          taskId: id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to create direct audit report artifact contract during task update",
+      );
+      try {
+        updateTask(id, taskUpdateRollbackFields(existing));
+        if (attachmentsCreatedForFailureCleanup.length > 0 && projectRootForCleanup) {
+          cleanupReplacedAttachments(
+            projectRootForCleanup,
+            attachmentsCreatedForFailureCleanup,
+            [],
+          );
+        }
+        if (hasPlanUpdate) {
+          updateTaskPlan(id, existing.plan ?? null, existing.isFix, existing.planPath);
+        }
+      } catch (rollbackError) {
+        log.error(
+          {
+            taskId: id,
+            error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+          },
+          "Failed to roll back direct audit task update after artifact contract creation failure",
+        );
+      }
+      return c.json(
+        {
+          error: "Failed to create direct audit report artifact contract",
+          code: "AUDIT_ARTIFACT_CONTRACT_CREATE_FAILED",
+        },
+        500,
+      );
+    }
+  }
   if (hasTaskRuntimeOverrideInput(body)) {
     appendTaskRuntimeOverrideAudit({ before: beforeRuntimeOverride, task: updated });
   }

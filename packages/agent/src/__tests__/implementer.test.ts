@@ -828,6 +828,181 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
+  it("keeps high-signal identifier risk evidence ahead of generic wording", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "README.md"),
+      [
+        "# Project",
+        "",
+        "Quick start configuration:",
+        "- `TRANSCRIPTION_BASE_URL` defaults to placeholder endpoint value.",
+        "- `TRANSCRIPTION_MODEL` defaults to whisper-1.",
+        "- `BOT_BACKUP_PASSPHRASE` is used for encrypted restore-verify checks.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed readme", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    queryMock.mockImplementationOnce(() => {
+      writeFileSync(
+        join(projectRoot, "audit", "env.md"),
+        ["# Audit", "", "No validated findings.", "", "- `README.md:4`"].join("\n"),
+        "utf8",
+      );
+      return streamSuccess("Implementation done");
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-identifier-risk-terms",
+        projectId: "project-1",
+        title: "Positive trusted direct audit canary",
+        description: [
+          "Scope: README.md",
+          "Risk hypotheses:",
+          "- risk-readme-transcription-base-url: README.md documents TRANSCRIPTION_BASE_URL and TRANSCRIPTION_MODEL in the quick-start section; verify the scoped documentation uses a placeholder or non-secret value and does not expose an API key or token.",
+          "Allowed changes: only create/update audit/env.md.",
+          "Report artifact: audit/env.md",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Produce audit report",
+        useSubagents: true,
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-identifier-risk-terms",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-identifier-risk-terms"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-identifier-risk-terms",
+          role: "report",
+          artifactPath: "audit/env.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-identifier-risk-terms", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(findRoadmapBatchArtifactByTaskId("task-audit-identifier-risk-terms")).toBeTruthy();
+    const report = readFileSync(join(projectRoot, "audit", "env.md"), "utf8");
+    expect(readAuditReportManifest(report).outcome).toBe("validated_no_findings");
+    expect(report).toContain(
+      'Command `git grep -n -E "TRANSCRIPTION_BASE_URL|TRANSCRIPTION_MODEL" -- README.md`',
+    );
+    expect(report).toContain("README.md:4:- `TRANSCRIPTION_BASE_URL`");
+    expect(report).not.toContain("restore-verify");
+  });
+
+  it("does not treat normal generated audit contract text as a direct canary", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "README.md"),
+      [
+        "# Project",
+        "",
+        "The roadmap generator includes Trusted artifact lifecycle and No-findings rule wording.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed generated audit text", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    queryMock.mockImplementationOnce(() => {
+      writeFileSync(
+        join(projectRoot, "audit", "generated.md"),
+        ["# Audit", "", "No validated findings.", "", "- `README.md:3`"].join("\n"),
+        "utf8",
+      );
+      return streamSuccess("Implementation done");
+    });
+
+    db.insert(tasks)
+      .values({
+        id: "task-audit-generated-contract-text",
+        projectId: "project-1",
+        title: "Audit: generated source report",
+        roadmapAlias: "audit-generated-contract-canary",
+        description: [
+          "Scope: README.md",
+          "Task intent: audit",
+          "Risk hypotheses: risk-readme-contract README.md documents Trusted artifact lifecycle and No-findings rule wording; verify the generated source report treats those phrases as contract text only.",
+          "Allowed changes: only create/update audit/generated.md.",
+          "Report artifact: audit/generated.md",
+          "Expected report artifact: audit/generated.md",
+          "Allowed write paths: audit/generated.md",
+          "Dependency order: source report sequence 1; no predecessor.",
+          "Trusted artifact lifecycle: report artifacts must be committed and validated before synthesis.",
+          "No-findings rule: no-findings claims must cite scoped evidence.",
+          "Constraint: diagnostic-only; do not implement fixes.",
+        ].join("\n"),
+        taskIntent: "audit",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Produce audit report",
+        useSubagents: true,
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "audit-generated-contract-canary",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-generated-contract-text"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-generated-contract-text",
+          role: "report",
+          artifactPath: "audit/generated.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runImplementer("task-audit-generated-contract-text", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const implementCall = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(implementCall.prompt).toContain('"canaryKind": null');
+  });
+
   it("fails closed when post-run audit report repair throws", async () => {
     const db = testDb.current;
     mkdirSync(join(projectRoot, "src"), { recursive: true });
@@ -3546,6 +3721,20 @@ describe("runImplementer rework behavior", () => {
       "A first-run source audit must make a source-specific decision.",
     );
     expect(implementCall.prompt).toContain("Source audit scope discipline:");
+    expect(implementCall.prompt).toContain("Audit writer contract:");
+    expect(implementCall.prompt).toContain('"auditWriterContract"');
+    expect(implementCall.prompt).toContain('"taskIntent": "audit"');
+    expect(implementCall.prompt).toContain(
+      '"expectedReportArtifactPath": "audit/security-controls.md"',
+    );
+    expect(implementCall.prompt).toContain('"allowedWritePaths"');
+    expect(implementCall.prompt).toContain('"declaredScopeRoots"');
+    expect(implementCall.prompt).toContain('"manifest": true');
+    expect(implementCall.prompt).toContain('"ledger": true');
+    expect(implementCall.prompt).toContain('"sourceSnapshot": true');
+    expect(implementCall.prompt).toContain('"committedBlob": true');
+    expect(implementCall.prompt).toContain("fabricated command output");
+    expect(implementCall.prompt).toContain("local AIF validation");
     expect(implementCall.prompt).toContain("Audit report manifest contract:");
     expect(implementCall.prompt).toContain("taskId: task-audit-first-run-report");
     expect(implementCall.prompt).toContain("artifactPath: audit/security-controls.md");
@@ -3668,9 +3857,10 @@ describe("runImplementer rework behavior", () => {
     );
     const updatedArtifact = findRoadmapBatchArtifactByTaskId("task-audit-budget-direct-repair");
     expect(updatedArtifact?.state).toBe("valid");
-    expect(readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8")).toContain(
-      "```audit-report-manifest",
-    );
+    const report = readFileSync(join(projectRoot, "audit", "architecture.md"), "utf8");
+    expect(report).toContain("```audit-report-manifest");
+    expect(report).toMatch(/\| `README\.md` \| `README\.md:\d+` \| Command /);
+    expect(report).not.toMatch(/\| `README\.md` \| `README\.md:\d+`,/);
   });
 
   it("does not invoke ledger-writer when budget-exhaustion deterministic repair fails", async () => {

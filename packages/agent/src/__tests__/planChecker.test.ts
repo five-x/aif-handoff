@@ -883,6 +883,76 @@ describe("runPlanChecker", () => {
     ).toBe(true);
   });
 
+  it("persists deterministic direct audit canary plan when root scope is concrete", async () => {
+    const description = [
+      "Scope: README.md",
+      "Risk hypotheses: risk-readme README.md onboarding claims may drift from repository evidence.",
+      "Report artifact: audit/direct-audit-positive-canary.md",
+      "Remote validation target: http://192.168.88.67",
+    ].join("\n");
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-direct-audit-canary",
+        projectId: "project-1",
+        title: "Positive trusted direct audit canary",
+        taskIntent: "audit",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        description,
+        status: "plan_ready",
+        plan: "<aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+      })
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "project-1",
+      roadmapAlias: "direct-audit-canary",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-direct-audit-canary"],
+      artifacts: [
+        {
+          taskId: "task-direct-audit-canary",
+          role: "report",
+          artifactPath: "audit/direct-audit-positive-canary.md",
+        },
+      ],
+    });
+
+    await runPlanChecker("task-direct-audit-canary", "/tmp/plan-checker-test");
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const row = testDb.current
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-direct-audit-canary"))
+      .get();
+    expect(row?.plan).toContain("## Diagnostic-only plan");
+    expect(row?.plan).toContain(
+      "Expected report artifact: `audit/direct-audit-positive-canary.md`",
+    );
+    expect(row?.plan).toContain("Declared scope: `README.md`");
+    expect(row?.plan).toContain("Allowed write paths:");
+    expect(row?.plan).toContain("Ledger evidence required: yes");
+    expect(row?.plan).toContain("Remote validation target: http://192.168.88.67");
+    expect(
+      evaluateTaskPlanQuality({
+        task: {
+          id: "task-direct-audit-canary",
+          title: "Positive trusted direct audit canary",
+          taskIntent: "audit",
+          plannerMode: "full",
+          createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+          description,
+          auditArtifactRole: "report",
+          roadmapBatchId: "direct-audit-canary",
+        },
+        plan: row?.plan,
+      }).ok,
+    ).toBe(true);
+  });
+
   it("does not replace report-only audit plans with deterministic fallback", async () => {
     const description =
       "Diagnostic only. Do not implement fixes. Report artifact: audit/report-only-audit.md.";

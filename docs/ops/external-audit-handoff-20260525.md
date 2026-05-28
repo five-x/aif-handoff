@@ -59,9 +59,23 @@ Remote validation attempt:
 - Existing positive control `b3de6310-e1bc-4129-92e4-48a32554ed72` currently projects as `artifactState=valid` but `artifactTrustLevel=untrusted`, so it does not satisfy the trusted positive canary acceptance criteria.
 - The temporary remote source patch was reverted, the service was rebuilt back to clean commit `772ba2df08b5725decdbbeff15e7676fee6b1ba9`, and remote project worktrees ended clean.
 
-Current conclusion:
+Historical conclusion before the direct audit canary planner/routing follow-up:
 
 > Audit trust promotion is hardened, bad reports still fail closed, and local generator-quality controls have been improved and tested. The remote Definition of Done is still blocked because fresh positive and negative generator canaries did not reach report production/trusted validation. Remaining open work is upstream audit planner/routing quality for direct audit canary tasks, followed by a fresh roadmap-backed positive trusted canary.
+
+This historical blocker was resolved by the follow-up section below.
+
+## Direct Audit Canary Planner/Routing Follow-up
+
+- Root cause: direct audit canaries could enter free-form planning without a concrete report artifact contract. The resulting plans drifted into placeholder/slash fallback prose, treated the report artifact as the audited scope, omitted concrete source boundaries, and failed the plan-quality guard before report generation.
+- Fix summary: direct audit task creation and audit-intent task updates now require `Report artifact: audit/<name>.md`, create or reuse a report-role roadmap artifact contract, and route canary planning through deterministic diagnostic audit plans. The plan checker accepts root-level source scopes such as `README.md`, rejects local AIF validation, and requires the report artifact, declared scope, allowed writes, ledger, manifest, source snapshot, and committed blob checks. The audit writer receives a structured allowed-evidence contract, and direct canary review uses deterministic audit report validation instead of unrelated specialized reviewer fanout.
+- Negative canary task ID: `0edf9524-d26a-41a3-85b4-0484f89ecfd6`.
+- Negative canary outcome: `blocked_external` / `source_inconclusive`; report `audit/direct-audit-negative-canary-20260527.md` reached generation and failed closed with `irrelevant_grep_match`, `manifest_outcome_mismatch`, and `shallow_evidence`. Validation fingerprint `885af8ebf66c7024`; claim trust level `untrusted`.
+- Positive canary task ID: `5d4c787d-eedd-45c6-883a-440a5d54dbe8`.
+- Positive canary outcome: `done`; report `audit/direct-audit-positive-trusted-canary-20260527-v2.md` reached generation, manifest `valid`, source classification `validated_no_findings`, `trustedAuditArtifact=true`, lifecycle states `draft_written`, `manifest_finalized`, `validator_passed`, `git_committed`, `committed_blob_revalidated`, and `artifact_state_valid` all true. Validation fingerprint `df165cb52bbe70b2`.
+- Runtime lease validation: local runtime/data regression suites continue to cover shared endpoint lease bootstrap, endpoint-key separation, heartbeat/stale recovery, and timeout/cooldown behavior. The direct-canary fix did not weaken endpoint lease routing.
+- Worktree cleanup evidence: the final remote project checkout `/srv/aif-handoff/projects/botIntevra` ended clean on `feature/positive-trusted-direct-audit-canary-202-5d4c78`; `git status --short --branch --untracked-files=all` returned only the branch header. The negative report was invalid but committed on its isolated feature branch, so no untracked dirty audit file or cleanup backup path was produced in that run.
+- Remaining risks: the positive proof is a narrow README-scoped canary. It proves the trusted artifact lifecycle and routing path, not broad audit reasoning quality across large or ambiguous scopes.
 
 ## Remote Worktree Cleanup Evidence
 
@@ -96,9 +110,9 @@ Final container `git status --short --untracked-files=all` for `/home/www/botInt
 
 Please review these areas critically:
 
-- The generator-quality follow-up added local allowed-evidence and cleanup controls, but fresh remote canaries were blocked upstream in planning before report generation. The next review should focus on planner/routing conditions that prevent direct audit canaries from producing child report work.
-- The negative canary description requested `README.md`, but the deterministic diagnostic plan used `config` and `tests`; local prompt contracts now emphasize declared scope, but remote confirmation is still pending.
-- The workflow now backs up and removes untrusted untracked audit artifacts during terminal blocked paths, but remote canary confirmation is still pending because the new canaries did not reach report generation.
+- The planner/routing follow-up unblocked fresh remote direct canaries, but the positive proof is intentionally narrow (`README.md`). Review broader scopes separately before claiming audit-quality consistency.
+- The negative follow-up canary requested `README.md` and the deterministic diagnostic plan preserved that declared scope. It failed closed after report generation with `source_inconclusive`, `irrelevant_grep_match`, `manifest_outcome_mismatch`, and `shallow_evidence`.
+- The workflow backs up and removes untrusted untracked audit artifacts during terminal blocked paths. The fresh negative follow-up canary did not produce a cleanup backup path because the invalid report was already committed on an isolated feature branch, leaving no untracked dirty audit file to remove.
 - Runtime routing improved through endpoint leases, but live canary logs still showed implementer work on `8003` and reviewer work on `8005`; review whether long audit jobs should be forced to `8005` earlier in the lifecycle.
 - The root format gate has unrelated baseline drift; decide whether to fix or narrow the repository-level format script.
 

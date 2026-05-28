@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   AUDIT_ABSENCE_PROOF_REQUIREMENT,
+  AUDIT_CHILD_ORDER_REQUIREMENT,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+  AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT,
   generatePlanPath,
   projects,
   roadmapBatches,
@@ -107,6 +109,7 @@ function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
     synthesis
       ? "Scope: all audit/2026-05-09-*-audit.md reports from this audit batch."
       : "Scope: src/config.ts, src/index.ts",
+    "Task intent: audit",
     "Audit mandate: Act as the area owner and find actionable technical-quality risks.",
     ...(synthesis
       ? []
@@ -115,9 +118,15 @@ function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
         ]),
     "Allowed changes: only create/update one report artifact.",
     `Report artifact: ${reportName}`,
+    `Expected report artifact: ${reportName}`,
+    `Allowed write paths: ${reportName}`,
+    synthesis
+      ? "Dependency order: after all source audit report children are trusted valid or accepted terminal inconclusive/manual-exception."
+      : "Dependency order: source report sequence 1; no predecessor.",
     "Acceptance criteria: inspect the scoped files and record only actionable findings or no validated findings.",
     "Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
     "Manifest requirements: include a fenced audit-report-manifest JSON block with version 1, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
+    AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT,
     "Evidence ID rule: manifest evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 are never evidenceRefs.",
     "Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py.",
     AUDIT_ABSENCE_PROOF_REQUIREMENT,
@@ -127,7 +136,7 @@ function auditTaskDescription(reportName = "audit/2026-05-09-config-audit.md") {
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
     AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
-    ...(synthesis ? [AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT] : []),
+    ...(synthesis ? [AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT] : [AUDIT_CHILD_ORDER_REQUIREMENT]),
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
   ].join("\n");
@@ -1431,6 +1440,13 @@ describe("roadmapGeneration", () => {
       expect(task?.useSubagents).toBe(true);
       expect(task?.tags).toContain("kind:audit");
       expect(task?.tags).toContain("diagnostic-only");
+      expect(task?.description).toContain("Task intent: audit");
+      expect(task?.description).toContain(
+        "Expected report artifact: audit/2026-05-09-config-audit.md",
+      );
+      expect(task?.description).toContain("Allowed write paths: audit/2026-05-09-config-audit.md");
+      expect(task?.description).toContain("Dependency order:");
+      expect(task?.description).toContain("Trusted artifact lifecycle:");
       expect(synthesis?.paused).toBe(true);
       expect(synthesis?.parentTaskId).toBe(parent?.id);
       expect(synthesis?.blockedReason).toContain("synthesis_not_ready");

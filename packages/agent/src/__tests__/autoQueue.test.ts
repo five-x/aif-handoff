@@ -34,6 +34,48 @@ const {
   setTaskFields,
 } = await import("@aif/data");
 
+function trustedNoFindingsValidationDetails() {
+  const artifactSha = "a".repeat(64);
+  const contentSha = "b".repeat(64);
+  return {
+    evidence: {
+      auditReportValidation: {
+        sourceClassification: "validated_no_findings",
+        manifestStatus: "valid",
+        evidenceDepth: {
+          trustedNoFindingsSupported: true,
+          reasonCodes: [],
+        },
+      },
+      auditArtifactLifecycle: {
+        ok: true,
+        artifactPath: "audit/first.md",
+        committedRef: "HEAD",
+        states: {
+          draft_written: true,
+          manifest_finalized: true,
+          validator_passed: true,
+          git_committed: true,
+          committed_blob_revalidated: true,
+          artifact_state_valid: true,
+        },
+        issues: [],
+        worktreeArtifactSha256: artifactSha,
+        committedArtifactSha256: artifactSha,
+        worktreeContentSha256: contentSha,
+        committedContentSha256: contentSha,
+        committedValidation: {
+          ok: true,
+          issueCodes: [],
+          artifactSha256: artifactSha,
+          contentSha256: contentSha,
+          manifestStatus: "valid",
+        },
+      },
+    },
+  };
+}
+
 function seedProject(id: string, opts: { autoQueue?: boolean; parallel?: boolean } = {}) {
   testDb.current
     .insert(projects)
@@ -296,6 +338,67 @@ describe("processAutoQueueAdvance", () => {
       expect(findTaskById("t1")?.status).toBe("backlog");
       expect(findTaskById("t2")?.status).toBe("backlog");
     });
+
+    it("does not advance the second audit report child before the first is release-ready", () => {
+      seedTask("audit-first", "par", 100, { taskIntent: "audit" });
+      seedTask("audit-second", "par", 50, { taskIntent: "audit" });
+      createRoadmapBatchContract({
+        projectId: "par",
+        roadmapAlias: "audit-ordered-parallel",
+        taskIntent: "audit",
+        executionPolicy: "worktree_isolated",
+        createdTaskIds: ["audit-first", "audit-second"],
+        artifacts: [
+          { taskId: "audit-first", role: "report", artifactPath: "audit/first.md" },
+          { taskId: "audit-second", role: "report", artifactPath: "audit/second.md" },
+        ],
+      });
+
+      expect(processAutoQueueAdvance()).toBe(1);
+      expect(findTaskById("audit-first")?.status).toBe("planning");
+      expect(findTaskById("audit-second")?.status).toBe("backlog");
+
+      updateRoadmapBatchArtifactState({
+        taskId: "audit-first",
+        state: "valid",
+        validationDetails: trustedNoFindingsValidationDetails(),
+      });
+
+      expect(processAutoQueueAdvance()).toBe(1);
+      expect(findTaskById("audit-second")?.status).toBe("planning");
+    });
+
+    it("does not release the next audit report child for invalid terminal-looking predecessor evidence", () => {
+      seedTask("invalid-first", "par", 100, {
+        status: "blocked_external",
+        taskIntent: "audit",
+        manualReviewRequired: true,
+      });
+      seedTask("invalid-second", "par", 200, { taskIntent: "audit" });
+      createRoadmapBatchContract({
+        projectId: "par",
+        roadmapAlias: "audit-invalid-predecessor",
+        taskIntent: "audit",
+        executionPolicy: "worktree_isolated",
+        createdTaskIds: ["invalid-first", "invalid-second"],
+        artifacts: [
+          { taskId: "invalid-first", role: "report", artifactPath: "audit/invalid-first.md" },
+          { taskId: "invalid-second", role: "report", artifactPath: "audit/invalid-second.md" },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: "invalid-first",
+        state: "invalid",
+        failureFamily: "invalid_artifact_content",
+        reworkStatus: "terminal_inconclusive",
+        validationDetails: {
+          reasonCodes: ["invalid_artifact_content"],
+        },
+      });
+
+      expect(processAutoQueueAdvance()).toBe(0);
+      expect(findTaskById("invalid-second")?.status).toBe("backlog");
+    });
   });
 
   describe("scheduler + auto-queue interaction", () => {
@@ -329,6 +432,30 @@ describe("processAutoQueueAdvance", () => {
 
       expect(processDueScheduledTasks()).toBe(0);
       expect(findTaskById("t1")?.status).toBe("backlog");
+    });
+
+    it("does not fire a due scheduled audit report child before its predecessor is release-ready", () => {
+      seedProject("scheduled-audit", { autoQueue: true, parallel: true });
+      const past = new Date(Date.now() - 60_000).toISOString();
+      seedTask("scheduled-first", "scheduled-audit", 100, { taskIntent: "audit" });
+      seedTask("scheduled-second", "scheduled-audit", 200, {
+        taskIntent: "audit",
+        scheduledAt: past,
+      });
+      createRoadmapBatchContract({
+        projectId: "scheduled-audit",
+        roadmapAlias: "audit-scheduled-order",
+        taskIntent: "audit",
+        executionPolicy: "worktree_isolated",
+        createdTaskIds: ["scheduled-first", "scheduled-second"],
+        artifacts: [
+          { taskId: "scheduled-first", role: "report", artifactPath: "audit/scheduled-first.md" },
+          { taskId: "scheduled-second", role: "report", artifactPath: "audit/scheduled-second.md" },
+        ],
+      });
+
+      expect(processDueScheduledTasks()).toBe(0);
+      expect(findTaskById("scheduled-second")?.status).toBe("backlog");
     });
   });
 

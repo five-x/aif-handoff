@@ -43,6 +43,7 @@ export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "plan_manifest_missing_verification_commands",
   "plan_manifest_allowed_change_violation",
   "plan_manifest_forbidden_change_violation",
+  "local_aif_validation_forbidden",
 ] as const;
 
 export type TaskPlanQualityIssueCode = (typeof TASK_PLAN_QUALITY_ISSUE_CODES)[number];
@@ -152,6 +153,10 @@ const DIAGNOSTIC_ONLY_PATTERN =
   /\b(?:diagnostic[-\s]?only|report[-\s]?only|audit[-\s]?only|review[-\s]?only|do not implement|must not implement|no implementation|do not create child|must not create child)\b/i;
 const DIAGNOSTIC_SCOPE_VIOLATION_PATTERN =
   /\b(?:implement fixes?|fix findings?|patch code|modify source|create child implementation task|queue child implementation task)\b/i;
+const LOCAL_AIF_VALIDATION_TERMS_PATTERN =
+  /\b(?:localhost|127\.0\.0\.1|local\s+AIF|local\s+dev\s+server|local\s+e2e|AIF_SKIP_DEV_SERVER\s*=\s*0)\b/i;
+const LOCAL_AIF_FORBIDDEN_PATTERN =
+  /\b(?:forbidden|do not|must not|never|not allowed|disallowed|prohibited)\b/i;
 const AUDIT_EVIDENCE_TARGETS_PATTERN =
   /\b(?:scope|scoped evidence targets?|evidence targets?|source targets?|target paths?|authorized source boundaries)\s*:/i;
 const AUDIT_EXCLUSIONS_PATTERN =
@@ -1119,10 +1124,22 @@ function declaredReportArtifactPaths(text: string): string[] {
 function isConcreteAuditBoundaryPath(path: string): boolean {
   const normalized = normalizePath(path).replace(/\/+$/g, "");
   if (!normalized || isAuditReportArtifactPath(normalized)) return false;
+  if (/^[\w.@-]+\.[A-Za-z0-9]+$/.test(normalized)) return true;
   return (
     extractRepoPaths(` ${normalized}`).includes(normalized) ||
     extractConcreteSourceRoots(` ${normalized}`).includes(normalized)
   );
+}
+
+function planUsesForbiddenLocalAifValidation(plan: string): boolean {
+  return plan
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .some(
+      (line) =>
+        LOCAL_AIF_VALIDATION_TERMS_PATTERN.test(line) && !LOCAL_AIF_FORBIDDEN_PATTERN.test(line),
+    );
 }
 
 function concreteAuditBoundariesFromText(text: string): string[] {
@@ -1292,6 +1309,8 @@ export function buildDeterministicDiagnosticPlan(
   const evidenceTargets = taskPaths;
   const taskPathText = formatInlinePaths(taskPaths);
   const evidenceTargetsText = formatInlinePaths(evidenceTargets);
+  const remoteTarget =
+    sourceText.match(/\bhttps?:\/\/192\.168\.88\.67(?:\/api)?\b/)?.[0] ?? "not declared";
   const evidenceStep =
     taskPaths.length > 0
       ? `- [ ] Inspect the task-specific paths ${taskPathText} and cite exact existing file paths for every finding.`
@@ -1310,6 +1329,21 @@ export function buildDeterministicDiagnosticPlan(
     `Report artifact: \`${reportPath}\``,
     `Scope: ${evidenceTargetsText}`,
     `Scoped evidence targets: ${evidenceTargetsText}`,
+    "Contract:",
+    "- Task intent: audit",
+    "- Diagnostic only: yes",
+    `- Expected report artifact: \`${reportPath}\``,
+    `- Declared scope: ${evidenceTargetsText}`,
+    "- Allowed write paths:",
+    `  - \`${reportPath}\``,
+    "- Trusted artifact required: yes",
+    "- Ledger evidence required: yes",
+    "- Manifest required: yes",
+    "- Source snapshot required: yes",
+    "- Committed blob revalidation required: yes",
+    "- No source code changes: yes",
+    "- Local AIF service/e2e: forbidden",
+    `- Remote validation target: ${remoteTarget}`,
     "Excluded areas: generated files, build output, dependency caches, and vendor directories unless explicitly named by the task.",
     "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
     "Child audit reports: not required for this narrow source report.",
@@ -1540,6 +1574,15 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
         issue(
           "diagnostic_scope_violation",
           "Diagnostic task plan appears to implement fixes or child implementation work in the same run.",
+        ),
+      );
+    }
+
+    if (planUsesForbiddenLocalAifValidation(plan)) {
+      issues.push(
+        issue(
+          "local_aif_validation_forbidden",
+          "Audit canary plans must use remote-only validation and must not target localhost or a local AIF service.",
         ),
       );
     }

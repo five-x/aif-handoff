@@ -226,6 +226,11 @@ export function isLowSignalAuditEvidenceLine(input: {
   if (/^(?:#{1,6}\s+|```|~~~)/.test(trimmed)) return true;
   if (/^[{}()[\],;]+$/.test(trimmed)) return true;
 
+  if (/\.(?:md|mdx)$/i.test(input.path)) {
+    if (/^!\[[^\]]*\]\([^)]+\)\s*$/.test(trimmed)) return true;
+    if (/\bhttps?:\/\/\S+/i.test(trimmed)) return true;
+  }
+
   if (/\.(?:ts|tsx|js|jsx|mjs|cjs)$/i.test(input.path)) {
     if (/^import(?:\s+type)?\s+/i.test(trimmed)) return true;
     if (/^export\s+(?:type\s+)?(?:\{[^}]*\}|[A-Za-z0-9_$]+\s+from)\s+from\s+/i.test(trimmed)) {

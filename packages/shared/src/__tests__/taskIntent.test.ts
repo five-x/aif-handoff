@@ -11,9 +11,11 @@ import {
 } from "../taskIntent.js";
 import {
   AUDIT_ABSENCE_PROOF_REQUIREMENT,
+  AUDIT_CHILD_ORDER_REQUIREMENT,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+  AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT,
   validateGeneratedAuditCard,
 } from "../auditRoadmapContract.js";
 import {
@@ -24,21 +26,27 @@ import {
 
 function completeAuditDescription(options: { synthesis?: boolean } = {}) {
   const synthesis = options.synthesis ?? false;
+  const reportPath = synthesis ? "audit/security-summary.md" : "audit/config-audit.md";
   return [
     synthesis
       ? "Scope: all audit/2026-05-13-*-audit.md reports from this audit batch."
       : "Scope: src/config.ts",
+    "Task intent: audit",
     "Audit mandate: Act as the security owner and find actionable technical-quality risks.",
     ...(synthesis
       ? []
       : ["Risk hypotheses: risk-config-1 src/config.ts may contain unsafe defaults."]),
     "Allowed changes: only create/update one report artifact.",
+    `Report artifact: ${reportPath}`,
+    `Expected report artifact: ${reportPath}`,
+    `Allowed write paths: ${reportPath}`,
     synthesis
-      ? "Report artifact: audit/security-summary.md"
-      : "Report artifact: audit/config-audit.md",
+      ? "Dependency order: after all source audit report children are trusted valid or accepted terminal inconclusive/manual-exception."
+      : "Dependency order: first source audit report child; no predecessor.",
     "Acceptance criteria: inspect the scoped files and record findings or none.",
     "Evidence requirements: every finding must include Evidence: src/config.ts:1, Risk:, Proposed fix:, and Verification: Command rg config src/config.ts output matched.",
     "Manifest requirements: include a fenced audit-report-manifest JSON block with version 1, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
+    AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT,
     "Evidence ID rule: manifest evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 are never evidenceRefs.",
     "Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py.",
     AUDIT_ABSENCE_PROOF_REQUIREMENT,
@@ -48,7 +56,7 @@ function completeAuditDescription(options: { synthesis?: boolean } = {}) {
     'No-findings rule: if no actionable finding is found, write "No validated findings" plus checked files and commands with observed outputs.',
     AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
     AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
-    AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+    ...(synthesis ? [AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT] : [AUDIT_CHILD_ORDER_REQUIREMENT]),
     "Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
     "Evidence: src/config.ts:1",

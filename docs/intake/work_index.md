@@ -80,3 +80,4 @@
 | [work-20260525-distributed-runtime-endpoint-leases](work/work-20260525-distributed-runtime-endpoint-leases.md)                                 | done   | high     | yes  | Distributed Runtime Endpoint Leases                       |
 | [work-20260525-remote-audit-quality-trust-canary](work/work-20260525-remote-audit-quality-trust-canary.md)                                     | done   | critical | yes  | Remote Audit Quality Trust Canary                         |
 | [work-20260525-clear-remote-botintevra-dirty-audit-worktree](work/work-20260525-clear-remote-botintevra-dirty-audit-worktree.md)               | done   | high     | yes  | Clear Remote botIntevra Dirty Audit Worktree Blocker      |
+| [work-20260527-roadmap-audit-decomposition-ordered-e2e](work/work-20260527-roadmap-audit-decomposition-ordered-e2e.md)                         | queued | critical | yes  | Roadmap Audit Decomposition Ordered E2E                   |

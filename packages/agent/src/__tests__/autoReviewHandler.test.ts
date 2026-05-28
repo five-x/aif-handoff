@@ -92,6 +92,42 @@ describe("handleAutoReviewGate", () => {
     expect(mockCreateTaskComment.mock.calls[0][0].message).toContain("Parser mode: structured");
   });
 
+  it("prefers the refreshed task worktreePath when evaluating review evidence", async () => {
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      worktreePath: "/tmp/refreshed-task-worktree",
+      reviewComments: "Looks good",
+      reviewIterationCount: 0,
+      maxReviewIterations: 3,
+      autoReviewState: null,
+    });
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "success",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      },
+      blockingFindings: [],
+      fixesMarkdown: "- none",
+      autoReviewState: null,
+    });
+
+    await handleAutoReviewGate(baseInput);
+
+    expect(evaluateReviewCommentsForAutoMode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-1",
+        projectRoot: "/tmp/refreshed-task-worktree",
+      }),
+    );
+  });
+
   it("returns rework_requested and includes persisted autoReviewState", async () => {
     mockFindTaskById.mockReturnValue({
       id: "task-1",

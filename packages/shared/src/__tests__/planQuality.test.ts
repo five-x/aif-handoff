@@ -1262,6 +1262,131 @@ describe("evaluateTaskPlanQuality", () => {
     expect(evaluateTaskPlanQuality({ task, plan }).ok).toBe(true);
   });
 
+  it("builds a valid deterministic direct audit canary plan for a root-level scoped file", () => {
+    const task = {
+      id: "task-direct-positive-canary",
+      title: "Positive trusted direct audit canary",
+      taskIntent: "audit" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      description: [
+        "Scope: README.md",
+        "Risk hypotheses: risk-readme README.md onboarding claims may drift from repository evidence.",
+        "Report artifact: audit/direct-audit-positive-canary.md",
+        "Remote validation target: http://192.168.88.67",
+      ].join("\n"),
+      auditArtifactRole: "report" as const,
+      roadmapBatchId: "direct-audit-batch",
+    };
+    const plan = buildDeterministicDiagnosticPlan({ task });
+
+    expect(plan).toContain("Expected report artifact: `audit/direct-audit-positive-canary.md`");
+    expect(plan).toContain("Declared scope: `README.md`");
+    expect(plan).toContain("Allowed write paths:");
+    expect(plan).toContain("Trusted artifact required: yes");
+    expect(plan).toContain("Ledger evidence required: yes");
+    expect(plan).toContain("Committed blob revalidation required: yes");
+    expect(plan).toContain("Local AIF service/e2e: forbidden");
+    expect(plan).toContain("Remote validation target: http://192.168.88.67");
+    const result = evaluateTaskPlanQuality({ task, plan });
+    expect(result.ok).toBe(true);
+    expect(result.categories).toEqual([]);
+  });
+
+  it("rejects direct audit canary plans missing the expected report artifact", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Positive trusted direct audit canary",
+        description: "Scope: README.md\nReport artifact: audit/direct-audit-positive-canary.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Direct audit canary",
+        "Scope: `README.md`.",
+        "Scoped evidence targets: `README.md`.",
+        "Excluded areas: source code, config, tests, generated files.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Inspect `README.md`.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("missing_diagnostic_report_constraints");
+    expect(result.categories).toContain("diagnostic_report_artifact_mismatch");
+  });
+
+  it("rejects direct audit canary plans missing concrete scope", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Positive trusted direct audit canary",
+        description: "Report artifact: audit/direct-audit-positive-canary.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Direct audit canary",
+        "Report artifact: `audit/direct-audit-positive-canary.md`",
+        "Scope: audit report.",
+        "Scoped evidence targets: audit report.",
+        "Excluded areas: source code, config, tests, generated files.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("audit_without_concrete_boundaries");
+  });
+
+  it("rejects direct audit canary plans that propose source fixes", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Audit config canary",
+        description: "Scope: src/config.ts\nReport artifact: audit/config-canary.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Direct audit canary",
+        "Report artifact: `audit/config-canary.md`",
+        "Scope: `src/config.ts`.",
+        "Scoped evidence targets: `src/config.ts`.",
+        "Excluded areas: generated files and unrelated modules.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Patch code in `src/config.ts` if the audit finds a risky default.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("diagnostic_scope_violation");
+  });
+
+  it("rejects direct audit canary plans that use local AIF validation", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        title: "Audit config canary",
+        description: "Scope: src/config.ts\nReport artifact: audit/config-canary.md.",
+        taskIntent: "audit",
+      },
+      plan: [
+        "## Direct audit canary",
+        "Report artifact: `audit/config-canary.md`",
+        "Scope: `src/config.ts`.",
+        "Scoped evidence targets: `src/config.ts`.",
+        "Excluded areas: generated files and unrelated modules.",
+        "Expected report structure: finding ID, severity, evidence, risk, proposed fix, confidence, and verification.",
+        "Child audit reports: not required for this narrow source report.",
+        "- [ ] Keep this diagnostic-only and do not implement fixes.",
+        "- [ ] Run local AIF validation at http://localhost:3000.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("local_aif_validation_forbidden");
+  });
+
   it("does not build deterministic fallback when only the report artifact is available", () => {
     const plan = buildDeterministicDiagnosticPlan({
       task: {

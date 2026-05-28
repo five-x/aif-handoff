@@ -74,13 +74,14 @@ vi.mock("../services/runtime.js", () => ({
 // Import after mocks
 const { tasksRouter } = await import("../routes/tasks.js");
 const { broadcast: mockBroadcast } = await import("../ws.js");
+const dataModule = await import("@aif/data");
 const {
   createRoadmapBatchContract,
   appendEvidenceUnitEvent,
   listRoadmapBatchArtifacts,
   listRoadmapBatchArtifactAttempts,
   updateRoadmapBatchArtifactState,
-} = await import("@aif/data");
+} = dataModule;
 
 function createApp() {
   const app = new Hono();
@@ -1101,6 +1102,44 @@ describe("tasks API", () => {
       expect(body.skipReview).toBe(false);
       expect(body.useSubagents).toBe(true);
       expect(body.isFix).toBe(false);
+      expect(body.artifactTrust).toMatchObject({
+        artifactRole: "report",
+        artifactState: "expected",
+        artifactTrustLevel: "weak",
+        artifactPath: "audit/config-audit.md",
+      });
+      const artifact = testDb.current
+        .select()
+        .from(roadmapBatchArtifacts)
+        .where(eq(roadmapBatchArtifacts.taskId, body.id))
+        .get();
+      expect(artifact).toMatchObject({
+        role: "report",
+        artifactPath: "audit/config-audit.md",
+        state: "expected",
+      });
+    });
+
+    it("should reject direct audit tasks without a concrete report artifact", async () => {
+      const res = await app.request("/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Audit src/config.ts",
+          description: [
+            "Scope: src/config.ts",
+            "Audit mandate: Inspect configuration defaults for unsafe runtime behavior.",
+          ].join("\n"),
+          projectId: "test-project",
+          taskIntent: "audit",
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("AUDIT_REPORT_ARTIFACT_REQUIRED");
+      expect(testDb.current.select().from(tasks).all()).toEqual([]);
+      expect(testDb.current.select().from(roadmapBatchArtifacts).all()).toEqual([]);
     });
 
     it("should reject broad direct audit tasks before create", async () => {
@@ -2092,7 +2131,7 @@ describe("tasks API", () => {
       expect(body.useSubagents).toBe(false);
     });
 
-    it("should enforce audit defaults when updating taskIntent to audit", async () => {
+    it("should reject taskIntent audit updates without a concrete report artifact", async () => {
       const db = testDb.current;
       db.insert(tasks)
         .values({
@@ -2113,6 +2152,46 @@ describe("tasks API", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           taskIntent: "audit",
+          title: "Review README transcription endpoint",
+          description: [
+            "Scope: README.md",
+            "Audit mandate: Inspect README transcription endpoint documentation.",
+          ].join("\n"),
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe("AUDIT_REPORT_ARTIFACT_REQUIRED");
+      expect(testDb.current.select().from(roadmapBatchArtifacts).all()).toEqual([]);
+    });
+
+    it("should enforce audit defaults and create a report contract when updating taskIntent to audit", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "upd-audit-intent-contract",
+          projectId: "test-project",
+          title: "Audit candidate",
+          plannerMode: "fast",
+          skipReview: true,
+          planDocs: false,
+          planTests: false,
+          useSubagents: false,
+          isFix: false,
+        })
+        .run();
+
+      const res = await app.request("/tasks/upd-audit-intent-contract", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskIntent: "audit",
+          description: [
+            "Scope: README.md",
+            "Audit mandate: Inspect README transcription endpoint documentation.",
+            "Report artifact: audit/update-direct-audit.md",
+          ].join("\n"),
           plannerMode: "fast",
           skipReview: true,
           planDocs: false,
@@ -2130,6 +2209,83 @@ describe("tasks API", () => {
       expect(body.planDocs).toBe(true);
       expect(body.planTests).toBe(true);
       expect(body.useSubagents).toBe(true);
+      expect(body.artifactTrust).toMatchObject({
+        artifactRole: "report",
+        artifactState: "expected",
+        artifactTrustLevel: "weak",
+        artifactPath: "audit/update-direct-audit.md",
+      });
+      const artifact = testDb.current
+        .select()
+        .from(roadmapBatchArtifacts)
+        .where(eq(roadmapBatchArtifacts.taskId, "upd-audit-intent-contract"))
+        .get();
+      expect(artifact).toMatchObject({
+        role: "report",
+        artifactPath: "audit/update-direct-audit.md",
+        state: "expected",
+      });
+    });
+
+    it("rolls back task updates when audit report contract creation fails", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "upd-audit-contract-failure",
+          projectId: "test-project",
+          title: "General task",
+          description: "Original description",
+          taskIntent: "general",
+          plannerMode: "fast",
+          skipReview: true,
+          planDocs: false,
+          planTests: false,
+          useSubagents: false,
+          isFix: false,
+        })
+        .run();
+      const contractSpy = vi
+        .spyOn(dataModule, "createRoadmapBatchContract")
+        .mockImplementationOnce(() => {
+          throw new Error("synthetic contract failure");
+        });
+
+      const res = await app.request("/tasks/upd-audit-contract-failure", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskIntent: "audit",
+          title: "Audit candidate",
+          description: [
+            "Scope: README.md",
+            "Audit mandate: Inspect README transcription endpoint documentation.",
+            "Report artifact: audit/update-direct-audit.md",
+          ].join("\n"),
+        }),
+      });
+
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.code).toBe("AUDIT_ARTIFACT_CONTRACT_CREATE_FAILED");
+      expect(contractSpy).toHaveBeenCalledTimes(1);
+      const task = db.select().from(tasks).where(eq(tasks.id, "upd-audit-contract-failure")).get();
+      expect(task).toMatchObject({
+        title: "General task",
+        description: "Original description",
+        taskIntent: "general",
+        plannerMode: "fast",
+        skipReview: true,
+        planDocs: false,
+        planTests: false,
+        useSubagents: false,
+      });
+      expect(
+        db
+          .select()
+          .from(roadmapBatchArtifacts)
+          .where(eq(roadmapBatchArtifacts.taskId, "upd-audit-contract-failure"))
+          .all(),
+      ).toEqual([]);
     });
 
     it("should preserve audit invariants when updating an audit task without taskIntent", async () => {
@@ -2139,6 +2295,11 @@ describe("tasks API", () => {
           id: "upd-existing-audit",
           projectId: "test-project",
           title: "Existing audit",
+          description: [
+            "Scope: README.md",
+            "Audit mandate: Inspect README transcription endpoint documentation.",
+            "Report artifact: audit/existing-direct-audit.md",
+          ].join("\n"),
           taskIntent: "audit",
           plannerMode: "full",
           skipReview: false,
@@ -2169,6 +2330,15 @@ describe("tasks API", () => {
       expect(body.planDocs).toBe(true);
       expect(body.planTests).toBe(true);
       expect(body.useSubagents).toBe(true);
+      const artifact = testDb.current
+        .select()
+        .from(roadmapBatchArtifacts)
+        .where(eq(roadmapBatchArtifacts.taskId, "upd-existing-audit"))
+        .get();
+      expect(artifact).toMatchObject({
+        role: "report",
+        artifactPath: "audit/existing-direct-audit.md",
+      });
     });
 
     it("should update paused via PUT", async () => {
@@ -3063,6 +3233,64 @@ describe("tasks API", () => {
       });
 
       expect(res.status).toBe(409);
+    });
+
+    it("should reject manual start for audit roadmap children before predecessors release", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values([
+          {
+            id: "audit-order-child-1",
+            projectId: "test-project",
+            title: "Audit: first child",
+            taskIntent: "audit",
+            roadmapAlias: "audit-order",
+            status: "backlog",
+            autoMode: true,
+            position: 100,
+          },
+          {
+            id: "audit-order-child-2",
+            projectId: "test-project",
+            title: "Audit: second child",
+            taskIntent: "audit",
+            roadmapAlias: "audit-order",
+            status: "backlog",
+            autoMode: true,
+            position: 50,
+          },
+        ])
+        .run();
+      createRoadmapBatchContract({
+        projectId: "test-project",
+        roadmapAlias: "audit-order",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["audit-order-child-1", "audit-order-child-2"],
+        artifacts: [
+          {
+            taskId: "audit-order-child-1",
+            role: "report",
+            artifactPath: "audit/first.md",
+          },
+          {
+            taskId: "audit-order-child-2",
+            role: "report",
+            artifactPath: "audit/second.md",
+          },
+        ],
+      });
+
+      const res = await app.request("/tasks/audit-order-child-2/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_ai" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("audit_child_dependency_not_ready");
     });
 
     it("should approve done task to verified", async () => {

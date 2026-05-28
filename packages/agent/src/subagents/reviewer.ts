@@ -1358,10 +1358,17 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
       }
     }
   };
+  const runSpecializedReviewersForDeterministicArtifact = async () => {
+    // Deterministic audit artifact validation is the source of truth for these
+    // branches. Model reviewer fanout can add signal for ordinary code review,
+    // but it must not turn a valid ledger-backed audit artifact into a retry
+    // because an external reviewer timed out or returned malformed text.
+    return [];
+  };
 
   if (canUseDeterministicAuditReportReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const specializedRoleResults = await runSpecializedReviewersForDeterministicArtifact();
     const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
       buildDeterministicAuditReportReviewComments({
         strategy,
@@ -1391,7 +1398,7 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
 
   if (canUseDeterministicAuditReportInvalidReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const specializedRoleResults = await runSpecializedReviewersForDeterministicArtifact();
     const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
       buildDeterministicAuditReportInvalidReviewComments({
         strategy,
@@ -1425,7 +1432,7 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
 
   if (canUseDeterministicAuditSynthesisTrustedReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const specializedRoleResults = await runSpecializedReviewersForDeterministicArtifact();
     const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
       buildDeterministicAuditSynthesisTrustedReviewComments({
         strategy,
@@ -1465,7 +1472,7 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
     (roadmapArtifact.role === "report" || roadmapArtifact.role === "synthesis")
   ) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const specializedRoleResults = await runSpecializedReviewersForDeterministicArtifact();
     const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
       buildDeterministicAuditArtifactMissingReviewComments({
         strategy,
@@ -1495,7 +1502,7 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
 
   if (canUseDeterministicAuditSynthesisInconclusiveReview) {
     recordDeterministicAuditReportReviewActivity(taskId, roadmapArtifact.artifactPath);
-    const specializedRoleResults = await runRequiredSpecializedReviewers();
+    const specializedRoleResults = await runSpecializedReviewersForDeterministicArtifact();
     const combinedReview = mergeSpecializedResultsIntoStructuredReviewComments(
       buildDeterministicAuditSynthesisInconclusiveReviewComments({
         strategy,

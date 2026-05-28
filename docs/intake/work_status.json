@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-25",
+  "updated": "2026-05-27",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -723,6 +723,15 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260525-clear-remote-botintevra-dirty-audit-worktree",
       "updated": "2026-05-25"
+    },
+    {
+      "taskId": "work-20260527-roadmap-audit-decomposition-ordered-e2e",
+      "title": "Roadmap Audit Decomposition Ordered E2E",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260527-roadmap-audit-decomposition-ordered-e2e",
+      "updated": "2026-05-28"
     }
   ]
 }

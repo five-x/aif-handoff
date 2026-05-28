@@ -2534,6 +2534,9 @@ export function blockTaskForRuntimeGateIfEligible(input: {
  * task that auto-queue already advanced (or vice versa).
  */
 export function claimBacklogTaskForAdvance(taskId: string): boolean {
+  const task = findTaskById(taskId);
+  if (!task || !auditRoadmapTaskDependenciesReleaseReady(task)) return false;
+
   const nowIso = new Date().toISOString();
   const result = getDb()
     .update(tasks)
@@ -2774,8 +2777,9 @@ export function listDueScheduledTasks(nowIso: string): TaskRow[] {
     )
     .orderBy(asc(tasks.scheduledAt), asc(tasks.position), asc(tasks.createdAt), asc(tasks.id))
     .all();
-  log.debug({ dueCount: rows.length }, "Due scheduled tasks resolved");
-  return rows;
+  const eligibleRows = rows.filter(auditRoadmapTaskDependenciesReleaseReady);
+  log.debug({ dueCount: eligibleRows.length }, "Due scheduled tasks resolved");
+  return eligibleRows;
 }
 
 /** Clear scheduledAt after firing; bumps updatedAt. */
@@ -2833,7 +2837,7 @@ export function setAutoQueueMode(projectId: string, enabled: boolean): void {
  */
 export function nextBacklogTaskByPosition(projectId: string): TaskRow | undefined {
   const nowIso = new Date().toISOString();
-  return getDb()
+  const rows = getDb()
     .select()
     .from(tasks)
     .where(
@@ -2848,9 +2852,9 @@ export function nextBacklogTaskByPosition(projectId: string): TaskRow | undefine
         ),
       ),
     )
-    .orderBy(asc(tasks.position))
-    .limit(1)
-    .get();
+    .orderBy(asc(tasks.position), asc(tasks.createdAt), asc(tasks.id))
+    .all();
+  return rows.find(auditRoadmapTaskDependenciesReleaseReady);
 }
 
 export function listStaleInProgressTasks(): TaskRow[] {
@@ -5735,6 +5739,113 @@ function collectValidationReasonCodes(value: unknown): string[] {
   };
   visit(value);
   return [...codes].sort();
+}
+
+function latestCurrentRoadmapArtifactAttempt(
+  artifact: RoadmapBatchArtifactRow,
+): RoadmapBatchArtifactAttemptRow | null {
+  const latestAttempt = listRoadmapBatchArtifactAttempts(artifact.id).at(-1) ?? null;
+  if (
+    !latestAttempt ||
+    latestAttempt.attemptNumber !== artifact.attemptNumber ||
+    latestAttempt.state !== artifact.state
+  ) {
+    return null;
+  }
+  return latestAttempt;
+}
+
+function terminalReportArtifactHasMachineReadableDisposition(input: {
+  artifact: RoadmapBatchArtifactRow;
+  latestAttempt: RoadmapBatchArtifactAttemptRow;
+}): boolean {
+  const reasonCodes = [
+    input.artifact.state,
+    input.artifact.failureFamily,
+    input.latestAttempt.classification,
+    input.latestAttempt.failureFamily,
+    input.latestAttempt.reworkStatus,
+    ...collectValidationReasonCodes(parseValidationDetails(input.latestAttempt.validationDetailsJson)),
+  ].filter((code): code is string => typeof code === "string" && code.length > 0);
+  return reasonCodes.length > 0;
+}
+
+function roadmapReportArtifactReleaseReady(artifact: RoadmapBatchArtifactRow): boolean {
+  if (artifact.role !== "report") return false;
+  const latestAttempt = latestCurrentRoadmapArtifactAttempt(artifact);
+  if (!latestAttempt) return false;
+  const validationDetails = parseValidationDetails(latestAttempt.validationDetailsJson);
+  if (
+    artifact.state === "valid" &&
+    latestAttempt.reworkStatus === "accepted" &&
+    roadmapArtifactCountsAsValid(artifact) &&
+    attemptTrustedForSynthesisInput(latestAttempt, validationDetails)
+  ) {
+    return true;
+  }
+  const hasDisposition = terminalReportArtifactHasMachineReadableDisposition({
+    artifact,
+    latestAttempt,
+  });
+  if (!hasDisposition) return false;
+  if (
+    (artifact.state === "source_inconclusive" || artifact.state === "terminal_inconclusive") &&
+    latestAttempt.reworkStatus === "terminal_inconclusive"
+  ) {
+    return true;
+  }
+  return artifact.state === "manual_exception" && latestAttempt.reworkStatus === "manual_exception";
+}
+
+function auditRoadmapBatchTaskOrder(batch: RoadmapBatchRow): Map<string, number> {
+  return new Map(
+    parseJsonStringArray(batch.createdTaskIdsJson).map((taskId, index) => [taskId, index]),
+  );
+}
+
+export function auditRoadmapTaskDependenciesReleaseReady(task: TaskRow): boolean {
+  const candidateArtifact = findRoadmapBatchArtifactByTaskId(task.id);
+  if (
+    !candidateArtifact ||
+    (candidateArtifact.role !== "report" && candidateArtifact.role !== "synthesis")
+  ) {
+    return true;
+  }
+  const batch = getDb()
+    .select()
+    .from(roadmapBatches)
+    .where(eq(roadmapBatches.id, candidateArtifact.batchId))
+    .get();
+  if (!batch || batch.taskIntent !== "audit") return true;
+
+  const batchTaskOrder = auditRoadmapBatchTaskOrder(batch);
+  const orderedReportArtifacts = listRoadmapBatchArtifacts(batch.id)
+    .filter((artifact) => artifact.role === "report")
+    .sort((left, right) => {
+      const leftOrder = batchTaskOrder.get(left.taskId);
+      const rightOrder = batchTaskOrder.get(right.taskId);
+      if (leftOrder != null || rightOrder != null) {
+        if (leftOrder == null) return 1;
+        if (rightOrder == null) return -1;
+        if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      }
+      return (
+        left.createdAt.localeCompare(right.createdAt) || left.taskId.localeCompare(right.taskId)
+      );
+    });
+  const candidateIndex = orderedReportArtifacts.findIndex(
+    (artifact) => artifact.id === candidateArtifact.id,
+  );
+  if (candidateArtifact.role === "synthesis") {
+    return (
+      orderedReportArtifacts.length > 0 &&
+      orderedReportArtifacts.every(roadmapReportArtifactReleaseReady)
+    );
+  }
+  if (candidateIndex <= 0) return true;
+  return orderedReportArtifacts
+    .slice(0, candidateIndex)
+    .every(roadmapReportArtifactReleaseReady);
 }
 
 function artifactTrustedForSynthesisInput(artifact: RoadmapBatchArtifactRow): boolean {

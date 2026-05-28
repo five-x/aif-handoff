@@ -151,21 +151,12 @@ function expectAuditSpecializedFanoutCalls(): void {
   );
 }
 
-function expectDeterministicAuditSpecializedOnlyCalls(): void {
-  const agentNames = executeSubagentQueryMock.mock.calls.map(
-    (call) => (call[0] as { agentName: string }).agentName,
-  );
-  expect(executeSubagentQueryMock).toHaveBeenCalledTimes(4);
-  expect(agentNames).toEqual(
-    expect.arrayContaining([
-      "review-correctness",
-      "review-security-data-loss",
-      "review-regression-api-contract",
-      "review-audit-evidence",
-    ]),
-  );
-  expect(agentNames).not.toContain("review-sidecar");
-  expect(agentNames).not.toContain("security-sidecar");
+function expectDeterministicAuditReviewOnlyCalls(): void {
+  expect(executeSubagentQueryMock).not.toHaveBeenCalled();
+}
+
+function expectDeterministicAuditCanaryReviewOnlyCalls(): void {
+  expect(executeSubagentQueryMock).not.toHaveBeenCalled();
 }
 
 type SpecializedRoleResolutionTask = Parameters<typeof resolveRequiredSpecializedReviewerRoles>[0];
@@ -939,7 +930,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-audit-reviewer", projectRoot);
 
-    expectDeterministicAuditSpecializedOnlyCalls();
+    expectDeterministicAuditReviewOnlyCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, "task-audit-reviewer")).get();
     expect(storedTask?.reviewComments).toContain("## Blocking Findings");
     expect(storedTask?.reviewComments).toContain("- none");
@@ -950,6 +941,248 @@ describe("runReviewer", () => {
       "Agent: review-gate started (deterministic audit report validation)",
     );
     expect(storedTask?.agentActivityLog).toContain("Tool: read_file audit/runtime.md");
+  });
+
+  it("keeps direct audit canary report review deterministic when validator already trusts it", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-direct-canary-"));
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Test User"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "README.md"),
+      "# Project\nTRANSCRIPTION_BASE_URL uses placeholder endpoint value.\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "seed", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-direct-canary-reviewer",
+        name: "Direct Canary Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-direct-canary-reviewer",
+        projectId: "project-direct-canary-reviewer",
+        title: "Positive trusted direct audit canary",
+        description:
+          "Scope: README.md\nReport artifact: audit/direct-canary.md\nRisk hypotheses: risk-readme-env README.md documents TRANSCRIPTION_BASE_URL without exposing a secret.",
+        taskIntent: "audit",
+        status: "review",
+        useSubagents: true,
+        implementationLog:
+          "Deterministic audit report repair completed from scoped source evidence and passed strict validation.",
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "project-direct-canary-reviewer",
+      roadmapAlias: "direct-audit-task-direct",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-direct-canary-reviewer"],
+      artifacts: [
+        {
+          taskId: "task-direct-canary-reviewer",
+          role: "report",
+          artifactPath: "audit/direct-canary.md",
+          projectRoot,
+        },
+      ],
+    });
+    const auditPlanId = resolveAuditPlanId({
+      taskId: "task-direct-canary-reviewer",
+      roadmapBatchId: batch.batchId,
+    });
+    const sourceSnapshotId = deriveAuditSourceSnapshotId(projectRoot);
+    appendAuditEvidenceEvent(
+      buildAuditEvidenceUnit(
+        {
+          taskId: "task-direct-canary-reviewer",
+          auditPlanId,
+          sourceSnapshotId,
+          scopeIds: ["README.md"],
+          riskHypothesisIds: ["risk-readme-env"],
+        },
+        buildAuditEvidencePayload({
+          id: "ev-direct-canary-1",
+          toolName: "git grep",
+          evidenceKind: "search",
+          evidenceGrade: "substantive",
+          scopeIds: ["README.md"],
+          riskHypothesisIds: ["risk-readme-env"],
+          paths: ["README.md"],
+          command: 'git grep -n "TRANSCRIPTION_BASE_URL" -- README.md',
+          exitCode: 0,
+          output: "README.md:2:TRANSCRIPTION_BASE_URL uses placeholder endpoint value.",
+        }),
+      ),
+    );
+    const [snapshotKind, snapshotCommit, snapshotTree] = sourceSnapshotId.split(":");
+    const body = [
+      "# Direct Canary Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-readme-env for `README.md` transcription endpoint documentation was covered and is absent.",
+      "",
+      "## Evidence Register",
+      "",
+      "| Scope | Checked evidence | Verification |",
+      "| --- | --- | --- |",
+      '| `README.md` | `README.md:2` | Command `git grep -n "TRANSCRIPTION_BASE_URL" -- README.md` output includes `README.md:2:TRANSCRIPTION_BASE_URL uses placeholder endpoint value.` |',
+      "",
+      "## Checked Files",
+      "",
+      "- `README.md:2`",
+      "",
+      "## Checked Commands",
+      "",
+      '- Command `git grep -n "TRANSCRIPTION_BASE_URL" -- README.md` output:',
+      "```",
+      "README.md:2:TRANSCRIPTION_BASE_URL uses placeholder endpoint value.",
+      "```",
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId,
+      taskId: "task-direct-canary-reviewer",
+      batchId: batch.batchId,
+      roadmapAlias: "direct-audit-task-direct",
+      artifactPath: "audit/direct-canary.md",
+      contentSha256: computeAuditReportContentSha256(body),
+      sourceSnapshot: {
+        id: sourceSnapshotId,
+        commit: snapshotKind === "git" ? snapshotCommit : null,
+        tree: snapshotKind === "git" ? snapshotTree : null,
+        dirty: false,
+      },
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: ["ev-direct-canary-1"] }],
+      riskHypotheses: [
+        {
+          id: "risk-readme-env",
+          description: "README.md transcription endpoint documentation",
+          scopeIds: ["README.md"],
+          status: "covered",
+          evidenceRefs: ["ev-direct-canary-1"],
+        },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        {
+          id: "nf-direct-canary",
+          scopeIds: ["README.md"],
+          riskIds: ["risk-readme-env"],
+          evidenceRefs: ["ev-direct-canary-1"],
+        },
+      ],
+      evidenceRefs: ["ev-direct-canary-1"],
+    };
+    writeFileSync(
+      join(projectRoot, "audit", "direct-canary.md"),
+      `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`,
+      "utf8",
+    );
+
+    await runReviewer("task-direct-canary-reviewer", projectRoot);
+
+    expectDeterministicAuditCanaryReviewOnlyCalls();
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-direct-canary-reviewer"))
+      .get();
+    expect(storedTask?.reviewComments).toContain("- Deterministic Review: audit_report_validation");
+    expect(storedTask?.reviewComments).toContain("- none");
+    expect(storedTask?.reviewComments).toContain(
+      "review_gate | audit report validation accepted `audit/direct-canary.md`",
+    );
+  });
+
+  it("keeps invalid direct audit canary report review deterministic and blocking", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "aif-reviewer-invalid-direct-canary-"));
+    mkdirSync(join(projectRoot, "audit"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Project\n", "utf8");
+    writeFileSync(
+      join(projectRoot, "audit", "direct-canary-invalid.md"),
+      [
+        "# Direct Audit Canary",
+        "",
+        "No validated findings.",
+        "",
+        "## Evidence Register",
+        "| Scope | Checked evidence | Verification |",
+        "| --- | --- | --- |",
+        "| `README.md` | `README.md:1` | checked manually |",
+      ].join("\n"),
+      "utf8",
+    );
+    const db = testDb.current;
+    db.insert(projects)
+      .values({
+        id: "project-invalid-direct-canary-reviewer",
+        name: "Invalid Direct Canary Reviewer",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-invalid-direct-canary-reviewer",
+        projectId: "project-invalid-direct-canary-reviewer",
+        title: "Negative direct audit canary",
+        description:
+          "Scope: README.md\nReport artifact: audit/direct-canary-invalid.md\nDirect audit canary invalid report should fail closed.",
+        taskIntent: "audit",
+        status: "review",
+        useSubagents: true,
+        implementationLog: "Runtime produced invalid direct canary report.",
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-invalid-direct-canary-reviewer",
+      roadmapAlias: "direct-audit-task-invalid",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-invalid-direct-canary-reviewer"],
+      artifacts: [
+        {
+          taskId: "task-invalid-direct-canary-reviewer",
+          role: "report",
+          artifactPath: "audit/direct-canary-invalid.md",
+          projectRoot,
+        },
+      ],
+    });
+
+    await runReviewer("task-invalid-direct-canary-reviewer", projectRoot);
+
+    expectDeterministicAuditCanaryReviewOnlyCalls();
+    const storedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-invalid-direct-canary-reviewer"))
+      .get();
+    expect(storedTask?.reviewComments).toContain(
+      "- Deterministic Review: audit_report_validation_failed",
+    );
+    expect(storedTask?.reviewComments).toContain("missing_report_manifest");
+    expect(storedTask?.reviewComments).toContain("## Blocking Findings");
+    expect(storedTask?.reviewComments).toContain(
+      "Security sidecar skipped because deterministic audit report validation already produced blocking issues",
+    );
   });
 
   it("uses deterministic blocker output for audit report artifacts that fail validation", async () => {
@@ -1007,7 +1240,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-invalid-audit-reviewer", projectRoot);
 
-    expectDeterministicAuditSpecializedOnlyCalls();
+    expectDeterministicAuditReviewOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -1064,7 +1297,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-missing-audit-reviewer", projectRoot);
 
-    expectDeterministicAuditSpecializedOnlyCalls();
+    expectDeterministicAuditReviewOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -1265,7 +1498,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-reviewer", projectRoot);
 
-    expectDeterministicAuditSpecializedOnlyCalls();
+    expectDeterministicAuditReviewOnlyCalls();
     const storedTask = db.select().from(tasks).where(eq(tasks.id, "task-synthesis-reviewer")).get();
     expect(storedTask?.reviewComments).toContain("## Blocking Findings");
     expect(storedTask?.reviewComments).toContain("- none");
@@ -1703,7 +1936,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-trusted-reviewer", projectRoot);
 
-    expectDeterministicAuditSpecializedOnlyCalls();
+    expectDeterministicAuditReviewOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)
@@ -1968,7 +2201,7 @@ describe("runReviewer", () => {
 
     await runReviewer("task-synthesis-inconclusive-reviewer", projectRoot);
 
-    expectDeterministicAuditSpecializedOnlyCalls();
+    expectDeterministicAuditReviewOnlyCalls();
     const storedTask = db
       .select()
       .from(tasks)

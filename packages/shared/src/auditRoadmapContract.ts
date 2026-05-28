@@ -92,6 +92,11 @@ export function isTerminalAuditReworkStatus(
 
 export const AUDIT_GENERATED_CARD_ISSUE_CODES = [
   "missing_diagnostic_markers",
+  "missing_task_intent_contract",
+  "expected_report_artifact_mismatch",
+  "allowed_write_paths_mismatch",
+  "missing_dependency_order",
+  "missing_trusted_artifact_lifecycle",
   "missing_no_findings_proof_guardrail",
   "missing_substantive_no_findings_requirement",
   "missing_synthesis_outcome_requirement",
@@ -150,11 +155,17 @@ export interface AuditDecompositionClassification {
 
 export const AUDIT_REQUIRED_GENERATED_CARD_MARKERS = [
   "scope:",
+  "task intent:",
   "allowed changes:",
   "report artifact:",
+  "expected report artifact:",
+  "allowed write paths:",
+  "dependency order:",
   "acceptance criteria:",
   "evidence requirements:",
   "manifest requirements:",
+  "trusted artifact lifecycle:",
+  "artifact_state_valid",
   "evidence id rule:",
   "path rule:",
   "absence-proof rule:",
@@ -186,6 +197,12 @@ export const AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT =
 
 export const AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT =
   "Synthesis outcome requirement: classify the final audit as exactly one of validated findings present, validated no-findings with substantive evidence, or audit inconclusive when source reports are weak, missing, or inventory-only.";
+
+export const AUDIT_CHILD_ORDER_REQUIREMENT =
+  "Dependency order requirement: audit report children must execute in roadmap order; a successor starts only after the predecessor report artifact is trusted valid or accepted terminal inconclusive/manual-exception with machine-readable issue codes.";
+
+export const AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT =
+  "Trusted artifact lifecycle: manifest, runtime audit ledger evidence, source snapshot, git commit, committed blob revalidation, and artifact_state_valid are required before a report can be trusted.";
 
 export const TASK_COMPLETION_ISSUE_FAILURE_FAMILIES: Record<string, AuditFailureFamily> = {
   zero_delta: "rework_needed",
@@ -475,6 +492,16 @@ export function findAuditRiskHypothesesLine(description: string): string | null 
       .split(/\r?\n/)
       .map((line) => line.trim())
       .find((line) => /^risk hypotheses\s*:/i.test(line)) ?? null
+  );
+}
+
+function findAuditContractLine(description: string, label: string): string | null {
+  const pattern = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`, "i");
+  return (
+    description
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => pattern.test(line)) ?? null
   );
 }
 
@@ -922,6 +949,71 @@ function validateAuditReportArtifact(description: string): AuditGeneratedCardVal
   return [];
 }
 
+function validateAuditExplicitContract(description: string): AuditGeneratedCardValidationIssue[] {
+  const issues: AuditGeneratedCardValidationIssue[] = [];
+  const reportArtifactPath = parseExpectedAuditReportArtifactPath(description);
+  const taskIntentLine = findAuditContractLine(description, "task intent");
+  if (!taskIntentLine || !/\btask intent\s*:\s*audit\b/i.test(taskIntentLine)) {
+    issues.push({
+      code: "missing_task_intent_contract",
+      message: "audit task contract must include Task intent: audit",
+    });
+  }
+
+  const expectedReportLine = findAuditContractLine(description, "expected report artifact");
+  const expectedReportPath = expectedReportLine
+    ? parseAuditReportArtifactPath(
+        expectedReportLine.replace(/^expected report artifact\s*:\s*/i, "").trim(),
+      )
+    : null;
+  if (!reportArtifactPath || expectedReportPath !== reportArtifactPath) {
+    issues.push({
+      code: "expected_report_artifact_mismatch",
+      message: "audit task expected report artifact must match the declared Report artifact path",
+    });
+  }
+
+  const allowedWriteLine = findAuditContractLine(description, "allowed write paths");
+  const allowedWritePaths = allowedWriteLine
+    ? extractAuditPathTokens(allowedWriteLine).filter(isAuditReportArtifactPath)
+    : [];
+  if (
+    !reportArtifactPath ||
+    allowedWritePaths.length !== 1 ||
+    allowedWritePaths[0] !== reportArtifactPath
+  ) {
+    issues.push({
+      code: "allowed_write_paths_mismatch",
+      message: "audit task allowed write paths must contain only the declared report artifact",
+    });
+  }
+
+  if (!findAuditContractLine(description, "dependency order")) {
+    issues.push({
+      code: "missing_dependency_order",
+      message: "audit task contract must include dependency order metadata",
+    });
+  }
+
+  const lifecycleLine = findAuditContractLine(description, "trusted artifact lifecycle");
+  const lifecycleText = lifecycleLine?.toLowerCase() ?? "";
+  const hasLifecycle =
+    lifecycleText.includes("manifest") &&
+    lifecycleText.includes("ledger") &&
+    lifecycleText.includes("source snapshot") &&
+    lifecycleText.includes("git commit") &&
+    lifecycleText.includes("committed blob revalidation") &&
+    lifecycleText.includes("artifact_state_valid");
+  if (!hasLifecycle) {
+    issues.push({
+      code: "missing_trusted_artifact_lifecycle",
+      message: "audit task contract must include trusted artifact lifecycle requirements",
+    });
+  }
+
+  return issues;
+}
+
 export function validateGeneratedAuditCard(
   input: ValidateGeneratedAuditCardInput,
 ): ValidateGeneratedAuditCardResult {
@@ -974,6 +1066,7 @@ export function validateGeneratedAuditCard(
   }
 
   issueDetails.push(
+    ...validateAuditExplicitContract(description),
     ...validateAuditScopeAndRiskHypotheses(title, description),
     ...validateAuditAllowedChanges(description),
     ...validateAuditReportArtifact(description),

@@ -6,10 +6,12 @@ import {
   TASK_INTENT_CONTRACTS,
   TASK_INTENTS,
   AUDIT_ABSENCE_PROOF_REQUIREMENT,
+  AUDIT_CHILD_ORDER_REQUIREMENT,
   AUDIT_NO_TRACKED_SCOPE_SENTINEL,
   AUDIT_NO_FINDINGS_PROOF_GUARDRAIL,
   AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT,
   AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT,
+  AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT,
   formatTaskIntentContractForPrompt,
   defaultsForMode,
   getEnv,
@@ -277,7 +279,11 @@ function mentionsPriorInconclusiveAudit(value: string): boolean {
     normalized.includes("validated no-findings") ||
     normalized.includes("validated findings present") ||
     normalized.includes("source reports are weak") ||
-    normalized.includes("weak, missing, or inventory-only")
+    normalized.includes("weak, missing, or inventory-only") ||
+    normalized.includes("dependency order requirement") ||
+    normalized.includes("audit report children must execute in roadmap order") ||
+    normalized.includes("successor starts only after") ||
+    normalized.includes("accepted terminal inconclusive")
   ) {
     return false;
   }
@@ -731,10 +737,16 @@ function validateAuditRoadmapSource(roadmapContent: string, projectRoot?: string
     const lower = item.text.toLowerCase();
     const requiredMarkers = [
       "scope:",
+      "task intent:",
       "allowed changes:",
       "report artifact:",
+      "expected report artifact:",
+      "allowed write paths:",
+      "dependency order:",
       "acceptance criteria:",
       "evidence requirements:",
+      "trusted artifact lifecycle:",
+      "artifact_state_valid",
       "git requirements:",
       "constraint:",
       "diagnostic-only",
@@ -856,12 +868,22 @@ function buildAuditRoadmapItem(
   scope: string,
   reportPath: string,
   mandate: string,
-  options: { role?: "report" | "synthesis"; priorContext?: string | null } = {},
+  options: {
+    role?: "report" | "synthesis";
+    priorContext?: string | null;
+    dependencyOrder?: string;
+  } = {},
 ): string {
   const role = options.role ?? "report";
+  const dependencyOrder =
+    options.dependencyOrder ??
+    (role === "synthesis"
+      ? "after all source audit report children are trusted valid or accepted terminal inconclusive/manual-exception."
+      : "roadmap source report order; first source audit report child has no predecessor.");
   return [
     `- [ ] **${title}** - Diagnostic-only audit.`,
     `  - Scope: ${scope}`,
+    "  - Task intent: audit",
     `  - Audit mandate: ${mandate}`,
     ...(role === "report"
       ? [`  - Risk hypotheses: ${formatAuditRiskHypotheses(title, scope)}`]
@@ -869,9 +891,13 @@ function buildAuditRoadmapItem(
     ...(options.priorContext ? [`  - ${formatPriorAuditContextLine(options.priorContext)}`] : []),
     `  - Allowed changes: only create/update ${reportPath}.`,
     `  - Report artifact: ${reportPath}`,
+    `  - Expected report artifact: ${reportPath}`,
+    `  - Allowed write paths: ${reportPath}`,
+    `  - Dependency order: ${dependencyOrder}`,
     "  - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.",
     "  - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...",
     "  - Manifest requirements: include a fenced `audit-report-manifest` JSON block with version 1, auditPlanId `task:<task-id>` or `batch:<batch-id>:task:<task-id>`, taskId, batchId when assigned, roadmapAlias when assigned, artifactPath, contentSha256 for the markdown body without the manifest block, sourceSnapshot commit/tree/id, outcome, scopeCoverage, riskHypotheses, findings or noFindingsClaims, and evidenceRefs.",
+    `  - ${AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT}`,
     "  - Evidence ID rule: manifest evidenceRefs, scopeCoverage[].evidenceRefs, findings[].evidenceRefs, and noFindingsClaims[].evidenceRefs must cite actual runtime audit ledger IDs (`ev_*`) only; finding labels such as AOB-001 or invented IDs are never evidenceRefs.",
     "  - Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as `config.py`, future files such as `cli_context.py`, or generated `.ai-factory/*` files as source evidence.",
     `  - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}`,
@@ -887,7 +913,7 @@ function buildAuditRoadmapItem(
           `  - ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}`,
           `  - ${AUDIT_CHILD_REPORT_STATUS_REQUIREMENT}`,
         ]
-      : []),
+      : [`  - ${AUDIT_CHILD_ORDER_REQUIREMENT}`]),
     "  - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.",
     "  - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
   ].join("\n");
@@ -1315,13 +1341,19 @@ function buildDeterministicAuditRoadmapContent(ctx: {
   const areas = buildAuditAreasForProject(ctx.projectRoot, { codeOnly });
   const priorContext = extractPriorInconclusiveAuditContext(ctx);
 
-  const tasks = areas.map((area) =>
+  const tasks = areas.map((area, index) =>
     buildAuditRoadmapItem(
       area.title,
       area.scope,
       `audit/${reportDate}-${auditSlug(area.title)}-audit.md`,
       area.mandate,
-      { priorContext },
+      {
+        priorContext,
+        dependencyOrder:
+          index === 0
+            ? "source report sequence 1; no predecessor."
+            : `source report sequence ${index + 1}; after source report sequence ${index} is trusted valid or accepted terminal inconclusive/manual-exception.`,
+      },
     ),
   );
   tasks.push(
@@ -1330,7 +1362,12 @@ function buildDeterministicAuditRoadmapContent(ctx: {
       `all audit/${reportDate}-*-audit.md reports from this audit batch`,
       `audit/${reportDate}-summary.md`,
       "Act as the synthesis owner reviewing area reports; include only actionable findings that meet the evidence contract and call out weak reports by source.",
-      { role: "synthesis", priorContext },
+      {
+        role: "synthesis",
+        priorContext,
+        dependencyOrder:
+          "after every source audit report child is trusted valid or accepted terminal inconclusive/manual-exception with machine-readable issue codes.",
+      },
     ),
   );
 
@@ -1717,12 +1754,17 @@ Generate a ROADMAP.md file with the following format:
 
 - [ ] **Audit: <small area name>** - Diagnostic-only audit.
   - Scope: <3-10 concrete files or directories to inspect>
+  - Task intent: audit
   - Audit mandate: <owner role and concrete quality risks to investigate>
   - Risk hypotheses: risk-<area>-1 <scope root> may contain <specific actionable risk>; risk-<area>-2 <scope root> may contain <specific actionable risk>
 ${priorContextLine}  - Allowed changes: only create/update one report artifact.
   - Report artifact: audit/${reportDate}-<short-name>-audit.md
+  - Expected report artifact: audit/${reportDate}-<short-name>-audit.md
+  - Allowed write paths: audit/${reportDate}-<short-name>-audit.md
+  - Dependency order: source report sequence <n>; first source report has no predecessor, every later source report waits for the previous report artifact to be trusted valid or accepted terminal inconclusive/manual-exception with machine-readable issue codes.
   - Acceptance criteria: inspect the scoped files, record only actionable technical-quality findings, and classify each accepted finding as blocking or advisory.
   - Evidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
+  - ${AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT}
   - Evidence ID rule: manifest evidenceRefs, scopeCoverage[].evidenceRefs, findings[].evidenceRefs, and noFindingsClaims[].evidenceRefs must cite actual runtime audit ledger IDs (ev_*) only; finding labels such as AOB-001 or invented IDs are never evidenceRefs.
   - Path rule: every repository reference must use an existing scoped path plus line/range; do not use basename-only references such as config.py, future files such as cli_context.py, or generated .ai-factory/* files as source evidence.
   - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
@@ -1733,16 +1775,22 @@ ${priorContextLine}  - Allowed changes: only create/update one report artifact.
   - No-findings shape: do not write ### Finding or ### Risk subsections for no-findings claims; use a concise checklist/table and manifest noFindingsClaims tied to scoped evidenceRefs.
   - ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
   - ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
+  - ${AUDIT_CHILD_ORDER_REQUIREMENT}
   - Git requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.
   - Constraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.
 
 - [ ] **Synthesize audit findings** - Diagnostic-only synthesis.
   - Scope: all audit/${reportDate}-*-audit.md reports from this audit batch.
+  - Task intent: audit
   - Audit mandate: act as the synthesis owner reviewing area reports; include only actionable findings that meet the evidence contract and call out weak reports by source.
 ${priorContextLine}  - Allowed changes: only create/update audit/${reportDate}-summary.md.
   - Report artifact: audit/${reportDate}-summary.md
+  - Expected report artifact: audit/${reportDate}-summary.md
+  - Allowed write paths: audit/${reportDate}-summary.md
+  - Dependency order: after every source audit report child is trusted valid or accepted terminal inconclusive/manual-exception with machine-readable issue codes.
   - Acceptance criteria: summarize blocking findings, advisory findings, omitted weak findings by source, and remediation backlog.
   - Evidence requirements: every summarized finding must include Evidence: <source repo path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...
+  - ${AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT}
   - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
   - Quality bar: do not promote weak source-report observations, inventory notes, speculative risks, or findings without concrete path:line evidence.
   - No-findings rule: if no source finding meets the bar, write "No validated findings" and list source reports inspected with observed commit/output evidence.
@@ -1762,6 +1810,8 @@ Rules:
 - Every source audit task must include a locally parseable Risk hypotheses: line with risk-* IDs, and every declared Scope root must appear in at least one risk hypothesis.
 - Synthesis tasks do not need product risk hypotheses; their Scope must stay limited to all audit/${reportDate}-*-audit.md reports from this audit batch.
 - Each audit task must be independently runnable and must have exactly one report artifact.
+- Every audit task must include Task intent, Expected report artifact, Allowed write paths, Dependency order, and Trusted artifact lifecycle contract lines.
+- Source audit tasks must preserve strict roadmap order; successors cannot start until predecessor report artifacts are trusted valid or accepted terminal inconclusive/manual-exception with machine-readable issue codes.
 - The final synthesis task must list every child report artifact with a passed, failed, or inconclusive status before stating the overall audit outcome.
 - Output ONLY the markdown content for ROADMAP.md, nothing else`;
 }
@@ -1985,7 +2035,7 @@ Required output format (JSON only, no markdown fences):
     {
       "title": "Audit: short area name",
       "taskIntent": "audit",
-      "description": "Scope: packages/api/src/services/roadmapGeneration.ts, packages/shared/src/auditRoadmapContract.ts\\nAudit mandate: ...\\nRisk hypotheses: risk-roadmap-1 packages/api/src/services/roadmapGeneration.ts may contain extraction gaps; risk-roadmap-2 packages/shared/src/auditRoadmapContract.ts may contain validation gaps\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\nQuality bar: ...\\nNo-findings rule: ...\\n${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\\n${AUDIT_ABSENCE_PROOF_REQUIREMENT}\\n${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
+      "description": "Scope: packages/api/src/services/roadmapGeneration.ts, packages/shared/src/auditRoadmapContract.ts\\nTask intent: audit\\nAudit mandate: ...\\nRisk hypotheses: risk-roadmap-1 packages/api/src/services/roadmapGeneration.ts may contain extraction gaps; risk-roadmap-2 packages/shared/src/auditRoadmapContract.ts may contain validation gaps\\nAllowed changes: ...\\nReport artifact: audit/YYYY-MM-DD-name-audit.md\\nExpected report artifact: audit/YYYY-MM-DD-name-audit.md\\nAllowed write paths: audit/YYYY-MM-DD-name-audit.md\\nDependency order: source report sequence 1; no predecessor.\\nAcceptance criteria: ...\\nEvidence requirements: every finding must include Evidence: <path>:<line>, Risk:, Proposed fix:, and Verification: Command ... output ...\\n${AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT}\\nQuality bar: ...\\nNo-findings rule: ...\\n${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}\\n${AUDIT_ABSENCE_PROOF_REQUIREMENT}\\n${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}\\n${AUDIT_CHILD_ORDER_REQUIREMENT}\\nGit requirements: run git status --short; git add the report artifact; git commit the report artifact; verify with git log -1 --name-only --oneline.\\nConstraint: diagnostic-only; do not implement fixes; do not edit source/config/test files; do not create child implementation tasks.",
       "phase": 1,
       "phaseName": "Audit",
       "sequence": 1
@@ -1998,12 +2048,14 @@ Rules:
 - Do not create tasks whose primary action is fix, resolve, implement, refactor, harden, expand tests, deploy, or document.
 - Every task must remain diagnostic-only.
 - Every task must set "taskIntent": "audit".
-- Every task description must include Scope:, Audit mandate:, Allowed changes:, Report artifact:, Acceptance criteria:, Evidence requirements:, Quality bar:, No-findings rule:, Git requirements:, and Constraint:.
+- Every task description must include Scope:, Task intent:, Audit mandate:, Allowed changes:, Report artifact:, Expected report artifact:, Allowed write paths:, Dependency order:, Acceptance criteria:, Evidence requirements:, Trusted artifact lifecycle:, Quality bar:, No-findings rule:, Git requirements:, and Constraint:.
 - Source audit task descriptions must include concrete Scope roots and Risk hypotheses: with risk-* IDs that mention every Scope root; never use Scope: ., ./, *, globs, all files, entire repository, or natural-language-only scope.
 - Synthesis descriptions must keep Scope: all audit/YYYY-MM-DD-*-audit.md reports from this audit batch and report-only allowed changes.
 - Every task description must include: ${AUDIT_NO_FINDINGS_PROOF_GUARDRAIL}
 - Every task description must include: ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
 - Every task description must include: ${AUDIT_SUBSTANTIVE_NO_FINDINGS_REQUIREMENT}
+- Every task description must include: ${AUDIT_TRUSTED_ARTIFACT_LIFECYCLE_REQUIREMENT}
+- Source audit task descriptions must include: ${AUDIT_CHILD_ORDER_REQUIREMENT}
 - Synthesis task descriptions must include: ${AUDIT_SYNTHESIS_OUTCOME_REQUIREMENT}
 - Synthesis task descriptions must include: ${AUDIT_CHILD_REPORT_STATUS_REQUIREMENT}
 ${priorContextRule}

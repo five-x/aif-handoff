@@ -3060,9 +3060,10 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     }
 
     if (stage.label === "reviewer") {
+      const reviewExecutionRoot = latestTask.worktreePath ?? executionRoot;
       const outcome = await handleAutoReviewGate({
         taskId: task.id,
-        projectRoot: task.worktreePath ?? project.rootPath,
+        projectRoot: reviewExecutionRoot,
         force: taskRequiresSpecializedReviewerFanout(
           latestTask,
           findRoadmapBatchArtifactByTaskId(latestTask.id),
@@ -3076,7 +3077,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           blockTaskForStalledAutoReview({
             task: latestTask,
             outcome,
-            projectRoot: executionRoot,
+            projectRoot: latestTask.worktreePath ?? reviewExecutionRoot,
             fromStatus: stage.inProgress,
             title: taskTitle,
           })
@@ -3086,7 +3087,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         if (
           blockTaskForCompletionEvidenceIfNeeded({
             task: latestTask,
-            projectRoot: executionRoot,
+            projectRoot: latestTask.worktreePath ?? reviewExecutionRoot,
             fromStatus: stage.inProgress,
             title: taskTitle,
             requireManualReview: true,
@@ -3208,7 +3209,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         if (
           blockTaskForCompletionEvidenceIfNeeded({
             task: latestTask,
-            projectRoot: executionRoot,
+            projectRoot: latestTask.worktreePath ?? reviewExecutionRoot,
             fromStatus: stage.inProgress,
             title: taskTitle,
             extra: {
@@ -3237,7 +3238,7 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       task.reworkRequested &&
       blockTaskForNoSubstantiveReworkDeltaIfNeeded({
         task: latestTask,
-        projectRoot: executionRoot,
+        projectRoot: latestTask.worktreePath ?? executionRoot,
         fromStatus: stage.inProgress,
         title: taskTitle,
       })

@@ -1746,6 +1746,41 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
+  it("uses refreshed worktreePath for reviewer auto-review gate", async () => {
+    const db = testDb.current;
+    const refreshedRoot = mkdtempSync(join(tmpdir(), "aif-review-refreshed-worktree-"));
+    db.insert(tasks)
+      .values({
+        id: "task-review-refreshed-worktree",
+        projectId: "test-project",
+        title: "Review refreshed worktree",
+        status: "review",
+        autoMode: true,
+      })
+      .run();
+    vi.mocked(runReviewer).mockImplementationOnce(async () => {
+      db.update(tasks)
+        .set({ worktreePath: refreshedRoot })
+        .where(eq(tasks.id, "task-review-refreshed-worktree"))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    expect(runReviewer).toHaveBeenCalledWith("task-review-refreshed-worktree", "/tmp/test");
+    expect(handleAutoReviewGate).toHaveBeenCalledWith({
+      taskId: "task-review-refreshed-worktree",
+      projectRoot: refreshedRoot,
+      force: false,
+    });
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-review-refreshed-worktree"))
+      .get();
+    expect(task!.status).toBe("done");
+  });
+
   it("should auto-request changes after review when autoMode=true and fixes are found", async () => {
     const db = testDb.current;
     db.insert(tasks)

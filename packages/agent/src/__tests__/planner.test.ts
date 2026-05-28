@@ -303,6 +303,68 @@ describe("runPlanner comment selection", () => {
     );
   });
 
+  it("uses deterministic direct audit canary plans for root-level file scopes", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-direct-audit-"));
+    db.insert(projects)
+      .values({
+        id: "project-planner-direct-audit",
+        name: "Planner Direct Audit",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-direct-audit-canary",
+        projectId: "project-planner-direct-audit",
+        title: "Positive trusted direct audit canary",
+        description: [
+          "Scope: README.md",
+          "Risk hypotheses: risk-readme README.md onboarding claims may drift from repository evidence.",
+          "Report artifact: audit/direct-audit-positive-canary.md",
+          "Remote validation target: http://192.168.88.67",
+        ].join("\n"),
+        taskIntent: "audit",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+        status: "planning",
+        useSubagents: true,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "project-planner-direct-audit",
+      roadmapAlias: "direct-audit-canary",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-direct-audit-canary"],
+      artifacts: [
+        {
+          taskId: "task-direct-audit-canary",
+          role: "report",
+          artifactPath: "audit/direct-audit-positive-canary.md",
+        },
+      ],
+    });
+
+    await runPlanner("task-direct-audit-canary", projectRoot);
+
+    expect(queryMock).not.toHaveBeenCalled();
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-direct-audit-canary"))
+      .get();
+    expect(updatedTask?.plan).toContain("## Diagnostic-only plan");
+    expect(updatedTask?.plan).toContain(
+      "Expected report artifact: `audit/direct-audit-positive-canary.md`",
+    );
+    expect(updatedTask?.plan).toContain("Declared scope: `README.md`");
+    expect(updatedTask?.plan).toContain("Allowed write paths:");
+    expect(updatedTask?.plan).toContain("Ledger evidence required: yes");
+    expect(updatedTask?.plan).toContain("Local AIF service/e2e: forbidden");
+    expect(updatedTask?.plan).toContain("Remote validation target: http://192.168.88.67");
+  });
+
   it("uses narrowed diagnostic-only prompt wording", async () => {
     const db = testDb.current;
     db.insert(tasks)

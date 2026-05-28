@@ -28,6 +28,7 @@ import {
   findTaskById,
   getLatestHumanComment,
   appendTaskActivityLog,
+  auditRoadmapTaskDependenciesReleaseReady,
   listProjectConfigWorkBlockers,
   collectTaskRuntimeOverrideBlockers,
   listAuditEvidenceEvents,
@@ -960,6 +961,18 @@ export async function handleTaskEvent(input: EventHandlerInput): Promise<EventHa
       ok: false,
       status: 409,
       error: "Container tasks are coordination surfaces and cannot start runtime execution",
+    };
+  }
+  if (
+    task.taskIntent === "audit" &&
+    RUNTIME_STARTING_EVENTS.has(input.event) &&
+    !auditRoadmapTaskDependenciesReleaseReady(task)
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        "audit_child_dependency_not_ready: predecessor report artifacts must be trusted valid or accepted terminal before this audit task can start",
     };
   }
   const configBlocker = checkConfigGovernanceBlocker(task, input.event);
