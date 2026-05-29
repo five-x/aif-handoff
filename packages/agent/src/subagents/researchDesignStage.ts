@@ -43,8 +43,20 @@ const STAGE_LABELS: Record<ResearchDesignStage, string> = {
   design: "Design artifact",
 };
 
+const STAGE_ARTIFACT_FENCE_LANGUAGE = "aif-stage-artifact";
+const FORMAT_REPAIR_SOURCE_OUTPUT_MAX_CHARS = 60_000;
+
 function hashText(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function truncatePromptText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n[Truncated after ${maxChars} characters.]`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,6 +141,63 @@ export function parseStageArtifactOutput(
   };
 }
 
+function buildStageArtifactFenceExample(stage: ResearchDesignStage): string {
+  return [
+    `\`\`\`${STAGE_ARTIFACT_FENCE_LANGUAGE}`,
+    JSON.stringify(
+      {
+        version: 1,
+        stage,
+        status: "accepted",
+        summary: "Short non-empty summary.",
+        markdown: `# ${stage === "research" ? "Research" : "Design"}\n\n## Findings\n- ...`,
+        questions: [],
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
+
+export function buildStageFormatRepairPrompt(input: {
+  stage: ResearchDesignStage;
+  taskId: string;
+  taskTitle: string;
+  parserError: string;
+  sourceOutput: string;
+}): string {
+  const stageNoun = input.stage === "research" ? "research" : "design";
+  return [
+    `You are fixing the machine-readable output format for the ${stageNoun} stage of an AIF task.`,
+    "The prior response was rejected by the parser. Convert it into exactly one valid stage artifact.",
+    "",
+    "Hard requirements:",
+    `- Your entire final response must be one fenced \`${STAGE_ARTIFACT_FENCE_LANGUAGE}\` JSON block.`,
+    "- Do not write prose before or after the fenced block.",
+    "- Do not use a `json` fence.",
+    "- Preserve the substantive findings from the prior response in `markdown` when possible.",
+    "- Do not add new facts, external evidence, secrets, credentials, or file writes.",
+    "- If the prior response is not sufficient for downstream planning, use `questions` or `blocked` according to the schema.",
+    "- For `questions`, `questions` must be non-empty and each question must include `question` and `whyNeeded`.",
+    "",
+    "Valid final response shape:",
+    buildStageArtifactFenceExample(input.stage),
+    "",
+    "Task:",
+    `ID: ${input.taskId}`,
+    `Title: ${input.taskTitle}`,
+    "",
+    "Parser error:",
+    input.parserError,
+    "",
+    "Prior response to reformat is between <previous-output> tags:",
+    "<previous-output>",
+    truncatePromptText(input.sourceOutput, FORMAT_REPAIR_SOURCE_OUTPUT_MAX_CHARS),
+    "</previous-output>",
+  ].join("\n");
+}
+
 function formatHumanComments(taskId: string): string {
   const comments = listTaskComments(taskId)
     .filter((comment) => comment.author === "human")
@@ -150,34 +219,18 @@ function buildPrompt(input: {
   return [
     `You are the ${stageNoun} stage for an AIF task lifecycle.`,
     "",
-    "Return exactly one fenced `aif-stage-artifact` JSON block. Do not write files.",
+    `Return exactly one fenced \`${STAGE_ARTIFACT_FENCE_LANGUAGE}\` JSON block. Do not write files.`,
+    "Your final response must start with the fence and end with the closing fence; do not write prose before or after it.",
+    "Do not use a `json` fence and never emit more than one fenced block.",
     "",
-    "Allowed schema:",
-    "```json",
-    JSON.stringify(
-      {
-        version: 1,
-        stage: input.stage,
-        status: "accepted | questions | blocked",
-        summary: "Short non-empty summary.",
-        markdown: `# ${input.stage === "research" ? "Research" : "Design"}\n\n...`,
-        questions: [
-          {
-            idempotencyKey: `${input.stage}-missing-detail`,
-            question: "Question for the user.",
-            whyNeeded: "Why the answer is required.",
-            placeholder: "Optional answer guidance.",
-          },
-        ],
-      },
-      null,
-      2,
-    ),
-    "```",
+    "Valid final response shape:",
+    buildStageArtifactFenceExample(input.stage),
     "",
     "Rules:",
     "- Use `accepted` only when the artifact is specific enough for downstream planning.",
+    "- For `accepted`, `markdown` must be a non-empty Markdown artifact and `questions` may be empty.",
     "- Use `questions` for product clarification; these questions will route to needs_input.",
+    "- For `questions`, `questions` must be non-empty and each question must include `question` and `whyNeeded`.",
     "- Use `blocked` only for non-product blockers that require operator/manual triage.",
     "- Never include raw secrets or credentials in markdown or questions.",
     "",
@@ -194,6 +247,81 @@ function buildPrompt(input: {
     "",
     input.requirementsMarkdown,
   ].join("\n");
+}
+
+async function parseStageArtifactOutputWithFormatRepair(input: {
+  stage: ResearchDesignStage;
+  task: NonNullable<ReturnType<typeof findTaskById>>;
+  project: ReturnType<typeof findProjectById>;
+  projectRoot: string;
+  output: string;
+  promptHash: string;
+  scopeConstraint: string;
+}): Promise<{
+  parsed: ParsedStageArtifactOutput;
+  repairMetadata: Record<string, unknown>;
+}> {
+  try {
+    return {
+      parsed: parseStageArtifactOutput(input.output, input.stage),
+      repairMetadata: {},
+    };
+  } catch (initialError) {
+    const initialParserError = formatErrorMessage(initialError);
+    const repairPrompt = buildStageFormatRepairPrompt({
+      stage: input.stage,
+      taskId: input.task.id,
+      taskTitle: input.task.title,
+      parserError: initialParserError,
+      sourceOutput: input.output,
+    });
+    const repairPromptHash = hashText(repairPrompt);
+    const repairWorkflowSpec = createRuntimeWorkflowSpec({
+      workflowKind: "planner",
+      prompt: repairPrompt,
+      requiredCapabilities: [],
+      sessionReusePolicy: "new_session",
+      systemPromptAppend: input.scopeConstraint,
+      metadata: {
+        lifecycleStage: input.stage,
+        formatRepair: true,
+        promptHash: repairPromptHash,
+        repairForPromptHash: input.promptHash,
+      },
+    });
+
+    log.warn(
+      { taskId: input.task.id, stage: input.stage, initialParserError },
+      "Stage artifact validation failed; attempting one format repair pass",
+    );
+
+    const { resultText: repairedOutput } = await executeSubagentQuery({
+      taskId: input.task.id,
+      projectRoot: input.projectRoot,
+      agentName: `${input.stage}-stage-format-repair`,
+      prompt: repairPrompt,
+      workflowSpec: repairWorkflowSpec,
+      profileMode: "plan",
+      maxBudgetUsd: input.project?.plannerMaxBudgetUsd ?? null,
+      maxTurns: 2,
+    });
+
+    try {
+      return {
+        parsed: parseStageArtifactOutput(repairedOutput, input.stage),
+        repairMetadata: {
+          formatRepair: true,
+          initialParserError,
+          repairPromptHash,
+        },
+      };
+    } catch (repairError) {
+      const repairParserError = formatErrorMessage(repairError);
+      throw new Error(
+        `Stage artifact output failed validation and format repair failed. Initial parser error: ${initialParserError}. Repair parser error: ${repairParserError}`,
+      );
+    }
+  }
 }
 
 function toRequirementQuestionInputs(
@@ -299,10 +427,21 @@ export async function runResearchDesignStage(
   }
 
   let parsed: ParsedStageArtifactOutput;
+  let repairMetadata: Record<string, unknown> = {};
   try {
-    parsed = parseStageArtifactOutput(resultText, stage);
+    const parseResult = await parseStageArtifactOutputWithFormatRepair({
+      stage,
+      task,
+      project,
+      projectRoot,
+      output: resultText,
+      promptHash,
+      scopeConstraint,
+    });
+    parsed = parseResult.parsed;
+    repairMetadata = parseResult.repairMetadata;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatErrorMessage(error);
     recordTaskStageArtifactAttempt({
       taskId,
       stage,
@@ -317,6 +456,7 @@ export async function runResearchDesignStage(
       metadata: {
         outputVersion: 1,
         parserError: message,
+        formatRepairAttempted: true,
         promptHash,
         ...sourceResearchMetadata,
       },
@@ -341,6 +481,7 @@ export async function runResearchDesignStage(
         outputVersion: parsed.version,
         status: parsed.status,
         promptHash,
+        ...repairMetadata,
         ...sourceResearchMetadata,
       },
     });
@@ -385,6 +526,7 @@ export async function runResearchDesignStage(
           outputVersion: parsed.version,
           status: parsed.status,
           promptHash,
+          ...repairMetadata,
           intakeDisabled: true,
           questionBatchId: null,
           ...sourceResearchMetadata,
@@ -418,6 +560,7 @@ export async function runResearchDesignStage(
         outputVersion: parsed.version,
         status: parsed.status,
         promptHash,
+        ...repairMetadata,
         questionBatchId: result.batchId,
         ...sourceResearchMetadata,
       },
@@ -441,6 +584,7 @@ export async function runResearchDesignStage(
       outputVersion: parsed.version,
       status: parsed.status,
       promptHash,
+      ...repairMetadata,
       ...sourceResearchMetadata,
     },
   });

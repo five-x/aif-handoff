@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseStageArtifactOutput } from "../subagents/researchDesignStage.js";
+import {
+  buildStageFormatRepairPrompt,
+  parseStageArtifactOutput,
+} from "../subagents/researchDesignStage.js";
 
 describe("research/design stage artifact parser", () => {
   it("parses accepted stage artifacts", () => {
@@ -68,5 +71,20 @@ describe("research/design stage artifact parser", () => {
         "design",
       ),
     ).toThrow(/stage must be design/i);
+  });
+
+  it("documents the parser-supported fence language in format repair prompts", () => {
+    const prompt = buildStageFormatRepairPrompt({
+      stage: "research",
+      taskId: "task-1",
+      taskTitle: "Research task",
+      parserError: "Expected exactly one fenced aif-stage-artifact JSON block, found 0",
+      sourceOutput: "# Research\n\nFindings without a machine-readable fence.",
+    });
+
+    expect(prompt).toContain("```aif-stage-artifact");
+    expect(prompt).not.toContain("```json");
+    expect(prompt).toContain("Do not use a `json` fence.");
+    expect(prompt).toContain("Findings without a machine-readable fence.");
   });
 });
