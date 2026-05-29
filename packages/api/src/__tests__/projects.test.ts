@@ -700,6 +700,81 @@ describe("projects API", () => {
       expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(2);
     });
 
+    it("canaries split_required reject and approve decisions without executing generated tasks", async () => {
+      createRoadmapProject("roadmap-split-canary", "# Roadmap\n- [ ] Build split child\n");
+      mockRoadmapExtraction("split-reject");
+
+      const rejectImportRes = await app.request("/projects/roadmap-split-canary/roadmap/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "split-reject" }),
+      });
+
+      expect(rejectImportRes.status).toBe(201);
+      const rejectImportBody = await rejectImportRes.json();
+      expect(rejectImportBody.status).toBe("split_required");
+      expect(rejectImportBody.proposal.status).toBe("pending");
+      expect(findTasksByRoadmapAlias("roadmap-split-canary", "split-reject")).toHaveLength(0);
+
+      const rejectRes = await app.request(
+        `/projects/roadmap-split-canary/task-split-proposals/${rejectImportBody.proposal.id}/reject`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "canary rejection" }),
+        },
+      );
+
+      expect(rejectRes.status).toBe(200);
+      const rejected = await rejectRes.json();
+      expect(rejected.status).toBe("rejected");
+      expect(findTasksByRoadmapAlias("roadmap-split-canary", "split-reject")).toHaveLength(0);
+      expect(mockBroadcast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "task:created" }),
+      );
+
+      mockBroadcast.mockClear();
+      mockRoadmapExtraction("split-approve");
+      const approveImportRes = await app.request("/projects/roadmap-split-canary/roadmap/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "split-approve" }),
+      });
+
+      expect(approveImportRes.status).toBe(201);
+      const approveImportBody = await approveImportRes.json();
+      expect(approveImportBody.status).toBe("split_required");
+      expect(approveImportBody.proposal.status).toBe("pending");
+      expect(findTasksByRoadmapAlias("roadmap-split-canary", "split-approve")).toHaveLength(0);
+
+      const approveRes = await app.request(
+        `/projects/roadmap-split-canary/task-split-proposals/${approveImportBody.proposal.id}/approve`,
+        { method: "POST" },
+      );
+
+      expect(approveRes.status).toBe(201);
+      const approved = await approveRes.json();
+      expect(approved.status).toBe("approved");
+      expect(approved.containerTaskId).toBeTruthy();
+      expect(approved.createdTaskIds).toEqual(expect.arrayContaining([approved.containerTaskId]));
+      const created = findTasksByRoadmapAlias("roadmap-split-canary", "split-approve");
+      expect(created).toHaveLength(2);
+      const parent = findTaskById(approved.containerTaskId)!;
+      const childId = approved.createdTaskIds.find(
+        (taskId: string) => taskId !== approved.containerTaskId,
+      );
+      expect(childId).toBeTruthy();
+      const child = findTaskById(childId)!;
+      expect(parent.hierarchyRole).toBe("container");
+      expect(parent.paused).toBe(true);
+      expect(child.parentTaskId).toBe(parent.id);
+      expect(child.paused).toBe(true);
+      expect(mockBroadcast).toHaveBeenCalledWith(expect.objectContaining({ type: "task:created" }));
+      expect(mockBroadcast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "agent:wake" }),
+      );
+    });
+
     it("keeps audit-logging generate requests generic when vision asks to add audit logging", async () => {
       createRoadmapProject("roadmap-audit-logging");
 
