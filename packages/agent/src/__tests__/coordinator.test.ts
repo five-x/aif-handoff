@@ -4959,6 +4959,34 @@ describe("coordinator", () => {
     expect(task!.reviewIterationCount).toBe(1);
   });
 
+  it("should cap implementation evidence guard rework before exhausting the general review budget", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-handoff-cap-");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-handoff-cap",
+        projectId: "test-project",
+        title: "Development task with repeated bad manifest",
+        taskIntent: "feature",
+        status: "implementing",
+        reviewIterationCount: 2,
+        maxReviewIterations: 100,
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-cap", rootPath);
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-dev-handoff-cap")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toContain("missing_implementation_manifest");
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.reviewIterationCount).toBe(2);
+  });
+
   it("should block skipReview audit tasks with generic plan and no evidence delta", async () => {
     const db = testDb.current;
     db.insert(tasks)

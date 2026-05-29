@@ -67,4 +67,82 @@ describe("implementation manifest extraction", () => {
       ]),
     );
   });
+
+  it("rejects passed verification that uses the empty-output sha as placeholder evidence", () => {
+    const manifest = {
+      version: 1,
+      taskId: "task-empty-hash",
+      intent: "feature",
+      planManifestHash: null,
+      changedFiles: [{ path: "src/index.ts", status: "added" }],
+      diffSummary: { summary: "Implemented src/index.ts", filesChanged: 1 },
+      verificationEvidence: [
+        {
+          id: "ver-1",
+          command: "npm test",
+          status: "passed",
+          outputSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          outputPreview: "npm test completed successfully.",
+          outputPreviewTruncated: false,
+        },
+      ],
+      acceptanceCriteria: [{ id: "AC-1", status: "satisfied", evidenceRefs: ["ver-1"] }],
+      evidenceRefs: ["ver-1"],
+      planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+      reviewClosure: { status: "pending", evidenceRefs: [] },
+      commitEvidence: { status: "not_required", evidenceRefs: [] },
+      knownLimitations: [],
+    };
+
+    const result = validateImplementationManifest({
+      task: { id: "task-empty-hash", title: "Build feature", taskIntent: "feature" },
+      manifestJson: JSON.stringify(manifest),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
+  });
+
+  it("rejects passed verification when known limitations admit placeholder execution output", () => {
+    const manifest = {
+      version: 1,
+      taskId: "task-placeholder-limit",
+      intent: "feature",
+      planManifestHash: null,
+      changedFiles: [{ path: "src/index.ts", status: "added" }],
+      diffSummary: { summary: "Implemented src/index.ts", filesChanged: 1 },
+      verificationEvidence: [
+        {
+          id: "ver-1",
+          command: "npm test",
+          status: "passed",
+          outputSha256: "a".repeat(64),
+          outputPreview: "PASS tests/app.test.ts.",
+          outputPreviewTruncated: false,
+        },
+      ],
+      acceptanceCriteria: [{ id: "AC-1", status: "satisfied", evidenceRefs: ["ver-1"] }],
+      evidenceRefs: ["ver-1"],
+      planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+      reviewClosure: { status: "pending", evidenceRefs: [] },
+      commitEvidence: { status: "not_required", evidenceRefs: [] },
+      knownLimitations: [
+        "outputSha256 values are placeholders because commands were not executed.",
+      ],
+    };
+
+    const result = validateImplementationManifest({
+      task: { id: "task-placeholder-limit", title: "Build feature", taskIntent: "feature" },
+      manifestJson: JSON.stringify(manifest),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
+  });
 });

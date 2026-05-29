@@ -2538,6 +2538,7 @@ const IMPLEMENTATION_EVIDENCE_REWORK_ISSUES = new Set<ImplementationManifestIssu
   "missing_review_closure_evidence",
   "missing_fix_regression_explanation",
 ]);
+const IMPLEMENTATION_EVIDENCE_REWORK_MAX_ITERATIONS = 2;
 
 function implementationEvidenceIssueCodes(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
@@ -2563,7 +2564,11 @@ function returnImplementationEvidenceToReworkIfPossible(input: {
   if (issueCodes.length === 0) return false;
 
   const currentIteration = input.task.reviewIterationCount ?? 0;
-  const maxIterations = input.task.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const configuredMaxIterations = input.task.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const maxIterations = Math.min(
+    configuredMaxIterations,
+    IMPLEMENTATION_EVIDENCE_REWORK_MAX_ITERATIONS,
+  );
   const nextIteration = currentIteration + 1;
   if (nextIteration > maxIterations) return false;
 

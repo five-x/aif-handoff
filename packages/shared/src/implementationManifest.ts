@@ -542,9 +542,24 @@ function verificationHasOutputIdentity(entry: ImplementationManifestVerification
     usefulString(entry.command) &&
     typeof entry.outputSha256 === "string" &&
     SHA256_HEX_PATTERN.test(entry.outputSha256) &&
+    entry.outputSha256 !== EMPTY_OUTPUT_SHA256 &&
+    !looksLikeFabricatedVerificationText(entry.outputPreview) &&
     usefulString(entry.outputPreview) &&
     typeof entry.outputPreviewTruncated === "boolean"
   );
+}
+
+const EMPTY_OUTPUT_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+const FABRICATED_VERIFICATION_PATTERN =
+  /\b(?:placeholder|fake|fabricated|invented|assumed|simulated|not\s+executed|not\s+run|was\s+not\s+run|was\s+not\s+executed|did\s+not\s+run|did\s+not\s+execute|не\s+был[а-яё]*\s+выполн|не\s+выполн|плейсхолдер)\b/i;
+
+function looksLikeFabricatedVerificationText(value: string | null | undefined): boolean {
+  return typeof value === "string" && FABRICATED_VERIFICATION_PATTERN.test(value);
+}
+
+function manifestAdmitsFabricatedVerification(manifest: ImplementationManifest): boolean {
+  return manifest.knownLimitations.some((entry) => looksLikeFabricatedVerificationText(entry));
 }
 
 function pathMatchesApprovedBoundary(path: string, boundary: string): boolean {
@@ -680,12 +695,18 @@ export function validateImplementationManifest(
   const passedEntriesWithoutIdentity = passedEntries.filter(
     (entry) => !verificationHasOutputIdentity(entry),
   );
-  const passedVerification = passedEntries.length > 0 && passedEntriesWithoutIdentity.length === 0;
+  const admitsFabricatedVerification = manifestAdmitsFabricatedVerification(manifest);
+  const passedVerification =
+    passedEntries.length > 0 &&
+    passedEntriesWithoutIdentity.length === 0 &&
+    !admitsFabricatedVerification;
   if (!passedVerification) {
     issues.push(
       issue(
         "missing_verification_evidence",
-        "Development tasks require every passing verification evidence item to include command, outputSha256, outputPreview, and outputPreviewTruncated.",
+        admitsFabricatedVerification
+          ? "Development tasks cannot satisfy verification with placeholder, simulated, or explicitly unexecuted evidence."
+          : "Development tasks require every passing verification evidence item to include command, non-empty outputSha256, outputPreview, and outputPreviewTruncated.",
       ),
     );
   }
