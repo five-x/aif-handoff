@@ -88,3 +88,4 @@
 | [work-20260528-late-stage-question-resume](work/work-20260528-late-stage-question-resume.md)                                                   | queued | high     | yes  | Late Stage Question Resume                                |
 | [work-20260528-roadmap-split-required](work/work-20260528-roadmap-split-required.md)                                                           | queued | high     | yes  | Roadmap Split Required                                    |
 | [work-20260528-requirements-observability-docs-rollout](work/work-20260528-requirements-observability-docs-rollout.md)                         | queued | high     | yes  | Requirements Observability Docs And Rollout               |
+| [work-20260529-external-systemic-aif-stability-review](work/work-20260529-external-systemic-aif-stability-review.md)                           | queued | critical | yes  | External Systemic AIF Stability Review                    |

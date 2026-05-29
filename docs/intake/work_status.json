@@ -795,6 +795,15 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260528-requirements-observability-docs-rollout",
       "updated": "2026-05-29"
+    },
+    {
+      "taskId": "work-20260529-external-systemic-aif-stability-review",
+      "title": "External Systemic AIF Stability Review",
+      "status": "queued",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260529-external-systemic-aif-stability-review",
+      "updated": "2026-05-29"
     }
   ]
 }
