@@ -226,6 +226,65 @@ const auditInconclusiveTimeline: WorkflowTimeline = {
   ],
 };
 
+const requirementsTimeline: WorkflowTimeline = {
+  ...featureTimeline,
+  context: {
+    ...featureTimeline.context,
+    workflowPackId: "feature",
+    workflowKind: "feature",
+    sourceKind: "task_record",
+    sourceId: "requirements-task",
+  },
+  artifacts: [
+    {
+      ...featureTimeline.artifacts[0]!,
+      id: "requirements-artifact",
+      kind: "requirements",
+      label: "Requirements artifact",
+      path: "requirements.md",
+      currentAttemptNumber: 2,
+      metadata: { reasonCodes: ["requirements_snapshot_current"] },
+    },
+    {
+      ...featureTimeline.artifacts[0]!,
+      id: "research-artifact",
+      kind: "research",
+      label: "Research artifact",
+      path: "research.md",
+      metadata: { reasonCodes: ["research_artifact_current"] },
+    },
+    {
+      ...featureTimeline.artifacts[0]!,
+      id: "design-artifact",
+      kind: "design",
+      label: "Design artifact",
+      path: "design.md",
+      metadata: { reasonCodes: ["design_artifact_current"] },
+    },
+  ],
+  attempts: [
+    {
+      ...featureTimeline.attempts[0]!,
+      id: "requirements-attempt",
+      artifactId: "requirements-artifact",
+      attemptNumber: 2,
+      sourceSnapshotId: "requirements-snapshot-2",
+      metadata: { reasonCodes: ["requirements_snapshot_current"] },
+    },
+  ],
+  claims: [
+    {
+      ...featureTimeline.claims[0]!,
+      id: "requirements-claim",
+      artifactId: "requirements-artifact",
+      metadata: { reasonCodes: ["requirements_snapshot_current"] },
+    },
+  ],
+  evidence: [],
+  evidenceLinks: [],
+  events: [],
+};
+
 describe("WorkflowTimelinePanel", () => {
   it("renders populated audit-compatible timeline with generic labels and secondary details", () => {
     render(<WorkflowTimelinePanel timeline={auditTimeline} />);
@@ -271,6 +330,19 @@ describe("WorkflowTimelinePanel", () => {
     ).toBeGreaterThan(0);
     expect(screen.queryByText("Supported")).toBeNull();
     expect(screen.queryByText("Trust: trusted")).toBeNull();
+  });
+
+  it("renders requirements and stage artifact metadata", () => {
+    render(<WorkflowTimelinePanel timeline={requirementsTimeline} />);
+
+    expect(screen.getByText("Requirements artifact")).toBeDefined();
+    expect(screen.getByText("Research artifact")).toBeDefined();
+    expect(screen.getByText("Design artifact")).toBeDefined();
+    expect(screen.getByText("requirements.md")).toBeDefined();
+    expect(screen.getByText("research.md")).toBeDefined();
+    expect(screen.getByText("design.md")).toBeDefined();
+    expect(screen.getByText("Attempts: 2")).toBeDefined();
+    expect(screen.getByText("Snapshot: requirements-snapshot-2")).toBeDefined();
   });
 
   it("renders an empty generic timeline", () => {

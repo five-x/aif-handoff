@@ -75,6 +75,7 @@ import {
   createTaskRequirementQuestion,
   getAppDefaultRuntimeProfileId,
   getTaskRequirementQuestionsResponse,
+  getTaskRequirementsSnapshotResponse,
   resolveEffectiveRuntimeProfile,
   resolveEffectiveRuntimeProfilesForTasks,
   updateTaskPositionOnly,
@@ -459,9 +460,16 @@ tasksRouter.post(
           projectId: task.projectId,
           batchId: activeBatch?.batchId,
           stage: activeBatch?.stage ?? task.needsInputStage ?? undefined,
+          targetResumeStage: activeBatch?.targetResumeStage,
           openBlockingCount: questionState?.openBlockingCount ?? 0,
         },
       });
+    } else if (
+      type === "task:requirements_snapshot_created" ||
+      type === "task:requirements_snapshot_updated"
+    ) {
+      broadcast({ type, payload: toTaskBroadcastPayload(task) });
+      broadcast({ type: "task:timeline_updated", payload: taskOperatorPayload(task, type) });
     } else {
       broadcast({ type, payload: toTaskBroadcastPayload(task) });
       if (type === "task:updated" || type === "task:moved") {
@@ -938,9 +946,19 @@ tasksRouter.get("/:id/questions", (c) => {
   return c.json(response);
 });
 
+tasksRouter.get("/:id/requirements/snapshot", (c) => {
+  const { id } = c.req.param();
+  const response = getTaskRequirementsSnapshotResponse(id);
+  if (!response) return c.json({ error: "Task not found" }, 404);
+  return c.json(response);
+});
+
 tasksRouter.post("/:id/questions", jsonValidator(createRequirementQuestionSchema), (c) => {
   const { id } = c.req.param();
   const body = c.req.valid("json");
+  if (!getEnv().AIF_REQUIREMENTS_INTAKE_ENABLED) {
+    return c.json({ error: "Requirements intake is disabled" }, 409);
+  }
   try {
     const result = createTaskRequirementQuestion({
       taskId: id,
@@ -955,6 +973,9 @@ tasksRouter.post("/:id/questions", jsonValidator(createRequirementQuestionSchema
           projectId: result.task?.projectId,
           batchId: result.batchId,
           stage: body.stage,
+          targetResumeStage: result.response?.batches.find(
+            (batch) => batch.batchId === result.batchId,
+          )?.targetResumeStage,
           openBlockingCount: result.response?.openBlockingCount ?? 0,
         },
       });
@@ -966,6 +987,9 @@ tasksRouter.post("/:id/questions", jsonValidator(createRequirementQuestionSchema
             projectId: result.task.projectId,
             batchId: result.batchId,
             stage: body.stage,
+            targetResumeStage: result.response?.batches.find(
+              (batch) => batch.batchId === result.batchId,
+            )?.targetResumeStage,
             openBlockingCount: result.response?.openBlockingCount ?? 0,
           },
         });
@@ -1000,6 +1024,7 @@ tasksRouter.post(
           batchId: question.batchId,
           questionId,
           stage: question.stage,
+          targetResumeStage: question.targetResumeStage,
         },
       });
       return c.json(question);
@@ -1024,12 +1049,15 @@ tasksRouter.post(
         autoResume: body.autoResume,
       });
       const projectId = result.task?.projectId;
+      const answeredBatch = result.response?.batches.find((batch) => batch.batchId === batchId);
       broadcast({
         type: "task:question_batch_answered",
         payload: {
           taskId: id,
           projectId,
           batchId,
+          stage: answeredBatch?.stage,
+          targetResumeStage: answeredBatch?.targetResumeStage,
           openBlockingCount: result.response?.openBlockingCount ?? 0,
           resumed: result.resumed,
           resumeStatus: result.resumeStatus,

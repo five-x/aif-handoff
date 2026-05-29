@@ -4,6 +4,7 @@ import {
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
+  buildTaskRequirementsContextForPrompt,
   listRoadmapReportArtifactsForSynthesis,
   setTaskFields,
   type TaskRow,
@@ -31,6 +32,10 @@ import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
 import { flushActivityQueue, logActivity } from "../hooks.js";
 import { buildTaskMemoryContext } from "../memoryContext.js";
 import { executeSubagentQuery, startHeartbeat } from "../subagentQuery.js";
+import {
+  formatRaiseQuestionsPromptGuidance,
+  handleRaiseQuestionsOutput,
+} from "./raiseQuestions.js";
 import {
   buildStructuredReviewComments,
   buildSpecializedRoleManualReviewOutput,
@@ -1548,6 +1553,9 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
   });
   const reviewMemoryBlock = reviewMemoryContext ? `\n\n${reviewMemoryContext}\n` : "";
   const securityMemoryBlock = securityMemoryContext ? `\n\n${securityMemoryContext}\n` : "";
+  const requirementsContext = buildTaskRequirementsContextForPrompt(taskId, "review");
+  const requirementsBlock = requirementsContext ? `\n\n${requirementsContext.markdown}\n` : "";
+  const raiseQuestionsBlock = `\n\n${formatRaiseQuestionsPromptGuidance("review")}\n`;
   const reviewOutputContract = `Output contract:
 Return markdown only with these exact sections, in this exact order:
 
@@ -1600,7 +1608,7 @@ Rules:
   const reviewPromptBase = `Review the implementation for this task:
 
 ${scopeConstraint}
-${reviewMemoryBlock}
+${reviewMemoryBlock}${requirementsBlock}${raiseQuestionsBlock}
 
 Title: ${task.title}
 Description: ${task.description}
@@ -1633,7 +1641,7 @@ ${reviewOutputContract}`;
   const securityPromptBase = `Audit the implementation for security risks:
 
 ${scopeConstraint}
-${securityMemoryBlock}
+${securityMemoryBlock}${requirementsBlock}${raiseQuestionsBlock}
 
 Title: ${task.title}
 Description: ${task.description}
@@ -1802,6 +1810,38 @@ ${reviewOutputContract}`;
     }
 
     log.info({ taskId, specializedReviewerRoles }, "Review sidecars completed");
+
+    if (
+      handleRaiseQuestionsOutput({
+        taskId,
+        output: reviewResult,
+        stage: "review",
+        sourceAgent: reviewAgentName,
+        sourcePromptHash: null,
+      }) ||
+      handleRaiseQuestionsOutput({
+        taskId,
+        output: securityResult,
+        stage: "review",
+        sourceAgent: securityAgentName,
+        sourcePromptHash: null,
+      })
+    ) {
+      return;
+    }
+    for (const specializedResult of specializedRoleResults) {
+      if (
+        handleRaiseQuestionsOutput({
+          taskId,
+          output: specializedResult.rawOutput,
+          stage: "review",
+          sourceAgent: SPECIALIZED_REVIEWER_AGENT_NAMES[specializedResult.role],
+          sourcePromptHash: null,
+        })
+      ) {
+        return;
+      }
+    }
 
     const parsedReview = parseStructuredSidecarOutput(
       reviewResult,

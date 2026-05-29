@@ -264,6 +264,8 @@ export const broadcastTaskSchema = z.object({
       "task:scheduled_fired",
       "task:questions_created",
       "task:needs_input",
+      "task:requirements_snapshot_created",
+      "task:requirements_snapshot_updated",
       "task:timeline_updated",
       "task:evidence_recorded",
       "task:trust_updated",
@@ -299,6 +301,10 @@ export const roadmapGenerateSchema = z.object({
   roadmapAlias: z.string().min(1, "Roadmap alias is required").max(200),
   taskIntent: z.enum(TASK_INTENTS).optional(),
   vision: z.string().max(10000).optional(),
+});
+
+export const taskSplitProposalRejectSchema = z.object({
+  reason: z.string().max(1000).optional(),
 });
 
 export const warmupCreateSchema = z.object({

@@ -334,6 +334,21 @@ export function useWebSocket() {
       }
 
       if (
+        data.type === "task:requirements_snapshot_created" ||
+        data.type === "task:requirements_snapshot_updated"
+      ) {
+        if (hasIdPayload(data.payload)) {
+          queryClient.invalidateQueries({
+            queryKey: ["task-requirements-snapshot", data.payload.id],
+          });
+          queryClient.invalidateQueries({ queryKey: ["task-timeline", data.payload.id] });
+          queryClient.invalidateQueries({ queryKey: ["task", data.payload.id] });
+          queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        }
+        return;
+      }
+
+      if (
         data.type === "task:timeline_updated" ||
         data.type === "task:evidence_recorded" ||
         data.type === "task:trust_updated" ||
@@ -486,7 +501,11 @@ export function useWebSocket() {
       }
 
       // Dispatch roadmap events as custom DOM events for listeners
-      if (data.type === "roadmap:complete" || data.type === "roadmap:error") {
+      if (
+        data.type === "roadmap:complete" ||
+        data.type === "roadmap:split_required" ||
+        data.type === "roadmap:error"
+      ) {
         window.dispatchEvent(new CustomEvent(data.type, { detail: data.payload }));
 
         if (data.type === "roadmap:complete" && isRecord(data.payload)) {
@@ -499,6 +518,18 @@ export function useWebSocket() {
           }
           if (settingsRef.current.sound) {
             void playStatusChangeBeep().catch(() => {});
+          }
+        }
+        if (data.type === "roadmap:split_required" && isRecord(data.payload)) {
+          const p = data.payload as {
+            roadmapAlias?: string;
+            proposal?: { proposedChildren?: unknown[] };
+          };
+          if (settingsRef.current.desktop && Notification.permission === "granted") {
+            new Notification("Roadmap review required", {
+              body: `${p.roadmapAlias}: ${p.proposal?.proposedChildren?.length ?? 0} proposed task(s)`,
+              tag: "roadmap-split-required",
+            });
           }
         }
       }

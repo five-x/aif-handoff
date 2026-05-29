@@ -20,7 +20,10 @@ import {
   findCoordinatorTaskCandidates,
   findProjectById,
   findTaskById,
+  getFreshAcceptedTaskQaArtifact,
   getAppDefaultRuntimeProfileId,
+  getTaskStageArtifactGateState,
+  hasCurrentRequirementsSnapshotOrWaiver,
   hasActiveLockedTaskForProject,
   claimTask,
   releaseTaskClaim,
@@ -43,6 +46,7 @@ import {
   listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
   listAuditEvidenceEvents,
+  recordTaskAcceptancePack,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
   setTaskFields,
@@ -57,6 +61,7 @@ import {
   getEnv,
   CLEAN_STATE_RESET,
   buildAcceptedAuditCardDecision,
+  buildRequirementsLifecycleMetric,
   evaluateTaskCompletionEvidence,
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
@@ -67,6 +72,7 @@ import {
   resolveAuditPlanId,
   TaskPlanQualityError,
   buildDeterministicDiagnosticPlan,
+  REQUIREMENTS_LIFECYCLE_EVENTS,
   redactProviderText,
   withTimeout,
   type AuditCardDecision,
@@ -81,9 +87,12 @@ import {
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
 import { runRequirementsAnalyst } from "./subagents/requirementsAnalyst.js";
+import { runResearcher } from "./subagents/researcher.js";
+import { runDesigner } from "./subagents/designer.js";
 import { runPlanChecker } from "./subagents/planChecker.js";
 import { runImplementer } from "./subagents/implementer.js";
 import { runReviewer, taskRequiresSpecializedReviewerFanout } from "./subagents/reviewer.js";
+import { runQa } from "./subagents/qa.js";
 import {
   describeDirtyWorkingTree,
   isGitRepo,
@@ -120,6 +129,12 @@ import {
 } from "./taskWatchdog.js";
 
 const log = logger("coordinator");
+function logRequirementsLifecycleMetric(
+  event: Parameters<typeof buildRequirementsLifecycleMetric>[0],
+  dimensions: Parameters<typeof buildRequirementsLifecycleMetric>[1] = {},
+): void {
+  log.info(buildRequirementsLifecycleMetric(event, dimensions), "Requirements lifecycle metric");
+}
 const env = getEnv();
 const STAGE_RUN_TIMEOUT_MS = Math.max(env.AGENT_STAGE_RUN_TIMEOUT_MS, 60_000);
 const CLAIM_LOCK_DURATION_MS = STAGE_RUN_TIMEOUT_MS + 5 * 60 * 1000; // stage timeout + 5 min buffer
@@ -155,6 +170,20 @@ const PIPELINE: StatusTransition[] = [
     label: "requirements-analyst",
   },
   {
+    from: ["research"],
+    inProgress: "research",
+    onSuccess: "design",
+    runner: runResearcher,
+    label: "researcher",
+  },
+  {
+    from: ["design"],
+    inProgress: "design",
+    onSuccess: "planning",
+    runner: runDesigner,
+    label: "designer",
+  },
+  {
     from: ["planning"],
     inProgress: "planning",
     onSuccess: "plan_ready",
@@ -182,7 +211,40 @@ const PIPELINE: StatusTransition[] = [
     runner: runReviewer,
     label: "reviewer",
   },
+  {
+    from: ["qa"],
+    inProgress: "qa",
+    onSuccess: "done",
+    runner: runQa,
+    label: "qa",
+  },
 ];
+
+function researchDesignStagesEnabled(): boolean {
+  return env.AIF_REQUIREMENTS_INTAKE_ENABLED && env.AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED;
+}
+
+function requirementsQaEnabled(): boolean {
+  return env.AIF_REQUIREMENTS_INTAKE_ENABLED && env.AIF_REQUIREMENTS_QA_ENABLED;
+}
+
+function activePipeline(): StatusTransition[] {
+  const enabled = researchDesignStagesEnabled();
+  const qaEnabled = requirementsQaEnabled();
+  return PIPELINE.filter(
+    (stage) =>
+      (enabled || (stage.label !== "researcher" && stage.label !== "designer")) &&
+      (qaEnabled || stage.label !== "qa"),
+  ).map((stage) => {
+    if (stage.label === "requirements-analyst") {
+      return { ...stage, onSuccess: enabled ? "research" : "planning" };
+    }
+    if (stage.label === "reviewer") {
+      return { ...stage, onSuccess: qaEnabled ? "qa" : "done" };
+    }
+    return stage;
+  });
+}
 
 // ── Stage Semaphore ──────────────────────────────────────────
 
@@ -297,6 +359,111 @@ function fallbackStagesForCoordinatorTask(stage: CoordinatorStage, task: TaskRow
 
 function backlogAdvanceTargetStatus(): TaskStatus {
   return env.AIF_REQUIREMENTS_INTAKE_ENABLED ? "requirements_analysis" : "planning";
+}
+
+function routeTaskToQaGate(input: {
+  task: TaskWithHydratedFields;
+  fromStatus: TaskStatus;
+  taskTitle: string;
+  reason: string;
+  extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
+}): void {
+  const nowIso = new Date().toISOString();
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "qa",
+    {
+      ...CLEAN_STATE_RESET,
+      reviewIterationCount: input.task.reviewIterationCount ?? 0,
+      autoReviewState: input.task.autoReviewState ?? null,
+      ...input.extra,
+    },
+    { title: input.taskTitle, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(input.task.id, `[${nowIso}] Routed task to QA gate: ${input.reason}`);
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QA_GATE_ROUTED, {
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    fromStatus: input.fromStatus,
+    toStatus: "qa",
+    reviewIterationCount: input.task.reviewIterationCount ?? 0,
+    hasAutoReviewState: input.task.autoReviewState != null,
+  });
+  void notifyTaskBroadcast(input.task.id, "task:timeline_updated");
+}
+
+function blockTaskForQaDoneGate(input: {
+  task: TaskWithHydratedFields;
+  fromStatus: TaskStatus;
+  taskTitle: string;
+  reason: string;
+}): void {
+  const nowIso = new Date().toISOString();
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "blocked_external",
+    {
+      blockedReason: `qa_done_gate_blocked: ${input.reason}`,
+      blockedFromStatus: input.fromStatus,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      reworkRequested: false,
+      manualReviewRequired: true,
+      autoReviewState: input.task.autoReviewState ?? null,
+    },
+    { title: input.taskTitle, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] QA done gate blocked terminal handoff: ${input.reason}`,
+  );
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QA_GATE_BLOCKED, {
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    fromStatus: input.fromStatus,
+    toStatus: "blocked_external",
+    reviewIterationCount: input.task.reviewIterationCount ?? 0,
+    hasAutoReviewState: input.task.autoReviewState != null,
+  });
+  void notifyTaskBroadcast(input.task.id, "task:timeline_updated");
+}
+
+function returnTaskToPrePlanningStage(input: {
+  task: TaskRow;
+  targetStatus: "requirements_analysis" | "research" | "design";
+  sourceStatus: TaskStatus;
+  taskTitle: string;
+  reason: string;
+}): void {
+  const nowIso = new Date().toISOString();
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    input.targetStatus,
+    {
+      blockedReason: null,
+      blockedFromStatus: null,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      manualReviewRequired: false,
+    },
+    { title: input.taskTitle, fromStatus: input.sourceStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] Planner guard returned task to ${input.targetStatus}: ${input.reason}`,
+  );
+  log.info(
+    {
+      taskId: input.task.id,
+      from: input.sourceStatus,
+      to: input.targetStatus,
+      reason: input.reason,
+    },
+    "Planner guard returned task to an upstream lifecycle stage",
+  );
 }
 
 function shouldBlockOnRuntimeLimit(stage: RuntimeStage): boolean {
@@ -2971,6 +3138,40 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
   const sourceStatus = task.status;
   const taskTitle = task.title;
 
+  if (
+    stage.label === "planner" &&
+    env.AIF_REQUIREMENTS_INTAKE_ENABLED &&
+    !hasCurrentRequirementsSnapshotOrWaiver(task.id)
+  ) {
+    returnTaskToPrePlanningStage({
+      task,
+      targetStatus: "requirements_analysis",
+      sourceStatus,
+      taskTitle,
+      reason: "current requirements snapshot or documented waiver is required before planning.",
+    });
+    return false;
+  }
+
+  if (stage.label === "planner" && researchDesignStagesEnabled()) {
+    const gateState = getTaskStageArtifactGateState(task.id, [
+      { stage: "research", kind: "research", label: "Research artifact" },
+      { stage: "design", kind: "design", label: "Design artifact" },
+    ]);
+    const firstIssue = gateState.issues[0];
+    if (firstIssue) {
+      const targetStatus = firstIssue.stage === "design" ? "design" : "research";
+      returnTaskToPrePlanningStage({
+        task,
+        targetStatus,
+        sourceStatus,
+        taskTitle,
+        reason: `${firstIssue.label} is ${firstIssue.state}; accepted artifact or documented waiver is required before planning.`,
+      });
+      return false;
+    }
+  }
+
   if (stage.label === "implementer" && holdSynthesisIfNotReady(task, executionRoot)) {
     return false;
   }
@@ -3029,14 +3230,42 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     flushActivityQueue(task.id);
     let latestTask: TaskWithHydratedFields = findTaskById(task.id) ?? task;
 
-    if (stage.label === "requirements-analyst" && latestTask.status !== stage.inProgress) {
+    if (latestTask.status === "needs_input" && latestTask.status !== stage.inProgress) {
+      log.info(
+        {
+          taskId: task.id,
+          from: stage.inProgress,
+          to: latestTask.status,
+          stage: stage.label,
+        },
+        "Lifecycle stage raised product clarification questions before coordinator handoff",
+      );
+      void notifyTaskBroadcast(task.id, "task:questions_created");
+      void notifyTaskBroadcast(task.id, "task:needs_input");
+      void notifyTaskBroadcast(task.id, "task:moved", {
+        title: taskTitle,
+        fromStatus: stage.inProgress,
+        toStatus: latestTask.status,
+      });
+      if (stage.label === "researcher" || stage.label === "designer" || stage.label === "qa") {
+        void notifyTaskBroadcast(task.id, "task:timeline_updated");
+      }
+      return true;
+    }
+
+    const runnerMayUpdateTaskStatus =
+      stage.label === "requirements-analyst" ||
+      stage.label === "researcher" ||
+      stage.label === "designer" ||
+      stage.label === "qa";
+    if (runnerMayUpdateTaskStatus && latestTask.status !== stage.inProgress) {
       log.info(
         {
           taskId: task.id,
           from: stage.inProgress,
           to: latestTask.status,
         },
-        "Requirements analyst updated task status before coordinator handoff",
+        "Lifecycle stage runner updated task status before coordinator handoff",
       );
       if (latestTask.status === "needs_input") {
         void notifyTaskBroadcast(task.id, "task:questions_created");
@@ -3046,8 +3275,35 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           fromStatus: stage.inProgress,
           toStatus: latestTask.status,
         });
+      } else if (latestTask.status === "blocked_external") {
+        void notifyTaskBroadcast(task.id, "task:moved", {
+          title: taskTitle,
+          fromStatus: stage.inProgress,
+          toStatus: latestTask.status,
+        });
+      }
+      if (stage.label === "researcher" || stage.label === "designer" || stage.label === "qa") {
+        void notifyTaskBroadcast(task.id, "task:timeline_updated");
       }
       return latestTask.status === "needs_input" || latestTask.status === "blocked_external";
+    }
+
+    if (
+      stage.label === "requirements-analyst" &&
+      latestTask.requirementsSnapshotId &&
+      latestTask.requirementsSnapshotId !== task.requirementsSnapshotId
+    ) {
+      void notifyTaskBroadcast(
+        task.id,
+        task.requirementsSnapshotId
+          ? "task:requirements_snapshot_updated"
+          : "task:requirements_snapshot_created",
+      );
+      void notifyTaskBroadcast(task.id, "task:timeline_updated");
+    }
+
+    if (stage.label === "researcher" || stage.label === "designer" || stage.label === "qa") {
+      void notifyTaskBroadcast(task.id, "task:timeline_updated");
     }
 
     if (stage.label === "implementer" && latestTask.status === "blocked_external") {
@@ -3081,13 +3337,14 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       ) {
         return false;
       }
+      const nextStatus = requirementsQaEnabled() ? "qa" : "done";
       clearTaskRuntimeLimitSnapshot(task.id);
-      updateTaskStatus(task.id, "done", CLEAN_STATE_RESET, {
+      updateTaskStatus(task.id, nextStatus, CLEAN_STATE_RESET, {
         title: taskTitle,
         fromStatus: stage.inProgress,
       });
       log.info(
-        { taskId: task.id, from: stage.inProgress, to: "done" },
+        { taskId: task.id, from: stage.inProgress, to: nextStatus },
         "Skip review enabled — bypassing review stage",
       );
       return true;
@@ -3254,15 +3511,36 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         ) {
           return false;
         }
+        const nextStatus = requirementsQaEnabled() ? "qa" : "done";
+        const acceptedReset =
+          nextStatus === "qa"
+            ? {
+                ...CLEAN_STATE_RESET,
+                reviewIterationCount: outcome.currentIteration,
+                autoReviewState: outcome.autoReviewState,
+              }
+            : CLEAN_STATE_RESET;
         clearTaskRuntimeLimitSnapshot(task.id);
-        updateTaskStatus(task.id, "done", CLEAN_STATE_RESET, {
+        updateTaskStatus(task.id, nextStatus, acceptedReset, {
           title: taskTitle,
           fromStatus: stage.inProgress,
         });
         log.info(
-          { taskId: task.id, from: stage.inProgress, to: "done" },
-          "Auto review gate accepted review, moving to done",
+          { taskId: task.id, from: stage.inProgress, to: nextStatus },
+          requirementsQaEnabled()
+            ? "Auto review gate accepted review, moving to QA"
+            : "Auto review gate accepted review, moving to done",
         );
+        if (nextStatus === "qa") {
+          logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QA_GATE_ROUTED, {
+            taskId: task.id,
+            projectId: task.projectId,
+            fromStatus: stage.inProgress,
+            toStatus: nextStatus,
+            reviewIterationCount: outcome.currentIteration,
+            hasAutoReviewState: outcome.autoReviewState != null,
+          });
+        }
         return true;
       }
     }
@@ -3282,6 +3560,26 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
     if (stage.onSuccess === "done") {
       latestTask = findTaskById(task.id) ?? latestTask;
+      if (requirementsQaEnabled()) {
+        if (stage.label !== "qa") {
+          routeTaskToQaGate({
+            task: latestTask,
+            fromStatus: stage.inProgress,
+            taskTitle,
+            reason: "QA is required before done.",
+          });
+          return true;
+        }
+        if (!getFreshAcceptedTaskQaArtifact(task.id)) {
+          blockTaskForQaDoneGate({
+            task: latestTask,
+            fromStatus: stage.inProgress,
+            taskTitle,
+            reason: "A fresh accepted QA artifact is required before done.",
+          });
+          return false;
+        }
+      }
       if (
         blockTaskForCompletionEvidenceIfNeeded({
           task: latestTask,
@@ -3291,6 +3589,31 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         })
       ) {
         return false;
+      }
+      if (requirementsQaEnabled()) {
+        try {
+          const acceptancePack = recordTaskAcceptancePack(task.id);
+          logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QA_GATE_ACCEPTED, {
+            taskId: task.id,
+            projectId: task.projectId,
+            fromStatus: stage.inProgress,
+            toStatus: stage.onSuccess,
+            qaArtifactId: acceptancePack.qaArtifactId,
+            qaAttemptNumber: acceptancePack.qaAttemptNumber,
+            acceptanceArtifactId: acceptancePack.acceptanceArtifactId,
+            acceptanceAttemptNumber: acceptancePack.acceptanceAttemptNumber,
+            ready: acceptancePack.readiness.ready,
+          });
+          void notifyTaskBroadcast(task.id, "task:timeline_updated");
+        } catch (error) {
+          blockTaskForQaDoneGate({
+            task: latestTask,
+            fromStatus: stage.inProgress,
+            taskTitle,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+          return false;
+        }
       }
     }
     if (
@@ -3314,9 +3637,15 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
     const successReset: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt"> = {
       ...CLEAN_STATE_RESET,
-      reviewIterationCount: stage.label === "implementer" ? (task.reviewIterationCount ?? 0) : 0,
+      reviewIterationCount:
+        stage.label === "implementer" || stage.label === "qa"
+          ? (latestTask.reviewIterationCount ?? task.reviewIterationCount ?? 0)
+          : 0,
     };
     if (stage.label === "implementer" && task.reworkRequested) {
+      successReset.autoReviewState = latestTask.autoReviewState ?? null;
+    }
+    if (stage.label === "qa") {
       successReset.autoReviewState = latestTask.autoReviewState ?? null;
     }
     if (stage.label === "planner" && isPlanQualityRetryState(latestTask)) {
@@ -3784,7 +4113,7 @@ export async function pollAndProcess(): Promise<void> {
     return cached;
   }
 
-  for (const stage of PIPELINE) {
+  for (const stage of activePipeline()) {
     // Global cap: total active tasks across all stages (prevents resource exhaustion
     // when multiple poll cycles overlap from cron + wake)
     const totalActive = stageSemaphore.totalActive();

@@ -123,6 +123,9 @@ export function QuestionsPanel({
           {openBatch.stage}
         </Badge>
         <Badge variant="outline" size="sm">
+          resume {openBatch.targetResumeStage}
+        </Badge>
+        <Badge variant="outline" size="sm">
           blocking {openBatch.openBlockingCount}
         </Badge>
       </div>

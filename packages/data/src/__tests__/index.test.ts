@@ -25,6 +25,9 @@ const {
   createTask,
   updateTask,
   setTaskFields,
+  buildTaskAcceptancePack,
+  buildTaskQaMandatoryCheckInventory,
+  buildTaskQaSourceFingerprint,
   deleteTask,
   findTaskById,
   listTasks,
@@ -48,6 +51,8 @@ const {
   incrementTaskTokenUsage,
   findTasksByRoadmapAlias,
   buildTaskArtifactTrustRollup,
+  hasFreshAcceptedTaskAcceptancePack,
+  hasFreshAcceptedTaskQaArtifact,
   createRoadmapBatchContract,
   findRoadmapBatchByProjectAlias,
   listRoadmapBatchArtifacts,
@@ -57,6 +62,8 @@ const {
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
   persistTaskPlanForTask,
+  recordTaskAcceptancePack,
+  recordTaskStageArtifactAttempt,
   findCoordinatorTaskCandidate,
   findCoordinatorTaskCandidates,
   claimTask,
@@ -76,6 +83,10 @@ const {
   getAutoQueueMode,
   setAutoQueueMode,
   buildProjectQueueState,
+  createOrReusePendingTaskSplitProposal,
+  findTaskSplitProposal,
+  approveTaskSplitProposal,
+  rejectTaskSplitProposal,
   getMinBacklogPosition,
   nextBacklogTaskByPosition,
   listAutoQueueProjects,
@@ -3165,6 +3176,22 @@ describe("data layer", () => {
       expect(candidate).toBeDefined();
       expect(candidate!.id).toBe("rv-task");
     });
+
+    it("finds qa candidates", () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "qa-task",
+          projectId: "proj-1",
+          title: "QA",
+          status: "qa",
+          paused: false,
+        })
+        .run();
+      const candidate = findCoordinatorTaskCandidate("qa");
+      expect(candidate).toBeDefined();
+      expect(candidate!.id).toBe("qa-task");
+    });
   });
 
   // ── Batch task selection ─────────────────────────────────
@@ -3342,6 +3369,29 @@ describe("data layer", () => {
       const released = releaseStaleTaskClaims();
       expect(released).toBe(1);
       expect(findTaskById("dead-hb")!.lockedBy).toBeNull();
+    });
+
+    it("releases qa claims with dead heartbeat and stale updatedAt", () => {
+      const db = testDb.current;
+      const future = new Date(Date.now() + 3600000).toISOString();
+      const staleTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+      db.insert(tasks)
+        .values({
+          id: "dead-qa",
+          projectId: "proj-1",
+          title: "Dead QA",
+          status: "qa",
+          lockedBy: "crashed-coord",
+          lockedUntil: future,
+          lastHeartbeatAt: staleTime,
+          updatedAt: staleTime,
+        })
+        .run();
+
+      const released = releaseStaleTaskClaims();
+      expect(released).toBe(1);
+      expect(findTaskById("dead-qa")!.lockedBy).toBeNull();
     });
 
     it("does NOT release fresh claims with null heartbeat", () => {
@@ -3846,31 +3896,261 @@ describe("data layer", () => {
       expect(countActivePipelineTasksForProject("proj-1")).toBe(1);
     });
 
+    it("countActivePipelineTasksForProject includes qa", () => {
+      const a = createTask({ projectId: "proj-1", title: "A", description: "" });
+      updateTaskStatus(a!.id, "qa");
+      expect(countActivePipelineTasksForProject("proj-1")).toBe(1);
+    });
+
     it("buildProjectQueueState separates raw execution-active and scheduler queue-gating counts", () => {
       const backlog = createTask({ projectId: "proj-1", title: "Backlog", description: "" });
       const planning = createTask({ projectId: "proj-1", title: "Planning", description: "" });
       const planReady = createTask({ projectId: "proj-1", title: "Plan ready", description: "" });
+      const qa = createTask({ projectId: "proj-1", title: "QA", description: "" });
       const blocked = createTask({ projectId: "proj-1", title: "Blocked", description: "" });
       const done = createTask({ projectId: "proj-1", title: "Done", description: "" });
       updateTaskStatus(planning!.id, "planning");
       updateTaskStatus(planReady!.id, "plan_ready");
+      updateTaskStatus(qa!.id, "qa");
       updateTaskStatus(blocked!.id, "blocked_external");
       updateTaskStatus(done!.id, "done");
 
       expect(backlog).toBeDefined();
       expect(buildProjectQueueState("proj-1")).toEqual(
         expect.objectContaining({
-          executionActiveCount: 3,
-          queueGatingActiveCount: 3,
+          executionActiveCount: 4,
+          queueGatingActiveCount: 4,
           countsByStatus: expect.objectContaining({
             backlog: 1,
             planning: 1,
             plan_ready: 1,
+            qa: 1,
             blocked_external: 1,
             done: 1,
           }),
         }),
       );
+    });
+
+    it("builds fresh QA and acceptance pack read models and rejects stale QA artifacts", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "QA acceptance",
+        description: "Feature task",
+        taskIntent: "feature",
+      });
+      const manifest: ImplementationManifest = {
+        version: 1,
+        taskId: task!.id,
+        intent: "feature",
+        planManifestHash: null,
+        changedFiles: [{ path: "packages/app/src/feature.ts", status: "modified" }],
+        diffSummary: { summary: "Updated feature flow." },
+        verificationEvidence: [
+          {
+            id: "unit-tests",
+            command: "npm.cmd test --workspace=@aif/data -- qa",
+            status: "passed",
+            outputSha256: "a".repeat(64),
+            outputPreview: "Tests passed.",
+          },
+        ],
+        acceptanceCriteria: [],
+        evidenceRefs: ["unit-tests"],
+        planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+        reviewClosure: { status: "passed", evidenceRefs: ["review"] },
+        commitEvidence: { status: "not_required" },
+        knownLimitations: ["No browser E2E run."],
+      };
+      setTaskFields(task!.id, {
+        implementationManifestJson: JSON.stringify(manifest),
+        reviewComments: "Review accepted.",
+        reviewIterationCount: 1,
+      });
+
+      const inventory = buildTaskQaMandatoryCheckInventory(task!.id);
+      expect(inventory.map((item) => item.id)).toContain("manifest:unit-tests");
+      const fingerprint = buildTaskQaSourceFingerprint(task!.id);
+      expect(fingerprint).toBeTruthy();
+      recordTaskStageArtifactAttempt({
+        taskId: task!.id,
+        stage: "qa",
+        kind: "qa",
+        label: "QA artifact",
+        path: "qa.md",
+        state: "accepted",
+        summary: "QA passed.",
+        markdown: "# QA\n\nPassed.",
+        metadata: {
+          status: "passed",
+          sourceFingerprint: fingerprint,
+          commands: [
+            {
+              id: "manifest:unit-tests",
+              command: "npm.cmd test --workspace=@aif/data -- qa",
+              status: "passed",
+              mandatory: true,
+              outputSummary: "Tests passed.",
+            },
+          ],
+          limitations: ["No browser E2E run."],
+          rollbackNotes: ["Revert packages/app/src/feature.ts."],
+        },
+      });
+
+      expect(hasFreshAcceptedTaskQaArtifact(task!.id)).toBe(true);
+      const pack = recordTaskAcceptancePack(task!.id);
+      expect(pack.changedFiles).toEqual(["packages/app/src/feature.ts"]);
+      expect(pack.qaResult).toContain("QA passed.");
+      expect(hasFreshAcceptedTaskAcceptancePack(task!.id)).toBe(true);
+      expect(buildTaskAcceptancePack(task!.id)?.readiness.ready).toBe(true);
+
+      setTaskFields(task!.id, { reviewComments: "Review changed after QA." });
+      expect(hasFreshAcceptedTaskQaArtifact(task!.id)).toBe(false);
+      expect(hasFreshAcceptedTaskAcceptancePack(task!.id)).toBe(false);
+      expect(buildTaskAcceptancePack(task!.id)).toBeNull();
+    });
+
+    it("rejects accepted QA artifacts with incomplete mandatory metadata", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "QA metadata",
+        description: "Feature task",
+        taskIntent: "feature",
+      });
+      const manifest: ImplementationManifest = {
+        version: 1,
+        taskId: task!.id,
+        intent: "feature",
+        planManifestHash: null,
+        changedFiles: [{ path: "packages/app/src/feature.ts", status: "modified" }],
+        diffSummary: { summary: "Updated feature flow." },
+        verificationEvidence: [
+          {
+            id: "unit-tests",
+            command: "npm.cmd test --workspace=@aif/data -- qa",
+            status: "passed",
+            outputSha256: "a".repeat(64),
+            outputPreview: "Tests passed.",
+          },
+        ],
+        acceptanceCriteria: [],
+        evidenceRefs: ["unit-tests"],
+        planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+        reviewClosure: { status: "passed", evidenceRefs: ["review"] },
+        commitEvidence: { status: "not_required" },
+        knownLimitations: [],
+      };
+      setTaskFields(task!.id, {
+        implementationManifestJson: JSON.stringify(manifest),
+        reviewComments: "Review accepted.",
+      });
+      const fingerprint = buildTaskQaSourceFingerprint(task!.id);
+
+      recordTaskStageArtifactAttempt({
+        taskId: task!.id,
+        stage: "qa",
+        kind: "qa",
+        label: "QA artifact",
+        path: "qa.md",
+        state: "accepted",
+        summary: "QA failed but was marked accepted.",
+        markdown: "# QA\n\nFailed.",
+        metadata: {
+          status: "failed",
+          sourceFingerprint: fingerprint,
+          commands: [
+            {
+              id: "manifest:unit-tests",
+              command: "npm.cmd test --workspace=@aif/data -- qa",
+              status: "failed",
+              mandatory: true,
+              outputSummary: "Tests failed.",
+            },
+          ],
+        },
+      });
+      expect(hasFreshAcceptedTaskQaArtifact(task!.id)).toBe(false);
+
+      recordTaskStageArtifactAttempt({
+        taskId: task!.id,
+        stage: "qa",
+        kind: "qa",
+        label: "QA artifact",
+        path: "qa.md",
+        state: "accepted",
+        summary: "QA omitted mandatory checks.",
+        markdown: "# QA\n\nOmitted.",
+        metadata: {
+          status: "passed",
+          sourceFingerprint: fingerprint,
+          commands: [],
+        },
+      });
+      expect(hasFreshAcceptedTaskQaArtifact(task!.id)).toBe(false);
+    });
+
+    it("rejects accepted QA artifacts for missing implementation verification evidence", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "QA missing evidence",
+        description: "Feature task",
+        taskIntent: "feature",
+      });
+      const manifest: ImplementationManifest = {
+        version: 1,
+        taskId: task!.id,
+        intent: "feature",
+        planManifestHash: null,
+        changedFiles: [{ path: "packages/app/src/feature.ts", status: "modified" }],
+        diffSummary: { summary: "Updated feature flow." },
+        verificationEvidence: [],
+        acceptanceCriteria: [],
+        evidenceRefs: [],
+        planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+        reviewClosure: { status: "passed", evidenceRefs: ["review"] },
+        commitEvidence: { status: "not_required" },
+        knownLimitations: [],
+      };
+      setTaskFields(task!.id, {
+        implementationManifestJson: JSON.stringify(manifest),
+        reviewComments: "Review accepted.",
+      });
+      const inventory = buildTaskQaMandatoryCheckInventory(task!.id);
+      expect(inventory).toContainEqual(
+        expect.objectContaining({
+          id: "implementation-manifest:verification-evidence",
+          blockingReason: "Implementation manifest has no verification evidence.",
+        }),
+      );
+      const fingerprint = buildTaskQaSourceFingerprint(task!.id);
+
+      recordTaskStageArtifactAttempt({
+        taskId: task!.id,
+        stage: "qa",
+        kind: "qa",
+        label: "QA artifact",
+        path: "qa.md",
+        state: "accepted",
+        summary: "QA falsely passed.",
+        markdown: "# QA\n\nPassed.",
+        metadata: {
+          status: "passed",
+          sourceFingerprint: fingerprint,
+          commands: [
+            {
+              id: "implementation-manifest:verification-evidence",
+              command: "",
+              status: "passed",
+              mandatory: true,
+              outputSummary: "Evidence was missing.",
+            },
+          ],
+        },
+      });
+
+      expect(hasFreshAcceptedTaskQaArtifact(task!.id)).toBe(false);
+      expect(() => recordTaskAcceptancePack(task!.id)).toThrow(/fresh accepted QA artifact/i);
     });
 
     it("countActivePipelineTasksForProject ignores terminal manual audit report blocks", () => {
@@ -3997,6 +4277,13 @@ describe("data layer", () => {
       const a = createTask({ projectId: "proj-1", title: "A", description: "" });
       setTaskFields(a!.id, { branchName: "feature/a" });
       updateTaskStatus(a!.id, "implementing");
+      expect(hasActiveBranchBoundTasksForProject("proj-1")).toBe(true);
+    });
+
+    it("hasActiveBranchBoundTasksForProject treats qa as in flight", () => {
+      const a = createTask({ projectId: "proj-1", title: "A", description: "" });
+      setTaskFields(a!.id, { branchName: "feature/qa" });
+      updateTaskStatus(a!.id, "qa");
       expect(hasActiveBranchBoundTasksForProject("proj-1")).toBe(true);
     });
 
@@ -4914,6 +5201,145 @@ describe("data layer", () => {
       expect(claimBacklogTaskForAdvance(parent.id)).toBe(false);
       expect(() => deleteTask(parent.id)).toThrow(/child tasks/i);
       expect(() => deleteTask(child.id)).toThrow(/parent is open/i);
+    });
+  });
+
+  describe("task split proposals", () => {
+    const proposalInput = (fingerprint: string) => ({
+      projectId: "proj-1",
+      sourceKind: "roadmap_import" as const,
+      sourceRef: "roadmap-import:ROADMAP.md",
+      sourceFingerprint: fingerprint,
+      roadmapAlias: "split-v1",
+      taskIntent: "feature" as const,
+      summary: "Split required",
+      proposedChildren: [
+        {
+          title: "Build first child",
+          description: "First child",
+          taskIntent: "feature" as const,
+          phase: 1,
+          phaseName: "Phase 1",
+          sequence: 1,
+        },
+      ],
+    });
+
+    it("reuses matching pending proposals and conflicts on stale fingerprints", () => {
+      const first = createOrReusePendingTaskSplitProposal(proposalInput("a".repeat(64)));
+      expect(first.status).toBe("created");
+
+      const reused = createOrReusePendingTaskSplitProposal(proposalInput("a".repeat(64)));
+      expect(reused.status).toBe("reused");
+      expect(reused.proposal.id).toBe(first.proposal.id);
+
+      const conflict = createOrReusePendingTaskSplitProposal(proposalInput("b".repeat(64)));
+      expect(conflict.status).toBe("conflict");
+      expect(conflict.proposal.id).toBe(first.proposal.id);
+      expect(listTasks("proj-1")).toHaveLength(0);
+    });
+
+    it("approves idempotently and rejects reject-after-approve conflicts", () => {
+      const created = createOrReusePendingTaskSplitProposal(proposalInput("c".repeat(64)));
+      expect(created.status).toBe("created");
+
+      const approved = approveTaskSplitProposal({
+        projectId: "proj-1",
+        proposalId: created.proposal.id,
+        createTasks: () => {
+          const parent = createTask({
+            projectId: "proj-1",
+            title: "Roadmap: split-v1",
+            description: "Parent",
+            taskIntent: "feature",
+            hierarchyRole: "container",
+            parentCloseoutPolicy: "all_children_done",
+            paused: true,
+          })!;
+          const child = createTask({
+            projectId: "proj-1",
+            title: "Build first child",
+            description: "First child",
+            taskIntent: "feature",
+            parentTaskId: parent.id,
+            paused: true,
+          })!;
+          return { taskIds: [child.id], containerTaskId: parent.id };
+        },
+      });
+      expect(approved.status).toBe("approved");
+      if (approved.status !== "approved") throw new Error("approval did not succeed");
+      expect(listTasks("proj-1")).toHaveLength(2);
+      expect(approved.proposal.createdTaskIds).toEqual(
+        expect.arrayContaining([approved.proposal.containerTaskId]),
+      );
+      const childId = approved.proposal.createdTaskIds.find(
+        (taskId) => taskId !== approved.proposal.containerTaskId,
+      )!;
+      const child = findTaskById(childId)!;
+      expect(child.paused).toBe(true);
+      expect(child.parentTaskId).toBe(approved.proposal.containerTaskId);
+
+      const duplicate = approveTaskSplitProposal({
+        projectId: "proj-1",
+        proposalId: created.proposal.id,
+        createTasks: () => {
+          throw new Error("duplicate approval should not create tasks");
+        },
+      });
+      expect(duplicate.status).toBe("already_approved");
+      expect(listTasks("proj-1")).toHaveLength(2);
+
+      const rejectApproved = rejectTaskSplitProposal({
+        projectId: "proj-1",
+        proposalId: created.proposal.id,
+      });
+      expect(rejectApproved.status).toBe("conflict");
+    });
+
+    it("rolls back partial task creation when approval fails", () => {
+      const created = createOrReusePendingTaskSplitProposal(proposalInput("d".repeat(64)));
+      expect(created.status).toBe("created");
+
+      expect(() =>
+        approveTaskSplitProposal({
+          projectId: "proj-1",
+          proposalId: created.proposal.id,
+          createTasks: () => {
+            createTask({
+              projectId: "proj-1",
+              title: "Partial child",
+              description: "Should roll back",
+              paused: true,
+            });
+            throw new Error("approval failed");
+          },
+        }),
+      ).toThrow("approval failed");
+
+      expect(listTasks("proj-1")).toHaveLength(0);
+      expect(findTaskSplitProposal("proj-1", created.proposal.id)?.status).toBe("pending");
+    });
+
+    it("rejects pending proposals without creating rows and is idempotent", () => {
+      const created = createOrReusePendingTaskSplitProposal(proposalInput("e".repeat(64)));
+      expect(created.status).toBe("created");
+
+      const rejected = rejectTaskSplitProposal({
+        projectId: "proj-1",
+        proposalId: created.proposal.id,
+        reason: "not now",
+      });
+      expect(rejected.status).toBe("rejected");
+      if (rejected.status !== "rejected") throw new Error("proposal was not rejected");
+      expect(rejected.proposal.rejectedReason).toBe("not now");
+      expect(listTasks("proj-1")).toHaveLength(0);
+
+      const duplicate = rejectTaskSplitProposal({
+        projectId: "proj-1",
+        proposalId: created.proposal.id,
+      });
+      expect(duplicate.status).toBe("already_rejected");
     });
   });
 

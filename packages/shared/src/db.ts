@@ -174,6 +174,59 @@ function ensureTables(sqlite: Database.Database): void {
     )
   `);
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS task_requirements_snapshots (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      markdown TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      source_question_ids_json TEXT NOT NULL DEFAULT '[]',
+      redaction_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      UNIQUE(task_id, version)
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS task_stage_artifacts (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      label TEXT NOT NULL,
+      artifact_path TEXT,
+      state TEXT NOT NULL DEFAULT 'expected',
+      current_attempt_number INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      markdown TEXT,
+      source_snapshot_id TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS task_stage_artifact_attempts (
+      id TEXT PRIMARY KEY,
+      artifact_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      attempt_number INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      trust_level TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      markdown TEXT,
+      source_snapshot_id TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
     CREATE TABLE IF NOT EXISTS task_comments (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,
@@ -250,6 +303,30 @@ function ensureTables(sqlite: Database.Database): void {
       validation_details_json TEXT,
       source_snapshot_id TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+  `);
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS task_split_proposals (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      parent_task_id TEXT,
+      source_kind TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      source_fingerprint TEXT NOT NULL,
+      roadmap_alias TEXT NOT NULL,
+      task_intent TEXT NOT NULL DEFAULT 'general',
+      status TEXT NOT NULL DEFAULT 'pending',
+      decision TEXT NOT NULL DEFAULT 'split_required',
+      summary TEXT NOT NULL DEFAULT '',
+      proposed_children_json TEXT NOT NULL DEFAULT '[]',
+      created_task_ids_json TEXT NOT NULL DEFAULT '[]',
+      container_task_id TEXT,
+      approved_by TEXT,
+      rejected_reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      approved_at TEXT,
+      rejected_at TEXT
     )
   `);
   sqlite.exec(`
@@ -1253,6 +1330,89 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 37,
+    description: "Add requirements snapshots and task stage artifacts",
+    sql: `
+      CREATE TABLE IF NOT EXISTS task_requirements_snapshots (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        markdown TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        source_question_ids_json TEXT NOT NULL DEFAULT '[]',
+        redaction_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE(task_id, version)
+      );
+      CREATE TABLE IF NOT EXISTS task_stage_artifacts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        artifact_path TEXT,
+        state TEXT NOT NULL DEFAULT 'expected',
+        current_attempt_number INTEGER NOT NULL DEFAULT 0,
+        summary TEXT NOT NULL DEFAULT '',
+        markdown TEXT,
+        source_snapshot_id TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      CREATE TABLE IF NOT EXISTS task_stage_artifact_attempts (
+        id TEXT PRIMARY KEY,
+        artifact_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        trust_level TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        markdown TEXT,
+        source_snapshot_id TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `,
+  },
+  {
+    version: 38,
+    description: "Add task split proposal persistence",
+    sql: `
+      CREATE TABLE IF NOT EXISTS task_split_proposals (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        parent_task_id TEXT,
+        source_kind TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        source_fingerprint TEXT NOT NULL,
+        roadmap_alias TEXT NOT NULL,
+        task_intent TEXT NOT NULL DEFAULT 'general',
+        status TEXT NOT NULL DEFAULT 'pending',
+        decision TEXT NOT NULL DEFAULT 'split_required',
+        summary TEXT NOT NULL DEFAULT '',
+        proposed_children_json TEXT NOT NULL DEFAULT '[]',
+        created_task_ids_json TEXT NOT NULL DEFAULT '[]',
+        container_task_id TEXT,
+        approved_by TEXT,
+        rejected_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        approved_at TEXT,
+        rejected_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_split_proposals_lookup ON task_split_proposals(project_id, source_kind, roadmap_alias, task_intent, status);
+      CREATE INDEX IF NOT EXISTS idx_task_split_proposals_fingerprint ON task_split_proposals(project_id, source_fingerprint);
+    `,
+  },
 ];
 
 function splitSqlStatements(sqlText: string): string[] {
@@ -1574,6 +1734,12 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_status ON task_requirement_questions(status)",
     "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_batch_id ON task_requirement_questions(batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_task_requirement_questions_task_status ON task_requirement_questions(task_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_task_requirements_snapshots_task ON task_requirements_snapshots(task_id, version)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_requirements_snapshots_task_version_unique ON task_requirements_snapshots(task_id, version)",
+    "CREATE INDEX IF NOT EXISTS idx_task_stage_artifacts_task ON task_stage_artifacts(task_id, stage, kind)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_stage_artifacts_current ON task_stage_artifacts(task_id, stage, kind)",
+    "CREATE INDEX IF NOT EXISTS idx_task_stage_artifact_attempts_artifact ON task_stage_artifact_attempts(artifact_id, attempt_number)",
+    "CREATE INDEX IF NOT EXISTS idx_task_stage_artifact_attempts_task ON task_stage_artifact_attempts(task_id, stage, kind)",
     // Task locking: find unlocked or stale-locked tasks
     "CREATE INDEX IF NOT EXISTS idx_tasks_locked ON tasks(locked_by, locked_until)",
     // Coordinator scheduled-task scan: backlog tasks with due scheduled_at
@@ -1594,6 +1760,8 @@ function ensureIndexes(sqlite: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifact_attempts_artifact ON roadmap_batch_artifact_attempts(artifact_id, attempt_number)",
     "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifact_attempts_batch ON roadmap_batch_artifact_attempts(batch_id, role, state)",
     "CREATE INDEX IF NOT EXISTS idx_roadmap_batch_artifact_attempts_signature ON roadmap_batch_artifact_attempts(artifact_id, failure_signature)",
+    "CREATE INDEX IF NOT EXISTS idx_task_split_proposals_lookup ON task_split_proposals(project_id, source_kind, roadmap_alias, task_intent, status)",
+    "CREATE INDEX IF NOT EXISTS idx_task_split_proposals_fingerprint ON task_split_proposals(project_id, source_fingerprint)",
     "CREATE INDEX IF NOT EXISTS idx_audit_evidence_task ON audit_evidence_events(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_evidence_plan_snapshot ON audit_evidence_events(audit_plan_id, source_snapshot_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_evidence_kind_grade ON audit_evidence_events(evidence_kind, evidence_grade, created_at)",

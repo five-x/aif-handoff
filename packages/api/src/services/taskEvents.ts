@@ -27,6 +27,8 @@ import {
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
+  hasFreshAcceptedTaskAcceptancePack,
+  hasFreshAcceptedTaskQaArtifact,
   getLatestHumanComment,
   appendTaskActivityLog,
   auditRoadmapTaskDependenciesReleaseReady,
@@ -731,6 +733,18 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     const project = findProjectById(task.projectId);
     if (!project) {
       return { ok: false, status: 404, error: "Project not found for task" };
+    }
+    const env = getEnv();
+    if (
+      env.AIF_REQUIREMENTS_INTAKE_ENABLED &&
+      env.AIF_REQUIREMENTS_QA_ENABLED &&
+      (!hasFreshAcceptedTaskQaArtifact(task.id) || !hasFreshAcceptedTaskAcceptancePack(task.id))
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        error: "approve_done requires fresh accepted QA and acceptance artifacts",
+      };
     }
     const executionRoot = task.worktreePath ?? project.rootPath;
     const auditArtifact = findRoadmapBatchArtifactByTaskId(task.id);

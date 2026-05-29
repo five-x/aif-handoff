@@ -13,6 +13,8 @@ import type {
   TaskStatus,
   TaskHierarchyRole,
   TaskParentCloseoutPolicy,
+  TaskSplitProposalSourceKind,
+  TaskSplitProposalStatus,
   CoordinatorStage,
   UsageEventOutcome,
 } from "./types.js";
@@ -24,6 +26,11 @@ import type {
   RequirementQuestionStage,
   RequirementQuestionStatus,
 } from "./requirementsQuestions.js";
+import type {
+  TaskStageArtifactState,
+  WorkflowTimelineClaimOutcome,
+  WorkflowTimelineTrustLevel,
+} from "./types.js";
 import type {
   AuditEvidenceGrade,
   AuditEvidenceKind,
@@ -203,6 +210,80 @@ export const taskRequirementQuestions = sqliteTable("task_requirement_questions"
 export type TaskRequirementQuestionRow = typeof taskRequirementQuestions.$inferSelect;
 export type NewTaskRequirementQuestionRow = typeof taskRequirementQuestions.$inferInsert;
 
+export const taskRequirementsSnapshots = sqliteTable("task_requirements_snapshots", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  taskId: text("task_id").notNull(),
+  projectId: text("project_id").notNull(),
+  version: integer("version").notNull().default(1),
+  markdown: text("markdown").notNull(),
+  summary: text("summary").notNull(),
+  sourceQuestionIdsJson: text("source_question_ids_json").notNull().default("[]"),
+  redactionCount: integer("redaction_count").notNull().default(0),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type TaskRequirementsSnapshotRow = typeof taskRequirementsSnapshots.$inferSelect;
+export type NewTaskRequirementsSnapshotRow = typeof taskRequirementsSnapshots.$inferInsert;
+
+export const taskStageArtifacts = sqliteTable("task_stage_artifacts", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  taskId: text("task_id").notNull(),
+  projectId: text("project_id").notNull(),
+  stage: text("stage").notNull(),
+  kind: text("kind").notNull(),
+  label: text("label").notNull(),
+  artifactPath: text("artifact_path"),
+  state: text("state").$type<TaskStageArtifactState>().notNull().default("expected"),
+  currentAttemptNumber: integer("current_attempt_number").notNull().default(0),
+  summary: text("summary").notNull().default(""),
+  markdown: text("markdown"),
+  sourceSnapshotId: text("source_snapshot_id"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type TaskStageArtifactRow = typeof taskStageArtifacts.$inferSelect;
+export type NewTaskStageArtifactRow = typeof taskStageArtifacts.$inferInsert;
+
+export const taskStageArtifactAttempts = sqliteTable("task_stage_artifact_attempts", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  artifactId: text("artifact_id").notNull(),
+  taskId: text("task_id").notNull(),
+  projectId: text("project_id").notNull(),
+  stage: text("stage").notNull(),
+  kind: text("kind").notNull(),
+  attemptNumber: integer("attempt_number").notNull(),
+  state: text("state").$type<TaskStageArtifactState>().notNull(),
+  outcome: text("outcome").$type<WorkflowTimelineClaimOutcome>().notNull(),
+  trustLevel: text("trust_level").$type<WorkflowTimelineTrustLevel>().notNull(),
+  summary: text("summary").notNull().default(""),
+  markdown: text("markdown"),
+  sourceSnapshotId: text("source_snapshot_id"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+});
+
+export type TaskStageArtifactAttemptRow = typeof taskStageArtifactAttempts.$inferSelect;
+export type NewTaskStageArtifactAttemptRow = typeof taskStageArtifactAttempts.$inferInsert;
+
 export const taskComments = sqliteTable("task_comments", {
   id: text("id")
     .primaryKey()
@@ -309,6 +390,38 @@ export const roadmapBatchArtifactAttempts = sqliteTable("roadmap_batch_artifact_
 
 export type RoadmapBatchArtifactAttemptRow = typeof roadmapBatchArtifactAttempts.$inferSelect;
 export type NewRoadmapBatchArtifactAttemptRow = typeof roadmapBatchArtifactAttempts.$inferInsert;
+
+export const taskSplitProposals = sqliteTable("task_split_proposals", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  projectId: text("project_id").notNull(),
+  parentTaskId: text("parent_task_id"),
+  sourceKind: text("source_kind").$type<TaskSplitProposalSourceKind>().notNull(),
+  sourceRef: text("source_ref").notNull(),
+  sourceFingerprint: text("source_fingerprint").notNull(),
+  roadmapAlias: text("roadmap_alias").notNull(),
+  taskIntent: text("task_intent").$type<TaskIntent>().notNull().default("general"),
+  status: text("status").$type<TaskSplitProposalStatus>().notNull().default("pending"),
+  decision: text("decision").notNull().default("split_required"),
+  summary: text("summary").notNull().default(""),
+  proposedChildrenJson: text("proposed_children_json").notNull().default("[]"),
+  createdTaskIdsJson: text("created_task_ids_json").notNull().default("[]"),
+  containerTaskId: text("container_task_id"),
+  approvedBy: text("approved_by"),
+  rejectedReason: text("rejected_reason"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+  approvedAt: text("approved_at"),
+  rejectedAt: text("rejected_at"),
+});
+
+export type TaskSplitProposalRow = typeof taskSplitProposals.$inferSelect;
+export type NewTaskSplitProposalRow = typeof taskSplitProposals.$inferInsert;
 
 export const auditEvidenceEvents = sqliteTable("audit_evidence_events", {
   id: text("id").primaryKey(),

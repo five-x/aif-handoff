@@ -115,9 +115,27 @@ export interface RequirementAnswerValidationResult {
   error?: string;
 }
 
+export const AIF_RAISE_QUESTIONS_FENCE_LANGUAGE = "aif-raise-questions" as const;
+export const AIF_RAISE_QUESTIONS_ACTION = "raise_questions" as const;
+
+export type AifRaiseQuestionsAction = typeof AIF_RAISE_QUESTIONS_ACTION;
+
+export interface AifRaiseQuestionsContract {
+  version: 1;
+  action: AifRaiseQuestionsAction;
+  stage: RequirementQuestionStage;
+  targetResumeStage: RequirementQuestionStage;
+  reason: string;
+  questions: TaskRequirementQuestionInput[];
+}
+
 const RAW_SECRET_REQUEST_PATTERN =
   /\b(password|passphrase|api[_ -]?key|secret|token|bearer|private key)\b/i;
 const CREDENTIAL_REF_PATTERN = /\b(credential[_ -]?ref|secret[_ -]?ref|reference|env var)\b/i;
+const AIF_RAISE_QUESTIONS_BLOCK_PATTERN =
+  /```[ \t]*aif-raise-questions\b[^\r\n]*\r?\n([\s\S]*?)\r?\n```/gi;
+const REQUIREMENT_QUESTION_STAGE_SET = new Set<string>(REQUIREMENT_QUESTION_STAGES);
+const REQUIREMENT_ANSWER_TYPE_SET = new Set<string>(REQUIREMENT_ANSWER_TYPES);
 
 export function asksForRawSecret(question: string): boolean {
   return RAW_SECRET_REQUEST_PATTERN.test(question) && !CREDENTIAL_REF_PATTERN.test(question);
@@ -187,4 +205,140 @@ export function validateRequirementAnswer(
     default:
       return { ok: true };
   }
+}
+
+export function parseAifRaiseQuestionsContract(output: string): AifRaiseQuestionsContract | null {
+  const matches = [...output.matchAll(AIF_RAISE_QUESTIONS_BLOCK_PATTERN)];
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    throw new Error("Expected at most one fenced aif-raise-questions JSON block");
+  }
+
+  const rawJson = matches[0]?.[1]?.trim() ?? "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch (error) {
+    throw new Error(
+      `aif-raise-questions JSON is malformed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  return normalizeAifRaiseQuestionsContract(parsed);
+}
+
+export function normalizeAifRaiseQuestionsContract(input: unknown): AifRaiseQuestionsContract {
+  if (!isRecord(input)) throw new Error("aif-raise-questions must be a JSON object");
+  if (input.version !== 1) throw new Error("aif-raise-questions.version must be 1");
+  if (input.action !== AIF_RAISE_QUESTIONS_ACTION) {
+    throw new Error("aif-raise-questions.action must be raise_questions");
+  }
+
+  const stage = readRequirementQuestionStage(input.stage, "stage");
+  const targetResumeStage =
+    input.targetResumeStage === undefined
+      ? stage
+      : readRequirementQuestionStage(input.targetResumeStage, "targetResumeStage");
+  const reason = readRequiredString(input.reason, "reason");
+  if (!Array.isArray(input.questions) || input.questions.length === 0) {
+    throw new Error("aif-raise-questions.questions must be a non-empty array");
+  }
+
+  return {
+    version: 1,
+    action: AIF_RAISE_QUESTIONS_ACTION,
+    stage,
+    targetResumeStage,
+    reason,
+    questions: input.questions.map((question, index) =>
+      normalizeAifRaiseQuestionInput(question, index, stage, targetResumeStage),
+    ),
+  };
+}
+
+function normalizeAifRaiseQuestionInput(
+  input: unknown,
+  index: number,
+  stage: RequirementQuestionStage,
+  targetResumeStage: RequirementQuestionStage,
+): TaskRequirementQuestionInput {
+  const prefix = `aif-raise-questions.questions[${index}]`;
+  if (!isRecord(input)) throw new Error(`${prefix} must be an object`);
+
+  const question = readRequiredString(input.question, `${prefix}.question`);
+  if (asksForRawSecret(question)) {
+    throw new Error(`${prefix}.question appears to request a raw secret`);
+  }
+  const whyNeeded = readRequiredString(input.whyNeeded, `${prefix}.whyNeeded`);
+  const answerType =
+    input.answerType === undefined
+      ? "textarea"
+      : readRequirementAnswerType(input.answerType, `${prefix}.answerType`);
+  const options = readOptionalStringArray(input.options, `${prefix}.options`);
+  if ((answerType === "single_choice" || answerType === "multi_choice") && !options?.length) {
+    throw new Error(`${prefix}.options is required for choice questions`);
+  }
+
+  return {
+    stage,
+    targetResumeStage,
+    idempotencyKey: readOptionalString(input.idempotencyKey, `${prefix}.idempotencyKey`),
+    question,
+    whyNeeded,
+    blocking:
+      input.blocking === undefined ? true : readBoolean(input.blocking, `${prefix}.blocking`),
+    answerType,
+    options,
+    defaultAnswer: readOptionalString(input.defaultAnswer, `${prefix}.defaultAnswer`),
+    placeholder: readOptionalString(input.placeholder, `${prefix}.placeholder`),
+  };
+}
+
+function readRequirementQuestionStage(value: unknown, field: string): RequirementQuestionStage {
+  if (typeof value !== "string" || !REQUIREMENT_QUESTION_STAGE_SET.has(value)) {
+    throw new Error(`aif-raise-questions.${field} must be a valid requirement question stage`);
+  }
+  return value as RequirementQuestionStage;
+}
+
+function readRequirementAnswerType(value: unknown, field: string): RequirementAnswerType {
+  if (typeof value !== "string" || !REQUIREMENT_ANSWER_TYPE_SET.has(value)) {
+    throw new Error(`${field} must be a valid requirement answer type`);
+  }
+  return value as RequirementAnswerType;
+}
+
+function readRequiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`aif-raise-questions.${field} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function readOptionalString(value: unknown, field: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") throw new Error(`${field} must be a string`);
+  return value.trim() || null;
+}
+
+function readBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${field} must be a boolean`);
+  return value;
+}
+
+function readOptionalStringArray(value: unknown, field: string): string[] | null {
+  if (value == null) return null;
+  if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
+  const normalized = value.map((item, index) => {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(`${field}[${index}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
+  return normalized.length > 0 ? normalized : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
 }

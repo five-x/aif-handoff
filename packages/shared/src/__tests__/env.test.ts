@@ -69,6 +69,42 @@ describe("env validation", () => {
     expect(result.AIF_WARMUP_ENABLED).toBe(false);
     expect(result.AIF_TASK_WORKTREES_ENABLED).toBe(false);
     expect(result.AIF_RUNTIME_SESSION_FORK_ENABLED).toBe(false);
+    expect(result.AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED).toBe(false);
+    expect(result.AIF_REQUIREMENTS_QA_ENABLED).toBe(false);
+  });
+
+  it("should parse AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED boolean values", () => {
+    expect(
+      validateEnv({ AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED: "true" })
+        .AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED,
+    ).toBe(true);
+    expect(
+      validateEnv({ AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED: "1" })
+        .AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED,
+    ).toBe(true);
+    expect(
+      validateEnv({ AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED: "false" })
+        .AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED,
+    ).toBe(false);
+    expect(
+      validateEnv({ AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED: "0" })
+        .AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED,
+    ).toBe(false);
+  });
+
+  it("should parse AIF_REQUIREMENTS_QA_ENABLED boolean values", () => {
+    expect(validateEnv({ AIF_REQUIREMENTS_QA_ENABLED: "true" }).AIF_REQUIREMENTS_QA_ENABLED).toBe(
+      true,
+    );
+    expect(validateEnv({ AIF_REQUIREMENTS_QA_ENABLED: "1" }).AIF_REQUIREMENTS_QA_ENABLED).toBe(
+      true,
+    );
+    expect(validateEnv({ AIF_REQUIREMENTS_QA_ENABLED: "false" }).AIF_REQUIREMENTS_QA_ENABLED).toBe(
+      false,
+    );
+    expect(validateEnv({ AIF_REQUIREMENTS_QA_ENABLED: "0" }).AIF_REQUIREMENTS_QA_ENABLED).toBe(
+      false,
+    );
   });
 
   it("should parse AIF_MEMORY_ENABLED boolean values", () => {

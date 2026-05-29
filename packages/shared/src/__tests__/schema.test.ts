@@ -97,10 +97,15 @@ describe("tasks schema", () => {
   it("should store all task statuses", () => {
     const statuses: TaskStatus[] = [
       "backlog",
+      "requirements_analysis",
+      "needs_input",
+      "research",
+      "design",
       "planning",
       "plan_ready",
       "implementing",
       "review",
+      "qa",
       "blocked_external",
       "done",
       "verified",

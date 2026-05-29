@@ -4,6 +4,7 @@ import {
   findRoadmapBatchArtifactByTaskId,
   findProjectById,
   findTaskById,
+  buildTaskRequirementsContextForPrompt,
   listRoadmapReportArtifactsForSynthesis,
   listTaskComments,
   persistTaskPlanForTask,
@@ -21,6 +22,10 @@ import {
   type TaskPlanQualityTask,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
+import {
+  formatRaiseQuestionsPromptGuidance,
+  handleRaiseQuestionsOutput,
+} from "./raiseQuestions.js";
 import {
   assertCurrentBranch,
   ensureFeatureBranch,
@@ -363,9 +368,12 @@ ${planManifestPlanningConstraint}`;
     queryParts: [taskContext, commentsForPrompt, planningFeedback],
   });
   const memoryBlock = memoryContext ? `\n\n${memoryContext}\n` : "";
+  const requirementsContext = buildTaskRequirementsContextForPrompt(taskId, "planning");
+  const requirementsBlock = requirementsContext ? `\n\n${requirementsContext.markdown}\n` : "";
+  const raiseQuestionsBlock = `\n\n${formatRaiseQuestionsPromptGuidance("planning")}\n`;
 
   if (task.isFix) {
-    prompt = `${handoffContext}\n${scopeConstraint}${memoryBlock}\n\n${buildFixCommandText(taskContext)}`;
+    prompt = `${handoffContext}\n${scopeConstraint}${memoryBlock}${requirementsBlock}${raiseQuestionsBlock}\n\n${buildFixCommandText(taskContext)}`;
     workflowSpec = createRuntimeWorkflowSpec({
       workflowKind: "planner",
       prompt,
@@ -378,7 +386,7 @@ ${planManifestPlanningConstraint}`;
 
 ${handoffContext}
 ${scopeConstraint}
-${memoryBlock}
+${memoryBlock}${requirementsBlock}${raiseQuestionsBlock}
 
 Mode: ${plannerMode}, tests: ${planTests}, docs: ${planDocs}.
 Plan file reference: @${planPath}
@@ -405,7 +413,7 @@ Planning stage must not create report artifacts, edit source/config/test files, 
       },
     });
   } else {
-    prompt = `${handoffContext}\n${scopeConstraint}${memoryBlock}\n\n${plannerSlashCommand}
+    prompt = `${handoffContext}\n${scopeConstraint}${memoryBlock}${requirementsBlock}${raiseQuestionsBlock}\n\n${plannerSlashCommand}
 
 ${taskContext}`;
     workflowSpec = createRuntimeWorkflowSpec({
@@ -442,6 +450,18 @@ ${taskContext}`;
   // coordinator blocks the task instead of committing the drift.
   if (preparedBranch) {
     assertCurrentBranch(executionRoot, preparedBranch);
+  }
+
+  if (
+    handleRaiseQuestionsOutput({
+      taskId,
+      output: rawResult,
+      stage: "planning",
+      sourceAgent: "planner",
+      sourcePromptHash: null,
+    })
+  ) {
+    return;
   }
 
   const diskPlan = readPlanFromDisk(executionRoot, rawResult, !!task.isFix, planPath);

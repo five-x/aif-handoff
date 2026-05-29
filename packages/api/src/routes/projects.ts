@@ -29,6 +29,7 @@ import {
   listProjectConfigWorkBlockers,
   markRuntimeWarmupSessionFailed,
   markRuntimeWarmupSessionReady,
+  rejectTaskSplitProposal,
   type RuntimeWarmupSessionRow,
 } from "@aif/data";
 import {
@@ -39,6 +40,7 @@ import {
   autoQueueModeSchema,
   warmupCreateSchema,
   operatorLimitQuerySchema,
+  taskSplitProposalRejectSchema,
 } from "../schemas.js";
 import { getAutoQueueMode, setAutoQueueMode } from "@aif/data";
 import { broadcast } from "../ws.js";
@@ -54,9 +56,11 @@ import { toTaskBroadcastPayload } from "../repositories/tasks.js";
 import {
   generateRoadmapFile,
   generateRoadmapTasks,
-  importGeneratedTasks,
   commitGeneratedRoadmapIfNeeded,
+  approveRoadmapSplitProposal,
   assertRoadmapIntentMatchesRequest,
+  createRoadmapSplitProposal,
+  getRoadmapSourceContent,
   rejectReusedRoadmapAlias,
   RoadmapGenerationError,
 } from "../services/roadmapGeneration.js";
@@ -539,32 +543,31 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
   );
 
   try {
-    // Generate tasks from roadmap via Agent SDK
+    const source = getRoadmapSourceContent(id);
+
+    // Generate proposed tasks from roadmap via Agent SDK
     const generation = await generateRoadmapTasks({
       projectId: id,
       roadmapAlias,
       taskIntent,
     });
 
-    // Import with dedupe and tag enrichment
-    const result = importGeneratedTasks(id, generation);
-
-    // Broadcast each created task
-    for (const taskId of [result.containerTaskId, ...result.taskIds].filter(
-      (candidate): candidate is string => Boolean(candidate),
-    )) {
-      const task = findTaskById(taskId);
-      if (task) {
-        broadcast({ type: "task:created", payload: toTaskBroadcastPayload(task) });
-      }
-    }
-
-    // Wake coordinator to process new backlog items
-    if (result.created > 0) {
-      broadcast({ type: "agent:wake", payload: { id } });
-      log.info(
-        { projectId: id, roadmapAlias, created: result.created },
-        "Batch wake event sent after roadmap import",
+    const proposalResult = createRoadmapSplitProposal({
+      projectId: id,
+      sourceKind: "roadmap_import",
+      sourceRef: source.sourceRef,
+      sourceContent: source.content,
+      generation,
+    });
+    if (proposalResult.status === "conflict") {
+      return c.json(
+        {
+          error:
+            "A pending split proposal already exists for this roadmap alias with different source content. Reject it or use a different alias before creating a replacement.",
+          code: "TASK_SPLIT_PROPOSAL_SOURCE_CONFLICT",
+          proposal: proposalResult.proposal,
+        },
+        409,
       );
     }
 
@@ -572,14 +575,22 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
       {
         projectId: id,
         roadmapAlias,
-        created: result.created,
-        skipped: result.skipped,
-        batchStatus: result.batchSummary?.status,
+        proposalId: proposalResult.proposal.id,
+        proposalStatus: proposalResult.status,
       },
-      "Roadmap import completed",
+      "Roadmap import proposal persisted",
     );
 
-    return c.json(result, 201);
+    const payload = {
+      status: "split_required" as const,
+      projectId: id,
+      proposal: proposalResult.proposal,
+    };
+    broadcast({
+      type: "roadmap:split_required",
+      payload: { projectId: id, roadmapAlias, proposal: proposalResult.proposal },
+    });
+    return c.json(payload, proposalResult.status === "created" ? 201 : 200);
   } catch (err) {
     if (err instanceof RoadmapGenerationError) {
       const status =
@@ -600,6 +611,76 @@ projectsRouter.post("/:id/roadmap/import", jsonValidator(roadmapImportSchema), a
     releaseRoadmapAliasJob(id, roadmapAlias);
   }
 });
+
+projectsRouter.post("/:id/task-split-proposals/:proposalId/approve", async (c) => {
+  const { id, proposalId } = c.req.param();
+  const project = findProjectById(id);
+  if (!project) return c.json({ error: "Project not found" }, 404);
+
+  try {
+    const result = approveRoadmapSplitProposal({
+      projectId: id,
+      proposalId,
+      approvedBy: "api",
+    });
+    if (result.status === "not_found") return c.json({ error: "Proposal not found" }, 404);
+    if (result.status === "conflict") {
+      return c.json(
+        {
+          error: "Proposal is rejected and cannot be approved",
+          code: "PROPOSAL_CONFLICT",
+          proposal: result.proposal,
+        },
+        409,
+      );
+    }
+
+    const broadcastTaskIds = [
+      result.proposal.containerTaskId,
+      ...result.proposal.createdTaskIds,
+    ].filter(
+      (candidate, index, allIds): candidate is string =>
+        Boolean(candidate) && allIds.indexOf(candidate) === index,
+    );
+    for (const taskId of broadcastTaskIds) {
+      const task = findTaskById(taskId);
+      if (task) broadcast({ type: "task:created", payload: toTaskBroadcastPayload(task) });
+    }
+    return c.json(result.proposal, result.status === "approved" ? 201 : 200);
+  } catch (err) {
+    if (err instanceof RoadmapGenerationError) {
+      const status =
+        err.code === "PROJECT_NOT_FOUND" ? 404 : err.code === "ROADMAP_ALIAS_EXISTS" ? 409 : 500;
+      return c.json({ error: err.message, code: err.code }, status);
+    }
+    log.error({ projectId: id, proposalId, err }, "Split proposal approval failed");
+    return c.json({ error: "Internal server error" }, 500);
+  }
+});
+
+projectsRouter.post(
+  "/:id/task-split-proposals/:proposalId/reject",
+  jsonValidator(taskSplitProposalRejectSchema),
+  async (c) => {
+    const { id, proposalId } = c.req.param();
+    const project = findProjectById(id);
+    if (!project) return c.json({ error: "Project not found" }, 404);
+    const { reason } = c.req.valid("json");
+    const result = rejectTaskSplitProposal({ projectId: id, proposalId, reason });
+    if (result.status === "not_found") return c.json({ error: "Proposal not found" }, 404);
+    if (result.status === "conflict") {
+      return c.json(
+        {
+          error: "Approved proposal cannot be rejected",
+          code: "PROPOSAL_CONFLICT",
+          proposal: result.proposal,
+        },
+        409,
+      );
+    }
+    return c.json(result.proposal);
+  },
+);
 
 // GET /projects/:id/auto-queue-mode
 projectsRouter.get("/:id/auto-queue-mode", (c) => {
@@ -1012,42 +1093,34 @@ async function runRoadmapGenerationJob(
       );
     }
 
-    // Step 4: Import with dedupe and tag enrichment
-    const result = importGeneratedTasks(projectId, extraction);
-
-    // Step 5: Broadcast each created task
-    for (const taskId of [result.containerTaskId, ...result.taskIds].filter(
-      (candidate): candidate is string => Boolean(candidate),
-    )) {
-      const task = findTaskById(taskId);
-      if (task) {
-        broadcast({ type: "task:created", payload: toTaskBroadcastPayload(task) });
-      }
+    // Step 4: Persist a split proposal. Task rows are created only after approval.
+    const proposalResult = createRoadmapSplitProposal({
+      projectId,
+      sourceKind: "roadmap_generation",
+      sourceRef: `roadmap-generation:${roadmapAlias}`,
+      sourceContent: generated.content,
+      generation: extraction,
+    });
+    if (proposalResult.status === "conflict") {
+      throw new RoadmapGenerationError(
+        "TASK_SPLIT_PROPOSAL_SOURCE_CONFLICT",
+        "A pending split proposal already exists for this roadmap alias with different source content.",
+      );
     }
 
-    // Wake coordinator
-    if (result.created > 0) {
-      broadcast({ type: "agent:wake", payload: { id: projectId } });
-    }
-
-    // Step 6: Broadcast completion
+    // Step 5: Broadcast proposal review requirement.
     broadcast({
-      type: "roadmap:complete",
+      type: "roadmap:split_required",
       payload: {
         projectId,
-        roadmapAlias: result.roadmapAlias,
-        created: result.created,
-        skipped: result.skipped,
-        taskIds: result.taskIds,
-        containerTaskId: result.containerTaskId,
-        byPhase: result.byPhase,
-        batchSummary: result.batchSummary,
+        roadmapAlias,
+        proposal: proposalResult.proposal,
       },
     });
 
     log.info(
-      { projectId, roadmapAlias, created: result.created, skipped: result.skipped },
-      "Roadmap generation and import completed",
+      { projectId, roadmapAlias, proposalId: proposalResult.proposal.id },
+      "Roadmap generation proposal persisted",
     );
   } catch (err) {
     const code = err instanceof RoadmapGenerationError ? err.code : "UNKNOWN";

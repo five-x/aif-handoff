@@ -37,12 +37,15 @@ const {
   generateRoadmapTasks,
   importGeneratedTasks,
   buildTaskTags,
+  createRoadmapSplitProposal,
+  computeRoadmapSplitProposalFingerprint,
   commitGeneratedRoadmapIfNeeded,
   rejectReusedRoadmapAlias,
   RoadmapGenerationError,
 } = await import("../services/roadmapGeneration.js");
 const {
   findRoadmapBatchByProjectAlias,
+  findTaskById,
   findTasksByRoadmapAlias,
   listRoadmapBatchArtifacts,
   nextBacklogTaskByPosition,
@@ -1304,6 +1307,117 @@ describe("roadmapGeneration", () => {
   });
 
   describe("importGeneratedTasks", () => {
+    it("creates a paused hierarchy parent and paused children for split approval imports", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = importGeneratedTasks(
+        projectId,
+        {
+          alias: "split-approved",
+          taskIntent: "general",
+          tasks: [
+            {
+              title: "Build API",
+              description: "REST endpoints",
+              taskIntent: "general",
+              phase: 1,
+              phaseName: "Backend",
+              sequence: 1,
+            },
+          ],
+        },
+        { createHierarchyParent: true, pauseCreatedTasks: true },
+      );
+
+      expect(result.created).toBe(1);
+      expect(result.containerTaskId).toBeTruthy();
+      const parent = findTaskById(result.containerTaskId!)!;
+      const child = findTaskById(result.taskIds[0]!)!;
+      expect(parent.hierarchyRole).toBe("container");
+      expect(parent.parentCloseoutPolicy).toBe("all_children_done");
+      expect(parent.paused).toBe(true);
+      expect(child.parentTaskId).toBe(parent.id);
+      expect(child.paused).toBe(true);
+    });
+
+    it("persists split proposals without creating tasks and detects changed source content", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      const generation = {
+        alias: "split-pending",
+        taskIntent: "feature" as const,
+        tasks: [
+          {
+            title: "Build API",
+            description: "REST endpoints",
+            taskIntent: "feature" as const,
+            phase: 1,
+            phaseName: "Backend",
+            sequence: 1,
+          },
+        ],
+      };
+
+      const first = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent: "# Roadmap\n- [ ] Build API",
+        generation,
+      });
+      expect(first.status).toBe("created");
+      expect(findTasksByRoadmapAlias(projectId, "split-pending")).toHaveLength(0);
+
+      const reused = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent: "# Roadmap\n- [ ] Build API",
+        generation,
+      });
+      expect(reused.status).toBe("reused");
+      expect(reused.proposal.id).toBe(first.proposal.id);
+
+      const changed = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent: "# Roadmap\n- [ ] Build a different API",
+        generation,
+      });
+      expect(changed.status).toBe("conflict");
+    });
+
+    it("fingerprints source content, alias, intent, and canonical proposed children", () => {
+      const base = {
+        sourceContent: "# Roadmap\n- [ ] Build API",
+        roadmapAlias: "fp",
+        taskIntent: "feature" as const,
+        tasks: [
+          {
+            title: "Build API",
+            description: "REST endpoints",
+            taskIntent: "feature" as const,
+            phase: 1,
+            phaseName: "Backend",
+            sequence: 1,
+          },
+        ],
+      };
+
+      expect(computeRoadmapSplitProposalFingerprint(base)).toBe(
+        computeRoadmapSplitProposalFingerprint({
+          ...base,
+          sourceContent: `${base.sourceContent}\n`,
+        }),
+      );
+      expect(computeRoadmapSplitProposalFingerprint(base)).not.toBe(
+        computeRoadmapSplitProposalFingerprint({
+          ...base,
+          tasks: [{ ...base.tasks[0], title: "Build API v2" }],
+        }),
+      );
+    });
+
     it("should create tasks with proper tags", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 

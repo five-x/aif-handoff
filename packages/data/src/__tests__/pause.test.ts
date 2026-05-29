@@ -245,6 +245,23 @@ describe("pause functionality", () => {
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe("active-in-progress");
     });
+
+    it("should return non-paused qa tasks", () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "active-qa",
+          projectId: "test-project",
+          title: "Active QA",
+          status: "qa",
+          paused: false,
+        })
+        .run();
+
+      const result = listStaleInProgressTasks();
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("active-qa");
+    });
   });
 
   describe("toTaskResponse", () => {

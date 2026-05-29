@@ -17,6 +17,7 @@ import {
   TASK_INTENTS,
   formatTaskIntentPrimaryConstraints,
   type Project,
+  type TaskSplitProposal,
   type TaskIntent,
 } from "@aif/shared/browser";
 import type { RoadmapImportResult } from "./Header";
@@ -40,8 +41,10 @@ export function RoadmapDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RoadmapImportResult | null>(null);
+  const [proposal, setProposal] = useState<TaskSplitProposal | null>(null);
   const [exists, setExists] = useState<boolean | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+  const [decisionLoading, setDecisionLoading] = useState<"approve" | "reject" | null>(null);
   const requestInFlightRef = useRef(false);
   const selectedIntentContract = TASK_INTENT_CONTRACTS[taskIntent];
   const selectedIntentConstraints = formatTaskIntentPrimaryConstraints(taskIntent);
@@ -54,8 +57,10 @@ export function RoadmapDialog({
     setVision("");
     setError(null);
     setResult(null);
+    setProposal(null);
     setExists(null);
     setImportLoading(false);
+    setDecisionLoading(null);
     requestInFlightRef.current = false;
     api.checkRoadmapStatus(projectId).then(
       ({ exists: e }) => setExists(e),
@@ -96,6 +101,14 @@ export function RoadmapDialog({
         onImportComplete?.(detail);
       }
     };
+    const handleSplitRequired = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (project && detail.projectId === project.id) {
+        setProposal(detail.proposal);
+        setLoading(false);
+        requestInFlightRef.current = false;
+      }
+    };
     const handleError = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (project && detail.projectId === project.id) {
@@ -106,9 +119,11 @@ export function RoadmapDialog({
     };
 
     window.addEventListener("roadmap:complete", handleComplete);
+    window.addEventListener("roadmap:split_required", handleSplitRequired);
     window.addEventListener("roadmap:error", handleError);
     return () => {
       window.removeEventListener("roadmap:complete", handleComplete);
+      window.removeEventListener("roadmap:split_required", handleSplitRequired);
       window.removeEventListener("roadmap:error", handleError);
     };
   }, [project, onImportComplete]);
@@ -119,6 +134,7 @@ export function RoadmapDialog({
     setLoading(true);
     setError(null);
     setResult(null);
+    setProposal(null);
     try {
       await api.generateRoadmap(project.id, alias.trim(), vision.trim() || undefined, taskIntent);
     } catch (err) {
@@ -134,18 +150,58 @@ export function RoadmapDialog({
     setImportLoading(true);
     setError(null);
     setResult(null);
+    setProposal(null);
     try {
       const res = await api.importRoadmap(project.id, alias.trim(), taskIntent);
-      setResult(res);
+      setProposal(res.proposal);
       setImportLoading(false);
       requestInFlightRef.current = false;
-      onImportComplete?.(res);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setImportLoading(false);
       requestInFlightRef.current = false;
     }
-  }, [project, alias, taskIntent, onImportComplete]);
+  }, [project, alias, taskIntent]);
+
+  const handleApprove = useCallback(async () => {
+    if (!project || !proposal || decisionLoading) return;
+    setDecisionLoading("approve");
+    setError(null);
+    try {
+      const approved = await api.approveTaskSplitProposal(project.id, proposal.id);
+      setProposal(approved);
+      const childTaskIds = approved.createdTaskIds.filter(
+        (taskId) => taskId !== approved.containerTaskId,
+      );
+      const approvedResult: RoadmapImportResult = {
+        roadmapAlias: approved.roadmapAlias,
+        created: childTaskIds.length,
+        skipped: 0,
+        taskIds: childTaskIds,
+        containerTaskId: approved.containerTaskId ?? undefined,
+      };
+      setResult(approvedResult);
+      onImportComplete?.(approvedResult);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDecisionLoading(null);
+    }
+  }, [project, proposal, decisionLoading, onImportComplete]);
+
+  const handleReject = useCallback(async () => {
+    if (!project || !proposal || decisionLoading) return;
+    setDecisionLoading("reject");
+    setError(null);
+    try {
+      const rejected = await api.rejectTaskSplitProposal(project.id, proposal.id);
+      setProposal(rejected);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDecisionLoading(null);
+    }
+  }, [project, proposal, decisionLoading]);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -171,11 +227,62 @@ export function RoadmapDialog({
               Close
             </Button>
           </div>
+        ) : proposal ? (
+          <div className="space-y-3">
+            <div className="border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+              <p className="text-sm font-medium text-amber-300">Split approval required</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {proposal.proposedChildren.length} proposed task
+                {proposal.proposedChildren.length !== 1 ? "s" : ""} for{" "}
+                <span className="font-mono text-foreground">{proposal.roadmapAlias}</span>
+              </p>
+            </div>
+            <div className="max-h-72 space-y-2 overflow-auto pr-1">
+              {proposal.proposedChildren.map((child) => (
+                <div
+                  key={`${child.phase}-${child.sequence}-${child.title}`}
+                  className="border px-3 py-2"
+                >
+                  <p className="text-sm font-medium">{child.title}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Phase {child.phase}
+                    {child.phaseName ? `: ${child.phaseName}` : ""} - Seq {child.sequence}
+                  </p>
+                  {child.description && (
+                    <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
+                      {child.description}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+            {proposal.status === "rejected" && (
+              <p className="text-xs text-muted-foreground">Proposal rejected.</p>
+            )}
+            {error && <p className="text-xs text-destructive">{error}</p>}
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => void handleReject()}
+                disabled={proposal.status !== "pending" || decisionLoading !== null}
+              >
+                {decisionLoading === "reject" ? "Rejecting..." : "Reject"}
+              </Button>
+              <Button
+                className="w-full"
+                onClick={() => void handleApprove()}
+                disabled={proposal.status !== "pending" || decisionLoading !== null}
+              >
+                {decisionLoading === "approve" ? "Approving..." : "Approve"}
+              </Button>
+            </div>
+          </div>
         ) : (
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              Generate a project roadmap from DESCRIPTION.md, then create backlog tasks
-              automatically.
+              Generate a project roadmap from DESCRIPTION.md, then create backlog tasks after
+              proposal approval.
             </p>
             <div>
               <label htmlFor="roadmap-alias" className="block text-xs font-medium mb-1">

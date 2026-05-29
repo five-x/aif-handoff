@@ -55,6 +55,32 @@ const mockDoneTask: Task = {
   title: "Done Task",
 };
 
+const mockDoneTaskWithAcceptancePack: Task = {
+  ...mockDoneTask,
+  id: "detail-done-acceptance",
+  title: "Done Task With Acceptance",
+  acceptancePack: {
+    taskId: "detail-done-acceptance",
+    generatedAt: "2026-01-01T01:00:00.000Z",
+    coveredRequirements: ["Requirements snapshot v1: acceptance criteria"],
+    changedFiles: ["packages/app/src/feature.ts"],
+    reviewResult: "Review completed at iteration 1.",
+    qaResult: "QA passed. (1 passed, 0 failed, 0 skipped)",
+    limitations: ["No browser E2E run."],
+    rollbackNotes: ["Revert packages/app/src/feature.ts."],
+    readiness: {
+      ready: true,
+      reason: "Fresh QA artifact and acceptance pack are ready for human approval.",
+    },
+    qaArtifactId: "qa-artifact-1",
+    qaAttemptNumber: 1,
+    acceptanceArtifactId: "acceptance-artifact-1",
+    acceptanceAttemptNumber: 1,
+    sourceFingerprint: null,
+    markdown: "# Acceptance Pack\n\nReady.",
+  },
+};
+
 const mockDoneFixTask: Task = {
   ...mockDoneTask,
   id: "detail-done-fix",
@@ -329,6 +355,82 @@ const mockAuditInconclusiveTimeline: WorkflowTimeline = {
   events: [],
 };
 
+const mockRequirementsArtifactTask: Task = {
+  ...mockTask,
+  id: "detail-requirements-artifacts",
+  title: "Requirements Artifacts",
+};
+
+const mockRequirementsArtifactTimeline: WorkflowTimeline = {
+  context: {
+    taskId: "detail-requirements-artifacts",
+    projectId: "test-project",
+    workflowPackId: "feature",
+    workflowKind: "feature",
+    roadmapAlias: null,
+    sourceKind: "task_record",
+    sourceId: "detail-requirements-artifacts",
+    status: "planning",
+    generatedAt: "2026-05-28T00:00:00.000Z",
+  },
+  artifacts: [
+    {
+      id: "requirements-artifact",
+      taskId: "detail-requirements-artifacts",
+      kind: "requirements",
+      label: "Requirements artifact",
+      path: "requirements.md",
+      state: "accepted",
+      currentAttemptNumber: 1,
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:01:00.000Z",
+      metadata: {},
+    },
+    {
+      id: "research-artifact",
+      taskId: "detail-requirements-artifacts",
+      kind: "research",
+      label: "Research artifact",
+      path: "research.md",
+      state: "expected",
+      currentAttemptNumber: 1,
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:01:00.000Z",
+      metadata: {},
+    },
+    {
+      id: "design-artifact",
+      taskId: "detail-requirements-artifacts",
+      kind: "design",
+      label: "Design artifact",
+      path: "design.md",
+      state: "expected",
+      currentAttemptNumber: 1,
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:01:00.000Z",
+      metadata: {},
+    },
+  ],
+  attempts: [
+    {
+      id: "requirements-attempt",
+      artifactId: "requirements-artifact",
+      taskId: "detail-requirements-artifacts",
+      attemptNumber: 1,
+      state: "accepted",
+      outcome: "supported",
+      trustLevel: "trusted",
+      sourceSnapshotId: "snapshot-1",
+      createdAt: "2026-05-28T00:01:00.000Z",
+      metadata: {},
+    },
+  ],
+  claims: [],
+  evidence: [],
+  evidenceLinks: [],
+  events: [],
+};
+
 const mockPlanReadyManualTask: Task = {
   ...mockTask,
   id: "detail-plan-ready-manual",
@@ -384,6 +486,7 @@ const mutateTaskEventAsync = vi.fn();
 const mutateCreateCommentAsync = vi.fn();
 const mutateSyncTaskPlan = vi.fn();
 const mutateCleanupTaskWorktree = vi.fn();
+const mutateAnswerTaskQuestionBatch = vi.fn();
 const mockGetTaskPlanFileStatus = vi.fn();
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -404,41 +507,55 @@ vi.mock("@/hooks/useTasks", () => ({
         ? mockTask
         : id === "detail-done"
           ? mockDoneTask
-          : id === "detail-done-fix"
-            ? mockDoneFixTask
-            : id === "detail-manual-review"
-              ? mockManualReviewTask
-              : id === "detail-plan-quality-manual-review"
-                ? mockPlanQualityManualReviewTask
-                : id === "detail-backlog"
-                  ? mockBacklogTask
-                  : id === "detail-blocked"
-                    ? mockBlockedTask
-                    : id === "detail-audit-decision"
-                      ? mockAuditDecisionTask
-                      : id === "detail-hierarchy"
-                        ? mockHierarchyTask
-                        : id === "detail-audit-inconclusive-timeline"
-                          ? mockAuditInconclusiveTimelineTask
-                          : id === "detail-plan-ready-manual"
-                            ? mockPlanReadyManualTask
-                            : id === "detail-review"
-                              ? mockReviewTask
-                              : id === "detail-with-attachment"
-                                ? mockTaskWithAttachment
-                                : id === "detail-no-plan-no-log"
-                                  ? mockTaskNoPlanNoLog
-                                  : id === "detail-planning-activity"
-                                    ? mockPlanningTaskWithActivityOnly
-                                    : null,
+          : id === "detail-done-acceptance"
+            ? mockDoneTaskWithAcceptancePack
+            : id === "detail-done-fix"
+              ? mockDoneFixTask
+              : id === "detail-manual-review"
+                ? mockManualReviewTask
+                : id === "detail-plan-quality-manual-review"
+                  ? mockPlanQualityManualReviewTask
+                  : id === "detail-backlog"
+                    ? mockBacklogTask
+                    : id === "detail-blocked"
+                      ? mockBlockedTask
+                      : id === "detail-audit-decision"
+                        ? mockAuditDecisionTask
+                        : id === "detail-hierarchy"
+                          ? mockHierarchyTask
+                          : id === "detail-audit-inconclusive-timeline"
+                            ? mockAuditInconclusiveTimelineTask
+                            : id === "detail-requirements-artifacts"
+                              ? mockRequirementsArtifactTask
+                              : id === "detail-plan-ready-manual"
+                                ? mockPlanReadyManualTask
+                                : id === "detail-review"
+                                  ? mockReviewTask
+                                  : id === "detail-with-attachment"
+                                    ? mockTaskWithAttachment
+                                    : id === "detail-no-plan-no-log"
+                                      ? mockTaskNoPlanNoLog
+                                      : id === "detail-planning-activity"
+                                        ? mockPlanningTaskWithActivityOnly
+                                        : null,
   }),
   useTaskTimeline: (id: string | null) => ({
-    data: id === "detail-audit-inconclusive-timeline" ? mockAuditInconclusiveTimeline : null,
+    data:
+      id === "detail-audit-inconclusive-timeline"
+        ? mockAuditInconclusiveTimeline
+        : id === "detail-requirements-artifacts"
+          ? mockRequirementsArtifactTimeline
+          : null,
     isLoading: false,
   }),
   useTaskEvidence: () => ({ data: null, isLoading: false }),
   useTaskMemoryCandidates: () => ({ data: { candidates: [] }, isLoading: false }),
   useTaskRuntimeUsage: () => ({ data: null, isLoading: false }),
+  useTaskQuestions: () => ({ data: null, isLoading: false }),
+  useAnswerTaskQuestionBatch: () => ({
+    mutate: mutateAnswerTaskQuestionBatch,
+    isPending: false,
+  }),
   useTaskWorktree: () => ({ data: null, isLoading: false }),
   useProjectKnowledge: () => ({
     data: {
@@ -497,6 +614,7 @@ describe("TaskDetail", () => {
     mutateCreateCommentAsync.mockReset();
     mutateSyncTaskPlan.mockClear();
     mutateCleanupTaskWorktree.mockClear();
+    mutateAnswerTaskQuestionBatch.mockClear();
     mockGetTaskPlanFileStatus.mockReset();
     mutateTaskEventAsync.mockResolvedValue(undefined);
     mutateCreateCommentAsync.mockResolvedValue(undefined);
@@ -601,6 +719,24 @@ describe("TaskDetail", () => {
     expect(screen.queryByText("Trust: trusted")).toBeNull();
   });
 
+  it("renders requirements and stage artifacts in timeline and artifacts tabs", () => {
+    render(<TaskDetail taskId="detail-requirements-artifacts" onClose={vi.fn()} />, {
+      wrapper: Wrapper,
+    });
+
+    fireEvent.click(screen.getByText("Timeline"));
+    expect(screen.getByText("Requirements artifact")).toBeDefined();
+    expect(screen.getByText("Snapshot: snapshot-1")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Artifacts" }));
+    expect(screen.getAllByText("Requirements artifact").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Research artifact").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Design artifact").length).toBeGreaterThan(0);
+    expect(screen.getByText("requirements.md")).toBeDefined();
+    expect(screen.getByText("research.md")).toBeDefined();
+    expect(screen.getByText("design.md")).toBeDefined();
+  });
+
   it("should render operator projection tabs", () => {
     render(<TaskDetail taskId="detail-1" onClose={vi.fn()} />, { wrapper: Wrapper });
 
@@ -668,6 +804,20 @@ describe("TaskDetail", () => {
     render(<TaskDetail taskId="detail-done" onClose={vi.fn()} />, { wrapper: Wrapper });
     expect(screen.getByText("Approve")).toBeDefined();
     expect(screen.getByText("Request changes")).toBeDefined();
+  });
+
+  it("renders acceptance pack details as the default done-task tab", () => {
+    render(<TaskDetail taskId="detail-done-acceptance" onClose={vi.fn()} />, {
+      wrapper: Wrapper,
+    });
+
+    expect(screen.getByText("Acceptance Pack")).toBeDefined();
+    expect(
+      screen.getAllByText(/Fresh QA artifact and acceptance pack are ready for human approval\./)
+        .length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("QA passed. (1 passed, 0 failed, 0 skipped)")).toBeDefined();
+    expect(screen.getByText("packages/app/src/feature.ts")).toBeDefined();
   });
 
   it("should show manual review warning banner for manual handoff tasks", () => {

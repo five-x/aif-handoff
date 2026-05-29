@@ -1,5 +1,6 @@
 import {
   appendTaskActivityLog,
+  createCurrentRequirementsSnapshot,
   createTaskRequirementQuestionBatch,
   findTaskById,
   getTaskRequirementQuestionsResponse,
@@ -158,6 +159,10 @@ export async function runRequirementsAnalyst(taskId: string): Promise<void> {
     requirementsConfidence: 0.86,
     lastHeartbeatAt: nowIso,
     updatedAt: nowIso,
+  });
+  createCurrentRequirementsSnapshot(taskId, {
+    sourceStage: "requirements_analysis",
+    sourceQuestionBatchId: existingQuestions?.batches[0]?.batchId ?? null,
   });
   appendTaskActivityLog(
     taskId,

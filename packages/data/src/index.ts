@@ -1,4 +1,7 @@
 import {
+  createHash,
+} from "node:crypto";
+import {
   existsSync,
   readFileSync,
 } from "node:fs";
@@ -41,6 +44,7 @@ import {
   findMonorepoRootFromUrl,
   normalizeRuntimeStage,
   runtimeProfileModeForStage,
+  buildRequirementsLifecycleMetric,
   buildRuntimeLimitSignature,
   appSettings,
   evaluateTaskPlanQuality,
@@ -48,6 +52,7 @@ import {
   getEnv,
   getProjectConfig,
   logger as createLogger,
+  REQUIREMENTS_LIFECYCLE_EVENTS,
   normalizeRuntimeLimitSnapshot,
   redactProviderText,
   parseAttachments,
@@ -57,6 +62,9 @@ import {
   resolveTaskIntentDefaults,
   taskComments,
   taskRequirementQuestions,
+  taskRequirementsSnapshots,
+  taskStageArtifacts,
+  taskStageArtifactAttempts,
   tasks,
   runtimeProfiles,
   configAuditEvents,
@@ -68,6 +76,7 @@ import {
   roadmapBatches,
   roadmapBatchArtifacts,
   roadmapBatchArtifactAttempts,
+  taskSplitProposals,
   auditEvidenceEvents,
   codexSessions,
   codexSessionFiles,
@@ -115,6 +124,7 @@ import {
   type UpdateRuntimeProfileInput,
   type RuntimeWarmupSessionStatus,
   type Task,
+  type TaskAcceptancePack,
   type TaskArtifactTrustBatchCounts,
   type TaskArtifactTrustNextAction,
   type TaskArtifactTrustRollup,
@@ -126,6 +136,9 @@ import {
   type TaskRuntimeUsageEvent,
   type TaskRuntimeUsageResponse,
   type ImplementationManifest,
+  type AifPlanManifest,
+  type TaskQaMandatoryCheck,
+  type TaskQaSourceFingerprint,
   type TaskIntent,
   type TaskStatus,
   type RequirementAnswerType,
@@ -135,7 +148,17 @@ import {
   type TaskRequirementQuestionBatch,
   type TaskRequirementQuestionInput,
   type TaskRequirementQuestionsResponse,
+  type TaskRequirementsPromptContext,
+  type TaskRequirementsSnapshot,
+  type TaskRequirementsSnapshotResponse,
+  type TaskSplitProposal,
+  type TaskSplitProposalSourceKind,
+  type TaskSplitProposedChild,
+  type TaskStageArtifact,
+  type TaskStageArtifactAttempt,
+  type TaskStageArtifactState,
   asksForRawSecret,
+  containsSecretLikeAnswer,
   validateRequirementAnswer,
   type WorkflowTimeline,
   type WorkflowTimelineArtifact,
@@ -191,6 +214,15 @@ import {
 import { getDb } from "@aif/shared/server";
 
 const log = createLogger("data");
+function logRequirementsLifecycleMetric(
+  event: Parameters<typeof buildRequirementsLifecycleMetric>[0],
+  dimensions: Parameters<typeof buildRequirementsLifecycleMetric>[1] = {},
+): void {
+  log.info(
+    buildRequirementsLifecycleMetric(event, dimensions),
+    "Requirements lifecycle metric",
+  );
+}
 const AUTO_REVIEW_STRATEGY_SET = new Set<string>(AUTO_REVIEW_STRATEGIES);
 const AUTO_REVIEW_FINDING_SOURCE_SET = new Set<string>(AUTO_REVIEW_FINDING_SOURCES);
 const AUTO_REVIEW_SECURITY_COVERAGE_AREA_SET = new Set<string>(
@@ -227,6 +259,9 @@ function resolveInferredTaskIntent(input: {
 
 export type TaskRow = typeof tasks.$inferSelect;
 export type RequirementQuestionRow = typeof taskRequirementQuestions.$inferSelect;
+export type TaskRequirementsSnapshotRow = typeof taskRequirementsSnapshots.$inferSelect;
+export type TaskStageArtifactRow = typeof taskStageArtifacts.$inferSelect;
+export type TaskStageArtifactAttemptRow = typeof taskStageArtifactAttempts.$inferSelect;
 export type CommentRow = typeof taskComments.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type AppSettingsRow = typeof appSettings.$inferSelect;
@@ -236,6 +271,7 @@ export type RuntimeEndpointLeaseRow = typeof runtimeEndpointLeases.$inferSelect;
 export type RoadmapBatchRow = typeof roadmapBatches.$inferSelect;
 export type RoadmapBatchArtifactRow = typeof roadmapBatchArtifacts.$inferSelect;
 export type RoadmapBatchArtifactAttemptRow = typeof roadmapBatchArtifactAttempts.$inferSelect;
+export type TaskSplitProposalRow = typeof taskSplitProposals.$inferSelect;
 export type AuditEvidenceEventRow = typeof auditEvidenceEvents.$inferSelect;
 export type CodexSessionIndexRow = typeof codexSessions.$inferSelect;
 export type CodexSessionFileIndexRow = typeof codexSessionFiles.$inferSelect;
@@ -422,16 +458,22 @@ const TASK_PARENT_CLOSEOUT_POLICY_SET = new Set<string>(TASK_PARENT_CLOSEOUT_POL
 const ACTIVE_CHILD_STATUSES = new Set<TaskStatus>([
   "requirements_analysis",
   "needs_input",
+  "research",
+  "design",
   "planning",
   "plan_ready",
   "implementing",
   "review",
+  "qa",
 ]);
 const REQUIREMENT_RESUME_STATUS_SET = new Set<TaskStatus>([
   "requirements_analysis",
+  "research",
+  "design",
   "planning",
   "implementing",
   "review",
+  "qa",
 ]);
 
 function assertTaskHierarchyRole(value: TaskHierarchyRole | undefined): TaskHierarchyRole {
@@ -853,6 +895,7 @@ export function toTaskResponse(task: TaskRow): Task {
     implementationManifest: parseRuntimeObject(
       implementationManifestJson,
     ) as Task["implementationManifest"],
+    acceptancePack: buildTaskAcceptancePack(task.id),
     agentActivityLog: redactTaskTextForExternalUse(task.agentActivityLog),
     runtimeLimitSnapshot: parseTaskRuntimeLimitSnapshot(runtimeLimitSnapshotJson, task.id),
   };
@@ -936,6 +979,61 @@ function toRequirementQuestionResponse(row: RequirementQuestionRow): TaskRequire
     sourcePromptHash: row.sourcePromptHash ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+function toTaskRequirementsSnapshot(row: TaskRequirementsSnapshotRow): TaskRequirementsSnapshot {
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    projectId: row.projectId,
+    version: row.version,
+    markdown: row.markdown,
+    summary: row.summary,
+    sourceQuestionIds: parseJsonStringArray(row.sourceQuestionIdsJson),
+    redactionCount: row.redactionCount,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function toTaskStageArtifact(row: TaskStageArtifactRow): TaskStageArtifact {
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    projectId: row.projectId,
+    stage: row.stage,
+    kind: row.kind,
+    label: row.label,
+    path: row.artifactPath ?? null,
+    state: row.state,
+    currentAttemptNumber: row.currentAttemptNumber,
+    summary: row.summary,
+    markdown: row.markdown ?? null,
+    sourceSnapshotId: row.sourceSnapshotId ?? null,
+    metadata: parseRuntimeObject(row.metadataJson) ?? {},
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function toTaskStageArtifactAttempt(row: TaskStageArtifactAttemptRow): TaskStageArtifactAttempt {
+  return {
+    id: row.id,
+    artifactId: row.artifactId,
+    taskId: row.taskId,
+    projectId: row.projectId,
+    stage: row.stage,
+    kind: row.kind,
+    attemptNumber: row.attemptNumber,
+    state: row.state,
+    outcome: row.outcome,
+    trustLevel: row.trustLevel,
+    summary: row.summary,
+    markdown: row.markdown ?? null,
+    sourceSnapshotId: row.sourceSnapshotId ?? null,
+    metadata: parseRuntimeObject(row.metadataJson) ?? {},
+    createdAt: row.createdAt,
   };
 }
 
@@ -1636,7 +1734,7 @@ export function buildProjectQueueState(projectId: string): ProjectQueueStateResp
     countsByStatus[task.status] = (countsByStatus[task.status] ?? 0) + 1;
   }
   const executionActiveCount = (
-    ["planning", "plan_ready", "implementing", "review", "blocked_external"] as const
+    ["planning", "plan_ready", "implementing", "review", "qa", "blocked_external"] as const
   ).reduce((total, status) => total + (countsByStatus[status] ?? 0), 0);
 
   return {
@@ -2095,6 +2193,1268 @@ export function getTaskRequirementQuestionsResponse(
   return buildRequirementQuestionsResponse(task, rows);
 }
 
+function redactRequirementAnswerForSnapshot(answer: string | null | undefined): {
+  answer: string | null;
+  redacted: boolean;
+} {
+  if (answer == null) return { answer: null, redacted: false };
+  const trimmed = answer.trim();
+  if (!trimmed) return { answer: "", redacted: false };
+  if (containsSecretLikeAnswer(trimmed)) {
+    return { answer: "[REDACTED_SECRET_LIKE_ANSWER]", redacted: true };
+  }
+  return { answer: trimmed, redacted: false };
+}
+
+function buildRequirementsSnapshotMarkdown(input: {
+  task: TaskRow;
+  questions: RequirementQuestionRow[];
+}): { markdown: string; summary: string; sourceQuestionIds: string[]; redactionCount: number } {
+  const answered = input.questions.filter((question) =>
+    ["answered", "resolved"].includes(question.status),
+  );
+  let redactionCount = 0;
+  const lines = [
+    `# Requirements Snapshot: ${input.task.title}`,
+    "",
+    `Task: ${input.task.id}`,
+    `Status: ${input.task.status}`,
+    "",
+    "## Task Description",
+    input.task.description?.trim() || "(No description provided.)",
+    "",
+    "## Answered Requirements",
+  ];
+
+  if (answered.length === 0) {
+    lines.push("", "(No answered requirements questions.)");
+  }
+
+  for (const question of answered) {
+    const redacted = redactRequirementAnswerForSnapshot(question.answer);
+    if (redacted.redacted) redactionCount += 1;
+    lines.push(
+      "",
+      `### ${question.question}`,
+      "",
+      `Why needed: ${question.whyNeeded}`,
+      `Stage: ${question.stage}`,
+      `Answer: ${redacted.answer ?? "(No answer recorded.)"}`,
+    );
+  }
+
+  const sourceQuestionIds = answered.map((question) => question.id);
+  const summary =
+    redactionCount > 0
+      ? `${answered.length} answered requirement(s); ${redactionCount} answer(s) redacted.`
+      : `${answered.length} answered requirement(s).`;
+  return { markdown: lines.join("\n"), summary, sourceQuestionIds, redactionCount };
+}
+
+export interface CreateCurrentRequirementsSnapshotOptions {
+  summary?: string | null;
+  sourceStage?: string | null;
+  sourceQuestionBatchId?: string | null;
+}
+
+export function createCurrentRequirementsSnapshot(
+  taskId: string,
+  options: CreateCurrentRequirementsSnapshotOptions = {},
+): TaskRequirementsSnapshot {
+  const task = findTaskById(taskId);
+  if (!task) throw new Error("Task not found");
+  const db = getDb();
+  const nowIso = new Date().toISOString();
+  const questions = db
+    .select()
+    .from(taskRequirementQuestions)
+    .where(eq(taskRequirementQuestions.taskId, taskId))
+    .orderBy(asc(taskRequirementQuestions.cycleNumber), asc(taskRequirementQuestions.createdAt))
+    .all();
+  const built = buildRequirementsSnapshotMarkdown({ task, questions });
+  const snapshotId = crypto.randomUUID();
+  let version = 1;
+  const summary = options.summary?.trim() || built.summary;
+
+  db.transaction((tx) => {
+    const latest = tx
+      .select()
+      .from(taskRequirementsSnapshots)
+      .where(eq(taskRequirementsSnapshots.taskId, taskId))
+      .orderBy(desc(taskRequirementsSnapshots.version))
+      .get();
+    version = (latest?.version ?? 0) + 1;
+    tx.insert(taskRequirementsSnapshots)
+      .values({
+        id: snapshotId,
+        taskId: task.id,
+        projectId: task.projectId,
+        version,
+        markdown: built.markdown,
+        summary,
+        sourceQuestionIdsJson: JSON.stringify(built.sourceQuestionIds),
+        redactionCount: built.redactionCount,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      })
+      .run();
+    tx.update(tasks)
+      .set({ requirementsSnapshotId: snapshotId, updatedAt: nowIso })
+      .where(eq(tasks.id, task.id))
+      .run();
+  });
+
+  const attempt = recordTaskStageArtifactAttempt({
+    taskId,
+    stage: "requirements_analysis",
+    kind: "requirements",
+    label: "Requirements snapshot",
+    path: "requirements.md",
+    state: "accepted",
+    outcome: "supported",
+    trustLevel: "trusted",
+    summary,
+    markdown: built.markdown,
+    sourceSnapshotId: snapshotId,
+    metadata: {
+      snapshotVersion: version,
+      redactionCount: built.redactionCount,
+      sourceQuestionIds: built.sourceQuestionIds,
+      sourceStage: options.sourceStage ?? null,
+      sourceQuestionBatchId: options.sourceQuestionBatchId ?? null,
+    },
+  });
+  const snapshot = getCurrentRequirementsSnapshot(taskId);
+  if (!snapshot) throw new Error("Requirements snapshot was not persisted");
+  if (!attempt) throw new Error("Requirements snapshot artifact attempt was not persisted");
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.SNAPSHOT_CREATED, {
+    taskId: task.id,
+    projectId: task.projectId,
+    snapshotId: snapshot.id,
+    version: snapshot.version,
+    sourceQuestionCount: built.sourceQuestionIds.length,
+    redactionCount: built.redactionCount,
+    sourceStage: options.sourceStage ?? null,
+    hasSourceQuestionBatch: options.sourceQuestionBatchId != null,
+  });
+  return snapshot;
+}
+
+export function getCurrentRequirementsSnapshot(taskId: string): TaskRequirementsSnapshot | null {
+  const task = findTaskById(taskId);
+  const row = task?.requirementsSnapshotId
+    ? getDb()
+        .select()
+        .from(taskRequirementsSnapshots)
+        .where(eq(taskRequirementsSnapshots.id, task.requirementsSnapshotId))
+        .get()
+    : getDb()
+        .select()
+        .from(taskRequirementsSnapshots)
+        .where(eq(taskRequirementsSnapshots.taskId, taskId))
+        .orderBy(desc(taskRequirementsSnapshots.version))
+        .get();
+  return row ? toTaskRequirementsSnapshot(row) : null;
+}
+
+function listTaskStageArtifacts(taskId: string, stage?: string): TaskStageArtifact[] {
+  const conditions = [eq(taskStageArtifacts.taskId, taskId)];
+  if (stage) conditions.push(eq(taskStageArtifacts.stage, stage));
+  return getDb()
+    .select()
+    .from(taskStageArtifacts)
+    .where(and(...conditions))
+    .orderBy(asc(taskStageArtifacts.createdAt))
+    .all()
+    .map(toTaskStageArtifact);
+}
+
+function listTaskStageArtifactAttempts(taskId: string): TaskStageArtifactAttempt[] {
+  return getDb()
+    .select()
+    .from(taskStageArtifactAttempts)
+    .where(eq(taskStageArtifactAttempts.taskId, taskId))
+    .orderBy(asc(taskStageArtifactAttempts.createdAt))
+    .all()
+    .map(toTaskStageArtifactAttempt);
+}
+
+function findCurrentTaskStageArtifact(input: {
+  taskId: string;
+  stage: string;
+  kind: string;
+}): TaskStageArtifactRow | undefined {
+  return getDb()
+    .select()
+    .from(taskStageArtifacts)
+    .where(
+      and(
+        eq(taskStageArtifacts.taskId, input.taskId),
+        eq(taskStageArtifacts.stage, input.stage),
+        eq(taskStageArtifacts.kind, input.kind),
+      ),
+    )
+    .get();
+}
+
+function defaultOutcomeForTaskStageState(state: TaskStageArtifactState): WorkflowTimelineClaimOutcome {
+  if (state === "accepted") return "supported";
+  if (state === "rejected" || state === "missing") return "refuted";
+  if (state === "blocked") return "blocked";
+  if (state === "inconclusive") return "inconclusive";
+  if (state === "manual_exception") return "waived";
+  return "not_evaluated";
+}
+
+function defaultTrustForTaskStageState(state: TaskStageArtifactState): WorkflowTimelineTrustLevel {
+  if (state === "accepted") return "trusted";
+  if (state === "expected" || state === "manual_exception") return "weak";
+  return "untrusted";
+}
+
+export interface RecordTaskStageArtifactAttemptInput {
+  taskId: string;
+  stage: string;
+  kind: string;
+  label?: string;
+  path?: string | null;
+  state?: TaskStageArtifactState;
+  outcome?: WorkflowTimelineClaimOutcome;
+  trustLevel?: WorkflowTimelineTrustLevel;
+  summary?: string | null;
+  markdown?: string | null;
+  sourceSnapshotId?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export function recordTaskStageArtifactAttempt(
+  input: RecordTaskStageArtifactAttemptInput,
+): TaskStageArtifactAttempt {
+  const task = findTaskById(input.taskId);
+  if (!task) throw new Error("Task not found");
+  const state = input.state ?? "accepted";
+  const outcome = input.outcome ?? defaultOutcomeForTaskStageState(state);
+  const trustLevel = input.trustLevel ?? defaultTrustForTaskStageState(state);
+  const nowIso = new Date().toISOString();
+  const metadataJson = JSON.stringify(input.metadata ?? {});
+  const db = getDb();
+  const attemptId = crypto.randomUUID();
+  let artifactId = "";
+  let attemptNumber = 1;
+
+  db.transaction((tx) => {
+    const current = findCurrentTaskStageArtifact({
+      taskId: input.taskId,
+      stage: input.stage,
+      kind: input.kind,
+    });
+    if (current) {
+      artifactId = current.id;
+      attemptNumber = current.currentAttemptNumber + 1;
+      tx.update(taskStageArtifacts)
+        .set({
+          label: input.label ?? current.label,
+          artifactPath: Object.prototype.hasOwnProperty.call(input, "path")
+            ? (input.path ?? null)
+            : current.artifactPath,
+          state,
+          currentAttemptNumber: attemptNumber,
+          summary: input.summary?.trim() ?? current.summary,
+          markdown: Object.prototype.hasOwnProperty.call(input, "markdown")
+            ? (input.markdown ?? null)
+            : current.markdown,
+          sourceSnapshotId: Object.prototype.hasOwnProperty.call(input, "sourceSnapshotId")
+            ? (input.sourceSnapshotId ?? null)
+            : current.sourceSnapshotId,
+          metadataJson: input.metadata === undefined ? current.metadataJson : metadataJson,
+          updatedAt: nowIso,
+        })
+        .where(eq(taskStageArtifacts.id, artifactId))
+        .run();
+    } else {
+      artifactId = crypto.randomUUID();
+      tx.insert(taskStageArtifacts)
+        .values({
+          id: artifactId,
+          taskId: task.id,
+          projectId: task.projectId,
+          stage: input.stage,
+          kind: input.kind,
+          label: input.label ?? input.kind.replaceAll("_", " "),
+          artifactPath: input.path ?? null,
+          state,
+          currentAttemptNumber: attemptNumber,
+          summary: input.summary?.trim() ?? "",
+          markdown: input.markdown ?? null,
+          sourceSnapshotId: input.sourceSnapshotId ?? null,
+          metadataJson,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        })
+        .run();
+    }
+    tx.insert(taskStageArtifactAttempts)
+      .values({
+        id: attemptId,
+        artifactId,
+        taskId: task.id,
+        projectId: task.projectId,
+        stage: input.stage,
+        kind: input.kind,
+        attemptNumber,
+        state,
+        outcome,
+        trustLevel,
+        summary: input.summary?.trim() ?? "",
+        markdown: input.markdown ?? null,
+        sourceSnapshotId: input.sourceSnapshotId ?? null,
+        metadataJson,
+        createdAt: nowIso,
+      })
+      .run();
+  });
+
+  const row = db
+    .select()
+    .from(taskStageArtifactAttempts)
+    .where(eq(taskStageArtifactAttempts.id, attemptId))
+    .get();
+  if (!row) throw new Error("Task stage artifact attempt was not persisted");
+  logRequirementsLifecycleMetric(
+    REQUIREMENTS_LIFECYCLE_EVENTS.STAGE_ARTIFACT_ATTEMPT_PERSISTED,
+    {
+      taskId: task.id,
+      projectId: task.projectId,
+      artifactId,
+      attemptId,
+      stage: input.stage,
+      kind: input.kind,
+      state,
+      outcome,
+      trustLevel,
+      attemptNumber,
+      hasPath: input.path != null,
+      hasMarkdown: row.markdown != null,
+      hasSourceSnapshot: row.sourceSnapshotId != null,
+    },
+  );
+  return toTaskStageArtifactAttempt(row);
+}
+
+export function recordRequirementsSnapshotWaiver(
+  taskId: string,
+  justification: string,
+): TaskStageArtifactAttempt {
+  const trimmed = justification.trim();
+  if (!trimmed) throw new Error("Waiver justification is required");
+  return recordTaskStageArtifactAttempt({
+    taskId,
+    stage: "requirements_analysis",
+    kind: "requirements",
+    label: "Requirements snapshot waiver",
+    path: "requirements.md",
+    state: "manual_exception",
+    outcome: "waived",
+    trustLevel: "weak",
+    summary: "Requirements snapshot requirement waived.",
+    markdown: `# Requirements Snapshot Waiver\n\n${trimmed}`,
+    metadata: { waiver: true, justification: trimmed },
+  });
+}
+
+function getRequirementsSnapshotWaiver(taskId: string): TaskStageArtifact | null {
+  const artifact = findCurrentTaskStageArtifact({
+    taskId,
+    stage: "requirements_analysis",
+    kind: "requirements",
+  });
+  if (!artifact) return null;
+  const mapped = toTaskStageArtifact(artifact);
+  return mapped.metadata.waiver === true ? mapped : null;
+}
+
+export function hasCurrentRequirementsSnapshotOrWaiver(taskId: string): boolean {
+  return Boolean(getCurrentRequirementsSnapshot(taskId) || getRequirementsSnapshotWaiver(taskId));
+}
+
+function isAcceptedOrWaivedTaskStageArtifact(artifact: TaskStageArtifact): boolean {
+  if (artifact.state === "accepted") return true;
+  if (artifact.state !== "manual_exception") return false;
+  const justification = artifact.metadata.justification;
+  return typeof justification === "string" && justification.trim().length > 0;
+}
+
+function taskStageArtifactMatchesRequirementsSnapshot(
+  artifact: TaskStageArtifact,
+  currentSnapshotId: string | null,
+): boolean {
+  if (!currentSnapshotId || artifact.state === "manual_exception") return true;
+  return artifact.sourceSnapshotId === currentSnapshotId;
+}
+
+function taskStageArtifactMatchesCurrentResearch(
+  taskId: string,
+  artifact: TaskStageArtifact,
+): boolean {
+  if (artifact.stage !== "design" || artifact.kind !== "design") return true;
+  if (artifact.state !== "accepted") return true;
+  const researchRow = findCurrentTaskStageArtifact({
+    taskId,
+    stage: "research",
+    kind: "research",
+  });
+  if (!researchRow) return true;
+  const research = toTaskStageArtifact(researchRow);
+  if (!isAcceptedOrWaivedTaskStageArtifact(research)) return true;
+  return (
+    artifact.metadata.sourceResearchArtifactId === research.id &&
+    artifact.metadata.sourceResearchAttemptNumber === research.currentAttemptNumber
+  );
+}
+
+function getTaskStageArtifactGateIssueSummary(input: {
+  taskId: string;
+  artifact: TaskStageArtifact;
+  currentSnapshotId: string | null;
+}): string | null {
+  if (!isAcceptedOrWaivedTaskStageArtifact(input.artifact)) {
+    return input.artifact.summary || null;
+  }
+  if (
+    !taskStageArtifactMatchesRequirementsSnapshot(input.artifact, input.currentSnapshotId)
+  ) {
+    return `Artifact was produced for requirements snapshot ${input.artifact.sourceSnapshotId ?? "(none)"}, but current snapshot is ${input.currentSnapshotId}.`;
+  }
+  if (!taskStageArtifactMatchesCurrentResearch(input.taskId, input.artifact)) {
+    return "Design artifact is not bound to the current research artifact.";
+  }
+  return null;
+}
+
+export function hasAcceptedTaskStageArtifactOrWaiver(
+  taskId: string,
+  stage: string,
+  kind: string,
+): boolean {
+  const artifact = findCurrentTaskStageArtifact({ taskId, stage, kind });
+  if (!artifact) return false;
+  const currentSnapshotId = getCurrentRequirementsSnapshot(taskId)?.id ?? null;
+  return (
+    getTaskStageArtifactGateIssueSummary({
+      taskId,
+      artifact: toTaskStageArtifact(artifact),
+      currentSnapshotId,
+    }) === null
+  );
+}
+
+export interface TaskStageArtifactGateRequirement {
+  stage: string;
+  kind: string;
+  label?: string;
+}
+
+export interface TaskStageArtifactGateIssue {
+  stage: string;
+  kind: string;
+  label: string;
+  state: TaskStageArtifactState | "missing";
+  summary: string | null;
+}
+
+export interface TaskStageArtifactGateState {
+  ok: boolean;
+  issues: TaskStageArtifactGateIssue[];
+  artifacts: TaskStageArtifact[];
+}
+
+export function getTaskStageArtifactGateState(
+  taskId: string,
+  requirements: TaskStageArtifactGateRequirement[],
+): TaskStageArtifactGateState {
+  const issues: TaskStageArtifactGateIssue[] = [];
+  const artifacts: TaskStageArtifact[] = [];
+  const currentSnapshotId = getCurrentRequirementsSnapshot(taskId)?.id ?? null;
+  for (const requirement of requirements) {
+    const current = findCurrentTaskStageArtifact({
+      taskId,
+      stage: requirement.stage,
+      kind: requirement.kind,
+    });
+    const label = requirement.label ?? requirement.kind.replaceAll("_", " ");
+    if (!current) {
+      issues.push({
+        stage: requirement.stage,
+        kind: requirement.kind,
+        label,
+        state: "missing",
+        summary: null,
+      });
+      continue;
+    }
+    const artifact = toTaskStageArtifact(current);
+    artifacts.push(artifact);
+    const issueSummary = getTaskStageArtifactGateIssueSummary({
+      taskId,
+      artifact,
+      currentSnapshotId,
+    });
+    if (issueSummary !== null) {
+      issues.push({
+        stage: requirement.stage,
+        kind: requirement.kind,
+        label: artifact.label || label,
+        state: artifact.state,
+        summary: issueSummary,
+      });
+    }
+  }
+  return { ok: issues.length === 0, issues, artifacts };
+}
+
+const AIF_PLAN_MANIFEST_BLOCK_PATTERN =
+  /```aif-plan-manifest\b[^\r\n]*\r?\n([\s\S]*?)```/gi;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => stableJson(entry)).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function hashJson(value: unknown): string {
+  return sha256Text(stableJson(value));
+}
+
+function usefulString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function usefulStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => {
+        const text = usefulString(entry);
+        return text ? [text] : [];
+      })
+    : [];
+}
+
+function normalizeCommand(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function parseImplementationManifestFromTask(
+  task: Pick<TaskRow, "implementationManifestJson">,
+): ImplementationManifest | null {
+  const parsed = parseRuntimeObject(task.implementationManifestJson);
+  if (!parsed || parsed.version !== 1) return null;
+  return parsed as unknown as ImplementationManifest;
+}
+
+function parsePlanManifestFromTask(task: Pick<TaskRow, "plan">): AifPlanManifest | null {
+  if (!task.plan) return null;
+  AIF_PLAN_MANIFEST_BLOCK_PATTERN.lastIndex = 0;
+  const matches = [...task.plan.matchAll(AIF_PLAN_MANIFEST_BLOCK_PATTERN)];
+  if (matches.length !== 1) return null;
+  try {
+    const parsed: unknown = JSON.parse(matches[0]?.[1]?.trim() ?? "");
+    if (!isRecord(parsed) || parsed.version !== 1) return null;
+    return parsed as unknown as AifPlanManifest;
+  } catch {
+    return null;
+  }
+}
+
+function sortedChangedFilesDigest(manifest: ImplementationManifest | null): string {
+  const changedFiles = (manifest?.changedFiles ?? [])
+    .map((entry) => ({
+      path: normalizeCommand(entry.path).replaceAll("\\", "/"),
+      status: entry.status ?? "unknown",
+    }))
+    .filter((entry) => entry.path.length > 0)
+    .sort((a, b) => `${a.path}:${a.status}`.localeCompare(`${b.path}:${b.status}`));
+  return hashJson(changedFiles);
+}
+
+function changedFilePaths(manifest: ImplementationManifest | null): string[] {
+  return (manifest?.changedFiles ?? [])
+    .map((entry) => normalizeCommand(entry.path).replaceAll("\\", "/"))
+    .filter((entry) => entry.length > 0)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+export function buildTaskQaMandatoryCheckInventory(taskId: string): TaskQaMandatoryCheck[] {
+  const task = findTaskById(taskId);
+  if (!task) return [];
+  const workflowKind = resolveInferredTaskIntent(task);
+  const manifest = parseImplementationManifestFromTask(task);
+  const checks = new Map<string, TaskQaMandatoryCheck>();
+  const manifestCommands = new Set<string>();
+
+  for (const entry of manifest?.verificationEvidence ?? []) {
+    const id = usefulString(entry.id) ?? `verification-${checks.size + 1}`;
+    const command = normalizeCommand(entry.command);
+    if (command) manifestCommands.add(command);
+    checks.set(`manifest:${id}`, {
+      id: `manifest:${id}`,
+      label: `Implementation verification: ${id}`,
+      command: command || null,
+      source: "implementation_manifest",
+      mandatory: true,
+      originalStatus: entry.status,
+      outputSha256: entry.outputSha256 ?? null,
+      outputSummary: entry.outputPreview ?? null,
+    });
+  }
+
+  if (isDevelopmentImplementationIntent(workflowKind) && checks.size === 0) {
+    checks.set("implementation-manifest:verification-evidence", {
+      id: "implementation-manifest:verification-evidence",
+      label: "Implementation verification evidence",
+      command: null,
+      source: "completion_guard",
+      mandatory: true,
+      originalStatus: "missing",
+      outputSha256: null,
+      outputSummary: "Implementation manifest has no verification evidence.",
+      blockingReason: "Implementation manifest has no verification evidence.",
+    });
+  }
+
+  const planManifest = parsePlanManifestFromTask(task);
+  const addPlanCommand = (id: string, label: string, commandValue: unknown): void => {
+    const command = normalizeCommand(usefulString(commandValue));
+    if (!command || manifestCommands.has(command)) return;
+    const checkId = id.replace(/[^a-zA-Z0-9:_-]/g, "-");
+    checks.set(checkId, {
+      id: checkId,
+      label,
+      command,
+      source: "plan_manifest",
+      mandatory: true,
+    });
+  };
+
+  (planManifest?.verificationCommands ?? []).forEach((command, index) => {
+    addPlanCommand(
+      `plan:verification:${sha256Text(normalizeCommand(command)).slice(0, 16)}`,
+      `Plan verification command ${index + 1}`,
+      command,
+    );
+  });
+  (planManifest?.acceptanceCriteria ?? []).forEach((criterion, index) => {
+    addPlanCommand(
+      `plan:acceptance:${criterion.id || index + 1}`,
+      `Plan acceptance criterion ${criterion.id || index + 1}`,
+      criterion.verification,
+    );
+  });
+
+  return [...checks.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export function buildTaskQaSourceFingerprint(taskId: string): TaskQaSourceFingerprint | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const manifest = parseImplementationManifestFromTask(task);
+  const parsedManifest = parseRuntimeObject(task.implementationManifestJson);
+  const parsedAutoReviewState = parseRuntimeObject(task.autoReviewStateJson);
+  const currentSnapshot = getCurrentRequirementsSnapshot(taskId);
+  const waiver = getRequirementsSnapshotWaiver(taskId);
+  const inventory = buildTaskQaMandatoryCheckInventory(taskId);
+  const planManifest = parsePlanManifestFromTask(task);
+  const input = {
+    sourceSnapshotId: currentSnapshot?.id ?? null,
+    requirementsWaiverArtifactId: waiver?.id ?? null,
+    implementationManifestHash: parsedManifest ? hashJson(parsedManifest) : null,
+    changedFilesDigest: sortedChangedFilesDigest(manifest),
+    reviewCommentsHash: task.reviewComments?.trim() ? sha256Text(task.reviewComments.trim()) : null,
+    reviewIterationCount: task.reviewIterationCount ?? 0,
+    skipReview: Boolean(task.skipReview),
+    autoReviewStateHash: parsedAutoReviewState ? hashJson(parsedAutoReviewState) : null,
+    planManifestHash: planManifest ? hashJson(planManifest) : null,
+    mandatoryInventoryHash: hashJson(inventory),
+  };
+  return {
+    ...input,
+    fingerprint: hashJson(input),
+  };
+}
+
+export function buildTaskQaContextForPrompt(taskId: string): Record<string, unknown> | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const requirementsContext = buildTaskRequirementsContextForPrompt(taskId, "qa");
+  const manifest = parseImplementationManifestFromTask(task);
+  const fingerprint = buildTaskQaSourceFingerprint(taskId);
+  const inventory = buildTaskQaMandatoryCheckInventory(taskId);
+  const formattedInventory = inventory.map((item) => ({
+    ...item,
+    description: [
+      item.command ? `Command: ${item.command}` : null,
+      item.originalStatus ? `Implementation status: ${item.originalStatus}` : null,
+      item.outputSha256 ? `Output sha256: ${item.outputSha256}` : null,
+      item.outputSummary ? `Prior summary: ${item.outputSummary}` : null,
+    ]
+      .filter(Boolean)
+      .join("; "),
+  }));
+  const changedFiles = changedFilePaths(manifest);
+  const verificationEvidence = manifest?.verificationEvidence ?? [];
+  const markdown = [
+    requirementsContext?.markdown ?? "# Task Requirements Context\n\nNo context available.",
+    "",
+    "## Implementation Manifest",
+    "",
+    manifest
+      ? [
+          `Diff summary: ${manifest.diffSummary.summary}`,
+          "",
+          "Changed files:",
+          changedFiles.length > 0
+            ? changedFiles.map((file) => `- ${file}`).join("\n")
+            : "- None recorded.",
+          "",
+          "Verification evidence:",
+          verificationEvidence.length > 0
+            ? verificationEvidence
+                .map(
+                  (entry) =>
+                    `- ${entry.id}: ${entry.status} | ${entry.command}${
+                      entry.outputSha256 ? ` | sha256 ${entry.outputSha256}` : ""
+                    }`,
+                )
+                .join("\n")
+            : "- None recorded.",
+        ].join("\n")
+      : "No implementation manifest is recorded.",
+    "",
+    "## Review",
+    "",
+    task.skipReview
+      ? "Review was skipped by task configuration."
+      : task.reviewComments?.trim() || "No review comments recorded.",
+  ].join("\n");
+  return {
+    markdown,
+    sourceSnapshotId: requirementsContext?.snapshot?.id ?? null,
+    sourceFingerprint: fingerprint?.fingerprint ?? null,
+    mandatoryInventory: formattedInventory,
+    metadata: {
+      sourceFingerprint: fingerprint,
+      mandatoryInventory: formattedInventory,
+      mandatoryInventoryHash: fingerprint?.mandatoryInventoryHash ?? null,
+      implementationManifestHash: fingerprint?.implementationManifestHash ?? null,
+      changedFilesDigest: fingerprint?.changedFilesDigest ?? null,
+      reviewCommentsHash: fingerprint?.reviewCommentsHash ?? null,
+      reviewIterationCount: fingerprint?.reviewIterationCount ?? task.reviewIterationCount ?? 0,
+      planManifestHash: fingerprint?.planManifestHash ?? null,
+    },
+  };
+}
+
+function readSourceFingerprint(value: unknown): TaskQaSourceFingerprint | null {
+  if (!isRecord(value)) return null;
+  const fingerprint = usefulString(value.fingerprint);
+  const mandatoryInventoryHash = usefulString(value.mandatoryInventoryHash);
+  const changedFilesDigest = usefulString(value.changedFilesDigest);
+  if (!fingerprint || !mandatoryInventoryHash || !changedFilesDigest) return null;
+  return value as unknown as TaskQaSourceFingerprint;
+}
+
+function sourceFingerprintMatches(
+  artifact: TaskStageArtifact,
+  current: TaskQaSourceFingerprint,
+): boolean {
+  const artifactFingerprint = readSourceFingerprint(artifact.metadata.sourceFingerprint);
+  return (
+    artifactFingerprint?.fingerprint === current.fingerprint &&
+    artifactFingerprint.mandatoryInventoryHash === current.mandatoryInventoryHash
+  );
+}
+
+function qaArtifactSatisfiesMandatoryInventory(taskId: string, artifact: TaskStageArtifact): boolean {
+  if (artifact.metadata.status !== "passed") return false;
+  const inventory = buildTaskQaMandatoryCheckInventory(taskId);
+  if (inventory.length === 0) return false;
+  if (
+    inventory.some((item) => item.source === "completion_guard" || Boolean(item.blockingReason))
+  ) {
+    return false;
+  }
+
+  const inventoryById = new Map(inventory.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  const commands = Array.isArray(artifact.metadata.commands) ? artifact.metadata.commands : [];
+  for (const command of commands) {
+    if (!isRecord(command) || command.mandatory !== true) continue;
+    const id = usefulString(command.id);
+    if (!id) return false;
+    const inventoryItem = inventoryById.get(id);
+    if (!inventoryItem) return false;
+    if (seen.has(id)) return false;
+    if (command.status !== "passed") return false;
+    if (
+      inventoryItem.command &&
+      normalizeCommand(usefulString(command.command)) !== inventoryItem.command
+    ) {
+      return false;
+    }
+    seen.add(id);
+  }
+
+  return inventory.every((item) => seen.has(item.id));
+}
+
+export function getFreshAcceptedTaskQaArtifact(taskId: string): TaskStageArtifact | null {
+  const current = buildTaskQaSourceFingerprint(taskId);
+  if (!current) return null;
+  const row = findCurrentTaskStageArtifact({ taskId, stage: "qa", kind: "qa" });
+  if (!row) return null;
+  const artifact = toTaskStageArtifact(row);
+  if (artifact.state !== "accepted") return null;
+  if (!sourceFingerprintMatches(artifact, current)) return null;
+  return qaArtifactSatisfiesMandatoryInventory(taskId, artifact) ? artifact : null;
+}
+
+export function hasFreshAcceptedTaskQaArtifact(taskId: string): boolean {
+  return getFreshAcceptedTaskQaArtifact(taskId) !== null;
+}
+
+function getFreshAcceptedTaskAcceptanceArtifact(taskId: string): TaskStageArtifact | null {
+  const current = buildTaskQaSourceFingerprint(taskId);
+  const qaArtifact = getFreshAcceptedTaskQaArtifact(taskId);
+  if (!current || !qaArtifact) return null;
+  const row = findCurrentTaskStageArtifact({ taskId, stage: "acceptance", kind: "acceptance" });
+  if (!row) return null;
+  const artifact = toTaskStageArtifact(row);
+  if (artifact.state !== "accepted") return null;
+  if (!sourceFingerprintMatches(artifact, current)) return null;
+  return artifact.metadata.qaArtifactId === qaArtifact.id &&
+    artifact.metadata.qaAttemptNumber === qaArtifact.currentAttemptNumber &&
+    acceptanceArtifactHasCompletePackMetadata({
+      artifact,
+      taskId,
+      current,
+      qaArtifact,
+    })
+    ? artifact
+    : null;
+}
+
+export function hasFreshAcceptedTaskAcceptancePack(taskId: string): boolean {
+  return getFreshAcceptedTaskAcceptanceArtifact(taskId) !== null;
+}
+
+function validMetadataStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => usefulString(entry) !== null);
+}
+
+function validGeneratedAt(value: unknown): boolean {
+  const timestamp = usefulString(value);
+  return timestamp !== null && Number.isFinite(Date.parse(timestamp));
+}
+
+function acceptanceArtifactHasCompletePackMetadata(input: {
+  artifact: TaskStageArtifact;
+  taskId: string;
+  current: TaskQaSourceFingerprint;
+  qaArtifact: TaskStageArtifact;
+}): boolean {
+  const { artifact, taskId, current, qaArtifact } = input;
+  const metadata = artifact.metadata;
+  if (!artifact.markdown?.trim()) return false;
+  if (usefulString(metadata.taskId) !== taskId) return false;
+  if (!validGeneratedAt(metadata.generatedAt)) return false;
+  if (!validMetadataStringArray(metadata.coveredRequirements)) return false;
+  if (!validMetadataStringArray(metadata.changedFiles)) return false;
+  if (!validMetadataStringArray(metadata.limitations)) return false;
+  if (!validMetadataStringArray(metadata.rollbackNotes)) return false;
+  if (!usefulString(metadata.reviewResult)) return false;
+  if (!usefulString(metadata.qaResult)) return false;
+  if (!isRecord(metadata.readiness)) return false;
+  if (metadata.readiness.ready !== true) return false;
+  if (!usefulString(metadata.readiness.reason)) return false;
+  if (usefulString(metadata.qaArtifactId) !== qaArtifact.id) return false;
+  if (metadata.qaAttemptNumber !== qaArtifact.currentAttemptNumber) return false;
+  const sourceFingerprint = readSourceFingerprint(metadata.sourceFingerprint);
+  return (
+    sourceFingerprint?.fingerprint === current.fingerprint &&
+    sourceFingerprint.mandatoryInventoryHash === current.mandatoryInventoryHash
+  );
+}
+
+function qaSummaryFromArtifact(artifact: TaskStageArtifact): string {
+  const commands = Array.isArray(artifact.metadata.commands) ? artifact.metadata.commands : [];
+  const passed = commands.filter(
+    (entry) => isRecord(entry) && entry.status === "passed",
+  ).length;
+  const failed = commands.filter(
+    (entry) => isRecord(entry) && entry.status === "failed",
+  ).length;
+  const skipped = commands.filter(
+    (entry) => isRecord(entry) && entry.status === "skipped",
+  ).length;
+  const suffix =
+    commands.length > 0 ? ` (${passed} passed, ${failed} failed, ${skipped} skipped)` : "";
+  return `${artifact.summary || "QA accepted."}${suffix}`;
+}
+
+function buildAcceptanceMarkdown(pack: Omit<TaskAcceptancePack, "markdown">): string {
+  const list = (items: string[]): string =>
+    items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- None recorded.";
+  return [
+    "# Acceptance Pack",
+    "",
+    `Generated: ${pack.generatedAt}`,
+    "",
+    "## Readiness",
+    "",
+    `${pack.readiness.ready ? "Ready" : "Not ready"}: ${pack.readiness.reason}`,
+    "",
+    "## Covered Requirements",
+    "",
+    list(pack.coveredRequirements),
+    "",
+    "## Changed Files",
+    "",
+    list(pack.changedFiles),
+    "",
+    "## Review Result",
+    "",
+    pack.reviewResult,
+    "",
+    "## QA Result",
+    "",
+    pack.qaResult,
+    "",
+    "## Limitations",
+    "",
+    list(pack.limitations),
+    "",
+    "## Rollback Notes",
+    "",
+    list(pack.rollbackNotes),
+  ].join("\n");
+}
+
+function buildTaskAcceptancePackPayload(taskId: string): Omit<TaskAcceptancePack, "markdown"> {
+  const task = findTaskById(taskId);
+  if (!task) throw new Error(`Task ${taskId} not found`);
+  const sourceFingerprint = buildTaskQaSourceFingerprint(taskId);
+  if (!sourceFingerprint) throw new Error(`Task ${taskId} QA fingerprint could not be built`);
+  const qaArtifact = getFreshAcceptedTaskQaArtifact(taskId);
+  if (!qaArtifact) throw new Error(`Task ${taskId} has no fresh accepted QA artifact`);
+  const snapshot = getCurrentRequirementsSnapshot(taskId);
+  const waiver = getRequirementsSnapshotWaiver(taskId);
+  const manifest = parseImplementationManifestFromTask(task);
+  const research = findCurrentTaskStageArtifact({ taskId, stage: "research", kind: "research" });
+  const design = findCurrentTaskStageArtifact({ taskId, stage: "design", kind: "design" });
+  const qaLimitations = usefulStringArray(qaArtifact.metadata.limitations);
+  const qaRollbackNotes = usefulStringArray(qaArtifact.metadata.rollbackNotes);
+  const manifestLimitations = manifest?.knownLimitations ?? [];
+  const coveredRequirements = [
+    snapshot ? `Requirements snapshot v${snapshot.version}: ${snapshot.summary}` : null,
+    waiver ? `Requirements waiver: ${waiver.summary}` : null,
+    research ? `Research: ${research.summary}` : null,
+    design ? `Design: ${design.summary}` : null,
+  ].flatMap((entry) => (entry ? [entry] : []));
+  const changedFiles = changedFilePaths(manifest);
+  const reviewResult = task.skipReview
+    ? "Review skipped by task configuration; QA still required."
+    : task.reviewComments?.trim()
+      ? `Review completed at iteration ${task.reviewIterationCount ?? 0}.`
+      : "No review comments recorded.";
+  const pack: Omit<TaskAcceptancePack, "markdown"> = {
+    taskId,
+    generatedAt: new Date().toISOString(),
+    coveredRequirements,
+    changedFiles,
+    reviewResult,
+    qaResult: qaSummaryFromArtifact(qaArtifact),
+    limitations: [...manifestLimitations, ...qaLimitations].filter(Boolean),
+    rollbackNotes:
+      qaRollbackNotes.length > 0
+        ? qaRollbackNotes
+        : ["Use the recorded changed files, branch/worktree metadata, and version control history."],
+    readiness: {
+      ready: true,
+      reason: "Fresh QA artifact and acceptance pack are ready for human approval.",
+    },
+    qaArtifactId: qaArtifact.id,
+    qaAttemptNumber: qaArtifact.currentAttemptNumber,
+    acceptanceArtifactId: null,
+    acceptanceAttemptNumber: null,
+    sourceFingerprint,
+  };
+  return pack;
+}
+
+export function recordTaskAcceptancePack(taskId: string): TaskAcceptancePack {
+  const payload = buildTaskAcceptancePackPayload(taskId);
+  const markdown = buildAcceptanceMarkdown(payload);
+  const attempt = recordTaskStageArtifactAttempt({
+    taskId,
+    stage: "acceptance",
+    kind: "acceptance",
+    label: "Done acceptance pack",
+    path: "acceptance.md",
+    state: "accepted",
+    outcome: "supported",
+    trustLevel: "trusted",
+    summary: payload.readiness.reason,
+    markdown,
+    sourceSnapshotId: payload.sourceFingerprint?.sourceSnapshotId ?? null,
+    metadata: {
+      ...payload,
+      markdown: undefined,
+      sourceFingerprint: payload.sourceFingerprint,
+    },
+  });
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.ACCEPTANCE_PACK_CREATED, {
+    taskId,
+    acceptanceArtifactId: attempt.artifactId,
+    acceptanceAttemptNumber: attempt.attemptNumber,
+    qaArtifactId: payload.qaArtifactId,
+    qaAttemptNumber: payload.qaAttemptNumber,
+    ready: payload.readiness.ready,
+    coveredRequirementCount: payload.coveredRequirements.length,
+    changedFileCount: payload.changedFiles.length,
+    limitationCount: payload.limitations.length,
+    rollbackNoteCount: payload.rollbackNotes.length,
+    hasSourceSnapshot: payload.sourceFingerprint?.sourceSnapshotId != null,
+  });
+  return {
+    ...payload,
+    acceptanceArtifactId: attempt.artifactId,
+    acceptanceAttemptNumber: attempt.attemptNumber,
+    markdown,
+  };
+}
+
+export function buildTaskAcceptancePack(taskId: string): TaskAcceptancePack | null {
+  const artifact = getFreshAcceptedTaskAcceptanceArtifact(taskId);
+  if (!artifact) return null;
+  const metadata = artifact.metadata;
+  const sourceFingerprint = readSourceFingerprint(metadata.sourceFingerprint);
+  return {
+    taskId,
+    generatedAt: usefulString(metadata.generatedAt) ?? artifact.updatedAt,
+    coveredRequirements: usefulStringArray(metadata.coveredRequirements),
+    changedFiles: usefulStringArray(metadata.changedFiles),
+    reviewResult: usefulString(metadata.reviewResult) ?? "",
+    qaResult: usefulString(metadata.qaResult) ?? "",
+    limitations: usefulStringArray(metadata.limitations),
+    rollbackNotes: usefulStringArray(metadata.rollbackNotes),
+    readiness: isRecord(metadata.readiness)
+      ? {
+          ready: metadata.readiness.ready === true,
+          reason: usefulString(metadata.readiness.reason) ?? "",
+        }
+      : { ready: false, reason: "Acceptance readiness metadata is missing." },
+    qaArtifactId: usefulString(metadata.qaArtifactId),
+    qaAttemptNumber:
+      typeof metadata.qaAttemptNumber === "number" ? metadata.qaAttemptNumber : null,
+    acceptanceArtifactId: artifact.id,
+    acceptanceAttemptNumber: artifact.currentAttemptNumber,
+    sourceFingerprint,
+    markdown: artifact.markdown,
+  };
+}
+
+export function getTaskRequirementsSnapshotResponse(
+  taskId: string,
+): TaskRequirementsSnapshotResponse | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const waiver = getRequirementsSnapshotWaiver(taskId);
+  const snapshots = getDb()
+    .select()
+    .from(taskRequirementsSnapshots)
+    .where(eq(taskRequirementsSnapshots.taskId, taskId))
+    .orderBy(desc(taskRequirementsSnapshots.version))
+    .all()
+    .map(toTaskRequirementsSnapshot);
+  return {
+    taskId: task.id,
+    projectId: task.projectId,
+    snapshot: getCurrentRequirementsSnapshot(taskId),
+    snapshots,
+    stageArtifacts: listTaskStageArtifacts(taskId),
+    stageArtifactAttempts: listTaskStageArtifactAttempts(taskId),
+    hasWaiver: Boolean(waiver),
+    waiverJustification:
+      typeof waiver?.metadata.justification === "string" ? waiver.metadata.justification : null,
+  };
+}
+
+const PROMPT_STAGE_ARTIFACT_MARKDOWN_MAX_CHARS = 12_000;
+
+function truncatePromptText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n[Truncated after ${maxChars} characters.]`;
+}
+
+function formatStageArtifactBodyForPrompt(artifact: TaskStageArtifact): string[] {
+  if (artifact.stage === "requirements_analysis") return [];
+  const body = artifact.markdown?.trim();
+  if (!body) return ["Artifact body: (No artifact body recorded.)"];
+  return [
+    "Artifact body:",
+    "```markdown",
+    truncatePromptText(body, PROMPT_STAGE_ARTIFACT_MARKDOWN_MAX_CHARS),
+    "```",
+  ];
+}
+
+function promptContextQuestionStages(stage: string | undefined): Set<string> | null {
+  if (!stage) return null;
+  if (stage === "research") return new Set(["requirements_analysis", "research"]);
+  if (stage === "design") return new Set(["requirements_analysis", "research", "design"]);
+  if (["planning", "implementing", "review", "qa", "acceptance"].includes(stage)) {
+    return new Set(["requirements_analysis", "research", "design"]);
+  }
+  return new Set([stage]);
+}
+
+function shouldIncludeRequirementQuestionInPrompt(
+  stage: string | undefined,
+  question: RequirementQuestionRow,
+): boolean {
+  const allowedStages = promptContextQuestionStages(stage);
+  return !allowedStages || allowedStages.has(question.stage);
+}
+
+function listAnsweredRequirementQuestionsForPrompt(
+  taskId: string,
+  stage: string | undefined,
+  snapshot: TaskRequirementsSnapshot | null,
+): RequirementQuestionRow[] {
+  const capturedQuestionIds = new Set(snapshot?.sourceQuestionIds ?? []);
+  return getDb()
+    .select()
+    .from(taskRequirementQuestions)
+    .where(
+      and(
+        eq(taskRequirementQuestions.taskId, taskId),
+        inArray(taskRequirementQuestions.status, ["answered", "resolved"]),
+      ),
+    )
+    .orderBy(asc(taskRequirementQuestions.cycleNumber), asc(taskRequirementQuestions.createdAt))
+    .all()
+    .filter(
+      (question) =>
+        !capturedQuestionIds.has(question.id) &&
+        shouldIncludeRequirementQuestionInPrompt(stage, question),
+    );
+}
+
+export function buildTaskRequirementsContextForPrompt(
+  taskId: string,
+  stage?: string,
+): TaskRequirementsPromptContext | null {
+  const task = findTaskById(taskId);
+  if (!task) return null;
+  const snapshot = getCurrentRequirementsSnapshot(taskId);
+  const waiver = getRequirementsSnapshotWaiver(taskId);
+  const currentSnapshotId = snapshot?.id ?? null;
+  const stageArtifacts = listTaskStageArtifacts(taskId).filter(
+    (artifact) =>
+      shouldIncludeTaskStageArtifactInPrompt(stage, artifact, currentSnapshotId) &&
+      getTaskStageArtifactGateIssueSummary({ taskId, artifact, currentSnapshotId }) === null,
+  );
+  const answeredQuestions = listAnsweredRequirementQuestionsForPrompt(taskId, stage, snapshot);
+  const lines = [
+    "# Task Requirements Context",
+    "",
+    snapshot
+      ? snapshot.markdown
+      : waiver
+        ? `Requirements snapshot waived: ${String(waiver.metadata.justification ?? "")}`
+        : "No current requirements snapshot or waiver is recorded.",
+  ];
+  if (stageArtifacts.length > 0) {
+    lines.push("", "## Stage Artifacts");
+    for (const artifact of stageArtifacts) {
+      const bodyLines = formatStageArtifactBodyForPrompt(artifact);
+      lines.push(
+        "",
+        `### ${artifact.label}`,
+        `Stage: ${artifact.stage}`,
+        `Kind: ${artifact.kind}`,
+        `State: ${artifact.state}`,
+        `Source requirements snapshot: ${artifact.sourceSnapshotId ?? "(none)"}`,
+        `Summary: ${artifact.summary}`,
+      );
+      if (bodyLines.length > 0) lines.push("", ...bodyLines);
+    }
+  }
+  if (answeredQuestions.length > 0) {
+    lines.push(
+      "",
+      snapshot
+        ? "## Answered Questions Since Current Requirements Snapshot"
+        : "## Answered Questions",
+    );
+    for (const question of answeredQuestions) {
+      const redacted = redactRequirementAnswerForSnapshot(question.answer);
+      lines.push(
+        "",
+        `### ${question.question}`,
+        `Stage: ${question.stage}`,
+        `Why needed: ${question.whyNeeded}`,
+        `Answer: ${redacted.answer ?? "(No answer recorded.)"}`,
+      );
+    }
+  }
+  return {
+    taskId: task.id,
+    projectId: task.projectId,
+    stage: stage ?? null,
+    snapshot,
+    hasWaiver: Boolean(waiver),
+    waiverJustification:
+      typeof waiver?.metadata.justification === "string" ? waiver.metadata.justification : null,
+    stageArtifacts,
+    markdown: lines.join("\n"),
+  };
+}
+
+function promptContextArtifactStages(stage: string | undefined): Set<string> | null {
+  if (!stage) return null;
+  if (stage === "research") return new Set(["requirements_analysis"]);
+  if (stage === "design") return new Set(["requirements_analysis", "research"]);
+  if (["planning", "implementing", "review", "qa", "acceptance"].includes(stage)) {
+    return new Set(["requirements_analysis", "research", "design"]);
+  }
+  return new Set([stage]);
+}
+
+function shouldIncludeTaskStageArtifactInPrompt(
+  stage: string | undefined,
+  artifact: TaskStageArtifact,
+  currentSnapshotId: string | null,
+): boolean {
+  const allowedStages = promptContextArtifactStages(stage);
+  if (allowedStages && !allowedStages.has(artifact.stage)) return false;
+  return (
+    isAcceptedOrWaivedTaskStageArtifact(artifact) &&
+    taskStageArtifactMatchesRequirementsSnapshot(artifact, currentSnapshotId)
+  );
+}
+
 export function hasAnsweredRequirementQuestionKey(taskId: string, idempotencyKey: string): boolean {
   const key = idempotencyKey.trim();
   if (!key) return false;
@@ -2169,14 +3529,35 @@ export function createTaskRequirementQuestionBatch(
       !question.idempotencyKey ||
       !hasActiveRequirementQuestionKey(input.taskId, question.idempotencyKey),
   );
+  const dedupedCount = normalized.length - deduped.length;
 
   if (deduped.length === 0) {
+    logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QUESTION_BATCH_DEDUPED, {
+      taskId: task.id,
+      projectId: task.projectId,
+      stage: input.stage,
+      targetResumeStage: input.targetResumeStage ?? input.stage,
+      requestedCount: normalized.length,
+      dedupedCount,
+      createdCount: 0,
+    });
     return {
       batchId: null,
       questions: [],
       response: getTaskRequirementQuestionsResponse(input.taskId),
       task,
     };
+  }
+  if (dedupedCount > 0) {
+    logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QUESTION_BATCH_DEDUPED, {
+      taskId: task.id,
+      projectId: task.projectId,
+      stage: input.stage,
+      targetResumeStage: input.targetResumeStage ?? input.stage,
+      requestedCount: normalized.length,
+      dedupedCount,
+      createdCount: deduped.length,
+    });
   }
 
   getDb()
@@ -2236,6 +3617,19 @@ export function createTaskRequirementQuestionBatch(
     task.id,
     `[${nowIso}] Requirements questions created: batch=${batchId} count=${deduped.length} blocking=${hasBlocking ? "yes" : "no"}`,
   );
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QUESTION_BATCH_CREATED, {
+    taskId: task.id,
+    projectId: task.projectId,
+    batchId,
+    stage: input.stage,
+    targetResumeStage: input.targetResumeStage ?? input.stage,
+    cycleNumber,
+    requestedCount: normalized.length,
+    createdCount: deduped.length,
+    dedupedCount,
+    blockingCount: deduped.filter((question) => question.blocking ?? true).length,
+    hasBlocking,
+  });
 
   const response = getTaskRequirementQuestionsResponse(input.taskId);
   const createdQuestions =
@@ -2474,6 +3868,25 @@ export function answerTaskRequirementQuestionBatch(input: {
     input.taskId,
     `[${nowIso}] Requirement question batch answered: batch=${input.batchId} answered=${questions.length} batchOpenBlocking=${batchOpenBlockingCount} taskOpenBlocking=${taskOpenBlockingCount} autoResume=${autoResume ? "yes" : "no"} resumed=${resumed ? resumeStatus : "no"}`,
   );
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QUESTION_BATCH_ANSWERED, {
+    taskId: task.id,
+    projectId: task.projectId,
+    batchId: input.batchId,
+    answeredCount: questions.length,
+    batchOpenBlockingCount,
+    taskOpenBlockingCount,
+    autoResume,
+  });
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.QUESTION_BATCH_RESUME_DECIDED, {
+    taskId: task.id,
+    projectId: task.projectId,
+    batchId: input.batchId,
+    autoResume,
+    resumed,
+    resumeStatus,
+    batchOpenBlockingCount,
+    taskOpenBlockingCount,
+  });
 
   return {
     task: findTaskById(input.taskId),
@@ -2985,6 +4398,12 @@ export function findCoordinatorTaskCandidates(stage: CoordinatorStage, limit: nu
   const stageFilter =
     stage === "requirements-analyst"
       ? inArray(tasks.status, ["requirements_analysis"])
+      : stage === "researcher"
+        ? inArray(tasks.status, ["research"])
+      : stage === "designer"
+        ? inArray(tasks.status, ["design"])
+        : stage === "qa"
+          ? inArray(tasks.status, ["qa"])
       : stage === "implementer"
       ? or(
           eq(tasks.status, "implementing"),
@@ -3161,10 +4580,13 @@ export function claimBacklogTaskForAdvance(
 export function countActivePipelineTasksForProject(projectId: string): number {
   const activeStatuses: TaskStatus[] = [
     "requirements_analysis",
+    "research",
+    "design",
     "planning",
     "plan_ready",
     "implementing",
     "review",
+    "qa",
     "blocked_external",
   ];
   if (getEnv().AIF_AUTO_QUEUE_COUNT_NEEDS_INPUT_AS_ACTIVE) {
@@ -3234,10 +4656,13 @@ export function hasActiveBranchBoundTasksForProject(projectId: string): boolean 
           "backlog",
           "requirements_analysis",
           "needs_input",
+          "research",
+          "design",
           "planning",
           "plan_ready",
           "implementing",
           "review",
+          "qa",
           "blocked_external",
         ]),
       ),
@@ -3325,7 +4750,15 @@ export function releaseStaleTaskClaims(): number {
         lte(tasks.lockedUntil, nowIso),
         // Process died: heartbeat stale, task still in-progress, and not freshly claimed
         and(
-          inArray(tasks.status, ["requirements_analysis", "planning", "implementing", "review"]),
+          inArray(tasks.status, [
+            "requirements_analysis",
+            "research",
+            "design",
+            "planning",
+            "implementing",
+            "review",
+            "qa",
+          ]),
           // Ensure task was claimed at least 5 min ago (avoid race with fresh claims)
           lte(tasks.updatedAt, heartbeatDeadline),
           or(
@@ -3460,7 +4893,15 @@ export function listStaleInProgressTasks(): TaskRow[] {
     .from(tasks)
     .where(
       and(
-        inArray(tasks.status, ["requirements_analysis", "planning", "implementing", "review"]),
+        inArray(tasks.status, [
+          "requirements_analysis",
+          "research",
+          "design",
+          "planning",
+          "implementing",
+          "review",
+          "qa",
+        ]),
         ne(tasks.hierarchyRole, "container"),
         eq(tasks.paused, false),
         // Skip tasks with active (non-expired) locks — they're being processed
@@ -4362,10 +5803,13 @@ export interface RuntimeBudgetGateDecision {
 }
 
 const RUNTIME_BUDGET_WORKFLOW_KINDS: Record<RuntimeStage, string[]> = {
+  researcher: ["planner", "researcher", "research-stage"],
+  designer: ["planner", "designer", "design-stage"],
   planner: ["planner"],
   plan_checker: ["plan_checker", "plan-checker"],
   implementer: ["implementer", "implementer_checklist_sync"],
   reviewer: ["reviewer", "review-gate", "security", "security_review", "review-security"],
+  qa: ["qa", "qa-stage", "reviewer"],
   security: ["reviewer", "review-gate", "security", "security_review", "review-security"],
   chat: ["chat"],
   audit: ["audit"],
@@ -4373,12 +5817,16 @@ const RUNTIME_BUDGET_WORKFLOW_KINDS: Record<RuntimeStage, string[]> = {
 };
 
 function budgetFieldForStage(stage: RuntimeStage): RuntimeBudgetGateDecision["budgetField"] {
-  if (stage === "planner") return "plannerMaxBudgetUsd";
+  if (stage === "researcher" || stage === "designer" || stage === "planner") {
+    return "plannerMaxBudgetUsd";
+  }
   if (stage === "plan_checker") return "planCheckerMaxBudgetUsd";
   if (stage === "implementer" || stage === "audit" || stage === "synthesis") {
     return "implementerMaxBudgetUsd";
   }
-  if (stage === "reviewer" || stage === "security") return "reviewSidecarMaxBudgetUsd";
+  if (stage === "reviewer" || stage === "qa" || stage === "security") {
+    return "reviewSidecarMaxBudgetUsd";
+  }
   return null;
 }
 
@@ -5812,6 +7260,339 @@ export function findTasksByRoadmapAlias(projectId: string, alias: string): TaskR
     .all();
 }
 
+function parseProposalChildren(raw: string, proposalId: string): TaskSplitProposedChild[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as TaskSplitProposedChild[]) : [];
+  } catch (err) {
+    log.warn({ proposalId, err }, "Failed to parse split proposal children JSON");
+    return [];
+  }
+}
+
+function parseProposalTaskIds(raw: string | null | undefined, proposalId: string): string[] {
+  try {
+    const parsed = JSON.parse(raw ?? "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch (err) {
+    log.warn({ proposalId, err }, "Failed to parse split proposal created ids JSON");
+    return [];
+  }
+}
+
+export function toTaskSplitProposal(row: TaskSplitProposalRow): TaskSplitProposal {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    parentTaskId: row.parentTaskId ?? null,
+    sourceKind: row.sourceKind,
+    sourceRef: row.sourceRef,
+    sourceFingerprint: row.sourceFingerprint,
+    roadmapAlias: row.roadmapAlias,
+    taskIntent: row.taskIntent,
+    status: row.status,
+    decision: "split_required",
+    summary: row.summary,
+    proposedChildren: parseProposalChildren(row.proposedChildrenJson, row.id),
+    createdTaskIds: parseProposalTaskIds(row.createdTaskIdsJson, row.id),
+    containerTaskId: row.containerTaskId ?? null,
+    approvedBy: row.approvedBy ?? null,
+    rejectedReason: row.rejectedReason ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    approvedAt: row.approvedAt ?? null,
+    rejectedAt: row.rejectedAt ?? null,
+  };
+}
+
+export type CreateTaskSplitProposalInput = {
+  projectId: string;
+  parentTaskId?: string | null;
+  sourceKind: TaskSplitProposalSourceKind;
+  sourceRef: string;
+  sourceFingerprint: string;
+  roadmapAlias: string;
+  taskIntent: TaskIntent;
+  summary: string;
+  proposedChildren: TaskSplitProposedChild[];
+};
+
+export type CreateTaskSplitProposalResult =
+  | { status: "created" | "reused"; proposal: TaskSplitProposal }
+  | { status: "conflict"; proposal: TaskSplitProposal };
+
+export function createOrReusePendingTaskSplitProposal(
+  input: CreateTaskSplitProposalInput,
+): CreateTaskSplitProposalResult {
+  const db = getDb();
+  const existing = db
+    .select()
+    .from(taskSplitProposals)
+    .where(
+      and(
+        eq(taskSplitProposals.projectId, input.projectId),
+        eq(taskSplitProposals.sourceKind, input.sourceKind),
+        eq(taskSplitProposals.roadmapAlias, input.roadmapAlias),
+        eq(taskSplitProposals.taskIntent, input.taskIntent),
+        eq(taskSplitProposals.status, "pending"),
+      ),
+    )
+    .orderBy(desc(taskSplitProposals.createdAt))
+    .get();
+
+  if (existing) {
+    const proposal = toTaskSplitProposal(existing);
+    const status = proposal.sourceFingerprint === input.sourceFingerprint ? "reused" : "conflict";
+    logRequirementsLifecycleMetric(
+      status === "reused"
+        ? REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_REUSED
+        : REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_CONFLICT,
+      {
+        projectId: input.projectId,
+        parentTaskId: input.parentTaskId ?? null,
+        proposalId: proposal.id,
+        sourceKind: input.sourceKind,
+        roadmapAlias: input.roadmapAlias,
+        taskIntent: input.taskIntent,
+        proposedChildCount: proposal.proposedChildren.length,
+      },
+    );
+    return status === "reused"
+      ? { status: "reused", proposal }
+      : { status: "conflict", proposal };
+  }
+
+  const nowIso = new Date().toISOString();
+  const id = crypto.randomUUID();
+  db.insert(taskSplitProposals)
+    .values({
+      id,
+      projectId: input.projectId,
+      parentTaskId: input.parentTaskId ?? null,
+      sourceKind: input.sourceKind,
+      sourceRef: input.sourceRef,
+      sourceFingerprint: input.sourceFingerprint,
+      roadmapAlias: input.roadmapAlias,
+      taskIntent: input.taskIntent,
+      status: "pending",
+      decision: "split_required",
+      summary: input.summary,
+      proposedChildrenJson: JSON.stringify(input.proposedChildren),
+      createdTaskIdsJson: "[]",
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    })
+    .run();
+
+  const created = findTaskSplitProposalRow(input.projectId, id);
+  if (!created) throw new Error(`Failed to create task split proposal ${id}`);
+  const proposal = toTaskSplitProposal(created);
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_CREATED, {
+    projectId: input.projectId,
+    parentTaskId: input.parentTaskId ?? null,
+    proposalId: proposal.id,
+    sourceKind: input.sourceKind,
+    roadmapAlias: input.roadmapAlias,
+    taskIntent: input.taskIntent,
+    proposedChildCount: proposal.proposedChildren.length,
+  });
+  return { status: "created", proposal };
+}
+
+function findTaskSplitProposalRow(
+  projectId: string,
+  proposalId: string,
+): TaskSplitProposalRow | undefined {
+  return getDb()
+    .select()
+    .from(taskSplitProposals)
+    .where(and(eq(taskSplitProposals.projectId, projectId), eq(taskSplitProposals.id, proposalId)))
+    .get();
+}
+
+export function findTaskSplitProposal(
+  projectId: string,
+  proposalId: string,
+): TaskSplitProposal | undefined {
+  const row = findTaskSplitProposalRow(projectId, proposalId);
+  return row ? toTaskSplitProposal(row) : undefined;
+}
+
+export type RejectTaskSplitProposalResult =
+  | { status: "rejected" | "already_rejected"; proposal: TaskSplitProposal }
+  | { status: "conflict"; proposal: TaskSplitProposal }
+  | { status: "not_found" };
+
+export function rejectTaskSplitProposal(input: {
+  projectId: string;
+  proposalId: string;
+  reason?: string | null;
+}): RejectTaskSplitProposalResult {
+  const existing = findTaskSplitProposalRow(input.projectId, input.proposalId);
+  if (!existing) return { status: "not_found" };
+  if (existing.status === "rejected") {
+    const proposal = toTaskSplitProposal(existing);
+    logRequirementsLifecycleMetric(
+      REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_ALREADY_REJECTED,
+      {
+        projectId: input.projectId,
+        parentTaskId: proposal.parentTaskId,
+        proposalId: proposal.id,
+        sourceKind: proposal.sourceKind,
+        roadmapAlias: proposal.roadmapAlias,
+        taskIntent: proposal.taskIntent,
+        proposedChildCount: proposal.proposedChildren.length,
+      },
+    );
+    return { status: "already_rejected", proposal };
+  }
+  if (existing.status === "approved") {
+    const proposal = toTaskSplitProposal(existing);
+    logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_CONFLICT, {
+      projectId: input.projectId,
+      parentTaskId: proposal.parentTaskId,
+      proposalId: proposal.id,
+      sourceKind: proposal.sourceKind,
+      roadmapAlias: proposal.roadmapAlias,
+      taskIntent: proposal.taskIntent,
+      proposedChildCount: proposal.proposedChildren.length,
+      existingStatus: proposal.status,
+      attemptedDecision: "reject",
+    });
+    return { status: "conflict", proposal };
+  }
+
+  const nowIso = new Date().toISOString();
+  getDb()
+    .update(taskSplitProposals)
+    .set({
+      status: "rejected",
+      rejectedReason: input.reason ?? null,
+      rejectedAt: nowIso,
+      updatedAt: nowIso,
+    })
+    .where(
+      and(
+        eq(taskSplitProposals.id, input.proposalId),
+        eq(taskSplitProposals.projectId, input.projectId),
+        eq(taskSplitProposals.status, "pending"),
+      ),
+    )
+    .run();
+  const rejected = findTaskSplitProposalRow(input.projectId, input.proposalId);
+  if (!rejected) return { status: "not_found" };
+  const proposal = toTaskSplitProposal(rejected);
+  logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_REJECTED, {
+    projectId: input.projectId,
+    parentTaskId: proposal.parentTaskId,
+    proposalId: proposal.id,
+    sourceKind: proposal.sourceKind,
+    roadmapAlias: proposal.roadmapAlias,
+    taskIntent: proposal.taskIntent,
+    proposedChildCount: proposal.proposedChildren.length,
+    hasReason: Boolean(input.reason?.trim()),
+  });
+  return { status: "rejected", proposal };
+}
+
+export type ApproveTaskSplitProposalResult =
+  | { status: "approved" | "already_approved"; proposal: TaskSplitProposal }
+  | { status: "conflict"; proposal: TaskSplitProposal }
+  | { status: "not_found" };
+
+export function approveTaskSplitProposal(input: {
+  projectId: string;
+  proposalId: string;
+  approvedBy?: string | null;
+  createTasks: (proposal: TaskSplitProposal) => { taskIds: string[]; containerTaskId?: string | null };
+}): ApproveTaskSplitProposalResult {
+  return getDb().transaction(() => {
+    const existing = findTaskSplitProposalRow(input.projectId, input.proposalId);
+    if (!existing) return { status: "not_found" as const };
+    if (existing.status === "approved") {
+      const proposal = toTaskSplitProposal(existing);
+      logRequirementsLifecycleMetric(
+        REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_ALREADY_APPROVED,
+        {
+          projectId: input.projectId,
+          parentTaskId: proposal.parentTaskId,
+          proposalId: proposal.id,
+          sourceKind: proposal.sourceKind,
+          roadmapAlias: proposal.roadmapAlias,
+          taskIntent: proposal.taskIntent,
+          proposedChildCount: proposal.proposedChildren.length,
+          createdTaskCount: proposal.createdTaskIds.length,
+        },
+      );
+      return { status: "already_approved" as const, proposal };
+    }
+    if (existing.status === "rejected") {
+      const proposal = toTaskSplitProposal(existing);
+      logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_CONFLICT, {
+        projectId: input.projectId,
+        parentTaskId: proposal.parentTaskId,
+        proposalId: proposal.id,
+        sourceKind: proposal.sourceKind,
+        roadmapAlias: proposal.roadmapAlias,
+        taskIntent: proposal.taskIntent,
+        proposedChildCount: proposal.proposedChildren.length,
+        existingStatus: proposal.status,
+        attemptedDecision: "approve",
+      });
+      return { status: "conflict" as const, proposal };
+    }
+
+    const proposal = toTaskSplitProposal(existing);
+    const created = input.createTasks(proposal);
+    const createdTaskIds = [
+      created.containerTaskId,
+      ...created.taskIds,
+    ].filter((taskId, index, allIds): taskId is string =>
+      Boolean(taskId) && allIds.indexOf(taskId) === index,
+    );
+    const nowIso = new Date().toISOString();
+    const approvalUpdate = getDb()
+      .update(taskSplitProposals)
+      .set({
+        status: "approved",
+        createdTaskIdsJson: JSON.stringify(createdTaskIds),
+        containerTaskId: created.containerTaskId ?? null,
+        approvedBy: input.approvedBy ?? null,
+        approvedAt: nowIso,
+        updatedAt: nowIso,
+      })
+      .where(
+        and(
+          eq(taskSplitProposals.id, input.proposalId),
+          eq(taskSplitProposals.projectId, input.projectId),
+          eq(taskSplitProposals.status, "pending"),
+        ),
+      )
+      .run();
+    if (approvalUpdate.changes !== 1) {
+      throw new Error(`Task split proposal ${input.proposalId} is no longer pending`);
+    }
+
+    const approved = findTaskSplitProposalRow(input.projectId, input.proposalId);
+    if (!approved) throw new Error(`Task split proposal ${input.proposalId} disappeared`);
+    const approvedProposal = toTaskSplitProposal(approved);
+    logRequirementsLifecycleMetric(REQUIREMENTS_LIFECYCLE_EVENTS.SPLIT_PROPOSAL_APPROVED, {
+      projectId: input.projectId,
+      parentTaskId: approvedProposal.parentTaskId,
+      proposalId: approvedProposal.id,
+      sourceKind: approvedProposal.sourceKind,
+      roadmapAlias: approvedProposal.roadmapAlias,
+      taskIntent: approvedProposal.taskIntent,
+      proposedChildCount: approvedProposal.proposedChildren.length,
+      createdTaskCount: approvedProposal.createdTaskIds.length,
+      hasApprovedBy: input.approvedBy != null,
+    });
+    return { status: "approved" as const, proposal: approvedProposal };
+  });
+}
+
 export type RoadmapBatchExecutionPolicy = "worktree_isolated" | "serialized_shared_checkout";
 export type RoadmapBatchArtifactRole = "report" | "synthesis";
 export type RoadmapBatchArtifactState =
@@ -6613,6 +8394,24 @@ function listMemoryItemsBySourceTaskId(taskId: string): MemoryItemRow[] {
     .all();
 }
 
+function listTaskStageArtifactRowsByTaskId(taskId: string): TaskStageArtifactRow[] {
+  return getDb()
+    .select()
+    .from(taskStageArtifacts)
+    .where(eq(taskStageArtifacts.taskId, taskId))
+    .orderBy(asc(taskStageArtifacts.createdAt))
+    .all();
+}
+
+function listTaskStageArtifactAttemptRowsByTaskId(taskId: string): TaskStageArtifactAttemptRow[] {
+  return getDb()
+    .select()
+    .from(taskStageArtifactAttempts)
+    .where(eq(taskStageArtifactAttempts.taskId, taskId))
+    .orderBy(asc(taskStageArtifactAttempts.createdAt))
+    .all();
+}
+
 function taskStatusTerminalForGenericTrust(status: TaskStatus): boolean {
   return status === "done" || status === "verified";
 }
@@ -7045,6 +8844,103 @@ function buildGenericTaskProjection(task: TaskRow, generatedAt = new Date().toIS
       claimId,
       relation: outcome === "supported" ? "supports" : "context",
       metadata: { compatibilitySource: "task_record" },
+    });
+  }
+
+  const stageArtifactRows = listTaskStageArtifactRowsByTaskId(task.id);
+  const stageAttemptRows = listTaskStageArtifactAttemptRowsByTaskId(task.id);
+  for (const row of stageArtifactRows) {
+    const metadata = parseRuntimeObject(row.metadataJson) ?? {};
+    artifacts.push({
+      id: row.id,
+      taskId: row.taskId,
+      kind: row.kind,
+      label: row.label,
+      path: row.artifactPath ?? null,
+      state: row.state,
+      currentAttemptNumber: row.currentAttemptNumber,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      metadata: {
+        compatibilitySource: "task_stage_artifact",
+        stage: row.stage,
+        sourceSnapshotId: row.sourceSnapshotId,
+        ...metadata,
+      },
+    });
+    claims.push({
+      id: `${row.id}:claim:current`,
+      artifactId: row.id,
+      taskId: row.taskId,
+      attemptId: null,
+      label: `${row.label} claim`,
+      outcome: defaultOutcomeForTaskStageState(row.state),
+      trustLevel: defaultTrustForTaskStageState(row.state),
+      evaluatedAt: row.updatedAt,
+      metadata: {
+        compatibilitySource: "task_stage_artifact",
+        stage: row.stage,
+        sourceSnapshotId: row.sourceSnapshotId,
+        ...metadata,
+      },
+    });
+    evidence.push({
+      id: `${row.id}:evidence`,
+      taskId: row.taskId,
+      kind: "task_stage_artifact",
+      grade: row.state === "accepted" ? "substantive" : "context",
+      toolName: "task_stage_artifact",
+      summary: row.summary,
+      createdAt: row.updatedAt,
+      metadata: {
+        compatibilitySource: "task_stage_artifact",
+        stage: row.stage,
+        kind: row.kind,
+      },
+    });
+    evidenceLinks.push({
+      id: `${row.id}:evidence:link:${row.id}:claim:current`,
+      evidenceId: `${row.id}:evidence`,
+      artifactId: row.id,
+      claimId: `${row.id}:claim:current`,
+      relation: row.state === "accepted" ? "supports" : "context",
+      metadata: { compatibilitySource: "task_stage_artifact" },
+    });
+  }
+  for (const row of stageAttemptRows) {
+    const metadata = parseRuntimeObject(row.metadataJson) ?? {};
+    attempts.push({
+      id: row.id,
+      artifactId: row.artifactId,
+      taskId: row.taskId,
+      attemptNumber: row.attemptNumber,
+      state: row.state,
+      outcome: row.outcome,
+      trustLevel: row.trustLevel,
+      sourceSnapshotId: row.sourceSnapshotId,
+      createdAt: row.createdAt,
+      metadata: {
+        compatibilitySource: "task_stage_artifact_attempt",
+        stage: row.stage,
+        kind: row.kind,
+        ...metadata,
+      },
+    });
+    claims.push({
+      id: `${row.id}:claim`,
+      artifactId: row.artifactId,
+      taskId: row.taskId,
+      attemptId: row.id,
+      label: `${row.kind} attempt claim`,
+      outcome: row.outcome,
+      trustLevel: row.trustLevel,
+      evaluatedAt: row.createdAt,
+      metadata: {
+        compatibilitySource: "task_stage_artifact_attempt",
+        stage: row.stage,
+        kind: row.kind,
+        ...metadata,
+      },
     });
   }
 

@@ -20,9 +20,11 @@ vi.mock("@aif/shared/server", async (importOriginal) => {
 const originalFetch = global.fetch;
 const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
 
-// Coordinator reads env at module load. This suite covers the rollout-on
-// auto-queue behavior for branch-isolated projects.
+// Coordinator reads env at module load. This suite covers the legacy auto-queue
+// behavior while requirements intake is rolled out behind its flag.
 vi.stubEnv("AIF_TASK_WORKTREES_ENABLED", "true");
+vi.stubEnv("AIF_REQUIREMENTS_INTAKE_ENABLED", "false");
+vi.stubEnv("AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED", "false");
 
 const { processAutoQueueAdvance, processDueScheduledTasks } = await import("../coordinator.js");
 const {

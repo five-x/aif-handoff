@@ -16,6 +16,7 @@ import {
   runtimeProfiles,
   usageEvents,
   memoryItems,
+  taskRequirementQuestions,
   taskComments,
   tasks,
 } from "@aif/shared";
@@ -24,6 +25,8 @@ import { createTestDb } from "@aif/shared/server";
 // Mock the shared db module to use test db
 const testDb = { current: createTestDb() };
 const mockInternalBroadcastToken = { value: "" };
+const mockRequirementsIntakeEnabled = { value: undefined as boolean | undefined };
+const mockRequirementsQaEnabled = { value: undefined as boolean | undefined };
 
 vi.mock("@aif/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@aif/shared")>();
@@ -33,6 +36,10 @@ vi.mock("@aif/shared", async (importOriginal) => {
     getEnv: () => ({
       ...resolvedEnv,
       INTERNAL_BROADCAST_TOKEN: mockInternalBroadcastToken.value,
+      AIF_REQUIREMENTS_INTAKE_ENABLED:
+        mockRequirementsIntakeEnabled.value ?? resolvedEnv.AIF_REQUIREMENTS_INTAKE_ENABLED,
+      AIF_REQUIREMENTS_QA_ENABLED:
+        mockRequirementsQaEnabled.value ?? resolvedEnv.AIF_REQUIREMENTS_QA_ENABLED,
     }),
   };
 });
@@ -77,9 +84,13 @@ const { broadcast: mockBroadcast } = await import("../ws.js");
 const dataModule = await import("@aif/data");
 const {
   createRoadmapBatchContract,
+  createCurrentRequirementsSnapshot,
   appendEvidenceUnitEvent,
+  buildTaskQaSourceFingerprint,
+  recordTaskAcceptancePack,
   listRoadmapBatchArtifacts,
   listRoadmapBatchArtifactAttempts,
+  recordTaskStageArtifactAttempt,
   updateRoadmapBatchArtifactState,
 } = dataModule;
 
@@ -174,6 +185,8 @@ describe("tasks API", () => {
     testDb.current = createTestDb();
     app = createApp();
     mockInternalBroadcastToken.value = "";
+    mockRequirementsIntakeEnabled.value = undefined;
+    mockRequirementsQaEnabled.value = undefined;
     vi.mocked(mockBroadcast).mockClear();
     mockRunApiRuntimeOneShot.mockReset();
     mockRunApiRuntimeOneShot.mockResolvedValue({
@@ -1599,6 +1612,229 @@ describe("tasks API", () => {
     });
   });
 
+  describe("GET /tasks/:id/requirements/snapshot", () => {
+    it("returns current snapshot versions and stage artifact attempts with redacted snapshot content", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "requirements-snapshot-task",
+          projectId: "test-project",
+          title: "Requirements snapshot",
+          description: "Capture requirements safely.",
+          taskIntent: "feature",
+          status: "planning",
+        })
+        .run();
+      db.insert(taskRequirementQuestions)
+        .values({
+          id: "requirements-secret-question",
+          taskId: "requirements-snapshot-task",
+          projectId: "test-project",
+          stage: "requirements_analysis",
+          targetResumeStage: "requirements_analysis",
+          cycleNumber: 1,
+          batchId: "requirements-batch",
+          question: "Which credential reference should be used?",
+          whyNeeded: "Implementation needs the reference.",
+          status: "answered",
+          answer: "api_key=sk-secretsecretsecretsecret",
+          answerAuthor: "human",
+          answeredAt: "2026-05-28T00:00:00.000Z",
+        })
+        .run();
+
+      createCurrentRequirementsSnapshot("requirements-snapshot-task");
+      createCurrentRequirementsSnapshot("requirements-snapshot-task");
+      recordTaskStageArtifactAttempt({
+        taskId: "requirements-snapshot-task",
+        stage: "research",
+        kind: "research",
+        path: "research.md",
+        state: "accepted",
+        summary: "Research metadata recorded.",
+      });
+
+      const res = await app.request("/tasks/requirements-snapshot-task/requirements/snapshot");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      expect(body.snapshot).toEqual(expect.objectContaining({ version: 2 }));
+      expect(body.snapshots.map((snapshot: { version: number }) => snapshot.version)).toEqual([
+        2, 1,
+      ]);
+      expect(body.snapshot.markdown).toContain("[REDACTED_SECRET_LIKE_ANSWER]");
+      expect(JSON.stringify(body)).not.toContain("sk-secretsecretsecretsecret");
+      expect(body.stageArtifacts.map((artifact: { kind: string }) => artifact.kind)).toEqual(
+        expect.arrayContaining(["requirements", "research"]),
+      );
+      expect(body.stageArtifactAttempts.map((attempt: { kind: string }) => attempt.kind)).toEqual(
+        expect.arrayContaining(["requirements", "research"]),
+      );
+    });
+
+    it("returns an empty no-snapshot response for existing tasks and 404 for unknown tasks", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "requirements-no-snapshot-task",
+          projectId: "test-project",
+          title: "No snapshot yet",
+          status: "backlog",
+        })
+        .run();
+
+      const res = await app.request("/tasks/requirements-no-snapshot-task/requirements/snapshot");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(
+        expect.objectContaining({
+          taskId: "requirements-no-snapshot-task",
+          projectId: "test-project",
+          snapshot: null,
+          snapshots: [],
+          stageArtifacts: [],
+          stageArtifactAttempts: [],
+          hasWaiver: false,
+          waiverJustification: null,
+        }),
+      );
+
+      const missing = await app.request("/tasks/missing-requirements-task/requirements/snapshot");
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toEqual({ error: "Task not found" });
+    });
+  });
+
+  describe("requirements question resume targets", () => {
+    it("returns and broadcasts the active target resume stage", async () => {
+      const db = testDb.current;
+      db.insert(projects)
+        .values({ id: "question-project", name: "Questions", rootPath: "/tmp/questions" })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "api-question-target",
+          projectId: "question-project",
+          title: "Question target",
+          status: "review",
+        })
+        .run();
+
+      const createRes = await app.request("/tasks/api-question-target/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stage: "review",
+          targetResumeStage: "qa",
+          idempotencyKey: "review-product-decision",
+          question: "Should QA cover the new behavior?",
+          whyNeeded: "Review cannot hand off without the QA decision.",
+          blocking: true,
+          answerType: "textarea",
+        }),
+      });
+
+      expect(createRes.status).toBe(201);
+      const createBody = await createRes.json();
+      const batch = createBody.batches[0];
+      expect(batch.targetResumeStage).toBe("qa");
+      expect(mockBroadcast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "task:questions_created",
+          payload: expect.objectContaining({
+            taskId: "api-question-target",
+            stage: "review",
+            targetResumeStage: "qa",
+          }),
+        }),
+      );
+      expect(mockBroadcast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "task:needs_input",
+          payload: expect.objectContaining({
+            taskId: "api-question-target",
+            stage: "review",
+            targetResumeStage: "qa",
+          }),
+        }),
+      );
+
+      const answerRes = await app.request(
+        `/tasks/api-question-target/question-batches/${batch.batchId}/answers`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            autoResume: true,
+            answers: [{ questionId: batch.questions[0].id, answer: "Yes, QA must cover it." }],
+          }),
+        },
+      );
+
+      expect(answerRes.status).toBe(200);
+      const answerBody = await answerRes.json();
+      expect(answerBody.resumed).toBe(true);
+      expect(answerBody.resumeStatus).toBe("qa");
+      expect(mockBroadcast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "task:question_batch_answered",
+          payload: expect.objectContaining({
+            taskId: "api-question-target",
+            stage: "review",
+            targetResumeStage: "qa",
+            resumed: true,
+            resumeStatus: "qa",
+          }),
+        }),
+      );
+    });
+
+    it("rejects API-created questions without inserting rows when intake is disabled", async () => {
+      mockRequirementsIntakeEnabled.value = false;
+      const db = testDb.current;
+      db.insert(projects)
+        .values({
+          id: "question-disabled-project",
+          name: "Questions Off",
+          rootPath: "/tmp/questions",
+        })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "api-question-disabled",
+          projectId: "question-disabled-project",
+          title: "Question disabled",
+          status: "review",
+        })
+        .run();
+
+      const createRes = await app.request("/tasks/api-question-disabled/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stage: "review",
+          targetResumeStage: "qa",
+          idempotencyKey: "review-disabled-decision",
+          question: "Should QA cover the new behavior?",
+          whyNeeded: "Review cannot hand off without the QA decision.",
+          blocking: true,
+          answerType: "textarea",
+        }),
+      });
+
+      expect(createRes.status).toBe(409);
+      expect(await createRes.json()).toEqual({ error: "Requirements intake is disabled" });
+      const rows = db
+        .select()
+        .from(taskRequirementQuestions)
+        .where(eq(taskRequirementQuestions.taskId, "api-question-disabled"))
+        .all();
+      expect(rows).toHaveLength(0);
+      expect(mockBroadcast).not.toHaveBeenCalled();
+    });
+  });
+
   describe("operator trust surfaces", () => {
     it("returns artifact trust, evidence, memory, and runtime projections", async () => {
       const db = testDb.current;
@@ -2958,13 +3194,36 @@ describe("tasks API", () => {
       expect(body.error).toBe("Internal server error");
     });
 
-    it("should start AI from backlog", async () => {
+    it("should start AI from backlog into requirements analysis when intake is enabled", async () => {
       const db = testDb.current;
       db.insert(tasks)
         .values({ id: "mov-1", projectId: "test-project", title: "Move me", status: "backlog" })
         .run();
 
       const res = await app.request("/tasks/mov-1/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_ai" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("requirements_analysis");
+    });
+
+    it("should preserve legacy start AI routing when requirements intake is disabled", async () => {
+      mockRequirementsIntakeEnabled.value = false;
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "mov-disabled",
+          projectId: "test-project",
+          title: "Move me legacy",
+          status: "backlog",
+        })
+        .run();
+
+      const res = await app.request("/tasks/mov-disabled/events", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event: "start_ai" }),
@@ -4235,6 +4494,172 @@ describe("tasks API", () => {
       expect(types).not.toContain("task:commit_started");
       expect(types).not.toContain("task:commit_done");
       expect(types).not.toContain("task:commit_failed");
+    });
+
+    it("should block approve_done when QA is enabled and fresh acceptance evidence is missing", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      mockRequirementsIntakeEnabled.value = true;
+      mockRequirementsQaEnabled.value = true;
+      db.insert(tasks)
+        .values({
+          id: "ev-qa-missing",
+          projectId: "test-project",
+          title: "Done QA missing",
+          status: "done",
+          taskIntent: "general",
+          implementationManifestJson: implementationManifest({
+            taskId: "ev-qa-missing",
+            intent: "feature",
+            changedFiles: [],
+            regressionExplanation: "No source delta is needed for this QA approval gate test.",
+          }),
+          reviewComments: "Review accepted.",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-qa-missing/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("fresh accepted QA and acceptance artifacts");
+    });
+
+    it("should block approve_done when QA acceptance artifact metadata is malformed", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      mockRequirementsIntakeEnabled.value = true;
+      mockRequirementsQaEnabled.value = true;
+      db.insert(tasks)
+        .values({
+          id: "ev-qa-malformed-pack",
+          projectId: "test-project",
+          title: "Done QA malformed acceptance pack",
+          status: "done",
+          taskIntent: "general",
+          implementationManifestJson: implementationManifest({
+            taskId: "ev-qa-malformed-pack",
+            intent: "feature",
+            changedFiles: [],
+            regressionExplanation: "No source delta is needed for this QA approval gate test.",
+          }),
+          reviewComments: "Review accepted.",
+        })
+        .run();
+      const fingerprint = buildTaskQaSourceFingerprint("ev-qa-malformed-pack");
+      const qaAttempt = recordTaskStageArtifactAttempt({
+        taskId: "ev-qa-malformed-pack",
+        stage: "qa",
+        kind: "qa",
+        label: "QA artifact",
+        path: "qa.md",
+        state: "accepted",
+        summary: "QA passed.",
+        markdown: "# QA\n\nPassed.",
+        metadata: {
+          status: "passed",
+          sourceFingerprint: fingerprint,
+          commands: [
+            {
+              id: "manifest:verify-api",
+              command: "npm.cmd test --workspace=@aif/api -- --run src/__tests__/tasks.test.ts",
+              status: "passed",
+              mandatory: true,
+              outputSummary: "tests passed",
+            },
+          ],
+        },
+      });
+      recordTaskStageArtifactAttempt({
+        taskId: "ev-qa-malformed-pack",
+        stage: "acceptance",
+        kind: "acceptance",
+        label: "Malformed acceptance pack",
+        path: "acceptance.md",
+        state: "accepted",
+        summary: "Malformed acceptance pack.",
+        markdown: "# Acceptance Pack\n\nMalformed.",
+        metadata: {
+          taskId: "ev-qa-malformed-pack",
+          generatedAt: "2026-05-29T00:00:00.000Z",
+          readiness: { ready: false, reason: "Acceptance pack is incomplete." },
+          sourceFingerprint: fingerprint,
+          qaArtifactId: qaAttempt.artifactId,
+          qaAttemptNumber: qaAttempt.attemptNumber,
+        },
+      });
+
+      const res = await app.request("/tasks/ev-qa-malformed-pack/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("fresh accepted QA and acceptance artifacts");
+    });
+
+    it("should allow approve_done when QA is enabled and fresh acceptance evidence exists", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      mockRequirementsIntakeEnabled.value = true;
+      mockRequirementsQaEnabled.value = true;
+      db.insert(tasks)
+        .values({
+          id: "ev-qa-ready",
+          projectId: "test-project",
+          title: "Done QA ready",
+          status: "done",
+          taskIntent: "general",
+          implementationManifestJson: implementationManifest({
+            taskId: "ev-qa-ready",
+            intent: "feature",
+            changedFiles: [],
+            regressionExplanation: "No source delta is needed for this QA approval gate test.",
+          }),
+          reviewComments: "Review accepted.",
+        })
+        .run();
+      const fingerprint = buildTaskQaSourceFingerprint("ev-qa-ready");
+      recordTaskStageArtifactAttempt({
+        taskId: "ev-qa-ready",
+        stage: "qa",
+        kind: "qa",
+        label: "QA artifact",
+        path: "qa.md",
+        state: "accepted",
+        summary: "QA passed.",
+        markdown: "# QA\n\nPassed.",
+        metadata: {
+          status: "passed",
+          sourceFingerprint: fingerprint,
+          commands: [
+            {
+              id: "manifest:verify-api",
+              command: "npm.cmd test --workspace=@aif/api -- --run src/__tests__/tasks.test.ts",
+              status: "passed",
+              mandatory: true,
+              outputSummary: "tests passed",
+            },
+          ],
+        },
+      });
+      recordTaskAcceptancePack("ev-qa-ready");
+
+      const res = await app.request("/tasks/ev-qa-ready/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("verified");
     });
 
     it("should send done task to implementing with rework flag on request_changes", async () => {

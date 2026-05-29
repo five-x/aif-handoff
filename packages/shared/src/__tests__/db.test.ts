@@ -4,10 +4,10 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { rmSync } from "fs";
 import { eq } from "drizzle-orm";
-import { chatSessions, tasks } from "../schema.js";
+import { chatSessions, taskSplitProposals, tasks } from "../schema.js";
 import { closeDb, createTestDb, getDb } from "../db.js";
 
-const CURRENT_DB_USER_VERSION = 36;
+const CURRENT_DB_USER_VERSION = 38;
 
 function removeSqliteArtifacts(dbPath: string): void {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
@@ -881,6 +881,69 @@ describe("db", () => {
         "idx_roadmap_batch_artifacts_project_alias",
         "idx_roadmap_batch_artifacts_task",
         "idx_roadmap_batches_project_alias",
+      ]);
+      expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
+    } finally {
+      closeDb();
+      removeSqliteArtifacts(dbPath);
+    }
+  });
+
+  it("creates task split proposal table and lookup indexes for fresh databases", () => {
+    closeDb();
+    const dbPath = join(
+      tmpdir(),
+      `aif-shared-task-split-proposals-${Date.now()}-${Math.random()}.sqlite`,
+    );
+
+    try {
+      const db = getDb(dbPath);
+      db.insert(taskSplitProposals)
+        .values({
+          id: "proposal-1",
+          projectId: "project-1",
+          sourceKind: "roadmap_import",
+          sourceRef: "roadmap-import:ROADMAP.md",
+          sourceFingerprint: "a".repeat(64),
+          roadmapAlias: "v1",
+          taskIntent: "general",
+          proposedChildrenJson: "[]",
+          createdTaskIdsJson: "[]",
+        })
+        .run();
+      closeDb();
+
+      const sqlite = new Database(dbPath, { readonly: true });
+      const table = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name = 'task_split_proposals'
+        `,
+        )
+        .get() as { name: string } | undefined;
+      const indexes = sqlite
+        .prepare(
+          `
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (
+              'idx_task_split_proposals_lookup',
+              'idx_task_split_proposals_fingerprint'
+            )
+        `,
+        )
+        .all() as Array<{ name: string }>;
+      const userVersion = sqlite.pragma("user_version", { simple: true }) as number;
+      sqlite.close();
+
+      expect(table?.name).toBe("task_split_proposals");
+      expect(indexes.map((row) => row.name).sort()).toEqual([
+        "idx_task_split_proposals_fingerprint",
+        "idx_task_split_proposals_lookup",
       ]);
       expect(userVersion).toBe(CURRENT_DB_USER_VERSION);
     } finally {

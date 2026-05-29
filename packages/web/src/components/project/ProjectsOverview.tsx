@@ -39,6 +39,7 @@ const OVERVIEW_STATUSES: TaskStatus[] = [
   "plan_ready",
   "implementing",
   "review",
+  "qa",
   "done",
 ];
 

@@ -6,6 +6,7 @@ import {
   findProjectById,
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
+  buildTaskRequirementsContextForPrompt,
   getLatestReworkComment,
   listAuditEvidenceEvents,
   listRoadmapReportArtifactsForSynthesis,
@@ -49,6 +50,10 @@ import {
 import { createRuntimeWorkflowSpec, RuntimeExecutionError } from "@aif/runtime";
 import { flushActivityQueue, logActivity, persistAuditEvidencePayload } from "../hooks.js";
 import { executeSubagentQuery } from "../subagentQuery.js";
+import {
+  formatRaiseQuestionsPromptGuidance,
+  handleRaiseQuestionsOutput,
+} from "./raiseQuestions.js";
 import { computePendingPlanLayers, computePlanLayers } from "../planLayers.js";
 import { assertCurrentBranch, restorePersistedBranch } from "../gitBranch.js";
 import { buildTaskMemoryContext } from "../memoryContext.js";
@@ -4972,6 +4977,9 @@ All files must be created and modified inside this directory. Do NOT create file
     ],
   });
   const memoryBlock = memoryContext ? `\n\n${memoryContext}\n` : "";
+  const requirementsContext = buildTaskRequirementsContextForPrompt(taskId, "implementing");
+  const requirementsBlock = requirementsContext ? `\n\n${requirementsContext.markdown}\n` : "";
+  const raiseQuestionsBlock = `\n\n${formatRaiseQuestionsPromptGuidance("implementing")}\n`;
 
   const isRework = task.reworkRequested;
 
@@ -5128,7 +5136,7 @@ Rework handling protocol:
   const rawPrompt = `${topReworkHeader}${useSubagents ? "Implement the task using the provided plan." : implementSlashCommand}
 
 ${scopeConstraint}
-${memoryBlock}
+${memoryBlock}${requirementsBlock}${raiseQuestionsBlock}
 
 ${bodyReworkHeader}Title: ${task.title}
 Task intent contract:
@@ -5537,6 +5545,18 @@ Writer rules:
   // attribute diffs from a different branch to this task.
   if (task.branchName && !task.isFix) {
     assertCurrentBranch(projectRoot, task.branchName);
+  }
+
+  if (
+    handleRaiseQuestionsOutput({
+      taskId,
+      output: resultText,
+      stage: "implementing",
+      sourceAgent: executionName,
+      sourcePromptHash: null,
+    })
+  ) {
+    return;
   }
 
   let finalResultText = resultText;

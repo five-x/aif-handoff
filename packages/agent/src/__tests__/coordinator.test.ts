@@ -25,6 +25,7 @@ import { join } from "node:path";
 // Flag defaults to false (opt-in). Coordinator tests assert on persisted
 // limitSnapshot, which requires the gate to be open.
 process.env.AIF_USAGE_LIMITS_ENABLED = "true";
+process.env.AIF_REQUIREMENTS_INTAKE_ENABLED = "false";
 resetEnvCache();
 
 // Set up test db

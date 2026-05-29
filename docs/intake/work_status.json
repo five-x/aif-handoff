@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-28",
+  "updated": "2026-05-29",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -745,7 +745,7 @@
     {
       "taskId": "work-20260528-requirements-snapshot-and-stage-artifacts",
       "title": "Requirements Snapshot And Stage Artifacts",
-      "status": "queued",
+      "status": "done",
       "priority": "critical",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260528-requirements-snapshot-and-stage-artifacts",
@@ -754,47 +754,47 @@
     {
       "taskId": "work-20260528-research-design-stages",
       "title": "Research And Design Stages For Requirements Intake",
-      "status": "queued",
+      "status": "done",
       "priority": "critical",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260528-research-design-stages",
-      "updated": "2026-05-28"
+      "updated": "2026-05-29"
     },
     {
       "taskId": "work-20260528-qa-gate-and-acceptance-pack",
       "title": "QA Gate And Acceptance Pack",
-      "status": "queued",
+      "status": "done",
       "priority": "critical",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260528-qa-gate-and-acceptance-pack",
-      "updated": "2026-05-28"
+      "updated": "2026-05-29"
     },
     {
       "taskId": "work-20260528-late-stage-question-resume",
       "title": "Late Stage Question Resume",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260528-late-stage-question-resume",
-      "updated": "2026-05-28"
+      "updated": "2026-05-29"
     },
     {
       "taskId": "work-20260528-roadmap-split-required",
       "title": "Roadmap Split Required",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260528-roadmap-split-required",
-      "updated": "2026-05-28"
+      "updated": "2026-05-29"
     },
     {
       "taskId": "work-20260528-requirements-observability-docs-rollout",
       "title": "Requirements Observability Docs And Rollout",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260528-requirements-observability-docs-rollout",
-      "updated": "2026-05-28"
+      "updated": "2026-05-29"
     }
   ]
 }

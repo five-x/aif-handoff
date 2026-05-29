@@ -123,6 +123,20 @@ The coordinator (`packages/agent/src/coordinator.ts`) uses a dual-trigger model:
 
 The coordinator supports **parallel task execution** (experimental, per-project). When a project has "Parallel Execution" enabled in settings, up to `COORDINATOR_MAX_CONCURRENT_TASKS` (default 3) tasks per stage run concurrently via `Promise.allSettled`. This value also serves as the global cap on total concurrent Claude processes across all stages and projects. Non-parallel projects always process 1 task at a time. Tasks are atomically claimed (`lockedBy`/`lockedUntil` columns) with lock duration tied to the stage timeout; heartbeats renew the lock periodically. Stale claims (expired TTL or dead heartbeat) are auto-released. On shutdown, active locks are released immediately.
 
+### Requirements Lifecycle
+
+The requirements lifecycle extends the legacy agent pipeline when `AIF_REQUIREMENTS_INTAKE_ENABLED=true`:
+
+```
+backlog -> requirements_analysis -> research -> design -> planning -> plan_ready -> implementing -> review -> qa -> done -> verified
+```
+
+`requirements_analysis` asks bounded clarification questions, stores answered question batches, and creates a redacted requirements snapshot. `research` and `design` persist stage artifacts when `AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED=true`; otherwise approved requirements continue directly to `planning`. `qa` runs before terminal handoff when `AIF_REQUIREMENTS_QA_ENABLED=true` and records the acceptance pack only after fresh accepted QA evidence exists.
+
+The `needs_input` status can interrupt requirements, research, design, planning, implementing, review, or QA. Answering the active batch can auto-resume to the recorded target stage when `AIF_REQUIREMENTS_AUTO_RESUME_ON_ANSWER=true`; otherwise the task remains ready for a manual resume event. With `AIF_REQUIREMENTS_INTAKE_ENABLED=false`, `start_ai` preserves the Phase 1 compatibility path and routes backlog tasks directly to `planning`.
+
+Lifecycle state is stored in `task_requirement_questions`, `task_requirements_snapshots`, `task_stage_artifacts`, `task_stage_artifact_attempts`, and `task_split_proposals`. Structured observability is emitted as `requirements_lifecycle_events_total` envelopes with stable `requirements.lifecycle.*` event names and non-secret dimensions only. Raw user answers, raw roadmap content, provider output, and secrets must not be written to lifecycle metrics.
+
 It delegates workflow stages to `.claude/agents/` definitions, but actual execution transport/model/session behavior is adapter-owned through `@aif/runtime`:
 
 ```
@@ -172,16 +186,23 @@ All agents are defined as markdown files in `.claude/agents/*.md` and loaded by 
 
 Defined in `packages/shared/src/stateMachine.ts`. Human actions available per status:
 
-| Status             | Human Actions                                            |
-| ------------------ | -------------------------------------------------------- |
-| `backlog`          | `start_ai`                                               |
-| `planning`         | _(none — agent working)_                                 |
-| `plan_ready`       | `start_implementation`, `request_replanning`, `fast_fix` |
-| `implementing`     | _(none — agent working)_                                 |
-| `review`           | _(none — agent working)_                                 |
-| `blocked_external` | `retry_from_blocked`                                     |
-| `done`             | `approve_done`, `request_changes`                        |
-| `verified`         | _(terminal state)_                                       |
+| Status                  | Human Actions                                            |
+| ----------------------- | -------------------------------------------------------- |
+| `backlog`               | `start_ai`, `accept_existing_plan`                       |
+| `requirements_analysis` | `approve_requirements`                                   |
+| `needs_input`           | _(none - answer the active question batch)_              |
+| `research`              | _(none - agent working)_                                 |
+| `design`                | _(none - agent working)_                                 |
+| `planning`              | _(none - agent working)_                                 |
+| `plan_ready`            | `start_implementation`, `request_replanning`, `fast_fix` |
+| `implementing`          | _(none - agent working)_                                 |
+| `review`                | _(none - agent working)_                                 |
+| `qa`                    | _(none - agent working)_                                 |
+| `blocked_external`      | `retry_from_blocked`                                     |
+| `done`                  | `approve_done`, `request_changes`                        |
+| `verified`              | _(terminal state)_                                       |
+
+`request_requirements_reanalysis` is exposed through `POST /tasks/:id/requirements/reanalyze` when requirements intake is enabled. It can return backlog, planning, plan-ready, or done tasks to `requirements_analysis`.
 
 Tasks have an `autoMode` flag. When `true`, the agent automatically transitions through all stages. This includes an automatic post-review gate: reviewer output is stored in a structured format, parsed deterministically, and converted into blocking findings for the next cycle. When blockers remain, the coordinator applies a `request_changes`-style transition (`done -> implementing`) with an agent comment containing required fixes. When `false`, the user must manually trigger `start_implementation` from `plan_ready`.
 
@@ -272,18 +293,18 @@ target the same task in the same cycle.
 
 ## Roadmap Import
 
-The system supports bulk task creation from a project's `.ai-factory/ROADMAP.md` file via `POST /projects/:id/roadmap/import`.
+The system supports roadmap-to-task decomposition from a project's `.ai-factory/ROADMAP.md` file via `POST /projects/:id/roadmap/import`.
 
 **Flow:**
 
-1. API reads `ROADMAP.md` from the project root
-2. Agent SDK (haiku model) converts markdown milestones into structured JSON
-3. Response is validated via zod schema
-4. Tasks are created in batch with deduplication (by `projectId + normalizedTitle + roadmapAlias`)
-5. Each task receives automatic tags: `roadmap`, `rm:<alias>`, `phase:<N>`, `phase:<name>`, `seq:<NN>`
-6. WebSocket broadcasts `task:created` per task and `agent:wake` after batch
+1. API reads `ROADMAP.md` from the project root.
+2. Runtime generation converts markdown milestones into a structured task hierarchy proposal.
+3. Response is validated with zod and persisted as a `task_split_proposals` row.
+4. API returns `status: "split_required"` and broadcasts `roadmap:split_required`.
+5. A human approves or rejects the proposal through the split proposal routes.
+6. Approval creates the container and child backlog tasks, emits `task:created` events, and does not wake the agent automatically.
 
-**Deduplication:** Re-running import with the same alias is safe — existing tasks with matching titles are skipped. This makes the endpoint idempotent for reruns.
+**Compatibility:** Reusing a roadmap alias is rejected with `ROADMAP_ALIAS_EXISTS` unless it maps to the same pending proposal. A pending proposal with changed source content returns `TASK_SPLIT_PROPOSAL_SOURCE_CONFLICT`; reject it or use a different alias before creating a replacement.
 
 **Tag taxonomy:** Tags enable UI filtering. The `roadmap` quick filter in the Board shows only roadmap-generated tasks. When the roadmap filter is active, a sub-filter row displays all available `roadmapAlias` values (e.g., `v1.0`, `v2.0`) as clickable chips, allowing users to narrow results to a specific roadmap. Selecting no alias shows all roadmap tasks; selecting one or more aliases filters to only those. Tags like `phase:backend` allow additional grouping refinements.
 
@@ -293,14 +314,21 @@ The system supports bulk task creation from a project's `.ai-factory/ROADMAP.md`
 
 The API broadcasts events via WebSocket (`/ws` endpoint) on every state change:
 
-| Event                           | Trigger                                             |
-| ------------------------------- | --------------------------------------------------- |
-| `task:created`                  | New task created                                    |
-| `task:updated`                  | Task fields updated                                 |
-| `task:moved`                    | Task status changed via state machine               |
-| `task:deleted`                  | Task deleted                                        |
-| `agent:wake`                    | Coordinator should check for work                   |
-| `project:runtime_limit_updated` | Runtime-profile limit snapshot persisted or cleared |
+| Event                                | Trigger                                             |
+| ------------------------------------ | --------------------------------------------------- |
+| `task:created`                       | New task created                                    |
+| `task:updated`                       | Task fields updated                                 |
+| `task:moved`                         | Task status changed via state machine               |
+| `task:deleted`                       | Task deleted                                        |
+| `task:questions_created`             | Requirements question batch opened                  |
+| `task:question_answered`             | Single requirements question answered               |
+| `task:question_batch_answered`       | Requirements question batch answered                |
+| `task:needs_input`                   | Task moved into human-input hold                    |
+| `task:requirements_snapshot_created` | First requirements snapshot persisted               |
+| `task:requirements_snapshot_updated` | Later requirements snapshot persisted               |
+| `roadmap:split_required`             | Roadmap split proposal requires approval            |
+| `agent:wake`                         | Coordinator should check for work                   |
+| `project:runtime_limit_updated`      | Runtime-profile limit snapshot persisted or cleared |
 
 The web UI connects via `useWebSocket` hook and invalidates React Query caches on incoming events. The agent coordinator also subscribes to this WebSocket to receive wake signals for immediate task processing (see Agent Pipeline above).
 
@@ -317,9 +345,13 @@ SQLite via `better-sqlite3` with `drizzle-orm` for type-safe queries. Schema is 
 
 Key tables:
 
-- **tasks** — task data, status, plan/logs, heartbeat metadata, runtime override fields (`runtime_profile_id`, `model_override`, `runtime_options_json`), runtime session id (`session_id`), auto-review convergence state (`manual_review_required`, `auto_review_state_json`), and task-level runtime-limit copy (`runtime_limit_snapshot_json`, `runtime_limit_updated_at`)
+- **tasks** — task data, status, plan/logs, heartbeat metadata, runtime override fields (`runtime_profile_id`, `model_override`, `runtime_options_json`), runtime session id (`session_id`), requirements pointers (`requirements_snapshot_id`, `needs_input_*`, `requirements_cycle_count`, `requirements_confidence`, `last_human_answer_at`, `last_auto_resume_at`), hierarchy fields, auto-review convergence state (`manual_review_required`, `auto_review_state_json`), and task-level runtime-limit copy (`runtime_limit_snapshot_json`, `runtime_limit_updated_at`)
 - **runtime_profiles** — project-scoped or global runtime/provider profiles with non-secret transport/model config plus authoritative runtime-limit state (`runtime_limit_snapshot_json`, `runtime_limit_updated_at`)
 - **projects** — project metadata plus default runtime profile ids for tasks and chat
+- **task_requirement_questions** — requirements clarification questions, answer metadata, batch ids, resume target, and redaction-safe status fields
+- **task_requirements_snapshots** — versioned redacted requirements snapshots used by later stages
+- **task_stage_artifacts / task_stage_artifact_attempts** — current and immutable stage artifacts for requirements, research, design, QA, and acceptance
+- **task_split_proposals** — pending/approved/rejected roadmap hierarchy proposals before child tasks are created
 - **chat_sessions / chat_messages** — persisted chat state with runtime profile/session linkage
 - **codex_sessions** — indexed Codex session metadata keyed by runtime session id and source file state
 - **codex_limit_heads / codex_limit_history** — latest and recent normalized Codex limit snapshots keyed by account fingerprint/project scope/limit id

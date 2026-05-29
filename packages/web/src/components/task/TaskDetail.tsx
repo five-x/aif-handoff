@@ -273,6 +273,55 @@ function ArtifactsView({ timeline }: { timeline?: WorkflowTimeline | null }) {
   );
 }
 
+function AcceptanceView({ task }: { task: Task }) {
+  const pack = task.acceptancePack;
+  if (!pack) {
+    return (
+      <div className="text-sm text-muted-foreground">
+        No acceptance pack has been recorded for this task.
+      </div>
+    );
+  }
+  const rows: Array<[string, ReactNode]> = [
+    ["Readiness", `${pack.readiness.ready ? "Ready" : "Not ready"}: ${pack.readiness.reason}`],
+    ["Generated", new Date(pack.generatedAt).toLocaleString()],
+    ["Review", pack.reviewResult],
+    ["QA", pack.qaResult],
+    ["QA artifact", pack.qaArtifactId ?? "None"],
+  ];
+  const renderList = (items: string[]) =>
+    items.length > 0 ? (
+      <ul className="list-disc space-y-1 pl-4">
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    ) : (
+      <span>None</span>
+    );
+  return (
+    <div className="space-y-3 text-xs">
+      <DetailRows rows={rows} />
+      <div className="border border-border/70 bg-muted/20 p-3">
+        <div className="mb-2 font-semibold text-foreground">Covered requirements</div>
+        {renderList(pack.coveredRequirements)}
+      </div>
+      <div className="border border-border/70 bg-muted/20 p-3">
+        <div className="mb-2 font-semibold text-foreground">Changed files</div>
+        {renderList(pack.changedFiles)}
+      </div>
+      <div className="border border-border/70 bg-muted/20 p-3">
+        <div className="mb-2 font-semibold text-foreground">Limitations</div>
+        {renderList(pack.limitations)}
+      </div>
+      <div className="border border-border/70 bg-muted/20 p-3">
+        <div className="mb-2 font-semibold text-foreground">Rollback notes</div>
+        {renderList(pack.rollbackNotes)}
+      </div>
+    </div>
+  );
+}
+
 function MemoryView({
   taskMemory,
   projectKnowledge,
@@ -511,6 +560,23 @@ function OverviewView({
           {trust.summary}
         </div>
       )}
+      {task.acceptancePack && (
+        <div className="border border-border/70 bg-muted/20 p-3 text-xs">
+          <div className="mb-2 font-semibold text-foreground">Acceptance readiness</div>
+          <DetailRows
+            rows={[
+              [
+                "Readiness",
+                `${task.acceptancePack.readiness.ready ? "Ready" : "Not ready"}: ${
+                  task.acceptancePack.readiness.reason
+                }`,
+              ],
+              ["QA", task.acceptancePack.qaResult],
+              ["Review", task.acceptancePack.reviewResult],
+            ]}
+          />
+        </div>
+      )}
       {(task.children?.length ?? 0) > 0 && (
         <div className="space-y-2 border border-border/70 bg-muted/20 p-3 text-xs">
           <div className="font-semibold text-foreground">Direct children</div>
@@ -607,6 +673,9 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
   const actions = useTaskDetailActions(task, onClose);
   const defaultTab: TaskDetailTab = (() => {
     if (!task) return "overview";
+    if (task.status === "done" || task.status === "verified" || task.status === "qa") {
+      return "acceptance";
+    }
     if (task.status === "review") return "review";
     if (task.implementationLog?.trim()) return "implementation";
     if (task.agentActivityLog?.trim()) return "activity";
@@ -769,6 +838,11 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
                   {activeTab === "review" && (
                     <Section title="Review Comments">
                       <TaskLog log={task.reviewComments} label="Review comments" />
+                    </Section>
+                  )}
+                  {activeTab === "acceptance" && (
+                    <Section title="Acceptance Pack">
+                      <AcceptanceView task={task} />
                     </Section>
                   )}
                   {activeTab === "comments" && (

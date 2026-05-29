@@ -40,6 +40,9 @@ import type {
   TaskRequirementQuestionsResponse,
   TaskRequirementQuestionAnswerInput,
   TaskRequirementQuestionBatchAnswerInput,
+  TaskRequirementsSnapshotResponse,
+  TaskSplitProposal,
+  TaskSplitProposalResponse,
 } from "@aif/shared/browser";
 
 export type {
@@ -55,6 +58,8 @@ export type {
   TaskRequirementQuestionsResponse,
   TaskRequirementQuestionAnswerInput,
   TaskRequirementQuestionBatchAnswerInput,
+  TaskSplitProposal,
+  TaskSplitProposalResponse,
 } from "@aif/shared/browser";
 
 export class ApiError extends Error {
@@ -742,6 +747,11 @@ export const api = {
     return request<TaskRequirementQuestionsResponse>(`${API_BASE}/${id}/questions`);
   },
 
+  getTaskRequirementsSnapshot(id: string): Promise<TaskRequirementsSnapshotResponse> {
+    console.debug("[api] GET /tasks/%s/requirements/snapshot", id);
+    return request<TaskRequirementsSnapshotResponse>(`${API_BASE}/${id}/requirements/snapshot`);
+  },
+
   answerTaskQuestion(
     id: string,
     questionId: string,
@@ -900,14 +910,7 @@ export const api = {
     projectId: string,
     roadmapAlias: string,
     taskIntent?: TaskIntent,
-  ): Promise<{
-    roadmapAlias: string;
-    created: number;
-    skipped: number;
-    taskIds: string[];
-    containerTaskId?: string;
-    byPhase: Record<number, { created: number; skipped: number }>;
-  }> {
+  ): Promise<TaskSplitProposalResponse> {
     console.debug("[api] POST /projects/%s/roadmap/import", projectId, {
       roadmapAlias,
       taskIntent,
@@ -936,6 +939,25 @@ export const api = {
     return request(`/projects/${projectId}/roadmap/generate`, {
       method: "POST",
       body: JSON.stringify({ roadmapAlias, vision, taskIntent }),
+    });
+  },
+
+  approveTaskSplitProposal(projectId: string, proposalId: string): Promise<TaskSplitProposal> {
+    console.debug("[api] POST /projects/%s/task-split-proposals/%s/approve", projectId, proposalId);
+    return request(`/projects/${projectId}/task-split-proposals/${proposalId}/approve`, {
+      method: "POST",
+    });
+  },
+
+  rejectTaskSplitProposal(
+    projectId: string,
+    proposalId: string,
+    reason?: string,
+  ): Promise<TaskSplitProposal> {
+    console.debug("[api] POST /projects/%s/task-split-proposals/%s/reject", projectId, proposalId);
+    return request(`/projects/${projectId}/task-split-proposals/${proposalId}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
     });
   },
 

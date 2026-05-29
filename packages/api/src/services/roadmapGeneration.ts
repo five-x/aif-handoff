@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, isAbsolute, relative } from "node:path";
 import { z } from "zod";
@@ -34,8 +35,12 @@ import {
   classifyAuditDecompositionRequest,
   type AuditDecompositionClassification,
   type TaskIntent,
+  type TaskSplitProposal,
+  type TaskSplitProposedChild,
 } from "@aif/shared";
 import {
+  approveTaskSplitProposal,
+  createOrReusePendingTaskSplitProposal,
   createTask,
   findRoadmapBatchByProjectAlias,
   findProjectById,
@@ -44,6 +49,8 @@ import {
   listTasks,
   createRoadmapBatchContract,
   setTaskFields,
+  type CreateTaskSplitProposalResult,
+  type ApproveTaskSplitProposalResult,
   type RoadmapBatchExecutionPolicy,
   type RoadmapBatchSummary,
   type TaskRow,
@@ -86,6 +93,14 @@ export interface RoadmapGenerationResult {
   alias: string;
   taskIntent?: TaskIntent;
   tasks: GeneratedTask[];
+}
+
+export type SplitProposalSourceKind = "roadmap_import" | "roadmap_generation";
+
+export interface RoadmapSplitProposalResult {
+  status: "split_required";
+  projectId: string;
+  proposal: TaskSplitProposal;
 }
 
 type IndexedGeneratedTask = {
@@ -161,6 +176,11 @@ type RoadmapImportTaskOverrides = {
   paused?: boolean;
   blockedReason?: string | null;
 };
+
+export interface ImportGeneratedTasksOptions {
+  createHierarchyParent?: boolean;
+  pauseCreatedTasks?: boolean;
+}
 
 type RoadmapWorkflowHooks = {
   assertIntentMatchesRequest?: (
@@ -2312,6 +2332,147 @@ export function buildTaskTags(alias: string, task: GeneratedTask): string[] {
   return tags;
 }
 
+function canonicalizeForFingerprint(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalizeForFingerprint).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+    return `{${entries
+      .map(
+        ([key, entryValue]) => `${JSON.stringify(key)}:${canonicalizeForFingerprint(entryValue)}`,
+      )
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function normalizeSourceContentForFingerprint(content: string): string {
+  return content.replace(/\r\n/g, "\n").trim();
+}
+
+export function computeRoadmapSplitProposalFingerprint(input: {
+  sourceContent: string;
+  roadmapAlias: string;
+  taskIntent: TaskIntent;
+  tasks: GeneratedTask[];
+}): string {
+  const canonical = canonicalizeForFingerprint({
+    sourceContent: normalizeSourceContentForFingerprint(input.sourceContent),
+    roadmapAlias: input.roadmapAlias.trim(),
+    taskIntent: input.taskIntent,
+    tasks: input.tasks.map((task) => ({
+      title: task.title.trim(),
+      description: task.description ?? "",
+      taskIntent: task.taskIntent ?? input.taskIntent,
+      phase: task.phase,
+      phaseName: task.phaseName ?? "",
+      sequence: task.sequence,
+    })),
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+function toProposedChildren(generation: RoadmapGenerationResult): TaskSplitProposedChild[] {
+  const taskIntent = generation.taskIntent ?? "general";
+  return generation.tasks.map((task) => ({
+    title: task.title,
+    description: task.description,
+    taskIntent: task.taskIntent ?? taskIntent,
+    phase: task.phase,
+    phaseName: task.phaseName,
+    sequence: task.sequence,
+    tags: [...buildTaskTags(generation.alias, task), `kind:${task.taskIntent ?? taskIntent}`],
+  }));
+}
+
+function generationFromProposal(proposal: TaskSplitProposal): RoadmapGenerationResult {
+  return {
+    alias: proposal.roadmapAlias,
+    taskIntent: proposal.taskIntent,
+    tasks: proposal.proposedChildren.map((child) => ({
+      title: child.title,
+      description: child.description,
+      taskIntent: child.taskIntent ?? proposal.taskIntent,
+      phase: child.phase,
+      phaseName: child.phaseName,
+      sequence: child.sequence,
+    })),
+  };
+}
+
+export function getRoadmapSourceContent(projectId: string): {
+  content: string;
+  sourceRef: string;
+} {
+  const project = findProjectById(projectId);
+  if (!project) {
+    throw new RoadmapGenerationError("PROJECT_NOT_FOUND", `Project ${projectId} not found`);
+  }
+  const cfg = getProjectConfig(project.rootPath);
+  const roadmapPath = join(project.rootPath, cfg.paths.roadmap);
+  if (!existsSync(roadmapPath)) {
+    throw new RoadmapGenerationError(
+      "ROADMAP_NOT_FOUND",
+      `Roadmap file not found at ${roadmapPath}`,
+    );
+  }
+  return {
+    content: readFileSync(roadmapPath, "utf8"),
+    sourceRef: `roadmap-import:${cfg.paths.roadmap}`,
+  };
+}
+
+export function createRoadmapSplitProposal(input: {
+  projectId: string;
+  sourceKind: SplitProposalSourceKind;
+  sourceRef: string;
+  sourceContent: string;
+  generation: RoadmapGenerationResult;
+}): CreateTaskSplitProposalResult {
+  const taskIntent = input.generation.taskIntent ?? "general";
+  const sourceFingerprint = computeRoadmapSplitProposalFingerprint({
+    sourceContent: input.sourceContent,
+    roadmapAlias: input.generation.alias,
+    taskIntent,
+    tasks: input.generation.tasks,
+  });
+  return createOrReusePendingTaskSplitProposal({
+    projectId: input.projectId,
+    sourceKind: input.sourceKind,
+    sourceRef: input.sourceRef,
+    sourceFingerprint,
+    roadmapAlias: input.generation.alias,
+    taskIntent,
+    summary: `Split required for ${input.generation.tasks.length} proposed roadmap task(s).`,
+    proposedChildren: toProposedChildren(input.generation),
+  });
+}
+
+export function approveRoadmapSplitProposal(input: {
+  projectId: string;
+  proposalId: string;
+  approvedBy?: string | null;
+}): ApproveTaskSplitProposalResult {
+  return approveTaskSplitProposal({
+    projectId: input.projectId,
+    proposalId: input.proposalId,
+    approvedBy: input.approvedBy ?? null,
+    createTasks: (proposal) => {
+      const result = importGeneratedTasks(input.projectId, generationFromProposal(proposal), {
+        createHierarchyParent: true,
+        pauseCreatedTasks: true,
+      });
+      return {
+        taskIds: result.taskIds,
+        containerTaskId: result.containerTaskId ?? null,
+      };
+    },
+  });
+}
+
 function normalizeTitle(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -2358,6 +2519,51 @@ function createOrReuseAuditHierarchyParent(input: {
   });
 }
 
+function roadmapHierarchyParentTitle(alias: string): string {
+  return `Roadmap: ${alias}`;
+}
+
+function isRoadmapHierarchyParentTask(
+  task: TaskRow,
+  alias: string,
+  taskIntent: TaskIntent,
+): boolean {
+  const tags = parseStoredTags(task.tags);
+  return (
+    task.roadmapAlias === alias &&
+    task.taskIntent === taskIntent &&
+    task.hierarchyRole === "container" &&
+    tags.includes("roadmap-parent")
+  );
+}
+
+function createOrReuseRoadmapHierarchyParent(input: {
+  alias: string;
+  projectId: string;
+  taskIntent: TaskIntent;
+  existingTasks: TaskRow[];
+  position: number;
+}): TaskRow | undefined {
+  const existingParent = input.existingTasks.find((task) =>
+    isRoadmapHierarchyParentTask(task, input.alias, input.taskIntent),
+  );
+  if (existingParent) return existingParent;
+
+  return createTask({
+    projectId: input.projectId,
+    title: roadmapHierarchyParentTitle(input.alias),
+    description: `Coordination container for roadmap ${input.alias}.`,
+    taskIntent: input.taskIntent,
+    roadmapAlias: input.alias,
+    tags: ["roadmap", `rm:${input.alias}`, "roadmap-parent", `kind:${input.taskIntent}`],
+    autoMode: false,
+    paused: true,
+    hierarchyRole: "container",
+    parentCloseoutPolicy: "all_children_done",
+    position: input.position,
+  });
+}
+
 // -- Dedupe + batch creation --
 
 export interface ImportResult {
@@ -2377,6 +2583,7 @@ export interface ImportResult {
 export function importGeneratedTasks(
   projectId: string,
   generation: RoadmapGenerationResult,
+  options: ImportGeneratedTasksOptions = {},
 ): ImportResult {
   const { alias, tasks: generatedTasks } = generation;
   const importIntent: TaskIntent = generation.taskIntent ?? "general";
@@ -2472,10 +2679,21 @@ export function importGeneratedTasks(
           position: importPositionStart - 100,
         })
       : undefined;
-  if (auditHierarchyParent) {
-    result.containerTaskId = auditHierarchyParent.id;
-    if (auditHierarchyParent.planPath && auditHierarchyParent.planPath !== cfg.paths.plan) {
-      usedPlanPaths.add(auditHierarchyParent.planPath);
+  const roadmapHierarchyParent =
+    importIntent !== "audit" && options.createHierarchyParent
+      ? createOrReuseRoadmapHierarchyParent({
+          alias,
+          projectId,
+          taskIntent: importIntent,
+          existingTasks: existing,
+          position: importPositionStart - 100,
+        })
+      : undefined;
+  const hierarchyParent = auditHierarchyParent ?? roadmapHierarchyParent;
+  if (hierarchyParent) {
+    result.containerTaskId = hierarchyParent.id;
+    if (hierarchyParent.planPath && hierarchyParent.planPath !== cfg.paths.plan) {
+      usedPlanPaths.add(hierarchyParent.planPath);
     }
   } else if (importIntent === "audit") {
     throw new RoadmapGenerationError(
@@ -2550,8 +2768,8 @@ export function importGeneratedTasks(
       useSubagents:
         importOverrides.useSubagents ?? (taskIntent === "spike" ? true : defaults.useSubagents),
       position: importPositionStart + createdPositionIndex * 100,
-      paused: importOverrides.paused ?? false,
-      parentTaskId: auditHierarchyParent?.id ?? null,
+      paused: options.pauseCreatedTasks ? true : (importOverrides.paused ?? false),
+      parentTaskId: hierarchyParent?.id ?? null,
     });
 
     if (created) {

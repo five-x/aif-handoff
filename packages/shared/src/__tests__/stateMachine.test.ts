@@ -51,6 +51,7 @@ function makeTask(status: Task["status"]): Task {
     modelOverride: null,
     runtimeOptions: null,
     sessionId: null,
+    acceptancePack: null,
     scheduledAt: null,
     branchName: null,
     worktreePath: null,
@@ -78,6 +79,16 @@ describe("task state machine", () => {
     }
   });
 
+  it("keeps start_ai default behavior routed directly to planning", () => {
+    const result = applyHumanTaskEvent(makeTask("backlog"), "start_ai", {
+      requirementsIntakeEnabled: false,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("planning");
+    }
+  });
+
   it("rejects requirements reanalysis from active implementation and verified statuses", () => {
     const implementing = applyHumanTaskEvent(
       makeTask("implementing"),
@@ -95,6 +106,11 @@ describe("task state machine", () => {
 
   it("rejects start_ai from non-backlog statuses", () => {
     const result = applyHumanTaskEvent(makeTask("done"), "start_ai");
+    expect(result.ok).toBe(false);
+  });
+
+  it("has no human action from qa", () => {
+    const result = applyHumanTaskEvent(makeTask("qa"), "approve_done");
     expect(result.ok).toBe(false);
   });
 

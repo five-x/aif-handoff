@@ -10,6 +10,7 @@ import type {
   CreateTaskCommentInput,
   TaskRequirementQuestionsResponse,
   TaskRequirementQuestionBatchAnswerInput,
+  TaskRequirementsSnapshotResponse,
 } from "@aif/shared/browser";
 import { api } from "../lib/api.js";
 
@@ -65,6 +66,14 @@ export function useTaskQuestions(id: string | null, enabled = true) {
   return useQuery<TaskRequirementQuestionsResponse>({
     queryKey: ["task-questions", id],
     queryFn: () => api.getTaskQuestions(id!),
+    enabled: !!id && enabled,
+  });
+}
+
+export function useTaskRequirementsSnapshot(id: string | null, enabled = true) {
+  return useQuery<TaskRequirementsSnapshotResponse>({
+    queryKey: ["task-requirements-snapshot", id],
+    queryFn: () => api.getTaskRequirementsSnapshot(id!),
     enabled: !!id && enabled,
   });
 }

@@ -76,6 +76,7 @@ vi.mock("../services/runtime.js", () => ({
       listRuntimes: vi.fn(() => []),
     }),
   ),
+  resolveApiLightModel: vi.fn(async () => "claude-haiku-3-5"),
   resolveApiWarmupSupport: (...args: unknown[]) => mockResolveApiWarmupSupport(...args),
   resolveApiWarmupSupports: (...args: unknown[]) => mockResolveApiWarmupSupports(...args),
   runApiRuntimeOneShot: (...args: unknown[]) => mockRunApiRuntimeOneShot(...args),
@@ -91,6 +92,7 @@ vi.mock("../ws.js", () => ({
 }));
 
 const { projectsRouter } = await import("../routes/projects.js");
+const { findTaskById, findTasksByRoadmapAlias } = await import("@aif/data");
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
 function createApp() {
@@ -109,6 +111,28 @@ function createRoadmapProject(id: string, roadmapContent?: string) {
   }
   testDb.current.insert(projects).values({ id, name: "Roadmap Project", rootPath }).run();
   return rootPath;
+}
+
+function mockRoadmapExtraction(roadmapAlias: string) {
+  mockRunApiRuntimeOneShot.mockResolvedValueOnce({
+    result: {
+      outputText: JSON.stringify({
+        alias: roadmapAlias,
+        tasks: [
+          {
+            title: "Build split child",
+            description: "Implement the proposed roadmap child.",
+            phase: 1,
+            phaseName: "Phase 1",
+            sequence: 1,
+          },
+        ],
+      }),
+      sessionId: "roadmap-extract-session",
+      usage: null,
+    },
+    context: {},
+  });
 }
 
 function writeBlockingProjectConfig(rootPath: string) {
@@ -602,6 +626,78 @@ describe("projects API", () => {
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe("ROADMAP_INTENT_MISMATCH");
       expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    });
+
+    it("imports roadmap tasks as a split proposal and approval creates paused hierarchy without wake", async () => {
+      createRoadmapProject("roadmap-split-import", "# Roadmap\n- [ ] Build split child\n");
+      mockRoadmapExtraction("split-v1");
+
+      const importRes = await app.request("/projects/roadmap-split-import/roadmap/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "split-v1" }),
+      });
+
+      expect(importRes.status).toBe(201);
+      const importBody = await importRes.json();
+      expect(importBody).toMatchObject({
+        status: "split_required",
+        projectId: "roadmap-split-import",
+        proposal: {
+          roadmapAlias: "split-v1",
+          status: "pending",
+          proposedChildren: [expect.objectContaining({ title: "Build split child" })],
+        },
+      });
+      expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(0);
+      expect(mockBroadcast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "roadmap:split_required",
+          payload: expect.objectContaining({ roadmapAlias: "split-v1" }),
+        }),
+      );
+      expect(mockBroadcast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "task:created" }),
+      );
+      expect(mockBroadcast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "agent:wake" }),
+      );
+
+      mockBroadcast.mockClear();
+      const approveRes = await app.request(
+        `/projects/roadmap-split-import/task-split-proposals/${importBody.proposal.id}/approve`,
+        { method: "POST" },
+      );
+
+      expect(approveRes.status).toBe(201);
+      const approved = await approveRes.json();
+      expect(approved.status).toBe("approved");
+      expect(approved.containerTaskId).toBeTruthy();
+      expect(approved.createdTaskIds).toEqual(expect.arrayContaining([approved.containerTaskId]));
+
+      const stored = findTasksByRoadmapAlias("roadmap-split-import", "split-v1");
+      expect(stored).toHaveLength(2);
+      const parent = findTaskById(approved.containerTaskId)!;
+      const childId = approved.createdTaskIds.find(
+        (taskId: string) => taskId !== approved.containerTaskId,
+      );
+      expect(childId).toBeTruthy();
+      const child = findTaskById(childId)!;
+      expect(parent.hierarchyRole).toBe("container");
+      expect(parent.paused).toBe(true);
+      expect(child.parentTaskId).toBe(parent.id);
+      expect(child.paused).toBe(true);
+      expect(mockBroadcast).toHaveBeenCalledWith(expect.objectContaining({ type: "task:created" }));
+      expect(mockBroadcast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "agent:wake" }),
+      );
+
+      const duplicateApprove = await app.request(
+        `/projects/roadmap-split-import/task-split-proposals/${importBody.proposal.id}/approve`,
+        { method: "POST" },
+      );
+      expect(duplicateApprove.status).toBe(200);
+      expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(2);
     });
 
     it("keeps audit-logging generate requests generic when vision asks to add audit logging", async () => {

@@ -4,6 +4,7 @@ import {
   projects,
   resetEnvCache,
   taskComments,
+  taskRequirementQuestions,
   tasks,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
@@ -31,7 +32,11 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 const { runPlanner } = await import("../subagents/planner.js");
-const { createRoadmapBatchContract } = await import("@aif/data");
+const {
+  createCurrentRequirementsSnapshot,
+  createRoadmapBatchContract,
+  recordTaskStageArtifactAttempt,
+} = await import("@aif/data");
 
 function streamSuccess(result: string): AsyncIterable<{
   type: "result";
@@ -181,6 +186,92 @@ describe("runPlanner comment selection", () => {
     expect(call.prompt).toContain("acceptanceCriteria");
     expect(call.prompt).toContain("verificationCommands");
     expect(call.prompt).toContain("must not convert audit, spike, docs, or tests tasks");
+  });
+
+  it("includes requirements snapshot markdown in planner prompts", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-requirements-prompt",
+        projectId: "project-1",
+        title: "Requirements prompt",
+        description: "Use the captured requirement.",
+        status: "planning",
+        useSubagents: true,
+      })
+      .run();
+    db.insert(taskRequirementQuestions)
+      .values({
+        id: "q-requirements-prompt",
+        taskId: "task-requirements-prompt",
+        projectId: "project-1",
+        stage: "requirements_analysis",
+        targetResumeStage: "requirements_analysis",
+        cycleNumber: 1,
+        batchId: "batch-requirements-prompt",
+        question: "Who is the primary user?",
+        whyNeeded: "The implementation must know the actor.",
+        status: "answered",
+        answer: "Administrators",
+        answerAuthor: "human",
+        answeredAt: "2026-05-28T00:00:00.000Z",
+      })
+      .run();
+    createCurrentRequirementsSnapshot("task-requirements-prompt");
+
+    await runPlanner("task-requirements-prompt", "/tmp/planner-test");
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("# Task Requirements Context");
+    expect(call.prompt).toContain("Answer: Administrators");
+    expect(call.prompt).not.toContain("[object Object]");
+  });
+
+  it("includes accepted research and design artifact bodies in planner prompts", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-stage-artifact-prompt",
+        projectId: "project-1",
+        title: "Stage artifact prompt",
+        description: "Use the accepted stage artifacts.",
+        status: "planning",
+        useSubagents: true,
+      })
+      .run();
+    const snapshot = createCurrentRequirementsSnapshot("task-stage-artifact-prompt");
+    const researchAttempt = recordTaskStageArtifactAttempt({
+      taskId: "task-stage-artifact-prompt",
+      stage: "research",
+      kind: "research",
+      label: "Research artifact",
+      path: "research.md",
+      state: "accepted",
+      summary: "Research summary.",
+      markdown: "# Research\n\nPlanner-only research fact: offline mode is mandatory.",
+      sourceSnapshotId: snapshot.id,
+    });
+    recordTaskStageArtifactAttempt({
+      taskId: "task-stage-artifact-prompt",
+      stage: "design",
+      kind: "design",
+      label: "Design artifact",
+      path: "design.md",
+      state: "accepted",
+      summary: "Design summary.",
+      markdown: "# Design\n\nPlanner-only design decision: use local queue persistence.",
+      sourceSnapshotId: snapshot.id,
+      metadata: {
+        sourceResearchArtifactId: researchAttempt.artifactId,
+        sourceResearchAttemptNumber: researchAttempt.attemptNumber,
+      },
+    });
+
+    await runPlanner("task-stage-artifact-prompt", "/tmp/planner-test");
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("Planner-only research fact: offline mode is mandatory.");
+    expect(call.prompt).toContain("Planner-only design decision: use local queue persistence.");
   });
 
   it("normalizes json-fenced aif-plan-manifest output before persisting planner results", async () => {

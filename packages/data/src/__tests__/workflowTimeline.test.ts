@@ -23,6 +23,8 @@ const {
   buildTaskWorkflowTimeline,
   createMemoryItem,
   createRoadmapBatchContract,
+  getTaskRequirementsSnapshotResponse,
+  recordTaskStageArtifactAttempt,
   updateRoadmapBatchArtifactState,
 } = await import("../index.js");
 
@@ -328,6 +330,136 @@ describe("workflow timeline read model", () => {
         "claim_evaluated",
         "evidence_recorded",
       ]),
+    );
+  });
+
+  it("projects task stage artifacts and attempts into non-audit timelines", () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-stage-artifacts",
+        projectId: "proj-1",
+        title: "Stage artifact task",
+        taskIntent: "feature",
+        status: "planning",
+      })
+      .run();
+
+    const first = recordTaskStageArtifactAttempt({
+      taskId: "task-stage-artifacts",
+      stage: "research",
+      kind: "research",
+      label: "Research notes",
+      path: "research.md",
+      state: "accepted",
+      summary: "Initial research accepted.",
+      markdown: "# Research\n\nAccepted.",
+      metadata: { source: "test" },
+    });
+    const second = recordTaskStageArtifactAttempt({
+      taskId: "task-stage-artifacts",
+      stage: "research",
+      kind: "research",
+      label: "Research notes",
+      path: "research.md",
+      state: "rejected",
+      summary: "Research was superseded.",
+      markdown: "# Research\n\nSuperseded.",
+    });
+
+    const timeline = buildTaskWorkflowTimeline("task-stage-artifacts");
+    const artifact = timeline?.artifacts.find((entry) => entry.kind === "research");
+
+    expect(first.attemptNumber).toBe(1);
+    expect(second.attemptNumber).toBe(2);
+    expect(artifact).toEqual(
+      expect.objectContaining({
+        path: "research.md",
+        state: "rejected",
+        currentAttemptNumber: 2,
+      }),
+    );
+    expect(timeline?.attempts.filter((attempt) => attempt.artifactId === artifact?.id)).toHaveLength(
+      2,
+    );
+    expect(timeline?.claims).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artifactId: artifact?.id,
+          attemptId: second.id,
+          outcome: "refuted",
+        }),
+      ]),
+    );
+    expect(timeline?.events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining(["artifact_created", "attempt_recorded", "claim_evaluated"]),
+    );
+  });
+
+  it("allows a later task stage artifact attempt to clear nullable current fields", () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-stage-artifact-clear",
+        projectId: "proj-1",
+        title: "Clear stage artifact fields",
+        taskIntent: "feature",
+        status: "planning",
+      })
+      .run();
+
+    recordTaskStageArtifactAttempt({
+      taskId: "task-stage-artifact-clear",
+      stage: "research",
+      kind: "research",
+      label: "Research notes",
+      path: "research.md",
+      state: "accepted",
+      summary: "Initial research accepted.",
+      markdown: "# Research\n\nAccepted.",
+      sourceSnapshotId: "snapshot-1",
+      metadata: { source: "test" },
+    });
+    const second = recordTaskStageArtifactAttempt({
+      taskId: "task-stage-artifact-clear",
+      stage: "research",
+      kind: "research",
+      label: "Research notes",
+      path: null,
+      state: "missing",
+      summary: "Research artifact is no longer present.",
+      markdown: null,
+      sourceSnapshotId: null,
+    });
+
+    const response = getTaskRequirementsSnapshotResponse("task-stage-artifact-clear");
+    const current = response?.stageArtifacts.find((artifact) => artifact.kind === "research");
+    const timeline = buildTaskWorkflowTimeline("task-stage-artifact-clear");
+    const timelineArtifact = timeline?.artifacts.find((artifact) => artifact.kind === "research");
+
+    expect(second.attemptNumber).toBe(2);
+    expect(current).toEqual(
+      expect.objectContaining({
+        path: null,
+        state: "missing",
+        markdown: null,
+        sourceSnapshotId: null,
+        currentAttemptNumber: 2,
+        metadata: { source: "test" },
+      }),
+    );
+    expect(timelineArtifact).toEqual(
+      expect.objectContaining({
+        path: null,
+        state: "missing",
+        currentAttemptNumber: 2,
+      }),
+    );
+    expect(timelineArtifact?.metadata).toEqual(
+      expect.objectContaining({
+        sourceSnapshotId: null,
+        source: "test",
+      }),
     );
   });
 

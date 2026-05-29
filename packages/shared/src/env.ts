@@ -185,6 +185,26 @@ const envSchema = z.object({
       return value;
     }, z.boolean())
     .default(false),
+  AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED: z
+    .preprocess((value) => {
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (BOOLEAN_TRUE_VALUES.has(normalized)) return true;
+        if (BOOLEAN_FALSE_VALUES.has(normalized)) return false;
+      }
+      return value;
+    }, z.boolean())
+    .default(false),
+  AIF_REQUIREMENTS_QA_ENABLED: z
+    .preprocess((value) => {
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (BOOLEAN_TRUE_VALUES.has(normalized)) return true;
+        if (BOOLEAN_FALSE_VALUES.has(normalized)) return false;
+      }
+      return value;
+    }, z.boolean())
+    .default(false),
   AIF_REQUIREMENTS_MAX_QUESTIONS_PER_CYCLE: z.coerce.number().int().min(1).max(20).default(7),
   AIF_REQUIREMENTS_MAX_CYCLES: z.coerce.number().int().min(1).max(20).default(5),
   AIF_REQUIREMENTS_AUTO_RESUME_ON_ANSWER: z

@@ -23,6 +23,7 @@ export type TaskDetailTab =
   | "plan"
   | "implementation"
   | "review"
+  | "acceptance"
   | "timeline"
   | "evidence"
   | "artifacts"
@@ -384,6 +385,7 @@ export function TaskDetailHeader({
           { value: "plan", label: "Plan" },
           { value: "implementation", label: "Implementation" },
           { value: "review", label: "Review" },
+          { value: "acceptance", label: "Acceptance" },
           { value: "timeline", label: "Timeline" },
           { value: "evidence", label: "Evidence" },
           { value: "artifacts", label: "Artifacts" },

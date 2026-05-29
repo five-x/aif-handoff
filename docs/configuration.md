@@ -313,6 +313,53 @@ The coordinator includes a stale-stage watchdog:
 - For stale `implementing` tasks, recovery resumes from `plan_ready` to avoid half-broken implementation continuation.
 - Any valid human/stage transition resets stale-retry debt (`retryCount=0`) and refreshes heartbeat baseline.
 
+## Requirements Lifecycle Flags
+
+The requirements lifecycle is controlled by additive flags. The default profile keeps the Phase 1 agent path compatible while allowing the intake slice to be rolled out separately from research/design and QA.
+
+| Variable                                     | Default | Description                                                                                                                                                                      |
+| -------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AIF_REQUIREMENTS_INTAKE_ENABLED`            | `true`  | Routes `start_ai` through `requirements_analysis`, enables question/snapshot routes, and allows requirements reanalysis. Set to `false` for the legacy backlog -> planning path. |
+| `AIF_REQUIREMENTS_INTAKE_FOR_EXISTING_TASKS` | `false` | Allows existing non-backlog tasks to participate in requirements intake flows where supported. Keep off during initial rollout.                                                  |
+| `AIF_REQUIREMENTS_RESEARCH_DESIGN_ENABLED`   | `false` | Enables dedicated `research` and `design` stages after requirements analysis. When off, approved requirements continue to planning.                                              |
+| `AIF_REQUIREMENTS_QA_ENABLED`                | `false` | Enables the QA stage and acceptance-pack gate before terminal handoff. Requires requirements intake to be enabled.                                                               |
+| `AIF_REQUIREMENTS_MAX_QUESTIONS_PER_CYCLE`   | `7`     | Per-cycle cap for generated clarification questions. Valid range: 1-20.                                                                                                          |
+| `AIF_REQUIREMENTS_MAX_CYCLES`                | `5`     | Maximum requirements clarification cycles before the analyst must proceed or block. Valid range: 1-20.                                                                           |
+| `AIF_REQUIREMENTS_AUTO_RESUME_ON_ANSWER`     | `true`  | Automatically resumes a `needs_input` task to its recorded target stage after all active blocking questions are answered.                                                        |
+
+Compatibility matrix:
+
+| Intake  | Research/Design | QA      | Result                                                                                   |
+| ------- | --------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `false` | any             | any     | `start_ai` routes directly to `planning`; question creation and reanalysis return `409`. |
+| `true`  | `false`         | `false` | Requirements questions and snapshots run, then tasks continue to `planning`.             |
+| `true`  | `true`          | `false` | Requirements, research, and design artifacts are persisted before planning.              |
+| `true`  | any             | `true`  | QA and acceptance-pack evidence are required before `done -> verified` handoff.          |
+
+Requirements observability uses structured Pino logs as the metrics carrier. Each lifecycle log has `metricKey: "requirements_lifecycle_events_total"`, `metricValue: 1`, an `event` value, and redaction-safe dimensions.
+
+Stable event names:
+
+- `requirements.lifecycle.snapshot.created`
+- `requirements.lifecycle.stage_artifact_attempt.persisted`
+- `requirements.lifecycle.question_batch.created`
+- `requirements.lifecycle.question_batch.deduped`
+- `requirements.lifecycle.question_batch.answered`
+- `requirements.lifecycle.question_batch.resume_decided`
+- `requirements.lifecycle.split_proposal.created`
+- `requirements.lifecycle.split_proposal.reused`
+- `requirements.lifecycle.split_proposal.conflict`
+- `requirements.lifecycle.split_proposal.approved`
+- `requirements.lifecycle.split_proposal.rejected`
+- `requirements.lifecycle.split_proposal.already_approved`
+- `requirements.lifecycle.split_proposal.already_rejected`
+- `requirements.lifecycle.acceptance_pack.created`
+- `requirements.lifecycle.qa_gate.routed`
+- `requirements.lifecycle.qa_gate.blocked`
+- `requirements.lifecycle.qa_gate.accepted`
+
+Do not add raw question text, raw answers, generated roadmap bodies, provider output, or secrets to these dimensions. Use ids, counts, booleans, status names, stages, artifact kinds, and source kinds.
+
 ## Auto-Review Convergence
 
 Auto-review persists its latest blocking snapshot on the task (`autoReviewState`) and exposes the resolved global strategy via `GET /settings` as `autoReviewStrategy`.

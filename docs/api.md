@@ -270,40 +270,80 @@ Checks whether `.ai-factory/ROADMAP.md` exists in the project root directory.
 POST /projects/:id/roadmap/import
 ```
 
-Reads `.ai-factory/ROADMAP.md` from the project root, uses Agent SDK to convert milestones into structured tasks, and creates them as backlog items with deduplication.
+Reads `.ai-factory/ROADMAP.md` from the project root, converts milestones into a structured task hierarchy, and persists a split proposal for human approval. Task rows are created only after the proposal is approved.
 
 **Body:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `roadmapAlias` | string | yes | Alias for grouping imported tasks (e.g., `v1.0`, `sprint-1`) |
+| `taskIntent` | string | no | Intent to stamp on approved child tasks; defaults to `general` |
 
-**Response:** `201 Created`
+**Response:** `201 Created` for a new proposal, `200 OK` when the same pending proposal is reused.
 
 ```json
 {
-  "roadmapAlias": "v1.0",
-  "created": 5,
-  "skipped": 2,
-  "taskIds": ["uuid-1", "uuid-2", "..."],
-  "byPhase": {
-    "1": { "created": 3, "skipped": 1 },
-    "2": { "created": 2, "skipped": 1 }
+  "status": "split_required",
+  "projectId": "project-uuid",
+  "proposal": {
+    "id": "proposal-uuid",
+    "projectId": "project-uuid",
+    "roadmapAlias": "v1.0",
+    "status": "pending",
+    "sourceKind": "roadmap_import",
+    "proposedTasks": [],
+    "createdTaskIds": [],
+    "containerTaskId": null
   }
 }
 ```
 
-**Deduplication:** Tasks are deduped by `projectId + normalizedTitle + roadmapAlias`. Re-running import with the same alias skips already-existing tasks.
+**Compatibility:** Reusing an alias that already produced tasks returns `409` with `code: "ROADMAP_ALIAS_EXISTS"`. Re-running against an existing pending proposal with different source content returns `409` with `code: "TASK_SPLIT_PROPOSAL_SOURCE_CONFLICT"` and the conflicting proposal.
 
-**Tag enrichment:** Each created task automatically receives tags: `roadmap`, `rm:<alias>`, `phase:<number>`, `phase:<name>`, `seq:<nn>`.
+**Tag enrichment after approval:** Approved tasks receive tags such as `roadmap`, `rm:<alias>`, `phase:<number>`, `phase:<name>`, and `seq:<nn>`.
 
 **Errors:**
 
 - `404` — Project not found or `ROADMAP.md` missing
+- `409` — Alias already imported, alias job in progress, or pending proposal source conflict
 - `500` — Agent SDK unavailable or response parse failure
 
-**WebSocket events:** `task:created` for each new task, `agent:wake` after batch completion.
+**WebSocket event:** `roadmap:split_required` with `{ projectId, roadmapAlias, proposal }`.
 
 **Timeout:** This endpoint may take 30-120 seconds due to Agent SDK processing.
+
+### Approve Task Split Proposal
+
+```
+POST /projects/:id/task-split-proposals/:proposalId/approve
+```
+
+Approves a pending roadmap split proposal and creates the proposed container and child backlog tasks. Approval returns `201 Created`; approving an already-approved proposal returns `200 OK` with the existing proposal.
+
+**Response:** proposal object with `status: "approved"`, `containerTaskId`, and `createdTaskIds`.
+
+**Errors:**
+
+- `404` — Project or proposal not found
+- `409` — Proposal was rejected, or an approved task would violate alias uniqueness
+
+**WebSocket events:** `task:created` for each created task. Approval does not emit `agent:wake`; operators decide when to start the new backlog tasks.
+
+### Reject Task Split Proposal
+
+```
+POST /projects/:id/task-split-proposals/:proposalId/reject
+```
+
+Rejects a pending split proposal without creating tasks.
+
+**Body:** `{ "reason": "string" }`
+
+**Response:** proposal object with `status: "rejected"`.
+
+**Errors:**
+
+- `404` — Project or proposal not found
+- `409` — Proposal was already approved
 
 ### Delete Project
 
@@ -712,12 +752,42 @@ GET /tasks/:id
 
 Notable task fields in the response:
 
-| Field                   | Type         | Description                                                                                                                                                                                  |
-| ----------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `manualReviewRequired`  | boolean      | `true` when auto-review stopped and explicit human review is required; unresolved auto-review findings are surfaced on `blocked_external` tasks with preserved `autoReviewState` diagnostics |
-| `autoReviewState`       | object\|null | Latest persisted auto-review snapshot: `strategy`, `iteration`, `findings[]`, optional finding `firstSeenIteration`/`lastSeenIteration`/`streak`, and optional `reworkSnapshot`              |
-| `runtimeLimitSnapshot`  | object\|null | Persisted runtime-limit snapshot copied onto the task when quota gating or quota failure blocks execution                                                                                    |
-| `runtimeLimitUpdatedAt` | string\|null | ISO timestamp for the last task-level runtime-limit snapshot write                                                                                                                           |
+| Field                    | Type         | Description                                                                                                                                                                                  |
+| ------------------------ | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manualReviewRequired`   | boolean      | `true` when auto-review stopped and explicit human review is required; unresolved auto-review findings are surfaced on `blocked_external` tasks with preserved `autoReviewState` diagnostics |
+| `autoReviewState`        | object\|null | Latest persisted auto-review snapshot: `strategy`, `iteration`, `findings[]`, optional finding `firstSeenIteration`/`lastSeenIteration`/`streak`, and optional `reworkSnapshot`              |
+| `requirementsSnapshotId` | string\|null | Current versioned requirements snapshot id used by downstream stages                                                                                                                         |
+| `requirementsCycleCount` | number       | Number of requirements question cycles already attempted                                                                                                                                     |
+| `requirementsConfidence` | number\|null | Latest requirements-analysis confidence score when available                                                                                                                                 |
+| `needsInputBatchId`      | string\|null | Active blocking question batch while the task is in `needs_input`                                                                                                                            |
+| `needsInputStage`        | string\|null | Stage that raised the active question batch                                                                                                                                                  |
+| `needsInputReason`       | string\|null | Redaction-safe reason for the input hold                                                                                                                                                     |
+| `lastHumanAnswerAt`      | string\|null | ISO timestamp for the latest accepted requirements answer                                                                                                                                    |
+| `lastAutoResumeAt`       | string\|null | ISO timestamp for the latest automatic resume after a question batch was answered                                                                                                            |
+| `acceptancePack`         | object\|null | Current accepted QA/acceptance artifact rollup when QA close-out evidence exists                                                                                                             |
+| `runtimeLimitSnapshot`   | object\|null | Persisted runtime-limit snapshot copied onto the task when quota gating or quota failure blocks execution                                                                                    |
+| `runtimeLimitUpdatedAt`  | string\|null | ISO timestamp for the last task-level runtime-limit snapshot write                                                                                                                           |
+
+### Requirements Questions And Snapshot
+
+```
+GET /tasks/:id/questions
+GET /tasks/:id/requirements/snapshot
+POST /tasks/:id/questions
+POST /tasks/:id/questions/:questionId/answer
+POST /tasks/:id/question-batches/:batchId/answers
+POST /tasks/:id/requirements/reanalyze
+```
+
+`GET /questions` returns grouped requirements question batches and answer status. `GET /requirements/snapshot` returns the latest redacted requirements snapshot, or a task-shaped empty response when no snapshot exists.
+
+`POST /questions` opens a question batch and can move the task to `needs_input`. The body includes `stage`, optional `targetResumeStage`, optional `idempotencyKey`, `question`, `whyNeeded`, `blocking`, `answerType`, optional `options`, and redaction-safe source metadata. When `AIF_REQUIREMENTS_INTAKE_ENABLED=false`, this route returns `409`.
+
+Answer routes accept text answers and optional attachments. Batch answers accept `{ "answers": [{ "questionId": "...", "answer": "..." }], "autoResume": true }`. When all blocking questions in the active batch are answered and auto-resume is enabled, the task resumes to the recorded target stage and the API emits `agent:wake`.
+
+`POST /requirements/reanalyze` returns eligible backlog, planning, plan-ready, or done tasks to `requirements_analysis`. It returns `409` when requirements intake is disabled or the task is in a status that cannot be reanalyzed.
+
+Requirement answer content is persisted as task data, but lifecycle observability and WebSocket payloads use ids, counts, statuses, stages, and timestamps only.
 
 ### Download Task Attachment
 
@@ -810,15 +880,19 @@ Transitions a task through the state machine.
 
 **Valid events by current status:**
 
-| Current Status     | Valid Events                                             |
-| ------------------ | -------------------------------------------------------- |
-| `backlog`          | `start_ai`, `accept_existing_plan`                       |
-| `plan_ready`       | `start_implementation`, `request_replanning`, `fast_fix` |
-| `blocked_external` | `retry_from_blocked`                                     |
-| `done`             | `approve_done`, `request_changes`                        |
+| Current Status          | Valid Events                                             |
+| ----------------------- | -------------------------------------------------------- |
+| `backlog`               | `start_ai`, `accept_existing_plan`                       |
+| `requirements_analysis` | `approve_requirements`                                   |
+| `plan_ready`            | `start_implementation`, `request_replanning`, `fast_fix` |
+| `blocked_external`      | `retry_from_blocked`                                     |
+| `done`                  | `approve_done`, `request_changes`                        |
 
 Additional constraints:
 
+- When `AIF_REQUIREMENTS_INTAKE_ENABLED=true`, `start_ai` routes backlog tasks to `requirements_analysis`; when it is `false`, it preserves the compatibility path and routes directly to `planning`.
+- `approve_requirements` is only valid from `requirements_analysis` and continues to `planning`.
+- `request_requirements_reanalysis` is handled by `POST /tasks/:id/requirements/reanalyze`, not the generic event route, and requires requirements intake to be enabled.
 - `start_implementation` requires `autoMode=false` (manual gate). For `autoMode=true`, implementation is picked automatically by the coordinator.
 - `accept_existing_plan` reads the plan file from disk, saves it to the database, and transitions directly to `plan_ready` — skipping the planning stage entirely. Returns `404` if the plan file does not exist on disk.
 - `fast_fix` requires `autoMode=false` and at least one human comment on the task.
@@ -886,7 +960,7 @@ Used by the agent process to trigger WebSocket broadcasts after updating a task.
 **Body:**
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `task:updated` | Event type: `task:updated`, `task:moved`, `task:activity`, `task:scheduled_fired`, `task:timeline_updated`, `task:evidence_recorded`, `task:trust_updated`, or `task:manual_handoff_required` |
+| `type` | string | `task:updated` | Event type: `task:updated`, `task:moved`, `task:activity`, `task:scheduled_fired`, `task:questions_created`, `task:needs_input`, `task:requirements_snapshot_created`, `task:requirements_snapshot_updated`, `task:timeline_updated`, `task:evidence_recorded`, `task:trust_updated`, or `task:manual_handoff_required` |
 
 **Response:** `200 OK`
 
@@ -1236,45 +1310,52 @@ All events are JSON with this structure:
 }
 ```
 
-| Event                               | Payload                                                                                            | Triggered By                                                                         |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `project:created`                   | Full project object                                                                                | `POST /projects`                                                                     |
-| `project:updated`                   | Full project object                                                                                | `PUT /projects/:id`                                                                  |
-| `project:deleted`                   | `{ id: string }`                                                                                   | `DELETE /projects/:id`                                                               |
-| `runtime_profile:created`           | Full runtime profile object                                                                        | `POST /runtime-profiles`                                                             |
-| `runtime_profile:updated`           | Full runtime profile object                                                                        | `PUT /runtime-profiles/:id`                                                          |
-| `runtime_profile:deleted`           | `{ id: string, projectId: string                                                                   | null }`                                                                              | `DELETE /runtime-profiles/:id`                            |
-| `settings:runtime_defaults_updated` | Full app settings object                                                                           | `PUT /settings/runtime-defaults`                                                     |
-| `settings:config_updated`           | `{ projectId: string }`                                                                            | `PUT /settings/config`                                                               |
-| `task:created`                      | Full task object                                                                                   | `POST /tasks`, `POST /projects/:id/roadmap/import`                                   |
-| `task:updated`                      | Full task object                                                                                   | `PUT /tasks/:id`, `PATCH /tasks/:id/position`, `POST /tasks/:id/events` (`fast_fix`) |
-| `task:moved`                        | Full task object                                                                                   | `POST /tasks/:id/events`                                                             |
-| `task:deleted`                      | `{ id: string }`                                                                                   | `DELETE /tasks/:id`                                                                  |
-| `task:comment_created`              | `{ id: string, taskId: string, projectId: string }`                                                | `POST /tasks/:id/comments`                                                           |
-| `sync:task_created`                 | Full task object                                                                                   | MCP `handoff_create_task`                                                            |
-| `sync:task_updated`                 | Full task object                                                                                   | MCP `handoff_update_task`, `handoff_push_plan`                                       |
-| `sync:status_changed`               | Full task object                                                                                   | MCP `handoff_sync_status`                                                            |
-| `sync:plan_pushed`                  | Full task object                                                                                   | MCP `handoff_push_plan`                                                              |
-| `chat:token`                        | `{ conversationId, token }`                                                                        | `POST /chat` — streaming response tokens                                             |
-| `chat:done`                         | `{ conversationId, usage?, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }`        | `POST /chat` — stream completed                                                      |
-| `chat:error`                        | `{ conversationId, message, code, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }` | `POST /chat` — error during streaming                                                |
-| `chat:session_created`              | `{ id: string, projectId: string                                                                   | null }`                                                                              | `POST /chat/sessions`, `POST /chat` auto-session creation |
-| `chat:session_updated`              | `{ id: string, projectId: string                                                                   | null }`                                                                              | `PUT /chat/sessions/:id`, runtime session link updates    |
-| `chat:session_deleted`              | `{ id: string, projectId: string                                                                   | null }`                                                                              | `DELETE /chat/sessions/:id`                               |
-| `chat:session_messages_updated`     | `{ id: string, projectId: string                                                                   | null }`                                                                              | `POST /chat` persists user or assistant messages          |
-| `task:scheduled_fired`              | Full task object                                                                                   | Coordinator fires a backlog task whose `scheduledAt` is due                          |
-| `project:auto_queue_mode_changed`   | Full project object                                                                                | `PATCH /projects/:id/auto-queue-mode`                                                |
-| `project:auto_queue_advanced`       | `{ id: string }` (task id)                                                                         | Coordinator auto-advances the next backlog task in an auto-queue project             |
-| `task:timeline_updated`             | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built task timeline invalidation                                              |
-| `task:evidence_recorded`            | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built task evidence invalidation                                              |
-| `task:trust_updated`                | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built artifact-trust invalidation                                             |
-| `task:manual_handoff_required`      | `{ id, projectId, blockedReason?, reasonCodes?, generatedAt? }`                                    | Manual-review or blocked-external handoff                                            |
-| `project:memory_candidate_created`  | `{ id, projectId, taskId, status }`                                                                | Verified task memory candidate creation                                              |
-| `project:usage_updated`             | `{ projectId, taskId?, runtimeProfileId? }`                                                        | Runtime usage event persisted                                                        |
-| `project:queue_updated`             | `{ projectId, taskId? }`                                                                           | Task create/delete/reorder or queue state change                                     |
-| `project:worktree_warning`          | `{ projectId, taskId, warnings }`                                                                  | Worktree inspect/cleanup surfaced warning codes                                      |
-| `project:runtime_limit_updated`     | `{ projectId, runtimeProfileId, taskId? }`                                                         | Persisted runtime-profile limit state or last usage changed                          |
-| `project:warmup_updated`            | `{ projectId, status }`                                                                            | Warmup create/delete/failure changed project warmup state                            |
+| Event                                | Payload                                                                                            | Triggered By                                                                         |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `project:created`                    | Full project object                                                                                | `POST /projects`                                                                     |
+| `project:updated`                    | Full project object                                                                                | `PUT /projects/:id`                                                                  |
+| `project:deleted`                    | `{ id: string }`                                                                                   | `DELETE /projects/:id`                                                               |
+| `runtime_profile:created`            | Full runtime profile object                                                                        | `POST /runtime-profiles`                                                             |
+| `runtime_profile:updated`            | Full runtime profile object                                                                        | `PUT /runtime-profiles/:id`                                                          |
+| `runtime_profile:deleted`            | `{ id: string, projectId: string\|null }`                                                          | `DELETE /runtime-profiles/:id`                                                       |
+| `settings:runtime_defaults_updated`  | Full app settings object                                                                           | `PUT /settings/runtime-defaults`                                                     |
+| `settings:config_updated`            | `{ projectId: string }`                                                                            | `PUT /settings/config`                                                               |
+| `task:created`                       | Full task object                                                                                   | `POST /tasks`, `POST /projects/:id/task-split-proposals/:proposalId/approve`         |
+| `task:updated`                       | Full task object                                                                                   | `PUT /tasks/:id`, `PATCH /tasks/:id/position`, `POST /tasks/:id/events` (`fast_fix`) |
+| `task:moved`                         | Full task object                                                                                   | `POST /tasks/:id/events`                                                             |
+| `task:deleted`                       | `{ id: string }`                                                                                   | `DELETE /tasks/:id`                                                                  |
+| `task:comment_created`               | `{ id: string, taskId: string, projectId: string }`                                                | `POST /tasks/:id/comments`                                                           |
+| `task:questions_created`             | `{ taskId, projectId?, batchId, stage, targetResumeStage?, openBlockingCount }`                    | `POST /tasks/:id/questions` or agent-raised requirements questions                   |
+| `task:question_answered`             | `{ taskId, projectId, batchId, questionId, stage, targetResumeStage }`                             | `POST /tasks/:id/questions/:questionId/answer`                                       |
+| `task:question_batch_answered`       | `{ taskId, projectId?, batchId, stage?, targetResumeStage?, openBlockingCount, resumed }`          | `POST /tasks/:id/question-batches/:batchId/answers`                                  |
+| `task:needs_input`                   | `{ taskId, projectId, batchId, stage, targetResumeStage?, openBlockingCount }`                     | Requirements question batch moved a task to human input                              |
+| `task:requirements_snapshot_created` | `{ taskId, projectId, snapshotId?, version? }`                                                     | First requirements snapshot persisted                                                |
+| `task:requirements_snapshot_updated` | `{ taskId, projectId, snapshotId?, version? }`                                                     | Later requirements snapshot persisted                                                |
+| `roadmap:split_required`             | `{ projectId, roadmapAlias, proposal }`                                                            | Roadmap import/generation persisted a split proposal for approval                    |
+| `sync:task_created`                  | Full task object                                                                                   | MCP `handoff_create_task`                                                            |
+| `sync:task_updated`                  | Full task object                                                                                   | MCP `handoff_update_task`, `handoff_push_plan`                                       |
+| `sync:status_changed`                | Full task object                                                                                   | MCP `handoff_sync_status`                                                            |
+| `sync:plan_pushed`                   | Full task object                                                                                   | MCP `handoff_push_plan`                                                              |
+| `chat:token`                         | `{ conversationId, token }`                                                                        | `POST /chat` — streaming response tokens                                             |
+| `chat:done`                          | `{ conversationId, usage?, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }`        | `POST /chat` — stream completed                                                      |
+| `chat:error`                         | `{ conversationId, message, code, projectId?, taskId?, runtimeProfileId?, runtimeLimitSnapshot? }` | `POST /chat` — error during streaming                                                |
+| `chat:session_created`               | `{ id: string, projectId: string\|null }`                                                          | `POST /chat/sessions`, `POST /chat` auto-session creation                            |
+| `chat:session_updated`               | `{ id: string, projectId: string\|null }`                                                          | `PUT /chat/sessions/:id`, runtime session link updates                               |
+| `chat:session_deleted`               | `{ id: string, projectId: string\|null }`                                                          | `DELETE /chat/sessions/:id`                                                          |
+| `chat:session_messages_updated`      | `{ id: string, projectId: string\|null }`                                                          | `POST /chat` persists user or assistant messages                                     |
+| `task:scheduled_fired`               | Full task object                                                                                   | Coordinator fires a backlog task whose `scheduledAt` is due                          |
+| `project:auto_queue_mode_changed`    | Full project object                                                                                | `PATCH /projects/:id/auto-queue-mode`                                                |
+| `project:auto_queue_advanced`        | `{ id: string }` (task id)                                                                         | Coordinator auto-advances the next backlog task in an auto-queue project             |
+| `task:timeline_updated`              | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built task timeline invalidation                                              |
+| `task:evidence_recorded`             | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built task evidence invalidation                                              |
+| `task:trust_updated`                 | `{ id, projectId, reasonCodes?, generatedAt? }`                                                    | Server-built artifact-trust invalidation                                             |
+| `task:manual_handoff_required`       | `{ id, projectId, blockedReason?, reasonCodes?, generatedAt? }`                                    | Manual-review or blocked-external handoff                                            |
+| `project:memory_candidate_created`   | `{ id, projectId, taskId, status }`                                                                | Verified task memory candidate creation                                              |
+| `project:usage_updated`              | `{ projectId, taskId?, runtimeProfileId? }`                                                        | Runtime usage event persisted                                                        |
+| `project:queue_updated`              | `{ projectId, taskId? }`                                                                           | Task create/delete/reorder or queue state change                                     |
+| `project:worktree_warning`           | `{ projectId, taskId, warnings }`                                                                  | Worktree inspect/cleanup surfaced warning codes                                      |
+| `project:runtime_limit_updated`      | `{ projectId, runtimeProfileId, taskId? }`                                                         | Persisted runtime-profile limit state or last usage changed                          |
+| `project:warmup_updated`             | `{ projectId, status }`                                                                            | Warmup create/delete/failure changed project warmup state                            |
 
 ### Connection
 

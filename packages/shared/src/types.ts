@@ -6,10 +6,13 @@ export const TASK_STATUSES = [
   "backlog",
   "requirements_analysis",
   "needs_input",
+  "research",
+  "design",
   "planning",
   "plan_ready",
   "implementing",
   "review",
+  "qa",
   "blocked_external",
   "done",
   "verified",
@@ -33,10 +36,13 @@ export type TaskParentCloseoutPolicy = (typeof TASK_PARENT_CLOSEOUT_POLICIES)[nu
 
 export const COORDINATOR_STAGES = [
   "requirements-analyst",
+  "researcher",
+  "designer",
   "planner",
   "plan-checker",
   "implementer",
   "reviewer",
+  "qa",
 ] as const;
 
 export type CoordinatorStage = (typeof COORDINATOR_STAGES)[number];
@@ -282,6 +288,7 @@ export interface Task {
   runtimeLimitUpdatedAt?: string | null;
   artifactTrust?: TaskArtifactTrustRollup | null;
   effectiveRuntime?: TaskEffectiveRuntime | null;
+  acceptancePack?: TaskAcceptancePack | null;
   memoryCandidateCount?: number;
   scheduledAt: string | null;
   branchName: string | null;
@@ -322,6 +329,76 @@ export interface TaskEffectiveRuntime {
   profileName: string | null;
 }
 
+export interface TaskQaMandatoryCheck {
+  id: string;
+  label: string;
+  command: string | null;
+  source: "implementation_manifest" | "plan_manifest" | "completion_guard";
+  mandatory: true;
+  originalStatus?: string | null;
+  outputSha256?: string | null;
+  outputSummary?: string | null;
+  blockingReason?: string | null;
+}
+
+export type TaskQaCommandStatus = "passed" | "failed" | "skipped";
+
+export interface TaskQaCommandEvidence {
+  id: string;
+  command: string;
+  status: TaskQaCommandStatus;
+  mandatory: boolean;
+  outputSummary: string;
+  outputSha256?: string | null;
+  reason?: string | null;
+  risk?: string | null;
+}
+
+export interface TaskQaSkippedCheck {
+  id: string;
+  command?: string | null;
+  mandatory: boolean;
+  reason: string;
+  risk: string;
+}
+
+export interface TaskQaSourceFingerprint {
+  sourceSnapshotId: string | null;
+  requirementsWaiverArtifactId?: string | null;
+  implementationManifestHash: string | null;
+  changedFilesDigest: string;
+  reviewCommentsHash: string | null;
+  reviewIterationCount: number;
+  skipReview: boolean;
+  autoReviewStateHash: string | null;
+  planManifestHash: string | null;
+  mandatoryInventoryHash: string;
+  fingerprint: string;
+}
+
+export interface TaskAcceptancePackReadiness {
+  ready: boolean;
+  reason: string;
+}
+
+export interface TaskAcceptancePack {
+  taskId: string;
+  generatedAt: string;
+  coveredRequirements: string[];
+  changedFiles: string[];
+  reviewResult: string;
+  qaResult: string;
+  limitations: string[];
+  rollbackNotes: string[];
+  readiness: TaskAcceptancePackReadiness;
+  qaArtifactId: string | null;
+  qaAttemptNumber: number | null;
+  acceptanceArtifactId?: string | null;
+  acceptanceAttemptNumber?: number | null;
+  sourceFingerprint: TaskQaSourceFingerprint | null;
+  markdown: string | null;
+}
+
 export interface TaskComment {
   id: string;
   taskId: string;
@@ -332,6 +409,9 @@ export interface TaskComment {
 }
 
 export const WORKFLOW_TIMELINE_GENERIC_ARTIFACT_KINDS = [
+  "requirements",
+  "research",
+  "design",
   "plan",
   "plan_manifest",
   "implementation_manifest",
@@ -339,6 +419,8 @@ export const WORKFLOW_TIMELINE_GENERIC_ARTIFACT_KINDS = [
   "test_result",
   "review_report",
   "security_report",
+  "qa",
+  "acceptance",
   "audit_report",
   "audit_synthesis",
   "memory_candidate",
@@ -517,6 +599,79 @@ export interface WorkflowTimeline {
   evidence: WorkflowTimelineEvidence[];
   evidenceLinks: WorkflowTimelineEvidenceLink[];
   events: WorkflowTimelineEvent[];
+}
+
+export type TaskStageArtifactState = WorkflowTimelineArtifactState;
+
+export interface TaskRequirementsSnapshot {
+  id: string;
+  taskId: string;
+  projectId: string;
+  version: number;
+  markdown: string;
+  summary: string;
+  sourceQuestionIds: string[];
+  redactionCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskRequirementsSnapshotResponse {
+  taskId: string;
+  projectId: string;
+  snapshot: TaskRequirementsSnapshot | null;
+  snapshots: TaskRequirementsSnapshot[];
+  stageArtifacts: TaskStageArtifact[];
+  stageArtifactAttempts: TaskStageArtifactAttempt[];
+  hasWaiver: boolean;
+  waiverJustification: string | null;
+}
+
+export interface TaskStageArtifact {
+  id: string;
+  taskId: string;
+  projectId: string;
+  stage: string;
+  kind: WorkflowTimelineGenericArtifactKind | string;
+  label: string;
+  path: string | null;
+  state: TaskStageArtifactState;
+  currentAttemptNumber: number;
+  summary: string;
+  markdown: string | null;
+  sourceSnapshotId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskStageArtifactAttempt {
+  id: string;
+  artifactId: string;
+  taskId: string;
+  projectId: string;
+  stage: string;
+  kind: WorkflowTimelineGenericArtifactKind | string;
+  attemptNumber: number;
+  state: TaskStageArtifactState;
+  outcome: WorkflowTimelineClaimOutcome;
+  trustLevel: WorkflowTimelineTrustLevel;
+  summary: string;
+  markdown: string | null;
+  sourceSnapshotId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface TaskRequirementsPromptContext {
+  taskId: string;
+  projectId: string;
+  stage: string | null;
+  snapshot: TaskRequirementsSnapshot | null;
+  hasWaiver: boolean;
+  waiverJustification: string | null;
+  stageArtifacts: TaskStageArtifact[];
+  markdown: string;
 }
 
 export interface TaskOperatorEvidenceResponse {
@@ -915,6 +1070,51 @@ export interface ProjectQueueStateResponse {
   backlog: ProjectQueueBacklogItem[];
 }
 
+export const TASK_SPLIT_PROPOSAL_STATUSES = ["pending", "approved", "rejected"] as const;
+
+export type TaskSplitProposalStatus = (typeof TASK_SPLIT_PROPOSAL_STATUSES)[number];
+
+export type TaskSplitProposalSourceKind = "roadmap_import" | "roadmap_generation";
+
+export interface TaskSplitProposedChild {
+  title: string;
+  description: string;
+  taskIntent?: TaskIntent;
+  phase: number;
+  phaseName: string;
+  sequence: number;
+  tags?: string[];
+}
+
+export interface TaskSplitProposal {
+  id: string;
+  projectId: string;
+  parentTaskId: string | null;
+  sourceKind: TaskSplitProposalSourceKind;
+  sourceRef: string;
+  sourceFingerprint: string;
+  roadmapAlias: string;
+  taskIntent: TaskIntent;
+  status: TaskSplitProposalStatus;
+  decision: "split_required";
+  summary: string;
+  proposedChildren: TaskSplitProposedChild[];
+  createdTaskIds: string[];
+  containerTaskId: string | null;
+  approvedBy: string | null;
+  rejectedReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+}
+
+export interface TaskSplitProposalResponse {
+  status: "split_required";
+  projectId: string;
+  proposal: TaskSplitProposal;
+}
+
 export interface TaskWorktreeInspection {
   taskId: string;
   path: string | null;
@@ -954,6 +1154,7 @@ export type WsEventType =
   | "task:requirements_snapshot_updated"
   | "agent:wake"
   | "roadmap:complete"
+  | "roadmap:split_required"
   | "roadmap:error"
   | "chat:token"
   | "chat:done"
@@ -997,6 +1198,12 @@ export interface RoadmapCompletePayload {
   containerTaskId?: string;
   byPhase: Record<number, { created: number; skipped: number }>;
   batchSummary?: RoadmapBatchSummaryPayload;
+}
+
+export interface RoadmapSplitRequiredPayload {
+  projectId: string;
+  roadmapAlias: string;
+  proposal: TaskSplitProposal;
 }
 
 export interface RoadmapBatchSummaryPayload {
@@ -1111,6 +1318,7 @@ export interface TaskQuestionWsPayload {
   questionId?: string;
   batchId?: string;
   stage?: string;
+  targetResumeStage?: string;
   openBlockingCount?: number;
   resumed?: boolean;
   resumeStatus?: string | null;
@@ -1129,6 +1337,7 @@ export interface WsEvent {
     | TaskCommentCreatedPayload
     | TaskQuestionWsPayload
     | RoadmapCompletePayload
+    | RoadmapSplitRequiredPayload
     | RoadmapErrorPayload
     | ChatStreamTokenPayload
     | ChatDonePayload

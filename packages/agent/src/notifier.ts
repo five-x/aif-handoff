@@ -9,6 +9,8 @@ type BroadcastType =
   | "task:scheduled_fired"
   | "task:questions_created"
   | "task:needs_input"
+  | "task:requirements_snapshot_created"
+  | "task:requirements_snapshot_updated"
   | "task:timeline_updated"
   | "task:evidence_recorded"
   | "task:trust_updated"
