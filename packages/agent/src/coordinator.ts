@@ -2951,6 +2951,7 @@ function recoverSynthesisPlanQualityFailure(input: {
   error: TaskPlanQualityError;
   retryCount: number;
 }): boolean {
+  if (!env.AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED) return false;
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   if (!artifact || artifact.role !== "synthesis") return false;
   const summary = summarizeRoadmapBatch(artifact.batchId);

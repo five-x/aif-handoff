@@ -1287,6 +1287,19 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
       400,
     );
   }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "agentActivityLog") &&
+    !getEnv().AIF_AGENT_ACTIVITY_LOG_API_EDITS_ENABLED
+  ) {
+    return c.json(
+      {
+        error:
+          "agentActivityLog is append-only in production mode; use server activity logging instead",
+        code: "AGENT_ACTIVITY_LOG_IMMUTABLE",
+      },
+      409,
+    );
+  }
 
   // Parallel-enabled projects enforce full mode
   const project = findProjectById(existing.projectId);

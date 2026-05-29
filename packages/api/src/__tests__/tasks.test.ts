@@ -2231,6 +2231,34 @@ describe("tasks API", () => {
       expect(body.title).toBe("Updated");
     });
 
+    it("blocks manual agentActivityLog edits through the task API by default", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "upd-agent-log-immutable",
+          projectId: "test-project",
+          title: "Immutable log",
+          agentActivityLog: "server-only entry",
+        })
+        .run();
+
+      const res = await app.request("/tasks/upd-agent-log-immutable", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentActivityLog: "manual overwrite" }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("AGENT_ACTIVITY_LOG_IMMUTABLE");
+      const persisted = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, "upd-agent-log-immutable"))
+        .get();
+      expect(persisted?.agentActivityLog).toBe("server-only entry");
+    });
+
     it("should update maxReviewIterations", async () => {
       const db = testDb.current;
       db.insert(tasks)
@@ -3258,14 +3286,24 @@ describe("tasks API", () => {
       const rootPath = mkdtempSync(join(tmpdir(), "aif-accept-plan-"));
       const aiFactoryDir = join(rootPath, ".ai-factory");
       mkdirSync(aiFactoryDir, { recursive: true });
-      writeFileSync(join(aiFactoryDir, "PLAN.md"), "# Existing Plan\n\n- Step 1\n- Step 2\n");
+      writeFileSync(
+        join(aiFactoryDir, "PLAN.md"),
+        [
+          "# Existing Plan",
+          "",
+          "- [ ] Inspect README.md for the requested acceptance flow.",
+          "- [ ] Update README.md with the accepted behavior.",
+          "- [ ] Run npm.cmd test for the focused regression check.",
+        ].join("\n"),
+      );
 
       db.insert(projects).values({ id: "proj-accept", name: "Accept", rootPath }).run();
       db.insert(tasks)
         .values({
           id: "ev-accept-plan-1",
           projectId: "proj-accept",
-          title: "Accept plan",
+          title: "Accept README plan",
+          description: "Scope: README.md.",
           status: "backlog",
         })
         .run();
@@ -3280,6 +3318,41 @@ describe("tasks API", () => {
       const body = await res.json();
       expect(body.status).toBe("plan_ready");
       expect(body.plan).toContain("Existing Plan");
+    });
+
+    it("blocks accept_existing_plan when the on-disk plan is generic", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-accept-plan-generic-"));
+      const aiFactoryDir = join(rootPath, ".ai-factory");
+      mkdirSync(aiFactoryDir, { recursive: true });
+      writeFileSync(join(aiFactoryDir, "PLAN.md"), "## Plan\n- [ ] Implement task\n");
+
+      db.insert(projects)
+        .values({ id: "proj-accept-generic", name: "Accept Generic", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-accept-plan-generic",
+          projectId: "proj-accept-generic",
+          title: "Generic plan should block",
+          status: "backlog",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-accept-plan-generic/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "accept_existing_plan" }),
+      });
+
+      expect(res.status).toBe(409);
+      const persisted = db.select().from(tasks).where(eq(tasks.id, "ev-accept-plan-generic")).get();
+      expect(persisted?.status).toBe("blocked_external");
+      expect(persisted?.blockedFromStatus).toBe("backlog");
+      expect(persisted?.manualReviewRequired).toBe(true);
+      expect(persisted?.blockedReason).toContain("Plan quality guard");
+      expect(persisted?.blockedReason).toContain("generic_plan");
+      expect(persisted?.plan).toBeNull();
     });
 
     it("should reject accept_existing_plan when plan file is missing", async () => {
@@ -3321,7 +3394,16 @@ describe("tasks API", () => {
       });
       const aiFactoryDir = join(rootPath, ".ai-factory");
       mkdirSync(aiFactoryDir, { recursive: true });
-      writeFileSync(join(aiFactoryDir, "PLAN.md"), "# Existing Plan\n\n- Step 1\n");
+      writeFileSync(
+        join(aiFactoryDir, "PLAN.md"),
+        [
+          "# Existing Plan",
+          "",
+          "- [ ] Inspect README.md before accepting the branch plan.",
+          "- [ ] Update README.md on the task branch.",
+          "- [ ] Run npm.cmd test for the branch acceptance check.",
+        ].join("\n"),
+      );
       writeFileSync(join(rootPath, "README.md"), "# t\n");
       execFileSync("git", ["add", "-A"], { cwd: rootPath, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
@@ -3336,7 +3418,8 @@ describe("tasks API", () => {
         .values({
           id: "ev-accept-branch-1",
           projectId: "proj-accept-branch",
-          title: "Auto accept and branch",
+          title: "Auto accept README branch",
+          description: "Scope: README.md.",
           status: "backlog",
           autoMode: true,
         })
@@ -3351,7 +3434,7 @@ describe("tasks API", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.status).toBe("plan_ready");
-      expect(body.branchName).toMatch(/^feature\/auto-accept-and-branch-/);
+      expect(body.branchName).toMatch(/^feature\/auto-accept-readme-branch-/);
 
       // HEAD now on the task's feature branch
       const current = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {

@@ -6,7 +6,9 @@ import {
   ensureFeatureBranch,
   buildAcceptedAuditCardDecision,
   evaluateTaskCompletionEvidence,
+  evaluateTaskPlanQuality,
   extractAuditReportManifestEvidenceRefs,
+  formatTaskPlanQualityBlockedReason,
   formatTaskCompletionBlockedReason,
   buildAuditFailureSignature,
   isRecoverableAuditFailureFamily,
@@ -968,6 +970,44 @@ function handleAcceptExistingPlan(input: EventHandlerInput): EventHandlerResult 
   }
 
   const nowIso = new Date().toISOString();
+  const planQuality = evaluateTaskPlanQuality({
+    task: {
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      taskIntent: task.taskIntent,
+      tags: task.tags,
+      roadmapAlias: task.roadmapAlias,
+      planPath: task.planPath,
+      plannerMode: task.plannerMode,
+      createdAt: task.createdAt,
+      blockedFromStatus: task.blockedFromStatus,
+      blockedReason: task.blockedReason,
+    },
+    plan: filePlan,
+  });
+  if (!planQuality.ok) {
+    const blockedReason = `${formatTaskPlanQualityBlockedReason(planQuality)} Operator next step: edit the plan file and retry accept_existing_plan.`;
+    setTaskFields(input.taskId, {
+      status: "blocked_external",
+      blockedReason,
+      blockedFromStatus: task.status,
+      retryAfter: null,
+      retryCount: task.retryCount ?? 0,
+      reworkRequested: false,
+      reviewIterationCount: task.reviewIterationCount ?? 0,
+      manualReviewRequired: true,
+      branchName: boundBranchName,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    appendTaskActivityLog(
+      input.taskId,
+      `[${nowIso}] accept_existing_plan blocked by plan quality guard: ${planQuality.categories.join(", ")}`,
+    );
+    return { ok: false, status: 409, error: blockedReason };
+  }
+
   persistTaskPlanForTask({
     taskId: input.taskId,
     planText: filePlan,

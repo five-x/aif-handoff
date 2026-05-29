@@ -147,6 +147,26 @@ const envSchema = z.object({
       return value;
     }, z.boolean())
     .default(false),
+  AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED: z
+    .preprocess((value) => {
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (BOOLEAN_TRUE_VALUES.has(normalized)) return true;
+        if (BOOLEAN_FALSE_VALUES.has(normalized)) return false;
+      }
+      return value;
+    }, z.boolean())
+    .default(false),
+  AIF_AGENT_ACTIVITY_LOG_API_EDITS_ENABLED: z
+    .preprocess((value) => {
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (BOOLEAN_TRUE_VALUES.has(normalized)) return true;
+        if (BOOLEAN_FALSE_VALUES.has(normalized)) return false;
+      }
+      return value;
+    }, z.boolean())
+    .default(false),
   AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED: z
     .preprocess((value) => {
       if (typeof value === "string") {

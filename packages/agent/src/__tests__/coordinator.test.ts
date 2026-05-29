@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   TaskPlanQualityError,
+  applyHumanTaskEvent,
   evaluateTaskPlanQuality,
   appSettings,
   tasks,
   projects,
   runtimeProfiles,
   usageEvents,
+  getEnv,
   resetEnvCache,
   formatAuditSynthesisOutcomeForArtifact,
   buildAuditEvidencePayload,
@@ -423,6 +425,7 @@ describe("coordinator", () => {
     vi.clearAllMocks();
     resetCoordinatorRuntimeCountersForTests();
     getStageSemaphore().reset();
+    getEnv().AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED = false;
   });
 
   function insertRuntimeProfile(input: {
@@ -538,8 +541,114 @@ describe("coordinator", () => {
     expect(released!.lockStage).toBeNull();
   });
 
+  it("preserves operator_cancelled when cancel_task lands while a mocked subagent is active", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-cancel-active-runner",
+        projectId: "test-project",
+        title: "Cancel active runner",
+        status: "plan_ready",
+        autoMode: true,
+      })
+      .run();
+
+    vi.mocked(runImplementer).mockImplementationOnce(async (taskId) => {
+      const active = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+      expect(active?.status).toBe("implementing");
+      const transition = applyHumanTaskEvent(active!, "cancel_task", {
+        requirementsIntakeEnabled: false,
+      });
+      if (!transition.ok) {
+        throw new Error(transition.error);
+      }
+      db.update(tasks)
+        .set({
+          ...transition.patch,
+          lastHeartbeatAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-cancel-active-runner")).get();
+    expect(task?.status).toBe("blocked_external");
+    expect(task?.blockedFromStatus).toBe("implementing");
+    expect(task?.blockedReason).toMatch(/^operator_cancelled:/);
+    expect(task?.paused).toBe(true);
+    expect(runReviewer).not.toHaveBeenCalled();
+  });
+
+  it("blocks exhausted synthesis plan-quality failure unless deterministic recovery is explicitly enabled", async () => {
+    const db = testDb.current;
+    vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-source-ready-no-recovery",
+          projectId: "test-project",
+          title: "Ready source report",
+          taskIntent: "audit",
+          description: "Report artifact: audit/source-ready.md",
+          status: "done",
+        },
+        {
+          id: "task-synthesis-no-recovery",
+          projectId: "test-project",
+          title: "Synthesize audit findings",
+          taskIntent: "audit",
+          description: "Report artifact: audit/final-no-recovery.md.",
+          status: "plan_ready",
+          retryCount: 3,
+          plan: "Short task\n/aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
+        },
+      ])
+      .run();
+
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-plan-no-recovery",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-source-ready-no-recovery", "task-synthesis-no-recovery"],
+      synthesisTaskId: "task-synthesis-no-recovery",
+      artifacts: [
+        {
+          taskId: "task-source-ready-no-recovery",
+          role: "report",
+          artifactPath: "audit/source-ready.md",
+        },
+        {
+          taskId: "task-synthesis-no-recovery",
+          role: "synthesis",
+          artifactPath: "audit/final-no-recovery.md",
+        },
+      ],
+    });
+    updateRoadmapBatchArtifactState({
+      taskId: "task-source-ready-no-recovery",
+      state: "valid",
+      validationDetails: trustedNoFindingsValidationDetails(),
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-synthesis-no-recovery")).get();
+    expect(task?.status).toBe("blocked_external");
+    expect(task?.blockedFromStatus).toBe("plan_ready");
+    expect(task?.retryCount).toBe(4);
+    expect(task?.manualReviewRequired).toBe(true);
+    expect(task?.blockedReason).toContain("Retry limit reached");
+    expect(task?.plan).not.toContain("Deterministic audit synthesis plan");
+    expect(runImplementer).not.toHaveBeenCalled();
+  });
+
   it("recovers synthesis plan-quality retry exhaustion with a deterministic exact-source plan", async () => {
     const db = testDb.current;
+    getEnv().AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED = true;
     const projectRoot = initGitFixture("aif-coordinator-synthesis-plan-");
     db.update(projects).set({ rootPath: projectRoot }).where(eq(projects.id, "test-project")).run();
     vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());

@@ -70,6 +70,8 @@ describe("env validation", () => {
     expect(result.AIF_USAGE_LIMITS_ENABLED).toBe(true);
     expect(result.AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT).toBe(true);
     expect(result.AIF_RUNTIME_AUTO_FALLBACK_ENABLED).toBe(false);
+    expect(result.AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED).toBe(false);
+    expect(result.AIF_AGENT_ACTIVITY_LOG_API_EDITS_ENABLED).toBe(false);
     expect(result.AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED).toBe(true);
     expect(result.AIF_MEMORY_ENABLED).toBe(true);
     expect(result.AIF_WARMUP_ENABLED).toBe(false);
@@ -118,6 +120,25 @@ describe("env validation", () => {
     expect(validateEnv({ AIF_MEMORY_ENABLED: "1" }).AIF_MEMORY_ENABLED).toBe(true);
     expect(validateEnv({ AIF_MEMORY_ENABLED: "false" }).AIF_MEMORY_ENABLED).toBe(false);
     expect(validateEnv({ AIF_MEMORY_ENABLED: "0" }).AIF_MEMORY_ENABLED).toBe(false);
+  });
+
+  it("should parse production safety opt-in boolean values", () => {
+    expect(
+      validateEnv({ AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED: "true" })
+        .AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED,
+    ).toBe(true);
+    expect(
+      validateEnv({ AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED: "0" })
+        .AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED,
+    ).toBe(false);
+    expect(
+      validateEnv({ AIF_AGENT_ACTIVITY_LOG_API_EDITS_ENABLED: "true" })
+        .AIF_AGENT_ACTIVITY_LOG_API_EDITS_ENABLED,
+    ).toBe(true);
+    expect(
+      validateEnv({ AIF_AGENT_ACTIVITY_LOG_API_EDITS_ENABLED: "0" })
+        .AIF_AGENT_ACTIVITY_LOG_API_EDITS_ENABLED,
+    ).toBe(false);
   });
 
   it("should parse AIF_WARMUP_ENABLED boolean values", () => {
