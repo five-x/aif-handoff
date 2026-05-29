@@ -138,7 +138,7 @@ function logRequirementsLifecycleMetric(
 const env = getEnv();
 const STAGE_RUN_TIMEOUT_MS = Math.max(env.AGENT_STAGE_RUN_TIMEOUT_MS, 60_000);
 const CLAIM_LOCK_DURATION_MS = STAGE_RUN_TIMEOUT_MS + 5 * 60 * 1000; // stage timeout + 5 min buffer
-const PLAN_QUALITY_MAX_RETRIES = 100;
+const PLAN_QUALITY_MAX_RETRIES = env.AGENT_PLAN_QUALITY_MAX_RETRIES;
 export const COORDINATOR_ID = crypto.randomUUID();
 
 type TaskWithHydratedFields = TaskRow & Pick<HydratedTaskRow, "autoReviewState">;
@@ -152,6 +152,17 @@ setCoordinatorId(COORDINATOR_ID);
 const runtimeCounters = {
   fastRetryStreamInterruptions: 0,
 };
+
+function boundedReviewIterationLimit(value: number | null | undefined): number {
+  return Math.min(value ?? env.AGENT_MAX_REVIEW_ITERATIONS, 10);
+}
+
+function isOperatorCancelledTask(task: Pick<TaskRow, "status" | "blockedReason">): boolean {
+  return (
+    task.status === "blocked_external" &&
+    task.blockedReason?.startsWith("operator_cancelled:") === true
+  );
+}
 
 interface StatusTransition {
   from: TaskStatus[];
@@ -331,6 +342,20 @@ function updateTaskStatus(
   extra: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt"> = {},
   info: TaskNotificationInfo = {},
 ): void {
+  const currentTask = findTaskById(taskId);
+  if (
+    currentTask &&
+    isOperatorCancelledTask(currentTask) &&
+    (status !== "blocked_external" ||
+      typeof extra.blockedReason !== "string" ||
+      !extra.blockedReason.startsWith("operator_cancelled:"))
+  ) {
+    log.info(
+      { taskId, requestedStatus: status },
+      "Skipped coordinator status update because task is operator-cancelled",
+    );
+    return;
+  }
   updateTaskStatusRow(taskId, status, extra);
   const broadcastType =
     info.fromStatus && info.fromStatus === status ? "task:updated" : "task:moved";
@@ -932,6 +957,45 @@ function handleContextLengthRecovery(input: {
     ...readFailedContextProfileIds(latestTask.runtimeOptionsJson, input.stage),
     ...(failedProfileId ? [failedProfileId] : []),
   ]);
+  if (!env.AIF_RUNTIME_AUTO_FALLBACK_ENABLED) {
+    const failedDisplay = [...failedProfileIds].join(", ") || "none";
+    const blockedReason =
+      "operator_input_required: Request exceeded the model context limit. " +
+      `Runtime auto fallback is disabled; select a larger compatible runtime profile for ${input.stageLabel}, or split/reduce the task scope before retry. ` +
+      `Context-failed profiles: ${failedDisplay}.`;
+    clearTaskRuntimeLimitSnapshot(latestTask.id, nowIso);
+    updateTaskStatus(
+      latestTask.id,
+      "blocked_external",
+      {
+        blockedReason,
+        blockedFromStatus: input.stageInProgress,
+        retryAfter: null,
+        retryCount: latestTask.retryCount ?? 0,
+        reworkRequested: false,
+        manualReviewRequired: false,
+        runtimeOptionsJson: clearContextFallbackRuntimeOption(
+          latestTask.runtimeOptionsJson,
+          input.stage,
+        ),
+      },
+      { title: input.title, fromStatus: input.stageInProgress },
+    );
+    appendTaskActivityLog(
+      latestTask.id,
+      `[${nowIso}] Context overflow blocked without runtime fallback: ${truncateReason(blockedReason)}`,
+    );
+    log.error(
+      {
+        taskId: latestTask.id,
+        stage: input.stageLabel,
+        failedProfileId,
+        failedProfileIds: [...failedProfileIds],
+      },
+      "Context length failure blocked because runtime auto fallback is disabled",
+    );
+    return true;
+  }
   const fallback = selectContextFallbackProfile({
     task: latestTask,
     stage: input.stage,
@@ -1046,6 +1110,7 @@ function handleTransientRuntimeFallbackRecovery(input: {
   }
   if (isRepositoryInspectionBudgetExhaustionError(input.err)) return false;
   if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
+  if (!env.AIF_RUNTIME_AUTO_FALLBACK_ENABLED) return false;
 
   const nowIso = new Date().toISOString();
   const latestTask = findTaskById(input.task.id) ?? input.task;
@@ -1162,6 +1227,7 @@ function handleAuditReportTimeoutRecovery(input: {
   if (runtimeError?.category !== "timeout") return false;
   if (isRepositoryInspectionBudgetExhaustionError(input.err)) return false;
   if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
+  if (!env.AIF_RUNTIME_AUTO_FALLBACK_ENABLED) return false;
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   if (artifact?.role !== "report") return false;
 
@@ -1250,6 +1316,7 @@ function handleAuditReportTransientRecovery(input: {
     return false;
   }
   if (runtimeError.resetAt || runtimeError.retryAfterSeconds != null) return false;
+  if (!env.AIF_RUNTIME_AUTO_FALLBACK_ENABLED) return false;
 
   const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
   if (artifact?.role !== "report") return false;
@@ -2532,13 +2599,15 @@ const IMPLEMENTATION_EVIDENCE_REWORK_ISSUES = new Set<ImplementationManifestIssu
   "implementation_changed_files_mismatch",
   "implementation_scope_mismatch",
   "missing_verification_evidence",
+  "verification_command_not_observed",
+  "contradictory_verification_claim",
   "missing_acceptance_evidence",
   "plan_checklist_drift",
   "unintended_uncommitted_changes",
   "missing_review_closure_evidence",
   "missing_fix_regression_explanation",
 ]);
-const IMPLEMENTATION_EVIDENCE_REWORK_MAX_ITERATIONS = 2;
+const IMPLEMENTATION_EVIDENCE_REWORK_MAX_ITERATIONS = env.AGENT_IMPLEMENTATION_EVIDENCE_MAX_REWORK;
 
 function implementationEvidenceIssueCodes(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
@@ -2564,7 +2633,7 @@ function returnImplementationEvidenceToReworkIfPossible(input: {
   if (issueCodes.length === 0) return false;
 
   const currentIteration = input.task.reviewIterationCount ?? 0;
-  const configuredMaxIterations = input.task.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const configuredMaxIterations = boundedReviewIterationLimit(input.task.maxReviewIterations);
   const maxIterations = Math.min(
     configuredMaxIterations,
     IMPLEMENTATION_EVIDENCE_REWORK_MAX_ITERATIONS,
@@ -2692,8 +2761,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     typeof input.extra?.reviewIterationCount === "number"
       ? input.extra.reviewIterationCount
       : (input.task.reviewIterationCount ?? 0);
-  const auditMaxReviewIterations =
-    input.task.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const auditMaxReviewIterations = boundedReviewIterationLimit(input.task.maxReviewIterations);
   const recoverableAuditArtifactFailure =
     Boolean(artifact) &&
     input.phase !== "pre_implementation" &&
@@ -2702,10 +2770,13 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     recoverableAuditArtifactFailure && artifact
       ? repeatedAuditFailureCount({ artifact, family, result }) > 0
       : false;
+  const repeatedFailureMustBlock =
+    repeatedSameFailure && env.AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED;
   const shouldReturnToRework =
     !input.preventAuditRework &&
     recoverableAuditArtifactFailure &&
-    auditReviewIteration < auditMaxReviewIterations;
+    auditReviewIteration < auditMaxReviewIterations &&
+    !repeatedFailureMustBlock;
   const auditReworkLimitReached =
     recoverableAuditArtifactFailure && auditReviewIteration >= auditMaxReviewIterations;
   const baseBlockedReason = formatTaskCompletionBlockedReason(result, {
@@ -2719,8 +2790,8 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     : baseBlockedReason;
   const blockedReason = auditReworkLimitReached
     ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
-    : repeatedSameFailure
-      ? `${actionableBlockedReason} Rework requested again for repeated audit artifact failure signature; local rework continues until the no-progress guard or review budget proves it is unproductive.`
+    : repeatedFailureMustBlock
+      ? `${actionableBlockedReason} Manual review required: repeated audit artifact failure signature failed closed.`
       : actionableBlockedReason;
   const terminalBlockedReason = artifact ? `${family}: ${blockedReason}` : blockedReason;
   const { blockedReason: extraBlockedReason, ...extraFields } = input.extra ?? {};
@@ -2747,12 +2818,15 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     });
     updateRoadmapBatchArtifactState({
       taskId: input.task.id,
-      state: artifactStateForFailureFamily(family, { terminal: auditReworkLimitReached }),
+      state: artifactStateForFailureFamily(family, {
+        terminal: auditReworkLimitReached || repeatedFailureMustBlock,
+      }),
       failureFamily: family,
       attemptBoundaryId: artifact.attemptBoundaryId,
       reworkStatus:
-        artifactStateForFailureFamily(family, { terminal: auditReworkLimitReached }) ===
-        "terminal_inconclusive"
+        artifactStateForFailureFamily(family, {
+          terminal: auditReworkLimitReached || repeatedFailureMustBlock,
+        }) === "terminal_inconclusive"
           ? "terminal_inconclusive"
           : "manual_review_required",
       validationDetails: {
@@ -2788,6 +2862,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       ...extraFields,
       manualReviewRequired:
         input.requireManualReview ||
+        repeatedFailureMustBlock ||
         auditReworkLimitReached ||
         result.issues.some((entry) => entry.code === "manual_review_required"),
     },
@@ -3234,6 +3309,13 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
 
     flushActivityQueue(task.id);
     let latestTask: TaskWithHydratedFields = findTaskById(task.id) ?? task;
+    if (isOperatorCancelledTask(latestTask)) {
+      log.info(
+        { taskId: task.id, stage: stage.label, status: latestTask.status },
+        "Preserved operator-cancelled task after runner completion",
+      );
+      return false;
+    }
 
     if (latestTask.status === "needs_input" && latestTask.status !== stage.inProgress) {
       log.info(
@@ -3671,6 +3753,16 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     );
     return true;
   } catch (err) {
+    const cancelledTask = findTaskById(task.id);
+    if (cancelledTask && isOperatorCancelledTask(cancelledTask)) {
+      flushActivityQueue(task.id);
+      log.info(
+        { taskId: task.id, stage: stage.label },
+        "Preserved operator-cancelled task after runner failure",
+      );
+      return false;
+    }
+
     const planQualityError = stage.label === "plan-checker" ? findTaskPlanQualityError(err) : null;
     if (planQualityError) {
       handlePlanQualityFailure({
@@ -3836,9 +3928,18 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           const runtimeError = findRuntimeExecutionError(err);
           const attemptedFailedProfileId = readAttemptedRuntimeProfileIdFromError(err);
           if (runtimeError && attemptedFailedProfileId) {
+            const safeStatus = redactProviderText(
+              readRuntimeProviderMetaString(err, "status") ?? "unknown",
+            );
+            const safeBaseUrl = redactProviderText(
+              readRuntimeProviderMetaString(err, "baseUrl") ?? "unknown",
+            );
+            const safeModel = redactProviderText(
+              readRuntimeProviderMetaString(err, "model") ?? "unknown",
+            );
             appendTaskActivityLog(
               task.id,
-              `[${new Date().toISOString()}] Runtime external failure attribution: category=${runtimeError.category} status=${readRuntimeProviderMetaString(err, "status") ?? "unknown"} failedProfile=${attemptedFailedProfileId} baseUrl=${readRuntimeProviderMetaString(err, "baseUrl") ?? "unknown"} model=${readRuntimeProviderMetaString(err, "model") ?? "unknown"} retryAfter=${recovery.retryAfter ?? "none"}`,
+              `[${new Date().toISOString()}] Runtime external failure attribution: category=${runtimeError.category} status=${safeStatus} failedProfile=${attemptedFailedProfileId} baseUrl=${safeBaseUrl} model=${safeModel} retryAfter=${recovery.retryAfter ?? "none"}`,
             );
           }
         }

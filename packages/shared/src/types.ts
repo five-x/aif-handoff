@@ -784,6 +784,7 @@ export const TASK_EVENTS = [
   "approve_done",
   "request_changes",
   "manual_exception",
+  "cancel_task",
   "retry_from_blocked",
 ] as const;
 

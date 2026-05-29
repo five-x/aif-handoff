@@ -1219,6 +1219,9 @@ describe("data layer", () => {
       });
       updateTaskStatus(trustedTask.id, "verified", {
         implementationLog: "Changed packages/data/src/index.ts\nTests passed.",
+        agentActivityLog:
+          "[2026-05-29T19:00:00.000Z] Agent: aif-implement started\n" +
+          "[2026-05-29T19:00:01.000Z] Tool: npm.cmd test --workspace=@aif/data -- --run src/__tests__/index.test.ts",
       });
 
       const weakTask = createTask({

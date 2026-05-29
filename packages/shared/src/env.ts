@@ -102,7 +102,9 @@ const envSchema = z.object({
     .default(true),
   COORDINATOR_MAX_CONCURRENT_TASKS: z.coerce.number().min(1).max(10).default(3),
   AGENT_CHAT_MAX_TURNS: z.coerce.number().min(1).default(50),
-  AGENT_MAX_REVIEW_ITERATIONS: z.coerce.number().min(1).default(100),
+  AGENT_MAX_REVIEW_ITERATIONS: z.coerce.number().int().min(1).max(10).default(3),
+  AGENT_PLAN_QUALITY_MAX_RETRIES: z.coerce.number().int().min(1).max(10).default(3),
+  AGENT_IMPLEMENTATION_EVIDENCE_MAX_REWORK: z.coerce.number().int().min(1).max(10).default(3),
   AGENT_AUTO_REVIEW_STRATEGY: z.enum(AUTO_REVIEW_STRATEGIES).default("full_re_review"),
   AGENT_AUTO_REVIEW_STALL_THRESHOLD: z.coerce.number().int().min(1).default(3),
   AGENT_USE_SUBAGENTS: z
@@ -124,7 +126,37 @@ const envSchema = z.object({
       }
       return value;
     }, z.boolean())
+    .default(true),
+  AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT: z
+    .preprocess((value) => {
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (BOOLEAN_TRUE_VALUES.has(normalized)) return true;
+        if (BOOLEAN_FALSE_VALUES.has(normalized)) return false;
+      }
+      return value;
+    }, z.boolean())
+    .default(true),
+  AIF_RUNTIME_AUTO_FALLBACK_ENABLED: z
+    .preprocess((value) => {
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (BOOLEAN_TRUE_VALUES.has(normalized)) return true;
+        if (BOOLEAN_FALSE_VALUES.has(normalized)) return false;
+      }
+      return value;
+    }, z.boolean())
     .default(false),
+  AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED: z
+    .preprocess((value) => {
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (BOOLEAN_TRUE_VALUES.has(normalized)) return true;
+        if (BOOLEAN_FALSE_VALUES.has(normalized)) return false;
+      }
+      return value;
+    }, z.boolean())
+    .default(true),
   AIF_MEMORY_ENABLED: z
     .preprocess((value) => {
       if (typeof value === "string") {

@@ -379,7 +379,7 @@ describe("runPlanChecker", () => {
         plannerMode: "full",
         createdAt: "2026-05-15T23:59:59.000Z",
         blockedFromStatus: "plan_ready",
-        blockedReason: "Plan quality guard replan 1/100: previous feedback",
+        blockedReason: "Plan quality guard replan 1/3: previous feedback",
         status: "plan_ready",
         plan: [
           "## Plan",

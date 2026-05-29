@@ -11,6 +11,7 @@ type TransitionPatch = Pick<
   | "manualReviewRequired"
   | "autoReviewState"
   | "scheduledAt"
+  | "paused"
 > & { status: TaskStatus };
 
 type TransitionResult = { ok: true; patch: TransitionPatch } | { ok: false; error: string };
@@ -30,6 +31,7 @@ export const CLEAN_STATE_RESET = {
   manualReviewRequired: false,
   autoReviewState: null,
   scheduledAt: null,
+  paused: false,
 } as const satisfies Omit<TransitionPatch, "status">;
 
 export function isManualReviewBlockedTask(
@@ -55,6 +57,7 @@ export function applyHumanTaskEvent(
     | "blockedFromStatus"
     | "reworkRequested"
     | "manualReviewRequired"
+    | "paused"
   >,
   event: TaskEvent,
   options: TaskTransitionOptions = {},
@@ -145,6 +148,28 @@ export function applyHumanTaskEvent(
     case "manual_exception": {
       return { ok: false, error: "manual_exception is handled by the audit artifact service" };
     }
+    case "cancel_task": {
+      if (task.status === "done" || task.status === "verified") {
+        return { ok: false, error: "cancel_task is not allowed from terminal task status" };
+      }
+      return {
+        ok: true,
+        patch: {
+          ...CLEAN_STATE_RESET,
+          status: "blocked_external",
+          blockedReason: `operator_cancelled: task cancelled by operator from ${task.status}`,
+          blockedFromStatus: task.status,
+          retryAfter: null,
+          retryCount: 0,
+          reworkRequested: false,
+          reviewIterationCount: task.status === "blocked_external" ? 0 : 0,
+          manualReviewRequired: true,
+          autoReviewState: null,
+          scheduledAt: null,
+          paused: true,
+        },
+      };
+    }
     case "retry_from_blocked": {
       if (task.status !== "blocked_external") {
         return { ok: false, error: "retry_from_blocked is only allowed from blocked_external" };
@@ -173,17 +198,17 @@ export function applyHumanTaskEvent(
 }
 
 export const HUMAN_ACTIONS_BY_STATUS: Record<TaskStatus, TaskEvent[]> = {
-  backlog: ["start_ai"],
-  requirements_analysis: ["approve_requirements"],
-  needs_input: [],
-  research: [],
-  design: [],
-  planning: [],
-  plan_ready: ["start_implementation", "request_replanning", "fast_fix"],
-  implementing: [],
-  review: [],
-  qa: [],
-  blocked_external: ["retry_from_blocked"],
+  backlog: ["start_ai", "cancel_task"],
+  requirements_analysis: ["approve_requirements", "cancel_task"],
+  needs_input: ["cancel_task"],
+  research: ["cancel_task"],
+  design: ["cancel_task"],
+  planning: ["cancel_task"],
+  plan_ready: ["start_implementation", "request_replanning", "fast_fix", "cancel_task"],
+  implementing: ["cancel_task"],
+  review: ["cancel_task"],
+  qa: ["cancel_task"],
+  blocked_external: ["retry_from_blocked", "cancel_task"],
   done: ["approve_done", "request_changes"],
   verified: [],
 };

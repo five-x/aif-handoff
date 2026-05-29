@@ -283,7 +283,10 @@ export async function handleAutoReviewGate(
   }
 
   const currentIteration = (refreshedTask.reviewIterationCount ?? 0) + 1;
-  const maxIterations = refreshedTask.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS;
+  const maxIterations = Math.min(
+    refreshedTask.maxReviewIterations ?? env.AGENT_MAX_REVIEW_ITERATIONS,
+    10,
+  );
   const stallThreshold = env.AGENT_AUTO_REVIEW_STALL_THRESHOLD;
   const reviewProjectRoot = refreshedTask.worktreePath ?? input.projectRoot;
 

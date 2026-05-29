@@ -66,6 +66,17 @@ const RUNTIME_STARTING_EVENTS = new Set<TaskEvent>([
   "retry_from_blocked",
 ]);
 
+function isOperatorCancelledTask(task: Pick<TaskRow, "status" | "blockedReason">): boolean {
+  return (
+    task.status === "blocked_external" &&
+    task.blockedReason?.startsWith("operator_cancelled:") === true
+  );
+}
+
+function boundedReviewIterationLimit(value: number | null | undefined): number {
+  return Math.min(value ?? getEnv().AGENT_MAX_REVIEW_ITERATIONS, 10);
+}
+
 function checkConfigGovernanceBlocker(task: TaskRow, event: TaskEvent): EventHandlerResult | null {
   if (!RUNTIME_STARTING_EVENTS.has(event)) return null;
   const blockers = listProjectConfigWorkBlockers(task.projectId);
@@ -139,7 +150,8 @@ function assertTaskBranchPostRun(task: TaskRow, projectRoot: string): EventHandl
 function isOperatorInputHold(task: TaskRow): boolean {
   return (
     task.status === "blocked_external" &&
-    task.blockedReason?.startsWith("operator_input_required:") === true
+    (task.blockedReason?.startsWith("operator_input_required:") === true ||
+      task.blockedReason?.startsWith("operator_cancelled:") === true)
   );
 }
 
@@ -442,37 +454,45 @@ function blockTaskForCompletionEvidence(
   const failureFamily = firstAuditFailureFamily(result);
   const auditArtifact = options.auditArtifact;
   const auditReviewIteration = task.reviewIterationCount ?? 0;
-  const auditMaxReviewIterations = task.maxReviewIterations ?? 100;
+  const env = getEnv();
+  const auditMaxReviewIterations = boundedReviewIterationLimit(task.maxReviewIterations);
+  const repeatedSameFailure =
+    auditArtifact && isRecoverableAuditFailureFamily(failureFamily)
+      ? repeatedAuditFailureCount({ artifact: auditArtifact, family: failureFamily, result }) > 0
+      : false;
+  const repeatedFailureMustBlock =
+    repeatedSameFailure && env.AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED;
   const shouldReturnToRework =
     Boolean(auditArtifact) &&
     Boolean(options.allowAuditRework) &&
     isRecoverableAuditFailureFamily(failureFamily) &&
-    auditReviewIteration < auditMaxReviewIterations;
+    auditReviewIteration < auditMaxReviewIterations &&
+    !repeatedFailureMustBlock;
   const auditReworkLimitReached =
     Boolean(auditArtifact) &&
     Boolean(options.allowAuditRework) &&
     isRecoverableAuditFailureFamily(failureFamily) &&
     !shouldReturnToRework;
-  const repeatedSameFailure =
-    auditArtifact && isRecoverableAuditFailureFamily(failureFamily)
-      ? repeatedAuditFailureCount({ artifact: auditArtifact, family: failureFamily, result }) > 0
-      : false;
   const blockedReason = formatTaskCompletionBlockedReason(result, {
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
-  const reworkBlockedReason = repeatedSameFailure
-    ? `${blockedReason} Rework requested again for repeated audit artifact failure signature; local rework continues until the no-progress guard or review budget proves it is unproductive.`
+  const reworkBlockedReason = repeatedFailureMustBlock
+    ? `${blockedReason} Manual review required: repeated audit artifact failure signature failed closed.`
     : blockedReason;
   const terminalBlockedReason = auditArtifact
     ? `${failureFamily}: ${
-        auditReworkLimitReached
-          ? `${blockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
-          : reworkBlockedReason
+        repeatedFailureMustBlock
+          ? reworkBlockedReason
+          : auditReworkLimitReached
+            ? `${blockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
+            : reworkBlockedReason
       }`
     : blockedReason;
 
   if (auditArtifact) {
-    const state = artifactStateForFailureFamily(failureFamily, { terminal: !shouldReturnToRework });
+    const state = artifactStateForFailureFamily(failureFamily, {
+      terminal: !shouldReturnToRework || repeatedFailureMustBlock,
+    });
     updateRoadmapBatchArtifactState({
       taskId: task.id,
       state,
@@ -526,6 +546,7 @@ function blockTaskForCompletionEvidence(
     retryAfter: null,
     retryCount: task.retryCount ?? 0,
     manualReviewRequired:
+      repeatedFailureMustBlock ||
       auditReworkLimitReached ||
       result.issues.some((entry) => entry.code === "manual_review_required"),
     lastHeartbeatAt: nowIso,
@@ -661,6 +682,13 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     return { ok: false, status: 404, error: "Task not found" };
   }
   const { event } = input;
+  if (event !== "cancel_task" && isOperatorCancelledTask(task)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "operator_cancelled tasks require operator triage before any further event",
+    };
+  }
   const operatorInputRetry = event === "retry_from_blocked" && isOperatorInputHold(task);
   if (operatorInputRetry && !hasFreshOperatorInputAnswer(task)) {
     return {
@@ -860,6 +888,13 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     lastHeartbeatAt: nowIso,
     updatedAt: nowIso,
   });
+
+  if (event === "cancel_task") {
+    appendTaskActivityLog(
+      task.id,
+      `[${nowIso}] Task cancelled by operator from ${task.status}; automation paused.`,
+    );
+  }
 
   const updated = findTaskById(task.id);
   if (!updated) {

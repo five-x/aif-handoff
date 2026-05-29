@@ -642,9 +642,15 @@ projectsRouter.post("/:id/task-split-proposals/:proposalId/approve", async (c) =
       (candidate, index, allIds): candidate is string =>
         Boolean(candidate) && allIds.indexOf(candidate) === index,
     );
+    const wakeImportedChildren = !getEnv().AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT;
     for (const taskId of broadcastTaskIds) {
       const task = findTaskById(taskId);
-      if (task) broadcast({ type: "task:created", payload: toTaskBroadcastPayload(task) });
+      if (task) {
+        broadcast({ type: "task:created", payload: toTaskBroadcastPayload(task) });
+        if (wakeImportedChildren && task.hierarchyRole !== "container") {
+          broadcast({ type: "agent:wake", payload: { id: task.id } });
+        }
+      }
     }
     return c.json(result.proposal, result.status === "approved" ? 201 : 200);
   } catch (err) {

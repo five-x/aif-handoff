@@ -62,9 +62,15 @@ describe("env validation", () => {
     expect(result.ACTIVITY_LOG_QUEUE_LIMIT).toBe(500);
     expect(result.AGENT_WAKE_ENABLED).toBe(true);
     expect(result.AGENT_CHAT_MAX_TURNS).toBe(50);
-    expect(result.AGENT_MAX_REVIEW_ITERATIONS).toBe(100);
+    expect(result.AGENT_MAX_REVIEW_ITERATIONS).toBe(3);
+    expect(result.AGENT_PLAN_QUALITY_MAX_RETRIES).toBe(3);
+    expect(result.AGENT_IMPLEMENTATION_EVIDENCE_MAX_REWORK).toBe(3);
     expect(result.AGENT_AUTO_REVIEW_STALL_THRESHOLD).toBe(3);
     expect(result.AGENT_USE_SUBAGENTS).toBe(false);
+    expect(result.AIF_USAGE_LIMITS_ENABLED).toBe(true);
+    expect(result.AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT).toBe(true);
+    expect(result.AIF_RUNTIME_AUTO_FALLBACK_ENABLED).toBe(false);
+    expect(result.AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED).toBe(true);
     expect(result.AIF_MEMORY_ENABLED).toBe(true);
     expect(result.AIF_WARMUP_ENABLED).toBe(false);
     expect(result.AIF_TASK_WORKTREES_ENABLED).toBe(false);
@@ -186,6 +192,12 @@ describe("env validation", () => {
         AGENT_AUTO_REVIEW_STALL_THRESHOLD: "0",
       }),
     ).toThrow();
+  });
+
+  it("should reject production safety iteration caps above ten", () => {
+    expect(() => validateEnv({ AGENT_MAX_REVIEW_ITERATIONS: "11" })).toThrow();
+    expect(() => validateEnv({ AGENT_PLAN_QUALITY_MAX_RETRIES: "11" })).toThrow();
+    expect(() => validateEnv({ AGENT_IMPLEMENTATION_EVIDENCE_MAX_REWORK: "11" })).toThrow();
   });
 
   it("should reject invalid LOG_LEVEL", () => {

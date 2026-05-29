@@ -2456,6 +2456,7 @@ export function approveRoadmapSplitProposal(input: {
   proposalId: string;
   approvedBy?: string | null;
 }): ApproveTaskSplitProposalResult {
+  const childrenPausedByDefault = getEnv().AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT;
   return approveTaskSplitProposal({
     projectId: input.projectId,
     proposalId: input.proposalId,
@@ -2463,7 +2464,7 @@ export function approveRoadmapSplitProposal(input: {
     createTasks: (proposal) => {
       const result = importGeneratedTasks(input.projectId, generationFromProposal(proposal), {
         createHierarchyParent: true,
-        pauseCreatedTasks: true,
+        pauseCreatedTasks: childrenPausedByDefault,
       });
       return {
         taskIds: result.taskIds,
@@ -2606,6 +2607,9 @@ export function importGeneratedTasks(
   const roadmapHooks = roadmapWorkflowPacks.get(importIntent).hooks;
   const priorContext = roadmapHooks?.extractPriorContext?.({ roadmapAlias: alias }) ?? null;
   const cfg = getProjectConfig(project.rootPath);
+  const importEnv = getEnv();
+  const pauseCreatedTasks =
+    options.pauseCreatedTasks ?? importEnv.AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT;
 
   const validationGeneration: RoadmapGenerationResult = hasExplicitTypedImportIntent
     ? generation
@@ -2757,6 +2761,7 @@ export function importGeneratedTasks(
       projectId,
       title: genTask.title,
       description: genTask.description,
+      autoMode: pauseCreatedTasks ? false : undefined,
       taskIntent,
       roadmapAlias: alias,
       tags,
@@ -2767,8 +2772,9 @@ export function importGeneratedTasks(
       skipReview: importOverrides.skipReview ?? defaults.skipReview,
       useSubagents:
         importOverrides.useSubagents ?? (taskIntent === "spike" ? true : defaults.useSubagents),
+      maxReviewIterations: importEnv.AGENT_MAX_REVIEW_ITERATIONS,
       position: importPositionStart + createdPositionIndex * 100,
-      paused: options.pauseCreatedTasks ? true : (importOverrides.paused ?? false),
+      paused: pauseCreatedTasks ? true : (importOverrides.paused ?? false),
       parentTaskId: hierarchyParent?.id ?? null,
     });
 
@@ -2788,9 +2794,14 @@ export function importGeneratedTasks(
         workflowArtifactInputs.push(artifact);
         if (artifact.role === "synthesis") synthesisTaskId = created.id;
       }
-      if (importOverrides.blockedReason) {
+      const importBlockedReason =
+        importOverrides.blockedReason ??
+        (pauseCreatedTasks
+          ? "operator_input_required: roadmap import created this child paused; start explicitly when ready."
+          : null);
+      if (importBlockedReason) {
         setTaskFields(created.id, {
-          blockedReason: importOverrides.blockedReason,
+          blockedReason: importBlockedReason,
         });
       }
     }

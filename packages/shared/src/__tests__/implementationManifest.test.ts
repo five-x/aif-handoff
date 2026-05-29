@@ -6,6 +6,42 @@ import {
 } from "../implementationManifest.js";
 
 describe("implementation manifest extraction", () => {
+  function validManifest(overrides: Record<string, unknown> = {}) {
+    return {
+      version: 1,
+      taskId: "task-feature",
+      intent: "feature",
+      planManifestHash: null,
+      changedFiles: [{ path: "src/index.ts", status: "modified" }],
+      diffSummary: { summary: "Implemented src/index.ts", filesChanged: 1 },
+      verificationEvidence: [
+        {
+          id: "ver-1",
+          command: "npm test",
+          status: "passed",
+          outputSha256: "a".repeat(64),
+          outputPreview: "PASS tests/app.test.ts",
+          outputPreviewTruncated: false,
+        },
+      ],
+      acceptanceCriteria: [{ id: "AC-1", status: "satisfied", evidenceRefs: ["ver-1"] }],
+      evidenceRefs: ["ver-1"],
+      planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+      reviewClosure: { status: "pending", evidenceRefs: [] },
+      commitEvidence: { status: "not_required", evidenceRefs: [] },
+      knownLimitations: [],
+      ...overrides,
+    };
+  }
+
+  function validActivityLog(command = "npm test") {
+    return [
+      "[2026-05-29T10:00:00.000Z] Agent: implement-coordinator started",
+      `[2026-05-29T10:00:01.000Z] Tool: run_shell ${command}`,
+      "[2026-05-29T10:00:02.000Z] Agent: implement-coordinator complete",
+    ].join("\n");
+  }
+
   it("extracts a JSON fence when the model labels it as aif-implementation-manifest", () => {
     const text = `Done.
 
@@ -144,5 +180,77 @@ describe("implementation manifest extraction", () => {
     });
 
     expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
+  });
+
+  it("rejects passed verification that says the command was not executed", () => {
+    const manifest = validManifest({
+      verificationEvidence: [
+        {
+          id: "ver-1",
+          command: "npm test",
+          status: "passed",
+          outputSha256: "b".repeat(64),
+          outputPreview: "Tests were not executed in this environment.",
+          outputPreviewTruncated: false,
+        },
+      ],
+    });
+
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: JSON.stringify(manifest),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("contradictory_verification_claim");
+  });
+
+  it("rejects passed verification command absent from latest implementation activity", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: [
+          "[2026-05-29T10:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-29T10:00:01.000Z] Tool: read_file src/index.ts",
+          "[2026-05-29T10:00:02.000Z] Agent: implement-coordinator complete",
+        ].join("\n"),
+      },
+      manifestJson: JSON.stringify(validManifest()),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("verification_command_not_observed");
+  });
+
+  it("accepts passed verification command observed in latest implementation activity", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: JSON.stringify(validManifest()),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues).toEqual([]);
   });
 });

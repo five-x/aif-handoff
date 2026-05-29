@@ -350,6 +350,40 @@ describe("task state machine", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("cancels non-terminal task statuses into a paused operator block", () => {
+    for (const status of [
+      "backlog",
+      "planning",
+      "plan_ready",
+      "implementing",
+      "review",
+      "blocked_external",
+    ] as const) {
+      const result = applyHumanTaskEvent(makeTask(status), "cancel_task");
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.patch.status).toBe("blocked_external");
+        expect(result.patch.paused).toBe(true);
+        expect(result.patch.manualReviewRequired).toBe(true);
+        expect(result.patch.blockedReason).toMatch(/^operator_cancelled:/);
+      }
+    }
+  });
+
+  it("rejects cancel_task from terminal task statuses", () => {
+    expect(applyHumanTaskEvent(makeTask("done"), "cancel_task").ok).toBe(false);
+    expect(applyHumanTaskEvent(makeTask("verified"), "cancel_task").ok).toBe(false);
+  });
+
+  it("clears paused when starting a paused backlog task", () => {
+    const result = applyHumanTaskEvent({ ...makeTask("backlog"), paused: true }, "start_ai");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("planning");
+      expect(result.patch.paused).toBe(false);
+    }
+  });
+
   it("returns unknown event error for unsupported event", () => {
     const result = applyHumanTaskEvent(makeTask("backlog"), "unsupported" as any);
     expect(result.ok).toBe(false);

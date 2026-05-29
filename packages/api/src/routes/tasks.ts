@@ -378,6 +378,7 @@ function isManualHandoffTask(task: TaskRow): boolean {
   const reason = task.blockedReason?.toLowerCase() ?? "";
   return Boolean(
     reason.startsWith("operator_input_required:") ||
+    reason.startsWith("operator_cancelled:") ||
     reason.includes("branch isolation failure") ||
     reason.includes("config_governance_blocked") ||
     reason.includes("manual action required before retry") ||
@@ -1686,7 +1687,15 @@ tasksRouter.post("/:id/events", jsonValidator(taskEventSchema), async (c) => {
 
     return c.json(toTaskRouteResponse(handled.task));
   } catch (error) {
-    log.error({ taskId: id, event, error }, "Task event handling failed");
+    log.error(
+      {
+        taskId: id,
+        event,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+      "Task event handling failed",
+    );
     return c.json({ error: "Internal server error" }, 500);
   }
 });

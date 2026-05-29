@@ -1069,21 +1069,25 @@ describe("coordinator", () => {
     report = db.select().from(tasks).where(eq(tasks.id, "task-canary-report")).get();
     expect(runImplementer).toHaveBeenCalledWith("task-canary-report", rootPath);
     expect(runReviewer).toHaveBeenCalledWith("task-canary-report", rootPath);
-    expect(report?.status).toBe("implementing");
-    expect(report?.reworkRequested).toBe(true);
-    expect(report?.manualReviewRequired).toBe(false);
+    expect(report?.status).toBe("blocked_external");
+    expect(report?.reworkRequested).toBe(false);
+    expect(report?.manualReviewRequired).toBe(true);
     expect(report?.blockedReason).toContain("invalid_artifact_contract");
     expect(report?.blockedReason).toContain("inventory_only_evidence");
     expect(report?.blockedReason).toContain(
-      "Rework requested again for repeated audit artifact failure signature",
+      "repeated audit artifact failure signature failed closed",
     );
     artifacts = listRoadmapBatchArtifacts(batch.batchId);
     reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
     if (!reportArtifact) throw new Error("missing canary report artifact");
-    const repeatedAttempts = listRoadmapBatchArtifactAttempts(reportArtifact.id).filter(
-      (attempt) => attempt.reworkStatus === "rework_requested",
-    );
+    expect(reportArtifact.state).toBe("invalid");
+    const repeatedAttempts = listRoadmapBatchArtifactAttempts(reportArtifact.id);
     expect(repeatedAttempts.length).toBeGreaterThanOrEqual(2);
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
 
     vi.clearAllMocks();
     const repairedSnapshot = currentGitSnapshot(rootPath);
@@ -3201,7 +3205,7 @@ describe("coordinator", () => {
     );
   });
 
-  it("retries in progress with a durable one-shot fallback after implementer context overflow", async () => {
+  it("blocks context overflow without durable one-shot fallback by default", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
       id: "profile-fast-32k",
@@ -3245,29 +3249,26 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     const retrying = db.select().from(tasks).where(eq(tasks.id, "task-context-fallback")).get();
-    expect(retrying!.status).toBe("implementing");
-    expect(retrying!.blockedReason).toContain("Runtime context limit recovery");
-    expect(retrying!.blockedReason).toContain("profile-heavy-80k");
-    expect(retrying!.blockedFromStatus).toBeNull();
+    expect(retrying!.status).toBe("blocked_external");
+    expect(retrying!.blockedReason).toContain("operator_input_required");
+    expect(retrying!.blockedReason).toContain("Runtime auto fallback is disabled");
+    expect(retrying!.blockedReason).toContain("profile-fast-32k");
+    expect(retrying!.blockedFromStatus).toBe("implementing");
     expect(retrying!.retryAfter).toBeNull();
-    expect(retrying!.retryCount).toBe(3);
+    expect(retrying!.retryCount).toBe(2);
     expect(retrying!.manualReviewRequired).toBe(false);
     expect(retrying!.reworkRequested).toBe(false);
-    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-80k");
-    expect(retrying!.runtimeOptionsJson).toContain("profile-fast-32k");
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("profile-heavy-80k");
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
     expect(retrying!.agentActivityLog).toContain(
-      "Context overflow scheduled immediate one-shot runtime fallback",
+      "Context overflow blocked without runtime fallback",
     );
 
     await pollAndProcess();
 
-    expect(runImplementer).toHaveBeenCalledTimes(2);
-    const done = db.select().from(tasks).where(eq(tasks.id, "task-context-fallback")).get();
-    expect(done!.status).toBe("done");
-    expect(done!.agentActivityLog).toContain("Runtime one-shot fallback before implementer");
-    expect(done!.agentActivityLog).toContain("selectedProfile=profile-heavy-80k");
-    expect(done!.runtimeOptionsJson).not.toContain("contextFallback");
-    expect(done!.runtimeOptionsJson).toContain("profile-fast-32k");
+    expect(runImplementer).toHaveBeenCalledTimes(1);
+    const blocked = db.select().from(tasks).where(eq(tasks.id, "task-context-fallback")).get();
+    expect(blocked!.status).toBe("blocked_external");
   });
 
   it("terminalizes audit reports after repository-inspection budget exhaustion without context fallback", async () => {
@@ -3436,7 +3437,7 @@ describe("coordinator", () => {
     );
   });
 
-  it("retries in progress with a durable one-shot fallback after transient implementer transport failure", async () => {
+  it("blocks transient implementer transport failure without one-shot fallback by default", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
       id: "profile-fast-transport",
@@ -3483,35 +3484,23 @@ describe("coordinator", () => {
     await pollAndProcess();
 
     const retrying = db.select().from(tasks).where(eq(tasks.id, "task-transport-fallback")).get();
-    expect(retrying!.status).toBe("implementing");
-    expect(retrying!.blockedReason).toContain("Runtime transient transport recovery");
-    expect(retrying!.blockedReason).toContain("profile-heavy-transport");
-    expect(retrying!.blockedFromStatus).toBeNull();
-    expect(retrying!.retryAfter).toBeNull();
+    expect(retrying!.status).toBe("blocked_external");
+    expect(retrying!.blockedReason).not.toContain("Runtime transient transport recovery");
+    expect(retrying!.blockedFromStatus).toBe("implementing");
     expect(retrying!.retryCount).toBe(1);
-    expect(retrying!.manualReviewRequired).toBe(false);
-    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-transport");
-    expect(retrying!.runtimeOptionsJson).toContain("profile-fast-transport");
-    expect(retrying!.runtimeOptionsJson).toContain('"failedContextProfileIds"');
-    expect(retrying!.runtimeOptionsJson).toContain("transient_runtime_error");
-    expect(retrying!.agentActivityLog).toContain(
-      "Transient runtime failure scheduled immediate one-shot fallback",
-    );
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("profile-heavy-transport");
     expect(retrying!.agentActivityLog).toContain("failedProfile=profile-fast-transport");
-    expect(retrying!.agentActivityLog).toContain("selectedProfile=profile-heavy-transport");
+    expect(retrying!.agentActivityLog).not.toContain("selectedProfile=profile-heavy-transport");
 
     await pollAndProcess();
 
-    expect(runImplementer).toHaveBeenCalledTimes(2);
-    const done = db.select().from(tasks).where(eq(tasks.id, "task-transport-fallback")).get();
-    expect(done!.status).toBe("done");
-    expect(done!.agentActivityLog).toContain("Runtime one-shot fallback before implementer");
-    expect(done!.agentActivityLog).toContain("selectedProfile=profile-heavy-transport");
-    expect(done!.runtimeOptionsJson).not.toContain("contextFallback");
-    expect(done!.runtimeOptionsJson).toContain("profile-fast-transport");
+    expect(runImplementer).toHaveBeenCalledTimes(1);
+    const blocked = db.select().from(tasks).where(eq(tasks.id, "task-transport-fallback")).get();
+    expect(blocked!.status).toBe("blocked_external");
   });
 
-  it("keeps attempted failed profile metadata when transient recovery already has an active fallback", async () => {
+  it("clears active fallback and blocks when transient recovery fallback is disabled", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
       id: "profile-fast-active-fallback",
@@ -3580,10 +3569,10 @@ describe("coordinator", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-active-fallback-attribution"))
       .get();
-    expect(retrying!.status).toBe("implementing");
-    expect(retrying!.blockedReason).toContain("Runtime transient transport recovery");
+    expect(retrying!.status).toBe("blocked_external");
+    expect(retrying!.blockedReason).not.toContain("Runtime transient transport recovery");
     expect(retrying!.retryCount).toBe(2);
-    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-active-fallback");
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
     expect(
       JSON.parse(retrying!.runtimeOptionsJson!).__aifRuntimeRecovery.failedContextProfileIds
         .implementer,
@@ -3673,7 +3662,7 @@ describe("coordinator", () => {
     expect(blocked!.agentActivityLog).toContain("baseUrl=[REDACTED]");
   });
 
-  it("retries audit report timeouts immediately with a bounded source-audit recovery", async () => {
+  it("blocks audit report timeouts without bounded source-audit fallback by default", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
       id: "profile-fast-audit-timeout",
@@ -3708,7 +3697,7 @@ describe("coordinator", () => {
         runtimeOptionsJson: JSON.stringify({
           __aifRuntimeRecovery: {
             contextFallback: {
-              stage: "implementer",
+              stage: "audit",
               profileId: "profile-heavy-audit-timeout",
               previousProfileId: "profile-fast-audit-timeout",
               reason: "context_length",
@@ -3716,7 +3705,7 @@ describe("coordinator", () => {
               createdAt: "2026-05-20T00:00:00.000Z",
             },
             failedContextProfileIds: {
-              implementer: ["profile-fast-audit-timeout"],
+              audit: ["profile-fast-audit-timeout"],
             },
           },
         }),
@@ -3749,17 +3738,12 @@ describe("coordinator", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-audit-timeout-bounded"))
       .get();
-    expect(retrying!.status).toBe("implementing");
-    expect(retrying!.blockedReason).toContain("Runtime audit report timeout recovery");
-    expect(retrying!.blockedReason).toContain("audit/architecture.md");
-    expect(retrying!.blockedFromStatus).toBeNull();
-    expect(retrying!.retryAfter).toBeNull();
+    expect(retrying!.status).toBe("blocked_external");
+    expect(retrying!.blockedReason).not.toContain("Runtime audit report timeout recovery");
+    expect(retrying!.blockedFromStatus).toBe("implementing");
     expect(retrying!.retryCount).toBe(2);
-    expect(retrying!.manualReviewRequired).toBe(false);
-    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-audit-timeout");
-    expect(retrying!.agentActivityLog).toContain(
-      "Audit report timeout scheduled immediate bounded retry",
-    );
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("profile-heavy-audit-timeout");
   });
 
   it("blocks audit report timeout on endpoint cooldown instead of immediate fallback retry", async () => {
@@ -3822,7 +3806,7 @@ describe("coordinator", () => {
     expect(blocked!.retryCount).toBe(1);
   });
 
-  it("keeps audit report transport failures in bounded recovery after fallback is active", async () => {
+  it("blocks audit report transport failures after clearing active fallback by default", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
       id: "profile-fast-audit-transport",
@@ -3901,17 +3885,13 @@ describe("coordinator", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-audit-transport-bounded"))
       .get();
-    expect(retrying!.status).toBe("implementing");
-    expect(retrying!.blockedReason).toContain("Runtime audit report transient transport recovery");
-    expect(retrying!.blockedReason).toContain("audit/architecture.md");
-    expect(retrying!.blockedFromStatus).toBeNull();
-    expect(retrying!.retryAfter).toBeNull();
-    expect(retrying!.retryCount).toBe(3);
-    expect(retrying!.manualReviewRequired).toBe(false);
-    expect(retrying!.runtimeOptionsJson).toContain("profile-heavy-audit-transport");
-    expect(retrying!.agentActivityLog).toContain(
-      "Audit report transient recovery scheduled immediate bounded retry",
+    expect(retrying!.status).toBe("blocked_external");
+    expect(retrying!.blockedReason).not.toContain(
+      "Runtime audit report transient transport recovery",
     );
+    expect(retrying!.blockedFromStatus).toBe("implementing");
+    expect(retrying!.retryCount).toBe(3);
+    expect(retrying!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
   });
 
   it("validates a written audit artifact before blocking post-write transport failures", async () => {
@@ -4723,7 +4703,7 @@ describe("coordinator", () => {
     expect(task!.blockedFromStatus).toBe("plan_ready");
     expect(task!.retryAfter).toBeNull();
     expect(task!.retryCount).toBe(1);
-    expect(task!.blockedReason).toContain("Plan quality guard replan 1/100");
+    expect(task!.blockedReason).toContain("Plan quality guard replan 1/3");
     expect(task!.blockedReason).toContain("slash_fallback_echo");
     expect(task!.agentActivityLog).toContain("Plan quality structured feedback");
     expect(task!.agentActivityLog).toContain('"kind":"plan_quality_feedback"');
@@ -4743,7 +4723,7 @@ describe("coordinator", () => {
         autoMode: true,
         retryCount: 1,
         blockedFromStatus: "plan_ready",
-        blockedReason: "Plan quality guard replan 1/100: previous feedback",
+        blockedReason: "Plan quality guard replan 1/3: previous feedback",
         plan: "## Plan\n- [ ] Try again",
       })
       .run();
@@ -4751,7 +4731,7 @@ describe("coordinator", () => {
     vi.mocked(runPlanChecker).mockImplementationOnce(async (taskId) => {
       const taskAtPlanCheck = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
       expect(taskAtPlanCheck!.blockedFromStatus).toBe("plan_ready");
-      expect(taskAtPlanCheck!.blockedReason).toContain("Plan quality guard replan 1/100");
+      expect(taskAtPlanCheck!.blockedReason).toContain("Plan quality guard replan 1/3");
       throw createPlanQualityError();
     });
 
@@ -4762,7 +4742,7 @@ describe("coordinator", () => {
     expect(runPlanChecker).toHaveBeenCalledWith("task-plan-quality-preserve", "/tmp/test");
     expect(task!.status).toBe("planning");
     expect(task!.retryCount).toBe(2);
-    expect(task!.blockedReason).toContain("Plan quality guard replan 2/100");
+    expect(task!.blockedReason).toContain("Plan quality guard replan 2/3");
   });
 
   it("should block non-roadmap invalid plan quality after retry limit", async () => {
@@ -4774,7 +4754,7 @@ describe("coordinator", () => {
         title: "Weak plan limit",
         status: "plan_ready",
         autoMode: true,
-        retryCount: 100,
+        retryCount: 3,
         plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
       })
       .run();
@@ -4787,7 +4767,7 @@ describe("coordinator", () => {
     expect(task!.status).toBe("blocked_external");
     expect(task!.blockedFromStatus).toBe("plan_ready");
     expect(task!.retryAfter).toBeNull();
-    expect(task!.retryCount).toBe(101);
+    expect(task!.retryCount).toBe(4);
     expect(task!.manualReviewRequired).toBe(true);
     expect(task!.blockedReason).toContain("Retry limit reached");
     expect(task!.blockedReason).toContain("Operator next step");
@@ -4807,7 +4787,7 @@ describe("coordinator", () => {
         taskIntent: "audit",
         status: "plan_ready",
         autoMode: true,
-        retryCount: 100,
+        retryCount: 3,
         plan: "## Plan\n- [ ] /aif-plan fast @.ai-factory/PLAN.md docs:false tests:false",
       })
       .run();
@@ -4860,7 +4840,7 @@ describe("coordinator", () => {
     expect(task!.blockedFromStatus).toBe("plan_ready");
     expect(task!.manualReviewRequired).toBe(true);
     expect(task!.reworkRequested).toBe(false);
-    expect(task!.retryCount).toBe(100);
+    expect(task!.retryCount).toBe(3);
     expect(runImplementer).not.toHaveBeenCalled();
 
     const reportArtifact = listRoadmapBatchArtifacts(batch.batchId).find(
@@ -4970,8 +4950,8 @@ describe("coordinator", () => {
         title: "Development task with repeated bad manifest",
         taskIntent: "feature",
         status: "implementing",
-        reviewIterationCount: 2,
-        maxReviewIterations: 100,
+        reviewIterationCount: 3,
+        maxReviewIterations: 10,
       })
       .run();
 
@@ -4984,7 +4964,7 @@ describe("coordinator", () => {
     expect(task!.blockedFromStatus).toBe("implementing");
     expect(task!.blockedReason).toContain("missing_implementation_manifest");
     expect(task!.reworkRequested).toBe(false);
-    expect(task!.reviewIterationCount).toBe(2);
+    expect(task!.reviewIterationCount).toBe(3);
   });
 
   it("should block skipReview audit tasks with generic plan and no evidence delta", async () => {
@@ -5561,7 +5541,7 @@ describe("coordinator", () => {
         autoMode: true,
         reviewComments: "## Blocking Findings\n- fix issue A",
         reviewIterationCount: 2,
-        maxReviewIterations: 100,
+        maxReviewIterations: 10,
         autoReviewStateJson: JSON.stringify({
           strategy: "full_re_review",
           iteration: 2,
@@ -5634,7 +5614,7 @@ describe("coordinator", () => {
         autoMode: true,
         reviewComments: "## Blocking Findings\n- fix issue A",
         reviewIterationCount: 2,
-        maxReviewIterations: 100,
+        maxReviewIterations: 10,
         autoReviewStateJson: JSON.stringify({
           strategy: "full_re_review",
           iteration: 2,

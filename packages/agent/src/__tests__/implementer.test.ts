@@ -5955,6 +5955,9 @@ describe("runImplementer rework behavior", () => {
         title: "Feature manifest with plan hash",
         taskIntent: "feature",
         plan,
+        agentActivityLog:
+          "[2026-05-29T19:00:00.000Z] Agent: aif-implement started\n" +
+          "[2026-05-29T19:00:01.000Z] Tool: npm.cmd test",
       },
       manifestJson,
       changedFiles: ["src/feature.ts"],

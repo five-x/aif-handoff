@@ -262,7 +262,8 @@ const IMPLEMENTATION_TOOL_ACTIVITY = [
   "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started (runtime=qwen-local-agent, transport=api, model=Qwen3)",
   "[2026-05-09T00:00:01.000Z] Tool: read_file README.md",
   "[2026-05-09T00:00:02.000Z] Tool: write_file reports/audit.md",
-  "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator complete (runtime=qwen-local-agent, transport=api, model=Qwen3)",
+  "[2026-05-09T00:00:03.000Z] Tool: run_shell npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts",
+  "[2026-05-09T00:00:04.000Z] Agent: implement-coordinator complete (runtime=qwen-local-agent, transport=api, model=Qwen3)",
 ].join("\n");
 
 const REVIEW_TOOL_ACTIVITY = [
@@ -461,6 +462,7 @@ describe("taskCompletionEvidence", () => {
         id: "form-validation-fix",
         title: "Fix form validation error",
         plan: "## Plan\n- Update validation handling\n- Add focused coverage",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "form-validation-fix",
           intent: "fix",
@@ -668,6 +670,7 @@ describe("taskCompletionEvidence", () => {
         title: "Add feature flag",
         taskIntent: "feature",
         plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "feature-with-manifest",
           intent: "feature",
@@ -709,6 +712,7 @@ describe("taskCompletionEvidence", () => {
         title: "Add feature flag",
         taskIntent: "feature",
         plan,
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "feature-with-plan-backed-manifest",
           intent: "feature",
@@ -796,6 +800,7 @@ describe("taskCompletionEvidence", () => {
         title: "Add feature flag",
         taskIntent: "feature",
         plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: JSON.stringify(manifest),
       },
     });
@@ -837,6 +842,7 @@ describe("taskCompletionEvidence", () => {
         title: "Add feature flag",
         taskIntent: "feature",
         plan: "## Plan\n- [ ] Implement feature\n- [ ] Run tests",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: JSON.stringify(manifest),
       },
     });
@@ -860,6 +866,7 @@ describe("taskCompletionEvidence", () => {
         title: "Add feature flag",
         taskIntent: "feature",
         plan: "## Plan\n- [x] Implement feature\n- [x] Run tests",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "feature-with-dirty-plan",
           intent: "feature",
@@ -1056,6 +1063,7 @@ describe("taskCompletionEvidence", () => {
         description: "Supporting source edits for docs correctness are required.",
         taskIntent: "docs",
         plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "docs-authorized-source",
           intent: "docs",
@@ -1080,6 +1088,7 @@ describe("taskCompletionEvidence", () => {
         title: "Update project plan docs",
         taskIntent: "docs",
         plan: "## Plan\n- [ ] Update docs/plan.md\n- [ ] Run docs validation",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "docs-plan-file-recorded",
           intent: "docs",
@@ -1204,6 +1213,7 @@ describe("taskCompletionEvidence", () => {
         title: "Update API docs",
         taskIntent: "docs",
         plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "docs-only",
           intent: "docs",
@@ -1252,6 +1262,7 @@ describe("taskCompletionEvidence", () => {
         title: "Add API tests",
         taskIntent: "tests",
         plan: "## Plan\n- [ ] Minimal source changes for testing are required.\n- [ ] Add API coverage",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "tests-authorized-source",
           intent: "tests",
@@ -1276,6 +1287,7 @@ describe("taskCompletionEvidence", () => {
         title: "Add API fixture coverage",
         taskIntent: "tests",
         plan: "## Plan\n- [ ] Add fixture coverage\n- [ ] Run the API test command",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({
           taskId: "tests-text-fixture",
           intent: "tests",
@@ -2493,7 +2505,7 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.evidence.implementationToolActivityCount).toBe(2);
+    expect(result.evidence.implementationToolActivityCount).toBe(3);
     expect(result.evidence.reviewStageToolActivityCount).toBe(0);
     expect(codes(result)).toContain("missing_review_tool_activity");
   });

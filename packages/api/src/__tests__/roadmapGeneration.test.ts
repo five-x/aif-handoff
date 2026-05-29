@@ -1338,6 +1338,9 @@ describe("roadmapGeneration", () => {
       expect(parent.paused).toBe(true);
       expect(child.parentTaskId).toBe(parent.id);
       expect(child.paused).toBe(true);
+      expect(child.autoMode).toBe(false);
+      expect(child.maxReviewIterations).toBe(3);
+      expect(child.blockedReason).toMatch(/^operator_input_required:/);
     });
 
     it("persists split proposals without creating tasks and detects changed source content", () => {
@@ -2077,16 +2080,20 @@ describe("roadmapGeneration", () => {
     it("should position imported roadmap tasks in phase and sequence order for auto-queue", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 
-      const result = importGeneratedTasks(projectId, {
-        alias: "v1",
-        tasks: [
-          { title: "Phase 5", description: "", phase: 5, phaseName: "Late", sequence: 1 },
-          { title: "Phase 1 second", description: "", phase: 1, phaseName: "Early", sequence: 2 },
-          { title: "Phase 1 first", description: "", phase: 1, phaseName: "Early", sequence: 1 },
-          { title: "Phase 1 tie A", description: "", phase: 1, phaseName: "Early", sequence: 3 },
-          { title: "Phase 1 tie B", description: "", phase: 1, phaseName: "Early", sequence: 3 },
-        ],
-      });
+      const result = importGeneratedTasks(
+        projectId,
+        {
+          alias: "v1",
+          tasks: [
+            { title: "Phase 5", description: "", phase: 5, phaseName: "Late", sequence: 1 },
+            { title: "Phase 1 second", description: "", phase: 1, phaseName: "Early", sequence: 2 },
+            { title: "Phase 1 first", description: "", phase: 1, phaseName: "Early", sequence: 1 },
+            { title: "Phase 1 tie A", description: "", phase: 1, phaseName: "Early", sequence: 3 },
+            { title: "Phase 1 tie B", description: "", phase: 1, phaseName: "Early", sequence: 3 },
+          ],
+        },
+        { pauseCreatedTasks: false },
+      );
 
       expect(result.created).toBe(5);
       const stored = findTasksByRoadmapAlias(projectId, "v1")

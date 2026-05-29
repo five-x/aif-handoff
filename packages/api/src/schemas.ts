@@ -137,7 +137,7 @@ export const createTaskSchema = z.object({
     .number()
     .int()
     .min(1)
-    .max(100)
+    .max(10)
     .default(getEnv().AGENT_MAX_REVIEW_ITERATIONS),
   paused: z.boolean().default(false),
   runtimeProfileId: z.string().min(1).nullable().optional(),
@@ -166,7 +166,7 @@ export const updateTaskSchema = z.object({
   planTests: z.boolean().optional(),
   skipReview: z.boolean().optional(),
   useSubagents: z.boolean().optional(),
-  maxReviewIterations: z.number().int().min(1).max(100).optional(),
+  maxReviewIterations: z.number().int().min(1).max(10).optional(),
   plan: z.string().nullable().optional(),
   implementationLog: z.string().nullable().optional(),
   implementationManifest: z.record(z.string(), z.unknown()).nullable().optional(),

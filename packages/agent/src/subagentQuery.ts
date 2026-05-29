@@ -74,6 +74,7 @@ import { splitRuntimeRecoveryOptions } from "./runtimeRecoveryOptions.js";
 const log = logger("subagent-query");
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const OPERATOR_CANCEL_WATCH_INTERVAL_MS = 1_000;
 
 const FIRST_ACTIVITY_TIMEOUT_ERROR = "first_activity_timeout";
 const FIRST_ACTIVITY_MAX_RETRIES = 2;
@@ -111,6 +112,28 @@ function findRuntimeCapabilityError(error: unknown): RuntimeCapabilityError | nu
     return findRuntimeCapabilityError(error.cause);
   }
   return null;
+}
+
+function isOperatorCancelledTask(task: ReturnType<typeof findTaskById>): boolean {
+  return (
+    task?.status === "blocked_external" &&
+    task.blockedReason?.startsWith("operator_cancelled:") === true
+  );
+}
+
+function startOperatorCancelWatcher(taskId: string, abort: AbortController): NodeJS.Timeout {
+  return setInterval(() => {
+    if (abort.signal.aborted) return;
+    const task = findTaskById(taskId);
+    if (!isOperatorCancelledTask(task)) return;
+    abort.abort(new Error("operator_cancelled"));
+    logActivity(taskId, "Agent", "active attempt aborted because task was cancelled by operator");
+  }, OPERATOR_CANCEL_WATCH_INTERVAL_MS);
+}
+
+function clearOperatorCancelWatcher(timer: NodeJS.Timeout | null): void {
+  if (!timer) return;
+  clearInterval(timer);
 }
 
 function buildSanitizedSubagentError(
@@ -952,6 +975,7 @@ export async function executeSubagentQuery(
   let latestLimitSnapshot: RuntimeLimitSnapshot | null = null;
   let adapter: RuntimeAdapter | null = null;
   let watchdog: ReturnType<typeof createFirstActivityWatchdog> | null = null;
+  let operatorCancelWatcher: NodeJS.Timeout | null = null;
   const runtimeUsageLimitsEnabled = getEnv().AIF_USAGE_LIMITS_ENABLED;
 
   try {
@@ -1096,6 +1120,7 @@ export async function executeSubagentQuery(
       latestLimitSnapshot = null;
       // Fresh AbortController per attempt — AbortController is single-use
       const attemptAbort = new AbortController();
+      operatorCancelWatcher = startOperatorCancelWatcher(taskId, attemptAbort);
       // Chain to the external abort if provided (stage timeout, shutdown)
       const externalAbort =
         options.abortController ?? getActiveStageAbortController(taskId) ?? undefined;
@@ -1226,10 +1251,14 @@ export async function executeSubagentQuery(
         }
         // Success — break out of retry loop
         watchdog.clear();
+        clearOperatorCancelWatcher(operatorCancelWatcher);
+        operatorCancelWatcher = null;
         break;
       } catch (err) {
         const stalledByWatchdog = watchdog.didFire;
         watchdog.clear();
+        clearOperatorCancelWatcher(operatorCancelWatcher);
+        operatorCancelWatcher = null;
         if (stalledByWatchdog && attempt < FIRST_ACTIVITY_MAX_RETRIES) {
           // Agent stalled — kill and retry
           log.info(
@@ -1398,6 +1427,11 @@ export async function executeSubagentQuery(
   } finally {
     try {
       watchdog?.clear();
+    } catch {
+      // safety guard
+    }
+    try {
+      clearOperatorCancelWatcher(operatorCancelWatcher);
     } catch {
       // safety guard
     }

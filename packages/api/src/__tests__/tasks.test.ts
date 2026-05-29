@@ -134,6 +134,16 @@ function initGitProject(rootPath: string) {
   });
 }
 
+const IMPLEMENTATION_VERIFICATION_COMMAND = "npm.cmd test";
+
+function implementationActivityLog(command = IMPLEMENTATION_VERIFICATION_COMMAND): string {
+  return [
+    "[2026-05-29T19:00:00.000Z] Agent: aif-implement started",
+    `[2026-05-29T19:00:01.000Z] Tool: ${command}`,
+    "[2026-05-29T19:00:02.000Z] Agent: aif-implement completed",
+  ].join("\n");
+}
+
 function implementationManifest(input: {
   taskId: string;
   intent: "feature" | "fix" | "docs" | "tests";
@@ -155,7 +165,7 @@ function implementationManifest(input: {
     verificationEvidence: [
       {
         id: "verify-api",
-        command: "npm.cmd test --workspace=@aif/api -- --run src/__tests__/tasks.test.ts",
+        command: IMPLEMENTATION_VERIFICATION_COMMAND,
         status: "passed",
         outputSha256: "a".repeat(64),
         outputPreview: "tests passed",
@@ -1044,13 +1054,13 @@ describe("tasks API", () => {
         body: JSON.stringify({
           title: "Task with max iterations",
           projectId: "test-project",
-          maxReviewIterations: 100,
+          maxReviewIterations: 10,
         }),
       });
 
       expect(res.status).toBe(201);
       const body = await res.json();
-      expect(body.maxReviewIterations).toBe(100);
+      expect(body.maxReviewIterations).toBe(10);
       expect(body.reviewIterationCount).toBe(0);
     });
 
@@ -1559,6 +1569,7 @@ describe("tasks API", () => {
           taskIntent: "feature",
           status: "done",
           implementationLog: "Changed packages/api/src/__tests__/tasks.test.ts\nTests passed",
+          agentActivityLog: implementationActivityLog(),
           implementationManifestJson: implementationManifest({
             taskId: "timeline-feature",
             intent: "feature",
@@ -2066,6 +2077,13 @@ describe("tasks API", () => {
             blockedReason: "manual-review: inspect rejected evidence",
           },
           {
+            id: "broadcast-operator-cancelled",
+            projectId: "test-project",
+            title: "Operator cancelled",
+            status: "blocked_external",
+            blockedReason: "operator_cancelled: task cancelled by operator from implementing",
+          },
+          {
             id: "broadcast-manual-exception",
             projectId: "test-project",
             title: "Manual exception",
@@ -2092,6 +2110,7 @@ describe("tasks API", () => {
       for (const taskId of [
         "broadcast-operator-hold",
         "broadcast-manual-review",
+        "broadcast-operator-cancelled",
         "broadcast-manual-exception",
         "broadcast-branch-isolation",
         "broadcast-runtime-auth",
@@ -2221,12 +2240,12 @@ describe("tasks API", () => {
       const res = await app.request("/tasks/upd-mri", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxReviewIterations: 100 }),
+        body: JSON.stringify({ maxReviewIterations: 10 }),
       });
 
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.maxReviewIterations).toBe(100);
+      expect(body.maxReviewIterations).toBe(10);
     });
 
     it("should return 404 for non-existent task", async () => {
@@ -3567,7 +3586,7 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual(expect.objectContaining({ status: "verified" }));
+      expect(body.status).toBe("verified");
     });
 
     it("should block approve_done for risky generic no-delta audit tasks", async () => {
@@ -3685,6 +3704,7 @@ describe("tasks API", () => {
           taskIntent: "docs",
           status: "done",
           plan: "## Plan\n- [ ] Update docs/api.md\n- [ ] Run docs validation",
+          agentActivityLog: implementationActivityLog(),
           implementationManifestJson: implementationManifest({
             taskId: "ev-docs-allow-1",
             intent: "docs",
@@ -3843,12 +3863,12 @@ describe("tasks API", () => {
 
       expect(repeatedRes.status).toBe(200);
       const repeatedBody = await repeatedRes.json();
-      expect(repeatedBody.status).toBe("implementing");
-      expect(repeatedBody.reworkRequested).toBe(true);
-      expect(repeatedBody.manualReviewRequired).toBe(false);
+      expect(repeatedBody.status).toBe("blocked_external");
+      expect(repeatedBody.reworkRequested).toBe(false);
+      expect(repeatedBody.manualReviewRequired).toBe(true);
       expect(repeatedBody.blockedReason).toContain("missing_artifact");
       expect(repeatedBody.blockedReason).toContain(
-        "Rework requested again for repeated audit artifact failure signature",
+        "repeated audit artifact failure signature failed closed",
       );
       const repeatedArtifact = listRoadmapBatchArtifacts(batch.batchId)[0];
       expect(repeatedArtifact.state).toBe("missing");
@@ -3881,7 +3901,7 @@ describe("tasks API", () => {
       expect(maxedBody.reworkRequested).toBe(false);
       expect(maxedBody.manualReviewRequired).toBe(true);
       expect(maxedBody.blockedReason).toContain(
-        "Manual review required: audit evidence guard failed after 3/3 review iterations",
+        "repeated audit artifact failure signature failed closed",
       );
     });
 
@@ -4249,7 +4269,7 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.status).toBe("verified");
+      expect(body).toEqual(expect.objectContaining({ status: "verified" }));
     });
 
     it("should delete FIX_PLAN.md on approve_done when task isFix=true", async () => {
@@ -4273,6 +4293,7 @@ describe("tasks API", () => {
           status: "done",
           isFix: true,
           planPath: ".ai-factory/PLAN.md",
+          agentActivityLog: implementationActivityLog(),
           implementationManifestJson: implementationManifest({
             taskId: "ev-approve-fix-plan-1",
             intent: "fix",
@@ -4290,7 +4311,7 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.status).toBe("verified");
+      expect(body).toEqual(expect.objectContaining({ status: "verified" }));
       expect(existsSync(fixPlanFilePath)).toBe(false);
       expect(existsSync(planFilePath)).toBe(true);
     });
@@ -4508,6 +4529,7 @@ describe("tasks API", () => {
           title: "Done QA missing",
           status: "done",
           taskIntent: "general",
+          agentActivityLog: implementationActivityLog(),
           implementationManifestJson: implementationManifest({
             taskId: "ev-qa-missing",
             intent: "feature",
@@ -4541,6 +4563,7 @@ describe("tasks API", () => {
           title: "Done QA malformed acceptance pack",
           status: "done",
           taskIntent: "general",
+          agentActivityLog: implementationActivityLog(),
           implementationManifestJson: implementationManifest({
             taskId: "ev-qa-malformed-pack",
             intent: "feature",
@@ -4566,7 +4589,7 @@ describe("tasks API", () => {
           commands: [
             {
               id: "manifest:verify-api",
-              command: "npm.cmd test --workspace=@aif/api -- --run src/__tests__/tasks.test.ts",
+              command: IMPLEMENTATION_VERIFICATION_COMMAND,
               status: "passed",
               mandatory: true,
               outputSummary: "tests passed",
@@ -4616,6 +4639,7 @@ describe("tasks API", () => {
           title: "Done QA ready",
           status: "done",
           taskIntent: "general",
+          agentActivityLog: implementationActivityLog(),
           implementationManifestJson: implementationManifest({
             taskId: "ev-qa-ready",
             intent: "feature",
@@ -4641,7 +4665,7 @@ describe("tasks API", () => {
           commands: [
             {
               id: "manifest:verify-api",
-              command: "npm.cmd test --workspace=@aif/api -- --run src/__tests__/tasks.test.ts",
+              command: IMPLEMENTATION_VERIFICATION_COMMAND,
               status: "passed",
               mandatory: true,
               outputSummary: "tests passed",
@@ -4909,6 +4933,37 @@ describe("tasks API", () => {
       expect(body.blockedFromStatus).toBeNull();
       expect(body.blockedReason).toBeNull();
       expect(body.retryAfter).toBeNull();
+    });
+
+    it("should persist cancel_task as a paused operator-cancelled manual handoff", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-cancel-active",
+          projectId: "test-project",
+          title: "Cancel active task",
+          status: "implementing",
+          autoMode: true,
+          paused: false,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-cancel-active/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "cancel_task" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.paused).toBe(true);
+      expect(body.manualReviewRequired).toBe(true);
+      expect(body.blockedReason).toMatch(/^operator_cancelled:/);
+      const persisted = db.select().from(tasks).where(eq(tasks.id, "ev-cancel-active")).get();
+      expect(persisted?.status).toBe("blocked_external");
+      expect(persisted?.paused).toBe(true);
+      expect(persisted?.manualReviewRequired).toBe(true);
     });
 
     it("should reject retry_from_blocked for manual review required blocks", async () => {

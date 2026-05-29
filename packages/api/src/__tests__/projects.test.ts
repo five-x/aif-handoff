@@ -22,10 +22,12 @@ const mockBroadcast = vi.fn();
 const mockInternalBroadcastToken = { value: "" };
 const mockWarmupEnabled = { value: false };
 const mockTaskWorktreesEnabled = { value: false };
+const mockRoadmapImportPausedByDefault = { value: true };
 const baseMockEnv = {
   AIF_DEFAULT_RUNTIME_ID: "claude",
   AIF_DEFAULT_PROVIDER_ID: "anthropic",
   INTERNAL_BROADCAST_TOKEN: "",
+  AGENT_MAX_REVIEW_ITERATIONS: 3,
 };
 
 vi.mock("@aif/shared", async (importOriginal) => {
@@ -37,6 +39,7 @@ vi.mock("@aif/shared", async (importOriginal) => {
       INTERNAL_BROADCAST_TOKEN: mockInternalBroadcastToken.value,
       AIF_WARMUP_ENABLED: mockWarmupEnabled.value,
       AIF_TASK_WORKTREES_ENABLED: mockTaskWorktreesEnabled.value,
+      AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT: mockRoadmapImportPausedByDefault.value,
     }),
   };
 });
@@ -154,6 +157,7 @@ describe("projects API", () => {
     mockInternalBroadcastToken.value = "";
     mockWarmupEnabled.value = false;
     mockTaskWorktreesEnabled.value = false;
+    mockRoadmapImportPausedByDefault.value = true;
     mockResolveApiWarmupSupport.mockReset();
     const unsupportedWarmup = {
       supported: false,
@@ -687,6 +691,9 @@ describe("projects API", () => {
       expect(parent.paused).toBe(true);
       expect(child.parentTaskId).toBe(parent.id);
       expect(child.paused).toBe(true);
+      expect(child.autoMode).toBe(false);
+      expect(child.maxReviewIterations).toBe(3);
+      expect(child.blockedReason).toMatch(/^operator_input_required:/);
       expect(mockBroadcast).toHaveBeenCalledWith(expect.objectContaining({ type: "task:created" }));
       expect(mockBroadcast).not.toHaveBeenCalledWith(
         expect.objectContaining({ type: "agent:wake" }),
@@ -769,9 +776,45 @@ describe("projects API", () => {
       expect(parent.paused).toBe(true);
       expect(child.parentTaskId).toBe(parent.id);
       expect(child.paused).toBe(true);
+      expect(child.autoMode).toBe(false);
+      expect(child.maxReviewIterations).toBe(3);
+      expect(child.blockedReason).toMatch(/^operator_input_required:/);
       expect(mockBroadcast).toHaveBeenCalledWith(expect.objectContaining({ type: "task:created" }));
       expect(mockBroadcast).not.toHaveBeenCalledWith(
         expect.objectContaining({ type: "agent:wake" }),
+      );
+    });
+
+    it("wakes imported children only when paused-by-default compatibility flag is disabled", async () => {
+      mockRoadmapImportPausedByDefault.value = false;
+      createRoadmapProject("roadmap-split-compat", "# Roadmap\n- [ ] Build compat child\n");
+      mockRoadmapExtraction("split-compat");
+
+      const importRes = await app.request("/projects/roadmap-split-compat/roadmap/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "split-compat" }),
+      });
+      expect(importRes.status).toBe(201);
+      const importBody = await importRes.json();
+      mockBroadcast.mockClear();
+
+      const approveRes = await app.request(
+        `/projects/roadmap-split-compat/task-split-proposals/${importBody.proposal.id}/approve`,
+        { method: "POST" },
+      );
+
+      expect(approveRes.status).toBe(201);
+      const approved = await approveRes.json();
+      const childId = approved.createdTaskIds.find(
+        (taskId: string) => taskId !== approved.containerTaskId,
+      );
+      const child = findTaskById(childId)!;
+      expect(child.paused).toBe(false);
+      expect(child.autoMode).toBe(true);
+      expect(child.blockedReason).toBeNull();
+      expect(mockBroadcast).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "agent:wake", payload: { id: child.id } }),
       );
     });
 

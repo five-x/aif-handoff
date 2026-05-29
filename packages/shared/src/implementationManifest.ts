@@ -93,6 +93,8 @@ export type ImplementationManifestIssueCode =
   | "implementation_changed_files_mismatch"
   | "implementation_scope_mismatch"
   | "missing_verification_evidence"
+  | "verification_command_not_observed"
+  | "contradictory_verification_claim"
   | "missing_acceptance_evidence"
   | "plan_checklist_drift"
   | "unintended_uncommitted_changes"
@@ -114,6 +116,7 @@ export interface ImplementationManifestValidationTask {
   roadmapAlias?: string | null;
   plan?: string | null;
   reviewComments?: string | null;
+  agentActivityLog?: string | null;
   skipReview?: boolean | null;
 }
 
@@ -549,6 +552,49 @@ function verificationHasOutputIdentity(entry: ImplementationManifestVerification
   );
 }
 
+function normalizeCommandText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function latestImplementationActivitySection(
+  agentActivityLog: string | null | undefined,
+): string[] {
+  if (!agentActivityLog?.trim()) return [];
+  const lines = agentActivityLog.split(/\r?\n/);
+  let startIndex = -1;
+  for (let index = 0; index < lines.length; index++) {
+    if (/\bAgent:\s+(?:aif-implement|implement-coordinator)\b.*\bstarted\b/i.test(lines[index])) {
+      startIndex = index;
+    }
+  }
+  if (startIndex < 0) return [];
+  const section: string[] = [];
+  for (let index = startIndex; index < lines.length; index++) {
+    const line = lines[index];
+    if (
+      index > startIndex &&
+      /\bAgent:\s+/i.test(line) &&
+      !/\bAgent:\s+(?:aif-implement|implement-coordinator)\b/i.test(line)
+    ) {
+      break;
+    }
+    section.push(line);
+  }
+  return section;
+}
+
+function verificationCommandObservedInLatestImplementationActivity(input: {
+  command: string;
+  agentActivityLog?: string | null;
+}): boolean {
+  const normalizedCommand = normalizeCommandText(input.command);
+  if (!normalizedCommand) return false;
+  return latestImplementationActivitySection(input.agentActivityLog).some((line) => {
+    const normalizedLine = normalizeCommandText(line);
+    return normalizedLine.includes("tool:") && normalizedLine.includes(normalizedCommand);
+  });
+}
+
 const EMPTY_OUTPUT_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 const FABRICATED_VERIFICATION_PATTERN =
@@ -695,11 +741,43 @@ export function validateImplementationManifest(
   const passedEntriesWithoutIdentity = passedEntries.filter(
     (entry) => !verificationHasOutputIdentity(entry),
   );
+  const contradictoryPassedEntries = passedEntries.filter((entry) =>
+    looksLikeFabricatedVerificationText(entry.outputPreview),
+  );
+  const unobservedPassedEntries = passedEntries.filter(
+    (entry) =>
+      usefulString(entry.command) &&
+      !verificationCommandObservedInLatestImplementationActivity({
+        command: entry.command,
+        agentActivityLog: input.task.agentActivityLog,
+      }),
+  );
   const admitsFabricatedVerification = manifestAdmitsFabricatedVerification(manifest);
   const passedVerification =
     passedEntries.length > 0 &&
     passedEntriesWithoutIdentity.length === 0 &&
-    !admitsFabricatedVerification;
+    !admitsFabricatedVerification &&
+    contradictoryPassedEntries.length === 0 &&
+    unobservedPassedEntries.length === 0;
+  if (
+    contradictoryPassedEntries.length > 0 ||
+    (passedEntries.length > 0 && admitsFabricatedVerification)
+  ) {
+    issues.push(
+      issue(
+        "contradictory_verification_claim",
+        "Implementation manifest cannot mark verification as passed while its evidence or limitations state that the command was not actually executed.",
+      ),
+    );
+  }
+  if (unobservedPassedEntries.length > 0) {
+    issues.push(
+      issue(
+        "verification_command_not_observed",
+        `Passed verification command(s) were not observed in the latest implementation activity: ${unobservedPassedEntries.map((entry) => entry.command).join(", ")}.`,
+      ),
+    );
+  }
   if (!passedVerification) {
     issues.push(
       issue(

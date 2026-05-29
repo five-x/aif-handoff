@@ -2035,6 +2035,138 @@ describe("executeSubagentQuery error redaction", () => {
   });
 });
 
+describe("executeSubagentQuery operator cancel watcher", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: vi.fn().mockResolvedValue({}),
+      }),
+    );
+    (globalThis as { __AIF_CLAUDE_QUERY_MOCK__?: typeof queryMock }).__AIF_CLAUDE_QUERY_MOCK__ =
+      queryMock;
+    queryMock.mockReset();
+    logActivityMock.mockReset();
+    findTaskByIdMock.mockReset();
+    resolveEffectiveRuntimeProfileMock.mockReset();
+    getTaskSessionIdMock.mockReturnValue(null);
+    findTaskByIdMock.mockReturnValue({
+      id: "task-cancel",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+    });
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "none",
+      profile: null,
+      taskRuntimeProfileId: null,
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("aborts the active attempt when the task becomes operator_cancelled", async () => {
+    vi.useFakeTimers();
+    queryMock.mockImplementation(
+      (input: { prompt: string; options: { abortController?: AbortController } }) => {
+        const abortController = input.options?.abortController;
+        async function* waitForAbort() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: "session-cancel",
+          };
+          await new Promise<void>((_, reject) => {
+            abortController?.signal.addEventListener(
+              "abort",
+              () => reject(abortController.signal.reason ?? new Error("aborted")),
+              { once: true },
+            );
+          });
+        }
+        return waitForAbort();
+      },
+    );
+
+    const promise = executeSubagentQuery({
+      taskId: "task-cancel",
+      projectRoot: "/tmp/project",
+      agentName: "implement-coordinator",
+      prompt: "run",
+      workflowKind: "implementer",
+    });
+    const rejection = expect(promise).rejects.toThrow();
+
+    await vi.advanceTimersByTimeAsync(0);
+    findTaskByIdMock.mockReturnValue({
+      id: "task-cancel",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+      status: "blocked_external",
+      blockedReason: "operator_cancelled: stopped by operator",
+    } as unknown as MockTaskRow);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejection;
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(logActivityMock).toHaveBeenCalledWith(
+      "task-cancel",
+      "Agent",
+      "active attempt aborted because task was cancelled by operator",
+    );
+  });
+
+  it("clears the operator cancel watcher after success and error paths", async () => {
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+
+    queryMock.mockImplementationOnce(makeSuccessWithSession("session-success", "done"));
+    await executeSubagentQuery({
+      taskId: "task-cancel-success",
+      projectRoot: "/tmp/project",
+      agentName: "implement-coordinator",
+      prompt: "run",
+      workflowKind: "implementer",
+    });
+    expect(clearIntervalSpy).toHaveBeenCalled();
+    const callsAfterSuccess = clearIntervalSpy.mock.calls.length;
+
+    queryMock.mockImplementationOnce(async function* () {
+      throw new RuntimeExecutionError("fetch failed", undefined, "transport", {
+        providerMeta: {
+          status: "endpoint_request_timeout",
+          body: "secret_token=abc sk-SECRET",
+        },
+      });
+    });
+    await expect(
+      executeSubagentQuery({
+        taskId: "task-cancel-error",
+        projectRoot: "/tmp/project",
+        agentName: "implement-coordinator",
+        prompt: "run",
+        workflowKind: "implementer",
+      }),
+    ).rejects.toThrow();
+    expect(clearIntervalSpy.mock.calls.length).toBeGreaterThan(callsAfterSuccess);
+
+    const agentMessages = logActivityMock.mock.calls
+      .filter((call: unknown[]) => call[1] === "Agent")
+      .map((call: unknown[]) => String(call[2] ?? ""))
+      .join("\n");
+    expect(agentMessages).not.toContain("secret_token");
+    expect(agentMessages).not.toContain("sk-SECRET");
+    clearIntervalSpy.mockRestore();
+  });
+});
+
 describe("executeSubagentQuery model fallback policy", () => {
   beforeEach(() => {
     vi.stubGlobal(

@@ -393,7 +393,7 @@ describe("handleAutoReviewGate", () => {
       autoMode: true,
       reviewComments: "still failing",
       reviewIterationCount: 2,
-      maxReviewIterations: 100,
+      maxReviewIterations: 10,
       autoReviewState: {
         strategy: "full_re_review",
         iteration: 2,
@@ -483,7 +483,7 @@ describe("handleAutoReviewGate", () => {
         "- none",
       ].join("\n"),
       reviewIterationCount: 6,
-      maxReviewIterations: 100,
+      maxReviewIterations: 10,
       autoReviewState: {
         strategy: "full_re_review",
         iteration: 6,
