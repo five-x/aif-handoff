@@ -329,6 +329,46 @@ describe("implementation manifest extraction", () => {
     );
   });
 
+  it("keeps audit evidence lines inside the latest implementation activity section", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: [
+          "[2026-05-29T10:00:00.000Z] Agent: aif-implement started",
+          "[2026-05-29T10:00:01.000Z] Agent: AuditEvidence ev-1 shell_command/discovery tool=run_shell redaction=clean",
+          "[2026-05-29T10:00:02.000Z] Tool: run_shell npm.cmd run build",
+          "[2026-05-29T10:00:03.000Z] Agent: aif-implement complete",
+          "[2026-05-29T10:00:04.000Z] Agent: aif-review started",
+        ].join("\n"),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          verificationEvidence: [
+            {
+              id: "ver-1",
+              command: "npm.cmd run build",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "> app@1.0.0 build\n> tsc\n",
+              outputPreviewTruncated: false,
+            },
+          ],
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues.map((entry) => entry.code)).not.toContain(
+      "verification_command_not_observed",
+    );
+  });
+
   it("does not block on synced=false when plan checklist counts are complete", () => {
     const result = validateImplementationManifest({
       task: {

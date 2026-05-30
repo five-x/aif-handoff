@@ -597,14 +597,13 @@ function latestImplementationActivitySection(
   const section: string[] = [];
   for (let index = startIndex; index < lines.length; index++) {
     const line = lines[index];
+    section.push(line);
     if (
       index > startIndex &&
-      /\bAgent:\s+/i.test(line) &&
-      !/\bAgent:\s+(?:aif-implement|implement-coordinator)\b/i.test(line)
+      /\bAgent:\s+(?:aif-implement|implement-coordinator)\b.*\bcomplete\b/i.test(line)
     ) {
       break;
     }
-    section.push(line);
   }
   return section;
 }
