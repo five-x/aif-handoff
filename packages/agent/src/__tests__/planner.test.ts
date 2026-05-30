@@ -635,7 +635,6 @@ describe("runPlanner comment selection", () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-fallback-"));
     mkdirSync(projectRoot, { recursive: true });
     const fallbackPlanPath = join(projectRoot, "PLAN.md");
-    writeFileSync(fallbackPlanPath, "## Fallback Plan\n- [ ] Step from fallback", "utf8");
 
     db.insert(projects)
       .values({
@@ -656,12 +655,54 @@ describe("runPlanner comment selection", () => {
       .run();
 
     queryMock.mockReset();
-    queryMock.mockReturnValue(streamSuccess("Plan written to PLAN.md"));
+    queryMock.mockImplementation(() => {
+      writeFileSync(fallbackPlanPath, "## Fallback Plan\n- [ ] Step from fallback", "utf8");
+      return streamSuccess("Plan written to PLAN.md");
+    });
 
     await runPlanner("task-fallback", projectRoot);
 
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-fallback")).get();
     expect(updatedTask?.plan).toBe("## Fallback Plan\n- [ ] Step from fallback");
+  });
+
+  it("ignores stale disk plans that were not updated by the current planner run", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-stale-plan-"));
+    mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, ".ai-factory", "PLAN.md"),
+      "## Stale Plan\n- [ ] stale",
+      "utf8",
+    );
+
+    db.insert(projects)
+      .values({
+        id: "project-stale-plan",
+        name: "Stale Plan Project",
+        rootPath: projectRoot,
+      })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-stale-plan",
+        projectId: "project-stale-plan",
+        title: "Use fresh planner output",
+        description: "Update src/main.ts.",
+        status: "planning",
+        plannerMode: "fast",
+      })
+      .run();
+
+    queryMock.mockReturnValue(
+      streamSuccess("## Fresh Plan\n- [ ] Update src/main.ts from the planner response."),
+    );
+
+    await runPlanner("task-stale-plan", projectRoot);
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-stale-plan")).get();
+    expect(updatedTask?.plan).toContain("Fresh Plan");
+    expect(updatedTask?.plan).not.toContain("Stale Plan");
   });
 
   it("creates a feature branch when plannerMode=full and git.create_branches=true", async () => {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   findRoadmapBatchArtifactByTaskId,
@@ -105,12 +105,17 @@ function normalizePlanPath(path: string | null | undefined, projectRoot: string)
   return path.trim().replace(/^@+/, "") || defaultPlan;
 }
 
-function readPlanFromDisk(
+interface PlanFileSnapshot {
+  capturedAtMs: number;
+  mtimes: Map<string, number>;
+}
+
+function planCandidatePaths(
   projectRoot: string,
   resultText: string,
   isFix: boolean,
   customPlanPath?: string,
-): string | null {
+): string[] {
   const cfg = getProjectConfig(projectRoot);
   const normalizedPlanPath = normalizePlanPath(customPlanPath, projectRoot);
   const canonicalPlanPath = resolve(projectRoot, isFix ? cfg.paths.fix_plan : normalizedPlanPath);
@@ -131,8 +136,51 @@ function readPlanFromDisk(
     candidatePaths.add(resolve(projectRoot, "PLAN.md"));
   }
 
-  for (const candidatePath of candidatePaths) {
+  return [...candidatePaths];
+}
+
+function snapshotPlanFiles(
+  projectRoot: string,
+  isFix: boolean,
+  customPlanPath?: string,
+): PlanFileSnapshot {
+  const mtimes = new Map<string, number>();
+  const capturedAtMs = Date.now();
+  for (const candidatePath of planCandidatePaths(projectRoot, "", isFix, customPlanPath)) {
     if (!existsSync(candidatePath)) continue;
+    try {
+      mtimes.set(candidatePath, statSync(candidatePath).mtimeMs);
+    } catch {
+      // The file may be removed between exists/stat checks; treat it as absent.
+    }
+  }
+  return { capturedAtMs, mtimes };
+}
+
+function wasPlanFileUpdatedForRun(candidatePath: string, snapshot: PlanFileSnapshot): boolean {
+  if (!existsSync(candidatePath)) return false;
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(candidatePath).mtimeMs;
+  } catch {
+    return false;
+  }
+  const previousMtimeMs = snapshot.mtimes.get(candidatePath);
+  if (previousMtimeMs !== undefined) {
+    return mtimeMs > previousMtimeMs + 0.5;
+  }
+  return mtimeMs >= snapshot.capturedAtMs - 1000;
+}
+
+function readPlanFromDisk(
+  projectRoot: string,
+  resultText: string,
+  isFix: boolean,
+  snapshot: PlanFileSnapshot,
+  customPlanPath?: string,
+): string | null {
+  for (const candidatePath of planCandidatePaths(projectRoot, resultText, isFix, customPlanPath)) {
+    if (!wasPlanFileUpdatedForRun(candidatePath, snapshot)) continue;
     const content = readFileSync(candidatePath, "utf8").trim();
     if (content.length > 0) return content;
   }
@@ -443,6 +491,7 @@ ${taskContext}`;
     });
   }
 
+  const planFileSnapshot = snapshotPlanFiles(executionRoot, task.isFix, planPath);
   const { resultText: rawResult } = await executeSubagentQuery({
     taskId,
     projectRoot: executionRoot,
@@ -477,7 +526,13 @@ ${taskContext}`;
     return;
   }
 
-  const diskPlan = readPlanFromDisk(executionRoot, rawResult, !!task.isFix, planPath);
+  const diskPlan = readPlanFromDisk(
+    executionRoot,
+    rawResult,
+    !!task.isFix,
+    planFileSnapshot,
+    planPath,
+  );
   const resultText = normalizeAifPlanManifestForTask({
     task: buildPlannerPlanQualityTaskContext(task),
     plan: diskPlan ?? normalizePlannerResult(rawResult),
