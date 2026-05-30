@@ -341,6 +341,9 @@ function normalizeCommitEvidenceShape(value: unknown): unknown {
   if (Array.isArray(value)) {
     return { status: "not_committed", evidenceRefs: value.filter(usefulString) };
   }
+  if (isObject(value) && value.status === "already_committed") {
+    return { ...value, status: "committed" };
+  }
   return value;
 }
 

@@ -104,6 +104,47 @@ describe("implementation manifest extraction", () => {
     );
   });
 
+  it("normalizes already_committed commit evidence without accepting weak evidence", () => {
+    const raw = JSON.stringify({
+      ...validManifest({
+        verificationEvidence: [
+          {
+            id: "ver-1",
+            command: "npm test",
+            status: "passed",
+            outputSha256: "placeholder",
+            outputPreview: "tests were not run",
+            outputPreviewTruncated: false,
+          },
+        ],
+        commitEvidence: { status: "already_committed", evidenceRefs: ["git_status"] },
+      }),
+    });
+
+    const normalized = normalizeImplementationManifestJson(raw);
+    expect(normalized).toBeTruthy();
+    expect(JSON.parse(normalized as string).commitEvidence.status).toBe("committed");
+
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: normalized,
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).not.toContain(
+      "invalid_implementation_manifest",
+    );
+    expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
+  });
+
   it("rejects passed verification that uses the empty-output sha as placeholder evidence", () => {
     const manifest = {
       version: 1,
