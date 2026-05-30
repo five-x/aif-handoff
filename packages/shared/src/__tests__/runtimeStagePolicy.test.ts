@@ -81,6 +81,14 @@ describe("runtime stage policy", () => {
     expect(isRuntimeProfileAllowedForStage(profile(), "chat")).toBe(true);
   });
 
+  it("gives qwen planner enough tool budget for bounded replanning", () => {
+    const caps = getRuntimeStageCaps(profile(), "planner");
+
+    expect(caps.maxToolTurns).toBe(20);
+    expect(caps.maxOutputTokens).toBe(4_000);
+    expect(caps.repositoryInspectionToolBudget).toBe(16);
+  });
+
   it("parses configured caps and keeps qwen defaults strict", () => {
     const caps = getRuntimeStageCaps(
       profile({

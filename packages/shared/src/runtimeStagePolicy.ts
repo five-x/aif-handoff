@@ -67,12 +67,12 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
     repositoryInspectionToolBudget: 8,
   },
   planner: {
-    maxToolTurns: 8,
+    maxToolTurns: 20,
     wallClockMs: 10 * 60 * 1000,
     contextTokens: 24_000,
-    maxOutputTokens: 2_000,
+    maxOutputTokens: 4_000,
     retryCount: 0,
-    repositoryInspectionToolBudget: 8,
+    repositoryInspectionToolBudget: 16,
   },
   plan_checker: {
     maxToolTurns: 8,
