@@ -226,6 +226,8 @@ function readCanaryApprovedCaps(
   const repositoryInspectionToolBudget = readPositiveInteger(canary.repositoryInspectionToolBudget);
   if (repositoryInspectionToolBudget !== undefined) {
     caps.repositoryInspectionToolBudget = repositoryInspectionToolBudget;
+  } else if (maxToolTurns !== undefined) {
+    caps.repositoryInspectionToolBudget = maxToolTurns;
   }
   const retryCount = readPositiveInteger(canary.retryCount);
   if (retryCount !== undefined) caps.retryCount = retryCount;

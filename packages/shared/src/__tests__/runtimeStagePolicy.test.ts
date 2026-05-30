@@ -127,6 +127,7 @@ describe("runtime stage policy", () => {
     expect(caps.maxToolTurns).toBe(200);
     expect(caps.wallClockMs).toBe(1_800_000);
     expect(caps.maxOutputTokens).toBe(12_000);
+    expect(caps.repositoryInspectionToolBudget).toBe(200);
     expect(caps.retryCount).toBe(0);
   });
 
