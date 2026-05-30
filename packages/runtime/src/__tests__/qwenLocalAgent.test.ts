@@ -278,6 +278,27 @@ describe("qwen-local-agent adapter", () => {
       ),
     ).toThrow(/endpoint input budget/);
   });
+  it("enforces configured context caps before sending a request", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-stage-context-cap-"));
+    const messages = [
+      { role: "system", content: "system" },
+      { role: "user", content: "x".repeat(2_000) },
+    ];
+
+    expect(() =>
+      buildQwenLocalAgentRequestBody(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://192.168.88.62:8005/v1",
+            contextWindowTokens: 100,
+            maxOutputTokens: 64,
+          },
+        }),
+        messages,
+      ),
+    ).toThrow(/endpoint input budget 100/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it("logs request estimates when endpoint budget rejects before fetch", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-budget-log-reject-"));
     const warn = vi.fn();
@@ -748,7 +769,15 @@ describe("qwen-local-agent adapter", () => {
           },
         }),
       ),
-    ).rejects.toThrow("qwen-local-agent exceeded max tool turns (41)");
+    ).rejects.toMatchObject({
+      message: "qwen-local-agent exceeded max tool turns (41)",
+      category: "timeout",
+      providerMeta: expect.objectContaining({
+        status: "max_tool_turns_exhausted",
+        category: "timeout",
+        maxToolTurns: 41,
+      }),
+    });
     expect(fetchMock).toHaveBeenCalledTimes(41);
   });
   it("executes a tool-call loop and emits sanitized tool events", async () => {

@@ -241,7 +241,7 @@ describe("runPlanChecker", () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 
-  it("repairs descriptive feature plan manifests before invoking the plan-checker model", async () => {
+  it("rejects broad full-mode plans before invoking the plan-checker model", async () => {
     const malformedManifest = JSON.stringify(
       {
         version: 1,
@@ -291,7 +291,9 @@ describe("runPlanChecker", () => {
       })
       .run();
 
-    await runPlanChecker("task-feature-descriptive-manifest", "/tmp/plan-checker-test");
+    await expect(
+      runPlanChecker("task-feature-descriptive-manifest", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
 
     expect(queryMock).not.toHaveBeenCalled();
     const row = testDb.current
@@ -301,19 +303,22 @@ describe("runPlanChecker", () => {
       .get();
     expect(row?.plan).toContain("```aif-plan-manifest");
     expect(row?.plan).toContain('"allowedChanges": [\n    "source",\n    "config"');
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-feature-descriptive-manifest",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Scope: package.json, tsconfig.json, src/index.ts, src/core/types.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: row?.plan,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("task_size_split_required");
     expect(
-      evaluateTaskPlanQuality({
-        task: {
-          id: "task-feature-descriptive-manifest",
-          title: "Setup Project Architecture and Core Engine Skeleton",
-          description: "Scope: package.json, tsconfig.json, src/index.ts, src/core/types.ts.",
-          taskIntent: "feature",
-          plannerMode: "full",
-          createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
-        },
-        plan: row?.plan,
-      }).ok,
-    ).toBe(true);
+      result.issues.find((issue) => issue.code === "task_size_split_required")?.message,
+    ).toMatch(/^split_required:/);
   });
 
   it("rejects new full-mode checklist plans that omit a plan manifest", async () => {
@@ -338,6 +343,56 @@ describe("runPlanChecker", () => {
 
     await expect(
       runPlanChecker("task-full-missing-manifest", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects broad fast-mode no-manifest plans before invoking the plan-checker model", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-fast-broad-no-manifest",
+        projectId: "project-1",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "feature",
+        plannerMode: "fast",
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "- [ ] Create the skeleton application and base configuration.",
+          "- [ ] Wire the local dev stack.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-fast-broad-no-manifest", "/tmp/plan-checker-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects broad plain-bullet no-manifest plans before invoking the plan-checker model", async () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-fast-broad-plain-bullets",
+        projectId: "project-1",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "feature",
+        plannerMode: "fast",
+        status: "plan_ready",
+        plan: [
+          "## Plan",
+          "- Create the skeleton application and base configuration.",
+          "- Wire the local dev stack.",
+        ].join("\n"),
+      })
+      .run();
+
+    await expect(
+      runPlanChecker("task-fast-broad-plain-bullets", "/tmp/plan-checker-test"),
     ).rejects.toBeInstanceOf(TaskPlanQualityError);
     expect(queryMock).not.toHaveBeenCalled();
   });

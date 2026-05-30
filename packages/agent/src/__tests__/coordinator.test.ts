@@ -5,6 +5,8 @@ import {
   evaluateTaskPlanQuality,
   appSettings,
   tasks,
+  taskSplitProposals,
+  taskStageArtifacts,
   projects,
   runtimeProfiles,
   usageEvents,
@@ -426,6 +428,7 @@ describe("coordinator", () => {
     resetCoordinatorRuntimeCountersForTests();
     getStageSemaphore().reset();
     getEnv().AIF_SYNTHESIS_PLAN_QUALITY_RECOVERY_ENABLED = false;
+    getEnv().AIF_RUNTIME_AUTO_FALLBACK_ENABLED = false;
   });
 
   function insertRuntimeProfile(input: {
@@ -437,9 +440,20 @@ describe("coordinator", () => {
     baseUrl?: string | null;
     enabled?: boolean;
     options?: Record<string, unknown>;
+    allowQwenImplementation?: boolean;
     snapshot?: Record<string, unknown> | null;
   }): void {
     const now = new Date().toISOString();
+    const options =
+      input.runtimeId === "qwen-local-agent" && input.allowQwenImplementation !== false
+        ? {
+            ...(input.options ?? {}),
+            qwenLocalAgent: {
+              ...((input.options?.qwenLocalAgent as Record<string, unknown> | undefined) ?? {}),
+              allowImplementation: true,
+            },
+          }
+        : (input.options ?? {});
     testDb.current
       .insert(runtimeProfiles)
       .values({
@@ -451,7 +465,7 @@ describe("coordinator", () => {
         transport: input.transport ?? null,
         baseUrl: input.baseUrl ?? null,
         enabled: input.enabled ?? true,
-        optionsJson: input.options ? JSON.stringify(input.options) : "{}",
+        optionsJson: JSON.stringify(options),
         runtimeLimitSnapshotJson: input.snapshot ? JSON.stringify(input.snapshot) : null,
         runtimeLimitUpdatedAt: input.snapshot ? now : null,
         createdAt: now,
@@ -935,6 +949,110 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("generic_plan");
   });
 
+  it("should block split-required plan_ready plans before implementer dispatch", async () => {
+    const db = testDb.current;
+    const plan = [
+      "## Plan",
+      "",
+      "```aif-plan-manifest",
+      JSON.stringify(
+        {
+          version: 1,
+          taskId: "task-split-required-plan-ready",
+          intent: "feature",
+          scope: ["package.json", "tsconfig.json", ".gitignore", "src/index.ts"],
+          allowedChanges: ["source", "config"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [
+            { kind: "config_update", paths: ["package.json", "tsconfig.json", ".gitignore"] },
+            { kind: "source_diff", paths: ["src/index.ts"] },
+          ],
+          acceptanceCriteria: [
+            {
+              id: "ac-build",
+              description: "Skeleton application and base configuration build.",
+              verification: "npm run build",
+            },
+          ],
+          verificationCommands: ["npm install", "npm run build", "node dist/index.js"],
+        },
+        null,
+        2,
+      ),
+      "```",
+      "",
+      "- [ ] Create the skeleton application and base configuration.",
+      "- [ ] Run npm install, npm run build, and node dist/index.js.",
+    ].join("\n");
+    db.insert(tasks)
+      .values({
+        id: "task-split-required-plan-ready",
+        projectId: "test-project",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        status: "plan_ready",
+        autoMode: true,
+        plan,
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runPlanChecker).toHaveBeenCalledWith("task-split-required-plan-ready", "/tmp/test");
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-split-required-plan-ready"))
+      .get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.blockedReason).toContain("task_size_split_required");
+    expect(task!.blockedReason).toContain("split_required:");
+  });
+
+  it("should block split-required no-manifest plan_ready plans before implementer dispatch", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-split-required-no-manifest-plan-ready",
+        projectId: "test-project",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "feature",
+        plannerMode: "fast",
+        status: "plan_ready",
+        autoMode: true,
+        plan: [
+          "## Plan",
+          "- [ ] Create the skeleton application and base configuration.",
+          "- [ ] Wire the local dev stack.",
+        ].join("\n"),
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runPlanChecker).toHaveBeenCalledWith(
+      "task-split-required-no-manifest-plan-ready",
+      "/tmp/test",
+    );
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-split-required-no-manifest-plan-ready"))
+      .get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.blockedReason).toContain("task_size_split_required");
+    expect(task!.blockedReason).toContain("split_required:");
+  });
+
   it("should not auto-implement plan_ready tasks when autoMode=false", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -954,6 +1072,76 @@ describe("coordinator", () => {
     expect(runReviewer).not.toHaveBeenCalled();
     const task = db.select().from(tasks).where(eq(tasks.id, "task-2-manual")).get();
     expect(task!.status).toBe("plan_ready");
+  });
+
+  it("blocks implementation before dispatch when only qwen-local-agent is configured", async () => {
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-qwen",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://qwen.local/v1",
+      allowQwenImplementation: false,
+    });
+    db.update(projects)
+      .set({ defaultTaskRuntimeProfileId: "profile-qwen" })
+      .where(eq(projects.id, "test-project"))
+      .run();
+
+    const plan = [
+      "## Plan",
+      "",
+      "```aif-plan-manifest",
+      JSON.stringify(
+        {
+          version: 1,
+          taskId: "task-qwen-implementer-denied",
+          intent: "fix",
+          scope: ["src/router.ts"],
+          allowedChanges: ["source"],
+          forbiddenChanges: ["secrets", "unrelated files"],
+          expectedArtifacts: [{ kind: "source_diff", paths: ["src/router.ts"] }],
+          acceptanceCriteria: [
+            {
+              id: "ac-route",
+              description: "Router selects the configured runtime stage.",
+              verification: "npm.cmd test --workspace=@aif/agent -- coordinator",
+            },
+          ],
+          verificationCommands: ["npm.cmd test --workspace=@aif/agent -- coordinator"],
+        },
+        null,
+        2,
+      ),
+      "```",
+      "",
+      "- [ ] Update src/router.ts.",
+      "- [ ] Run the focused coordinator test.",
+    ].join("\n");
+
+    db.insert(tasks)
+      .values({
+        id: "task-qwen-implementer-denied",
+        projectId: "test-project",
+        title: "Fix runtime routing",
+        description: "Route implementation through a capable profile.",
+        taskIntent: "fix",
+        plannerMode: "full",
+        status: "plan_ready",
+        autoMode: true,
+        plan,
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runPlanChecker).toHaveBeenCalledWith("task-qwen-implementer-denied", "/tmp/test");
+    expect(runImplementer).not.toHaveBeenCalledWith("task-qwen-implementer-denied", "/tmp/test");
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-qwen-implementer-denied")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("plan_ready");
+    expect(task!.blockedReason).toContain("No implementation-capable runtime profile");
   });
 
   it("should pick up implementing tasks and continue to review", async () => {
@@ -3609,6 +3797,120 @@ describe("coordinator", () => {
     expect(blocked!.status).toBe("blocked_external");
   });
 
+  it("fails closed for implementer timeout even when automatic fallback is available", async () => {
+    getEnv().AIF_RUNTIME_AUTO_FALLBACK_ENABLED = true;
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-fast-timeout",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8003/v1",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-heavy-timeout",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      baseUrl: "http://192.168.88.62:8005/v1",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({
+        defaultTaskRuntimeProfileId: "profile-fast-timeout",
+        defaultReviewRuntimeProfileId: "profile-heavy-timeout",
+      })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-implementation-timeout-fail-closed",
+        projectId: "test-project",
+        title: "Implementation timeout",
+        status: "implementing",
+        retryCount: 2,
+      })
+      .run();
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "Run timeout: qwen-local-agent exceeded 3600000ms limit",
+        undefined,
+        "timeout",
+        {
+          providerMeta: {
+            status: "max_tool_turns_exhausted",
+            profileId: "profile-fast-timeout",
+            baseUrl: "http://192.168.88.62:8003/v1",
+            model: "Qwen3.6-27B-Q5_K_M-mtp.gguf",
+          },
+        },
+      ),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-implementation-timeout-fail-closed"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedFromStatus).toBe("implementing");
+    expect(blocked!.blockedReason).toContain("implementation_runtime_exhausted_requires_split");
+    expect(blocked!.blockedReason).toContain("status=max_tool_turns_exhausted");
+    expect(blocked!.blockedReason).toContain("recoveryPackAttempt=");
+    expect(blocked!.blockedReason).toContain("splitProposalStatus=created");
+    expect(blocked!.blockedReason).not.toContain("3600000");
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(2);
+    expect(blocked!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
+    expect(blocked!.runtimeOptionsJson ?? "").not.toContain("profile-heavy-timeout");
+    expect(blocked!.agentActivityLog).toContain(
+      "Implementation runtime exhaustion failed closed before automatic runtime fallback",
+    );
+    expect(blocked!.agentActivityLog).toContain("implementation_recovery_pack_recorded");
+    expect(blocked!.agentActivityLog).not.toContain("selectedProfile=profile-heavy-timeout");
+    const recoveryArtifact = db
+      .select()
+      .from(taskStageArtifacts)
+      .where(eq(taskStageArtifacts.taskId, "task-implementation-timeout-fail-closed"))
+      .get();
+    expect(recoveryArtifact).toMatchObject({
+      stage: "implementation",
+      kind: "recovery_pack",
+      state: "blocked",
+    });
+    expect(recoveryArtifact?.markdown).toContain("Implementation Timeout Recovery Pack");
+    expect(recoveryArtifact?.metadataJson).toContain("implementation_timeout_recovery_pack");
+    const proposal = db
+      .select()
+      .from(taskSplitProposals)
+      .where(
+        eq(
+          taskSplitProposals.roadmapAlias,
+          "implementation-recovery-task-implementation-timeout-fail-closed",
+        ),
+      )
+      .get();
+    expect(proposal).toMatchObject({
+      sourceKind: "implementation_recovery",
+      status: "pending",
+      taskIntent: "general",
+    });
+    expect(
+      db
+        .select()
+        .from(tasks)
+        .all()
+        .filter((row) => row.projectId === "test-project"),
+    ).toHaveLength(1);
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledTimes(1);
+  });
+
   it("clears active fallback and blocks when transient recovery fallback is disabled", async () => {
     const db = testDb.current;
     insertRuntimeProfile({
@@ -3848,9 +4150,11 @@ describe("coordinator", () => {
       .where(eq(tasks.id, "task-audit-timeout-bounded"))
       .get();
     expect(retrying!.status).toBe("blocked_external");
+    expect(retrying!.blockedReason).toContain("implementation_runtime_exhausted_requires_split");
     expect(retrying!.blockedReason).not.toContain("Runtime audit report timeout recovery");
     expect(retrying!.blockedFromStatus).toBe("implementing");
-    expect(retrying!.retryCount).toBe(2);
+    expect(retrying!.retryAfter).toBeNull();
+    expect(retrying!.retryCount).toBe(1);
     expect(retrying!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
     expect(retrying!.runtimeOptionsJson ?? "").not.toContain("profile-heavy-audit-timeout");
   });
@@ -3909,10 +4213,124 @@ describe("coordinator", () => {
       .where(eq(tasks.id, "task-audit-timeout-cooldown"))
       .get();
     expect(blocked!.status).toBe("blocked_external");
-    expect(blocked!.blockedReason).toContain("Runtime request timed out");
+    expect(blocked!.blockedReason).toContain("implementation_runtime_exhausted_requires_split");
     expect(blocked!.blockedReason).not.toContain("Runtime audit report timeout recovery");
-    expect(blocked!.retryAfter).not.toBeNull();
-    expect(blocked!.retryCount).toBe(1);
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(0);
+  });
+
+  it("records implementation recovery pack before post-write audit timeout recovery", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-post-write-timeout-");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "architecture.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "## Finding: Central hub observation",
+        "Evidence: `README.md:1` identifies the fixture repository.",
+        "Risk: The module is a central hub and may become a single point of architectural failure.",
+        "Proposed fix: Document ownership boundaries.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) synthetic audit commit",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "-N", "audit/architecture.md"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-post-write-timeout",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 3,
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-post-write-timeout",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-post-write-timeout"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-post-write-timeout",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("Run timeout: execution exceeded 3600000ms", undefined, "timeout", {
+        providerMeta: {
+          status: "max_tool_turns_exhausted",
+        },
+      }),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-post-write-timeout"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toContain("implementation_runtime_exhausted_requires_split");
+    expect(blocked!.blockedReason).toContain("recoveryPackAttempt=");
+    expect(blocked!.blockedReason).toContain("splitProposalStatus=created");
+    expect(blocked!.blockedReason).not.toContain("runtime_timeout_after_audit_artifact_write");
+    expect(blocked!.reworkRequested).toBe(false);
+    expect(blocked!.manualReviewRequired).toBe(false);
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(3);
+    expect(blocked!.agentActivityLog).toContain("implementation_recovery_pack_recorded");
+    expect(blocked!.agentActivityLog).not.toContain(
+      "Runtime failure after audit artifact write was converted to validation-guided audit recovery",
+    );
+
+    const recoveryArtifact = db
+      .select()
+      .from(taskStageArtifacts)
+      .where(eq(taskStageArtifacts.taskId, "task-audit-post-write-timeout"))
+      .get();
+    expect(recoveryArtifact).toMatchObject({
+      stage: "implementation",
+      kind: "recovery_pack",
+      state: "blocked",
+    });
+    const proposal = db
+      .select()
+      .from(taskSplitProposals)
+      .where(
+        eq(
+          taskSplitProposals.roadmapAlias,
+          "implementation-recovery-task-audit-post-write-timeout",
+        ),
+      )
+      .get();
+    expect(proposal).toMatchObject({
+      sourceKind: "implementation_recovery",
+      status: "pending",
+    });
+    expect(runImplementer).toHaveBeenCalledTimes(1);
+    const artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-post-write-timeout",
+    );
+    const attempts = artifact ? listRoadmapBatchArtifactAttempts(artifact.id) : [];
+    expect(attempts).toHaveLength(0);
   });
 
   it("blocks audit report transport failures after clearing active fallback by default", async () => {

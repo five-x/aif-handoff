@@ -802,3 +802,22 @@ export {
   type SafeRuntimeErrorCategory,
   type SafeRuntimeErrorReason,
 } from "./runtimeLimitUtils.js";
+
+export {
+  evaluateRuntimeProfileStageCapability,
+  getRuntimeStageCaps,
+  isQwenLocalRuntimeProfile,
+  isRuntimeProfileAllowedForStage,
+  type RuntimeStageCapabilityDecision,
+  type RuntimeStageCapabilityReason,
+  type RuntimeStageCaps,
+} from "./runtimeStagePolicy.js";
+
+export {
+  DEFAULT_RETRY_CONTEXT_THRESHOLDS,
+  buildRetryContextForRuntimePrompt,
+  getRetryContextThresholds,
+  type RetryContextDecision,
+  type RetryContextTask,
+  type RetryContextThresholds,
+} from "./retryContext.js";

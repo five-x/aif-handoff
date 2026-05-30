@@ -44,6 +44,7 @@ import {
   findMonorepoRootFromUrl,
   normalizeRuntimeStage,
   runtimeProfileModeForStage,
+  evaluateRuntimeProfileStageCapability,
   buildRequirementsLifecycleMetric,
   buildRuntimeLimitSignature,
   appSettings,
@@ -230,6 +231,34 @@ const AUTO_REVIEW_SECURITY_COVERAGE_AREA_SET = new Set<string>(
 );
 const APP_SETTINGS_ID = 1;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
+
+function runtimeProfileAllowedForStage(
+  profile: RuntimeProfileRow,
+  stage: RuntimeStage,
+): boolean {
+  const decision = evaluateRuntimeProfileStageCapability(
+    {
+      id: profile.id,
+      runtimeId: profile.runtimeId,
+      providerId: profile.providerId,
+      options: parseRuntimeObject(profile.optionsJson) ?? {},
+    },
+    stage,
+  );
+  if (!decision.allowed) {
+    log.info(
+      {
+        runtimeProfileId: profile.id,
+        runtimeId: profile.runtimeId,
+        providerId: profile.providerId,
+        stage,
+        reason: decision.reason,
+      },
+      "Runtime profile is not eligible for stage",
+    );
+  }
+  return decision.allowed;
+}
 
 function resolvePersistedTaskIntent(input: {
   taskIntent?: TaskIntent | null;
@@ -792,6 +821,32 @@ function computeParentRollupStatus(parent: TaskRow, children: TaskRow[]): TaskSt
   return synthesisChild?.status === "verified" ? "done" : "backlog";
 }
 
+const GENERIC_HIERARCHY_ROLLUP_BLOCKED_REASON = "hierarchy_rollup: child task is blocked";
+const IMPLEMENTATION_RUNTIME_EXHAUSTED_REASON_PREFIX =
+  "implementation_runtime_exhausted_requires_split:";
+const IMPLEMENTATION_RUNTIME_EXHAUSTED_ROLLUP_REASON =
+  "hierarchy_rollup: child blocked by implementation_runtime_exhausted_requires_split";
+
+function computeParentRollupBlockedReason(children: TaskRow[]): string {
+  const blockedChildren = children.filter(
+    (child) => child.status === "blocked_external" || child.manualReviewRequired,
+  );
+  if (
+    blockedChildren.some((child) =>
+      child.blockedReason?.startsWith(IMPLEMENTATION_RUNTIME_EXHAUSTED_REASON_PREFIX),
+    )
+  ) {
+    return IMPLEMENTATION_RUNTIME_EXHAUSTED_ROLLUP_REASON;
+  }
+  return GENERIC_HIERARCHY_ROLLUP_BLOCKED_REASON;
+}
+
+function shouldUpdateHierarchyRollupBlockedReason(
+  currentReason: string | null | undefined,
+): boolean {
+  return !currentReason || currentReason.startsWith("hierarchy_rollup:");
+}
+
 function refreshParentRollup(parentId: string): void {
   const parent = findTaskById(parentId);
   if (!parent || effectiveHierarchyRole(parent) !== "container") return;
@@ -809,8 +864,8 @@ function refreshParentRollup(parentId: string): void {
     patch.blockedFromStatus = null;
     patch.retryAfter = null;
     patch.manualReviewRequired = false;
-  } else if (!parent.blockedReason) {
-    patch.blockedReason = "hierarchy_rollup: child task is blocked";
+  } else if (shouldUpdateHierarchyRollupBlockedReason(parent.blockedReason)) {
+    patch.blockedReason = computeParentRollupBlockedReason(children);
     patch.blockedFromStatus = parent.status;
     patch.retryAfter = null;
   }
@@ -11041,7 +11096,7 @@ export function resolveEffectiveRuntimeProfile(input: {
   for (const candidate of candidates) {
     if (!candidate.profileId) continue;
     const profile = findRuntimeProfileById(candidate.profileId);
-    if (!profile || !profile.enabled) {
+    if (!profile || !profile.enabled || !runtimeProfileAllowedForStage(profile, stage)) {
       unavailableIds.push(candidate.profileId);
       continue;
     }
@@ -11112,7 +11167,7 @@ export function resolveEffectiveRuntimeProfileExcluding(input: {
   for (const candidate of candidates) {
     if (!candidate.profileId || excluded.has(candidate.profileId)) continue;
     const profile = findRuntimeProfileById(candidate.profileId);
-    if (!profile || !profile.enabled) continue;
+    if (!profile || !profile.enabled || !runtimeProfileAllowedForStage(profile, stage)) continue;
     return {
       source: candidate.source,
       profile: toRuntimeProfileResponse(
@@ -11214,7 +11269,7 @@ export function resolveEffectiveRuntimeProfilesForTasks(
     for (const candidate of candidates) {
       if (!candidate.profileId) continue;
       const profile = profileById.get(candidate.profileId);
-      if (!profile || !profile.enabled) {
+      if (!profile || !profile.enabled || !runtimeProfileAllowedForStage(profile, stage)) {
         unavailableIds.push(candidate.profileId);
         continue;
       }

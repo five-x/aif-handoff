@@ -656,7 +656,13 @@ projectsRouter.post("/:id/task-split-proposals/:proposalId/approve", async (c) =
   } catch (err) {
     if (err instanceof RoadmapGenerationError) {
       const status =
-        err.code === "PROJECT_NOT_FOUND" ? 404 : err.code === "ROADMAP_ALIAS_EXISTS" ? 409 : 500;
+        err.code === "PROJECT_NOT_FOUND"
+          ? 404
+          : err.code === "ROADMAP_ALIAS_EXISTS"
+            ? 409
+            : err.code === "VALIDATION_ERROR"
+              ? 400
+              : 500;
       return c.json({ error: err.message, code: err.code }, status);
     }
     log.error({ projectId: id, proposalId, err }, "Split proposal approval failed");

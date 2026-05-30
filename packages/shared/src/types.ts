@@ -1075,7 +1075,10 @@ export const TASK_SPLIT_PROPOSAL_STATUSES = ["pending", "approved", "rejected"] 
 
 export type TaskSplitProposalStatus = (typeof TASK_SPLIT_PROPOSAL_STATUSES)[number];
 
-export type TaskSplitProposalSourceKind = "roadmap_import" | "roadmap_generation";
+export type TaskSplitProposalSourceKind =
+  | "roadmap_import"
+  | "roadmap_generation"
+  | "implementation_recovery";
 
 export interface TaskSplitProposedChild {
   title: string;
@@ -1085,6 +1088,11 @@ export interface TaskSplitProposedChild {
   phaseName: string;
   sequence: number;
   tags?: string[];
+  fileBoundaries?: string[];
+  acceptanceCriteria?: string[];
+  verificationCommands?: string[];
+  dependsOn?: string[];
+  splitRationale?: string;
 }
 
 export interface TaskSplitProposal {

@@ -4,11 +4,11 @@ import { discoverK6Scripts, isLocalUrl } from "./run.mjs";
 
 describe("k6 script discovery", () => {
   it("excludes shared helper modules from runnable k6 scripts", () => {
-    expect(discoverK6Scripts().map((script) => basename(script)).sort()).toEqual([
-      "chat-sessions.js",
-      "runtime-profiles.js",
-      "tasks.js",
-    ]);
+    expect(
+      discoverK6Scripts()
+        .map((script) => basename(script))
+        .sort(),
+    ).toEqual(["chat-sessions.js", "runtime-profiles.js", "tasks.js"]);
   });
 
   it("classifies loopback and bind addresses as local", () => {

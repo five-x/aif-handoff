@@ -21,8 +21,10 @@ import {
   logger,
   getEnv,
   decidePolicyBypass,
+  buildRetryContextForRuntimePrompt,
   formatTaskIntentOptionsForPrompt,
   getPermissionExecutionPolicy,
+  getRetryContextThresholds,
   isPermissionPolicyIntent,
   redactProviderText,
   redactProviderTextForLogs,
@@ -262,7 +264,13 @@ function buildContextAppend(
     if (task.reviewComments) {
       lines.push(`  Review comments:\n${redactTaskContextForRuntimePrompt(task.reviewComments)}`);
     }
-    if (task.agentActivityLog) {
+    const retryContext = buildRetryContextForRuntimePrompt(
+      task,
+      getRetryContextThresholds(getEnv()),
+    );
+    if (retryContext.compacted) {
+      lines.push(`  Agent activity summary:\n${retryContext.prompt}`);
+    } else if (task.agentActivityLog) {
       lines.push(
         `  Agent activity log:\n${redactTaskContextForRuntimePrompt(task.agentActivityLog)}`,
       );

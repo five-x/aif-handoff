@@ -109,7 +109,8 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
   general: {
     intent: "general",
     label: "General",
-    decomposition: "Preserve existing broad roadmap behavior as high-level implementable tasks.",
+    decomposition:
+      "Allow broad non-executable roadmap summaries, but split executable children into small microtasks with clear boundaries, acceptance criteria, and verification.",
     defaults: {
       plannerMode: "fast",
       skipReview: true,
@@ -148,12 +149,14 @@ export const TASK_INTENT_CONTRACTS: Record<TaskIntent, TaskIntentContract> = {
         summary: "Completion is governed by task acceptance criteria and existing evidence checks.",
       },
     },
-    executableBacklogPolicy: "Executable immediately when the task shape is valid.",
+    executableBacklogPolicy:
+      "Executable only when the child is a microtask with bounded scope, acceptance criteria, and verification; broad roadmap summaries must remain non-executable containers or be split first.",
     allowedFileChanges: "Normal implementation scope from the task text.",
     evidenceRequirements: "Task-specific acceptance criteria and verification when generated.",
     requiredGates: ["planner", "implementer"],
     hardConstraints: [],
-    planningPrompt: "Create a task-specific plan with clear implementation steps and verification.",
+    planningPrompt:
+      "Create a task-specific plan for one bounded microtask with clear implementation steps and verification.",
     implementationPrompt:
       "Implement the requested change and run verification relevant to the touched files.",
   },

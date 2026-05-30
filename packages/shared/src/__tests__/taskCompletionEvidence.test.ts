@@ -522,6 +522,140 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("generic_plan");
   });
 
+  it("blocks broad plan-ready tasks during pre-implementation evidence", () => {
+    const root = initRepo();
+    const plan = [
+      "## Plan",
+      "",
+      "```aif-plan-manifest",
+      JSON.stringify(
+        {
+          version: 1,
+          taskId: "broad-scaffold",
+          intent: "feature",
+          scope: ["package.json", "tsconfig.json", ".gitignore", "src/index.ts"],
+          allowedChanges: ["source", "config"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [
+            { kind: "config_update", paths: ["package.json", "tsconfig.json", ".gitignore"] },
+            { kind: "source_diff", paths: ["src/index.ts"] },
+          ],
+          acceptanceCriteria: [
+            {
+              id: "ac-build",
+              description: "Project architecture and core engine skeleton builds.",
+              verification: "npm run build",
+            },
+          ],
+          verificationCommands: ["npm install", "npm run build", "node dist/index.js"],
+        },
+        null,
+        2,
+      ),
+      "```",
+      "",
+      "- [ ] Create the skeleton application and base configuration.",
+      "- [ ] Run npm install, npm run build, and node dist/index.js.",
+    ].join("\n");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "pre_implementation",
+      task: {
+        id: "broad-scaffold",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        plan,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("task_size_split_required");
+    expect(formatTaskCompletionBlockedReason(result)).toContain("split_required:");
+  });
+
+  it("blocks broad no-manifest plans during pre-implementation evidence", () => {
+    const root = initRepo();
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "pre_implementation",
+      task: {
+        id: "broad-fast-scaffold",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "feature",
+        plannerMode: "fast",
+        plan: [
+          "## Plan",
+          "- [ ] Create the skeleton application and base configuration.",
+          "- [ ] Wire the local dev stack.",
+        ].join("\n"),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("task_size_split_required");
+    expect(formatTaskCompletionBlockedReason(result)).toContain("split_required:");
+  });
+
+  it("blocks broad explicit-general roadmap children during pre-implementation evidence", () => {
+    const root = initRepo();
+    const plan = [
+      "## Plan",
+      "",
+      "```aif-plan-manifest",
+      JSON.stringify(
+        {
+          version: 1,
+          taskId: "general-broad-scaffold",
+          intent: "general",
+          scope: ["package.json", "tsconfig.json", ".gitignore", "src/index.ts"],
+          allowedChanges: ["source", "config"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [
+            { kind: "config_update", paths: ["package.json", "tsconfig.json", ".gitignore"] },
+            { kind: "source_diff", paths: ["src/index.ts"] },
+          ],
+          acceptanceCriteria: [
+            {
+              id: "ac-build",
+              description: "Project architecture and core engine skeleton builds.",
+              verification: "npm run build",
+            },
+          ],
+          verificationCommands: ["npm install", "npm run build", "node dist/index.js"],
+        },
+        null,
+        2,
+      ),
+      "```",
+      "",
+      "- [ ] Create the skeleton application and base configuration.",
+      "- [ ] Run npm install, npm run build, and node dist/index.js.",
+    ].join("\n");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "pre_implementation",
+      task: {
+        id: "general-broad-scaffold",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "general",
+        tags: ["roadmap-child", "kind:general"],
+        plannerMode: "full",
+        plan,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("task_size_split_required");
+    expect(formatTaskCompletionBlockedReason(result)).toContain("split_required:");
+  });
+
   it("blocks development review handoff without an implementation manifest", () => {
     const root = initRepo();
     mkdirSync(join(root, "src"), { recursive: true });

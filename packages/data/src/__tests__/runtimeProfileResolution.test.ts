@@ -204,4 +204,186 @@ describe("runtime profile resolution", () => {
       profile: expect.objectContaining({ id: "profile-plan" }),
     });
   });
+
+  it("skips qwen-local-agent implementation profiles unless explicitly enabled", () => {
+    testDb.current
+      .insert(projects)
+      .values({
+        id: "proj-1",
+        name: "Project 1",
+        rootPath: "/tmp/proj-1",
+        defaultTaskRuntimeProfileId: "profile-codex",
+      })
+      .run();
+    testDb.current
+      .insert(runtimeProfiles)
+      .values([
+        {
+          id: "profile-qwen",
+          projectId: "proj-1",
+          name: "Qwen",
+          runtimeId: "qwen-local-agent",
+          providerId: "qwen",
+          enabled: true,
+          optionsJson: "{}",
+        },
+        {
+          id: "profile-codex",
+          projectId: "proj-1",
+          name: "Codex",
+          runtimeId: "codex",
+          providerId: "openai",
+          enabled: true,
+          optionsJson: "{}",
+        },
+      ])
+      .run();
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-qwen-override",
+        projectId: "proj-1",
+        title: "Implement",
+        runtimeProfileId: "profile-qwen",
+      })
+      .run();
+
+    const result = resolveEffectiveRuntimeProfile({
+      taskId: "task-qwen-override",
+      mode: "implementer",
+      systemDefaultRuntimeProfileId: null,
+    });
+
+    expect(result.source).toBe("project_default");
+    expect(result.profile?.id).toBe("profile-codex");
+    expect(loggerMock.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeProfileId: "profile-qwen",
+        stage: "implementer",
+        reason: "qwen_implementation_not_enabled",
+      }),
+      "Runtime profile is not eligible for stage",
+    );
+  });
+
+  it("selects qwen-local-agent for implementation when the profile carries an explicit flag", () => {
+    testDb.current
+      .insert(projects)
+      .values({ id: "proj-1", name: "Project 1", rootPath: "/tmp/proj-1" })
+      .run();
+    testDb.current
+      .insert(runtimeProfiles)
+      .values({
+        id: "profile-qwen-enabled",
+        projectId: "proj-1",
+        name: "Qwen Enabled",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        enabled: true,
+        optionsJson: JSON.stringify({ qwenLocalAgent: { allowImplementation: true } }),
+      })
+      .run();
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-qwen-enabled",
+        projectId: "proj-1",
+        title: "Implement",
+        runtimeProfileId: "profile-qwen-enabled",
+      })
+      .run();
+
+    const result = resolveEffectiveRuntimeProfile({
+      taskId: "task-qwen-enabled",
+      mode: "implementer",
+      systemDefaultRuntimeProfileId: null,
+    });
+
+    expect(result.source).toBe("task_override");
+    expect(result.profile?.id).toBe("profile-qwen-enabled");
+  });
+
+  it("keeps qwen-local-agent chat profiles eligible by default", () => {
+    testDb.current
+      .insert(projects)
+      .values({
+        id: "proj-1",
+        name: "Project 1",
+        rootPath: "/tmp/proj-1",
+        defaultChatRuntimeProfileId: "profile-qwen-chat",
+      })
+      .run();
+    testDb.current
+      .insert(runtimeProfiles)
+      .values({
+        id: "profile-qwen-chat",
+        projectId: "proj-1",
+        name: "Qwen Chat",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        enabled: true,
+        optionsJson: "{}",
+      })
+      .run();
+
+    const result = resolveEffectiveRuntimeProfile({
+      projectId: "proj-1",
+      mode: "chat",
+      systemDefaultRuntimeProfileId: null,
+    });
+
+    expect(result.stage).toBe("chat");
+    expect(result.profileMode).toBe("chat");
+    expect(result.source).toBe("project_default");
+    expect(result.profile?.id).toBe("profile-qwen-chat");
+    expect(loggerMock.info).not.toHaveBeenCalled();
+  });
+
+  it("batch runtime resolution applies stage eligibility filtering", () => {
+    testDb.current
+      .insert(projects)
+      .values({
+        id: "proj-1",
+        name: "Project 1",
+        rootPath: "/tmp/proj-1",
+        defaultTaskRuntimeProfileId: "profile-qwen",
+      })
+      .run();
+    testDb.current
+      .insert(runtimeProfiles)
+      .values([
+        {
+          id: "profile-qwen",
+          projectId: "proj-1",
+          name: "Qwen",
+          runtimeId: "qwen-local-agent",
+          providerId: "qwen",
+          enabled: true,
+          optionsJson: "{}",
+        },
+        {
+          id: "profile-system",
+          projectId: null,
+          name: "System",
+          runtimeId: "codex",
+          providerId: "openai",
+          enabled: true,
+          optionsJson: "{}",
+        },
+      ])
+      .run();
+    testDb.current
+      .insert(tasks)
+      .values([{ id: "task-batch", projectId: "proj-1", title: "Batch" }])
+      .run();
+
+    const taskRows = testDb.current.select().from(tasks).all();
+    const result = resolveEffectiveRuntimeProfilesForTasks(taskRows, {
+      mode: "implementer",
+      systemDefaultRuntimeProfileId: "profile-system",
+    }).get("task-batch");
+
+    expect(result?.source).toBe("system_default");
+    expect(result?.profile?.id).toBe("profile-system");
+  });
 });

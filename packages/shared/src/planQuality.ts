@@ -43,6 +43,7 @@ export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "plan_manifest_missing_verification_commands",
   "plan_manifest_allowed_change_violation",
   "plan_manifest_forbidden_change_violation",
+  "task_size_split_required",
   "local_aif_validation_forbidden",
 ] as const;
 
@@ -179,6 +180,104 @@ const PLAN_MANIFEST_WEAK_VERIFICATION_PATTERN =
   /^(?:verify|check|review|inspect|test|validate|confirm)(?:\s+(?:manually|the\s+ui|output|results?|it|changes?|behavior|work|works|task|plan|implementation|report|docs?))*\.?$/i;
 const PLAN_MANIFEST_COMMAND_PATTERN =
   /^(?:npm(?:\.cmd)?|pnpm|yarn|bun|node|npx|tsx|tsc|vitest|jest|playwright|eslint|prettier|turbo|git|python|py|pytest|ruff|go|cargo|dotnet|mvn|gradle|docker|docker-compose|make|cmake|bash|sh|powershell|pwsh|curl|rg)\b|^[\w./\\-]+(?:\.cmd|\.ps1|\.sh|\.py|\.js|\.ts|\.mjs|\.cjs)\b/i;
+const TASK_SIZE_NORMAL_CHANGED_FILE_GROUP_LIMIT = 2;
+const TASK_SIZE_HARD_CHANGED_FILE_GROUP_LIMIT = 3;
+const TASK_SIZE_NORMAL_MAJOR_SUBSYSTEM_LIMIT = 1;
+const TASK_SIZE_HARD_MAJOR_SUBSYSTEM_LIMIT = 2;
+const TASK_SIZE_MAX_VERIFICATION_COMMANDS = 4;
+const TASK_SIZE_PLACEHOLDER_BOUNDARIES = new Set([
+  "n/a",
+  "na",
+  "none",
+  "tbd",
+  "todo",
+  "unknown",
+  "later",
+  "manual",
+  "repo",
+  "repository",
+  "codebase",
+  "project",
+  "application",
+  "app",
+  "everything",
+]);
+const TASK_SIZE_BROAD_ROOT_BOUNDARIES = new Set([
+  "packages",
+  "apps",
+  "src",
+  "test",
+  "tests",
+  "__tests__",
+  "config",
+  "scripts",
+  "docs",
+  "migrations",
+]);
+const TASK_SIZE_ROOT_CONFIG_FILES = new Set([
+  ".gitignore",
+  ".npmrc",
+  ".prettierrc",
+  ".prettierrc.json",
+  ".eslintrc",
+  ".eslintrc.json",
+  "eslint.config.js",
+  "eslint.config.mjs",
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lockb",
+  "tsconfig.json",
+  "tsconfig.base.json",
+  "vite.config.ts",
+  "vite.config.js",
+  "vitest.config.ts",
+  "vitest.config.js",
+  "turbo.json",
+  "dockerfile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+]);
+const TASK_SIZE_SETUP_RUNTIME_COMMAND_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /^npm(?:\.cmd)? install\b/, label: "npm install" },
+  { pattern: /^npm(?:\.cmd)? ci\b/, label: "npm ci" },
+  { pattern: /^pnpm install\b/, label: "pnpm install" },
+  { pattern: /^yarn install\b/, label: "yarn install" },
+  { pattern: /^bun install\b/, label: "bun install" },
+  { pattern: /^npm(?:\.cmd)? run dev\b/, label: "npm run dev" },
+  { pattern: /^pnpm dev\b/, label: "pnpm dev" },
+  { pattern: /^yarn dev\b/, label: "yarn dev" },
+  { pattern: /^bun dev\b/, label: "bun dev" },
+  { pattern: /^turbo dev\b/, label: "turbo dev" },
+  { pattern: /^docker compose up\b/, label: "docker compose up" },
+  { pattern: /^docker-compose up\b/, label: "docker-compose up" },
+  { pattern: /^docker build\b/, label: "docker build" },
+  { pattern: /^docker compose build\b/, label: "docker compose build" },
+  { pattern: /^vite --host\b/, label: "vite --host" },
+  { pattern: /^playwright test\b.*\blocalhost\b/, label: "playwright test localhost" },
+  { pattern: /^curl\b.*\blocalhost\b/, label: "curl localhost" },
+  { pattern: /^curl\b.*\b127\.0\.0\.1\b/, label: "curl 127.0.0.1" },
+  { pattern: /^node dist\//, label: "node dist/..." },
+];
+const TASK_SIZE_AMBIGUITY_TERMS = [
+  "skeleton application",
+  "application skeleton",
+  "project architecture",
+  "core engine skeleton",
+  "local dev stack",
+  "dev stack",
+  "base configuration",
+  "baseline configuration",
+  "scaffold",
+  "scaffolding",
+  "full stack",
+  "entire app",
+  "complete setup",
+  "end-to-end build",
+  "project setup",
+  "architecture and core engine",
+] as const;
 const TASK_INTENT_CHANGE_CATEGORIES: readonly TaskIntentChangeCategory[] = [
   "source",
   "tests",
@@ -803,6 +902,294 @@ export function normalizeAifPlanManifestForTask(
   });
 }
 
+function normalizeTaskSizeBoundaryPath(path: string): string {
+  return normalizePath(path).trim().replace(/^\/+/, "").replace(/\/+$/g, "").toLowerCase();
+}
+
+function collectManifestBoundaryPaths(manifest: Partial<AifPlanManifest>): {
+  raw: string[];
+  normalized: string[];
+} {
+  const raw = new Set<string>();
+  if (Array.isArray(manifest.scope)) {
+    for (const entry of manifest.scope) {
+      if (typeof entry === "string") raw.add(entry.trim());
+    }
+  }
+  if (Array.isArray(manifest.expectedArtifacts)) {
+    for (const artifact of manifest.expectedArtifacts) {
+      if (isObject(artifact) && Array.isArray(artifact.paths)) {
+        for (const entry of artifact.paths) {
+          if (typeof entry === "string") raw.add(entry.trim());
+        }
+      }
+    }
+  }
+  return {
+    raw: [...raw].filter(Boolean),
+    normalized: [...new Set([...raw].map(normalizeTaskSizeBoundaryPath).filter(Boolean))].sort(),
+  };
+}
+
+function isTaskSizeBroadBoundaryPath(path: string): boolean {
+  const normalized = normalizeTaskSizeBoundaryPath(path);
+  const raw = path.trim().toLowerCase();
+  if (!normalized || raw === "." || raw === "./" || raw === "/") return true;
+  if (TASK_SIZE_PLACEHOLDER_BOUNDARIES.has(normalized)) return true;
+  if (TASK_SIZE_BROAD_ROOT_BOUNDARIES.has(normalized)) return true;
+  if (/^(?:packages|apps)\/[^/]+$/.test(normalized)) return true;
+  return normalized.endsWith("/*") || normalized.endsWith("/**");
+}
+
+function rootConfigGroupForPath(path: string): string | null {
+  if (path.includes("/")) return null;
+  const normalized = path.toLowerCase();
+  if (TASK_SIZE_ROOT_CONFIG_FILES.has(normalized)) return "root-config";
+  if (/^(?:package|tsconfig|vite|vitest|eslint|prettier|turbo|docker-compose)\b/.test(normalized)) {
+    return "root-config";
+  }
+  if (/^\.[\w-]+(?:rc|ignore|env)(?:\..+)?$/.test(normalized)) return "root-config";
+  return null;
+}
+
+function taskSizePackageArea(parts: string[]): string {
+  const candidate = parts[2] ?? "root";
+  if (candidate === "test" || candidate === "__tests__") return "tests";
+  if (candidate === "src" || candidate === "tests" || candidate === "config") return candidate;
+  return candidate;
+}
+
+function taskSizeChangedFileGroup(path: string): string {
+  const normalized = normalizeTaskSizeBoundaryPath(path);
+  const rootConfigGroup = rootConfigGroupForPath(normalized);
+  if (rootConfigGroup) return rootConfigGroup;
+  const parts = normalized.split("/").filter(Boolean);
+  if ((parts[0] === "packages" || parts[0] === "apps") && parts[1]) {
+    return `${parts[0]}/${parts[1]}/${taskSizePackageArea(parts)}`;
+  }
+  if (parts[0] && ["src", "docs", "scripts", "config"].includes(parts[0])) return parts[0];
+  return parts[0] ?? normalized;
+}
+
+function taskSizeMajorSubsystem(path: string): string {
+  const normalized = normalizeTaskSizeBoundaryPath(path);
+  const rootConfigGroup = rootConfigGroupForPath(normalized);
+  if (rootConfigGroup) return rootConfigGroup;
+  const parts = normalized.split("/").filter(Boolean);
+  if ((parts[0] === "packages" || parts[0] === "apps") && parts[1]) {
+    return `${parts[0]}/${parts[1]}`;
+  }
+  if (parts[0] && ["src", "docs", "scripts", "config"].includes(parts[0])) return parts[0];
+  return parts[0] ?? normalized;
+}
+
+function normalizedTaskSizeCommand(command: string): string {
+  return command.trim().replaceAll("\\", "/").replace(/\s+/g, " ").toLowerCase();
+}
+
+function findTaskSizeSetupRuntimeCommand(commands: string[]): string | null {
+  for (const command of commands.map(normalizedTaskSizeCommand)) {
+    const match = TASK_SIZE_SETUP_RUNTIME_COMMAND_PATTERNS.find((entry) =>
+      entry.pattern.test(command),
+    );
+    if (match) return match.label;
+  }
+  return null;
+}
+
+function findTaskSizeAmbiguityTerm(text: string): string | null {
+  const normalized = text.toLowerCase();
+  return TASK_SIZE_AMBIGUITY_TERMS.find((term) => normalized.includes(term)) ?? null;
+}
+
+function taskSizeManifestJson(manifest: Partial<AifPlanManifest>): string {
+  try {
+    return JSON.stringify(manifest);
+  } catch {
+    return "";
+  }
+}
+
+function isTaskSizeTextBoundaryCandidate(path: string): boolean {
+  const normalized = normalizeTaskSizeBoundaryPath(path);
+  if (!normalized) return false;
+  return normalized.includes("/") || rootConfigGroupForPath(normalized) !== null;
+}
+
+function evaluateTaskSizeSplitIssue(input: {
+  task: TaskPlanQualityTask;
+  plan: string;
+  manifest: Partial<AifPlanManifest>;
+  taskIntent: TaskIntent;
+}): TaskPlanQualityIssue | null {
+  if (input.taskIntent === "audit" || input.taskIntent === "spike") return null;
+
+  const boundaryPaths = collectManifestBoundaryPaths(input.manifest);
+  const broadBoundary = boundaryPaths.raw.find(isTaskSizeBroadBoundaryPath) ?? null;
+  const fileBoundaries = boundaryPaths.normalized.length === 0 || broadBoundary !== null;
+  const changedFileGroups = [
+    ...new Set(boundaryPaths.normalized.map(taskSizeChangedFileGroup).filter(Boolean)),
+  ].sort();
+  const majorSubsystems = [
+    ...new Set(boundaryPaths.normalized.map(taskSizeMajorSubsystem).filter(Boolean)),
+  ].sort();
+  const verificationCommands = Array.isArray(input.manifest.verificationCommands)
+    ? input.manifest.verificationCommands.filter(
+        (entry): entry is string => typeof entry === "string",
+      )
+    : [];
+  const setupRuntimeCommand = findTaskSizeSetupRuntimeCommand(verificationCommands);
+  const verificationSurface =
+    verificationCommands.length > TASK_SIZE_MAX_VERIFICATION_COMMANDS ||
+    setupRuntimeCommand !== null;
+  const ambiguityTerm = findTaskSizeAmbiguityTerm(
+    [input.task.title, input.task.description, input.plan, taskSizeManifestJson(input.manifest)]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n"),
+  );
+  const ambiguity = ambiguityTerm !== null;
+  const changedFileGroupsBroad =
+    changedFileGroups.length > TASK_SIZE_NORMAL_CHANGED_FILE_GROUP_LIMIT;
+  const majorSubsystemsBroad = majorSubsystems.length > TASK_SIZE_NORMAL_MAJOR_SUBSYSTEM_LIMIT;
+
+  const reject =
+    fileBoundaries ||
+    (changedFileGroupsBroad && majorSubsystemsBroad) ||
+    (changedFileGroupsBroad && ambiguity) ||
+    (majorSubsystemsBroad && ambiguity) ||
+    (verificationSurface && (changedFileGroupsBroad || majorSubsystemsBroad || ambiguity)) ||
+    changedFileGroups.length > TASK_SIZE_HARD_CHANGED_FILE_GROUP_LIMIT ||
+    majorSubsystems.length > TASK_SIZE_HARD_MAJOR_SUBSYSTEM_LIMIT;
+
+  if (!reject) return null;
+
+  const dimensions: string[] = [];
+  if (fileBoundaries) {
+    dimensions.push(
+      broadBoundary
+        ? `file_boundaries=broad:${normalizeTaskSizeBoundaryPath(broadBoundary) || broadBoundary}`
+        : "file_boundaries=empty",
+    );
+  }
+  if (changedFileGroupsBroad) {
+    dimensions.push(
+      `changed_file_groups=${changedFileGroups.length}>${TASK_SIZE_NORMAL_CHANGED_FILE_GROUP_LIMIT} (${changedFileGroups.join(", ")})`,
+    );
+  }
+  if (majorSubsystemsBroad) {
+    dimensions.push(
+      `major_subsystems=${majorSubsystems.length}>${TASK_SIZE_NORMAL_MAJOR_SUBSYSTEM_LIMIT} (${majorSubsystems.join(", ")})`,
+    );
+  }
+  if (verificationSurface) {
+    dimensions.push(
+      setupRuntimeCommand
+        ? `verification_surface=setup_runtime_command:${setupRuntimeCommand}`
+        : `verification_surface=${verificationCommands.length}>${TASK_SIZE_MAX_VERIFICATION_COMMANDS}`,
+    );
+  }
+  if (ambiguityTerm) {
+    dimensions.push(`ambiguity=${ambiguityTerm}`);
+  }
+
+  return issue(
+    "task_size_split_required",
+    `split_required: task is too broad for one implementation card (dimensions: ${dimensions.join(
+      "; ",
+    )}). Split into children with concrete file boundaries, acceptance checks, and verification commands.`,
+  );
+}
+
+function evaluateTaskSizeTextOnlySplitIssue(input: {
+  task: TaskPlanQualityTask;
+  plan: string;
+  taskIntent: TaskIntent;
+}): TaskPlanQualityIssue | null {
+  if (input.taskIntent === "audit" || input.taskIntent === "spike") return null;
+
+  const text = [combinedTaskText(input.task), input.plan].filter(Boolean).join("\n");
+  const ambiguityTerm = findTaskSizeAmbiguityTerm(text);
+  const boundaryPaths = [
+    ...new Set(
+      [
+        ...extractRepoPaths(text),
+        ...extractConcreteSourceRoots(text).filter(isTaskSizeTextBoundaryCandidate),
+      ]
+        .filter((path) => !isAuditReportArtifactPath(path))
+        .map(normalizeTaskSizeBoundaryPath)
+        .filter(Boolean),
+    ),
+  ].sort();
+  const broadBoundary = boundaryPaths.find(isTaskSizeBroadBoundaryPath) ?? null;
+  const missingConcreteBoundary = boundaryPaths.length === 0;
+  const changedFileGroups = [
+    ...new Set(boundaryPaths.map(taskSizeChangedFileGroup).filter(Boolean)),
+  ].sort();
+  const majorSubsystems = [
+    ...new Set(boundaryPaths.map(taskSizeMajorSubsystem).filter(Boolean)),
+  ].sort();
+  const verificationCommands = concreteVerificationCommandsFromText(input.plan);
+  const setupRuntimeCommand = findTaskSizeSetupRuntimeCommand(verificationCommands);
+  const missingConcreteVerification = verificationCommands.length === 0;
+  const verificationSurface =
+    verificationCommands.length > TASK_SIZE_MAX_VERIFICATION_COMMANDS ||
+    setupRuntimeCommand !== null;
+  const changedFileGroupsBroad =
+    changedFileGroups.length > TASK_SIZE_NORMAL_CHANGED_FILE_GROUP_LIMIT;
+  const majorSubsystemsBroad = majorSubsystems.length > TASK_SIZE_NORMAL_MAJOR_SUBSYSTEM_LIMIT;
+
+  const reject =
+    broadBoundary !== null ||
+    (ambiguityTerm !== null &&
+      (missingConcreteBoundary ||
+        missingConcreteVerification ||
+        changedFileGroupsBroad ||
+        majorSubsystemsBroad ||
+        verificationSurface)) ||
+    (changedFileGroupsBroad && majorSubsystemsBroad) ||
+    (verificationSurface && (changedFileGroupsBroad || majorSubsystemsBroad)) ||
+    changedFileGroups.length > TASK_SIZE_HARD_CHANGED_FILE_GROUP_LIMIT ||
+    majorSubsystems.length > TASK_SIZE_HARD_MAJOR_SUBSYSTEM_LIMIT;
+
+  if (!reject) return null;
+
+  const dimensions: string[] = [];
+  if (missingConcreteBoundary) {
+    dimensions.push("file_boundaries=missing_concrete");
+  } else if (broadBoundary) {
+    dimensions.push(`file_boundaries=broad:${broadBoundary}`);
+  }
+  if (changedFileGroupsBroad) {
+    dimensions.push(
+      `changed_file_groups=${changedFileGroups.length}>${TASK_SIZE_NORMAL_CHANGED_FILE_GROUP_LIMIT} (${changedFileGroups.join(", ")})`,
+    );
+  }
+  if (majorSubsystemsBroad) {
+    dimensions.push(
+      `major_subsystems=${majorSubsystems.length}>${TASK_SIZE_NORMAL_MAJOR_SUBSYSTEM_LIMIT} (${majorSubsystems.join(", ")})`,
+    );
+  }
+  if (verificationSurface) {
+    dimensions.push(
+      setupRuntimeCommand
+        ? `verification_surface=setup_runtime_command:${setupRuntimeCommand}`
+        : `verification_surface=${verificationCommands.length}>${TASK_SIZE_MAX_VERIFICATION_COMMANDS}`,
+    );
+  } else if (missingConcreteVerification && ambiguityTerm) {
+    dimensions.push("verification_surface=missing_concrete_command");
+  }
+  if (ambiguityTerm) {
+    dimensions.push(`ambiguity=${ambiguityTerm}`);
+  }
+
+  return issue(
+    "task_size_split_required",
+    `split_required: task is too broad for one implementation card (dimensions: ${dimensions.join(
+      "; ",
+    )}). Split into children with concrete file boundaries, acceptance checks, and verification commands.`,
+  );
+}
+
 function validatePlanManifest(input: {
   task: TaskPlanQualityTask;
   plan: string;
@@ -1042,6 +1429,17 @@ function validatePlanManifest(input: {
           : "aif-plan-manifest forbiddenChanges must list useful forbidden change entries.",
       );
     }
+  }
+
+  const taskSizeIssue = evaluateTaskSizeSplitIssue({
+    task: input.task,
+    plan: input.plan,
+    manifest,
+    taskIntent: input.taskIntent,
+  });
+  if (taskSizeIssue) {
+    issues.push(taskSizeIssue);
+    issueCodes.push(taskSizeIssue.code);
   }
 
   return {
@@ -1494,6 +1892,14 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
   }
 
   issues.push(...planManifestValidation.issues);
+  if (!planManifestValidation.summary.present) {
+    const textOnlySizeIssue = evaluateTaskSizeTextOnlySplitIssue({
+      task: input.task,
+      plan,
+      taskIntent,
+    });
+    if (textOnlySizeIssue) issues.push(textOnlySizeIssue);
+  }
 
   if (!CHECKLIST_PATTERN.test(plan)) {
     issues.push(

@@ -112,7 +112,7 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("missing_plan_manifest");
   });
 
-  it("repairs model-produced descriptive full-mode manifests before validation", () => {
+  it("rejects broad scaffold, local dev stack, and base configuration manifests", () => {
     const malformedManifest = JSON.stringify(
       {
         version: 1,
@@ -168,8 +168,41 @@ describe("evaluateTaskPlanQuality", () => {
     expect(normalized).toContain('"allowedChanges": [\n    "source",\n    "config"');
     expect(normalized).toContain('"kind": "source_diff"');
     expect(normalized).toContain('"kind": "config_update"');
-    expect(result.ok).toBe(true);
-    expect(result.categories).toEqual([]);
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("task_size_split_required");
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "task_size_split_required",
+          message: expect.stringMatching(
+            /^split_required:.*major_subsystems=2>1.*verification_surface=setup_runtime_command:npm install.*ambiguity=project architecture/,
+          ),
+        }),
+      ]),
+    );
+  });
+
+  it("rejects broad no-manifest scaffold plans before implementation", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-broad-fast",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "feature",
+        plannerMode: "fast",
+      },
+      plan: [
+        "## Plan",
+        "- [ ] Create the skeleton application and base configuration.",
+        "- [ ] Wire the local dev stack.",
+      ].join("\n"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("task_size_split_required");
+    expect(
+      result.issues.find((entry) => entry.code === "task_size_split_required")?.message,
+    ).toMatch(/^split_required:/);
   });
 
   it("accepts a focused checklist plan for a simple task", () => {
@@ -278,6 +311,111 @@ describe("evaluateTaskPlanQuality", () => {
       taskId: "task-full",
       intent: "feature",
     });
+  });
+
+  it("accepts a narrow concrete source and test manifest", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Add task-size gate",
+        description:
+          "Scope: packages/shared/src/planQuality.ts and packages/shared/src/__tests__/planQuality.test.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          scope: [
+            "packages/shared/src/planQuality.ts",
+            "packages/shared/src/__tests__/planQuality.test.ts",
+          ],
+          expectedArtifacts: [
+            { kind: "source_diff", paths: ["packages/shared/src/planQuality.ts"] },
+            {
+              kind: "test_delta",
+              paths: ["packages/shared/src/__tests__/planQuality.test.ts"],
+            },
+          ],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("task_size_split_required");
+  });
+
+  it("accepts a narrow roadmap-created child with concrete boundaries", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "roadmap-child-1",
+        title: "Child: add focused plan-quality regression",
+        description:
+          "Implement only packages/shared/src/__tests__/planQuality.test.ts. Acceptance: focused regression proves the validator accepts narrow child tasks. Verification: focused shared package test command.",
+        taskIntent: "tests",
+        plannerMode: "full",
+        roadmapAlias: "task-size-gate",
+        tags: ["roadmap-child"],
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          taskId: "roadmap-child-1",
+          intent: "tests",
+          scope: ["packages/shared/src/__tests__/planQuality.test.ts"],
+          allowedChanges: ["tests"],
+          forbiddenChanges: ["source", "docs", "config", "report"],
+          expectedArtifacts: [
+            {
+              kind: "test_delta",
+              paths: ["packages/shared/src/__tests__/planQuality.test.ts"],
+            },
+          ],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("task_size_split_required");
+  });
+
+  it("rejects broad explicit-general roadmap children before implementation", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "roadmap-general-broad",
+        title: "Setup Project Architecture and Core Engine Skeleton",
+        description: "Create a skeleton application, local dev stack, and base configuration.",
+        taskIntent: "general",
+        plannerMode: "full",
+        roadmapAlias: "generic-roadmap",
+        tags: ["roadmap-child", "kind:general"],
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          taskId: "roadmap-general-broad",
+          intent: "general",
+          scope: ["package.json", "tsconfig.json", ".gitignore", "src/index.ts"],
+          allowedChanges: ["source", "config"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [
+            { kind: "config_update", paths: ["package.json", "tsconfig.json", ".gitignore"] },
+            { kind: "source_diff", paths: ["src/index.ts"] },
+          ],
+          acceptanceCriteria: [
+            {
+              id: "ac-build",
+              description: "Skeleton application and base configuration build.",
+              verification: "npm run build",
+            },
+          ],
+          verificationCommands: ["npm install", "npm run build", "node dist/index.js"],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("task_size_split_required");
   });
 
   it("rejects malformed present manifests even when manifest is optional", () => {

@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-29",
+  "updated": "2026-05-30",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -799,11 +799,65 @@
     {
       "taskId": "work-20260529-external-systemic-aif-stability-review",
       "title": "External Systemic AIF Stability Review",
-      "status": "queued",
+      "status": "done",
       "priority": "critical",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260529-external-systemic-aif-stability-review",
       "updated": "2026-05-29"
+    },
+    {
+      "taskId": "work-20260530-fail-closed-implementation-runtime-exhaustion",
+      "title": "Fail Closed On Implementation Runtime Exhaustion",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260530-fail-closed-implementation-runtime-exhaustion",
+      "updated": "2026-05-30"
+    },
+    {
+      "taskId": "work-20260530-task-size-gate-before-implementation",
+      "title": "Task Size Gate Before Implementation",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260530-task-size-gate-before-implementation",
+      "updated": "2026-05-30"
+    },
+    {
+      "taskId": "work-20260530-implementation-timeout-recovery-split-pack",
+      "title": "Implementation Timeout Recovery Split Pack",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260530-implementation-timeout-recovery-split-pack",
+      "updated": "2026-05-30"
+    },
+    {
+      "taskId": "work-20260530-stage-aware-runtime-routing-and-qwen-caps",
+      "title": "Stage-Aware Runtime Routing And Qwen Caps",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260530-stage-aware-runtime-routing-and-qwen-caps",
+      "updated": "2026-05-30"
+    },
+    {
+      "taskId": "work-20260530-compact-runtime-retry-context",
+      "title": "Compact Runtime Retry Context",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260530-compact-runtime-retry-context",
+      "updated": "2026-05-30"
+    },
+    {
+      "taskId": "work-20260530-roadmap-microtask-decomposition-contract",
+      "title": "Roadmap Microtask Decomposition Contract",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260530-roadmap-microtask-decomposition-contract",
+      "updated": "2026-05-30"
     }
   ]
 }

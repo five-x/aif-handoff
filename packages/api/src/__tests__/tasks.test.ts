@@ -3550,6 +3550,105 @@ describe("tasks API", () => {
       expect(body.blockedReason).toContain("generic_plan");
     });
 
+    it("should block manual start_implementation when a broad plan requires splitting", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      const plan = [
+        "## Plan",
+        "",
+        "```aif-plan-manifest",
+        JSON.stringify(
+          {
+            version: 1,
+            taskId: "ev-plan-split-required",
+            intent: "feature",
+            scope: ["package.json", "tsconfig.json", ".gitignore", "src/index.ts"],
+            allowedChanges: ["source", "config"],
+            forbiddenChanges: ["report"],
+            expectedArtifacts: [
+              { kind: "config_update", paths: ["package.json", "tsconfig.json", ".gitignore"] },
+              { kind: "source_diff", paths: ["src/index.ts"] },
+            ],
+            acceptanceCriteria: [
+              {
+                id: "ac-build",
+                description: "Skeleton application and base configuration build.",
+                verification: "npm run build",
+              },
+            ],
+            verificationCommands: ["npm install", "npm run build", "node dist/index.js"],
+          },
+          null,
+          2,
+        ),
+        "```",
+        "",
+        "- [ ] Create the skeleton application and base configuration.",
+        "- [ ] Run npm install, npm run build, and node dist/index.js.",
+      ].join("\n");
+      db.insert(tasks)
+        .values({
+          id: "ev-plan-split-required",
+          projectId: "test-project",
+          title: "Setup Project Architecture and Core Engine Skeleton",
+          description: "Create a skeleton application, local dev stack, and base configuration.",
+          taskIntent: "feature",
+          plannerMode: "full",
+          status: "plan_ready",
+          autoMode: false,
+          plan,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-split-required/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_implementation" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("plan_ready");
+      expect(body.blockedReason).toContain("task_size_split_required");
+      expect(body.blockedReason).toContain("split_required:");
+    });
+
+    it("should block manual start_implementation when a broad no-manifest plan requires splitting", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      db.insert(tasks)
+        .values({
+          id: "ev-plan-split-required-no-manifest",
+          projectId: "test-project",
+          title: "Setup Project Architecture and Core Engine Skeleton",
+          description: "Create a skeleton application, local dev stack, and base configuration.",
+          taskIntent: "feature",
+          plannerMode: "fast",
+          status: "plan_ready",
+          autoMode: false,
+          plan: [
+            "## Plan",
+            "- [ ] Create the skeleton application and base configuration.",
+            "- [ ] Wire the local dev stack.",
+          ].join("\n"),
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-split-required-no-manifest/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_implementation" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("plan_ready");
+      expect(body.blockedReason).toContain("task_size_split_required");
+      expect(body.blockedReason).toContain("split_required:");
+    });
+
     it("should start implementation for short concrete plans without markdown structure", async () => {
       const db = testDb.current;
       insertTestProject(db);

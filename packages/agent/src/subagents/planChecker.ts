@@ -92,6 +92,19 @@ function assertTaskPlanQuality(task: PlanCheckerTask, planText: string | null | 
   }
 }
 
+function assertTaskSizeDoesNotRequireSplit(
+  task: PlanCheckerTask,
+  planText: string | null | undefined,
+): void {
+  const result = evaluateTaskPlanQuality({
+    task: buildPlanQualityTaskContext(task),
+    plan: planText,
+  });
+  if (result.categories.includes("task_size_split_required")) {
+    throw new TaskPlanQualityError(result);
+  }
+}
+
 function persistDeterministicDiagnosticPlanIfAvailable(
   task: PlanCheckerTask,
   projectRoot: string,
@@ -178,6 +191,8 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
     return;
   }
 
+  assertTaskSizeDoesNotRequireSplit(task, task.plan);
+
   // Fast path: skip LLM call if plan already has proper checklist format
   if (isPlanAlreadyChecklist(task.plan)) {
     assertTaskPlanQuality(task, task.plan);
@@ -214,7 +229,7 @@ export async function runPlanChecker(taskId: string, projectRoot: string): Promi
   const planCheckerBudget = project?.planCheckerMaxBudgetUsd ?? null;
   const manifestRequirement =
     task.plannerMode === "full"
-      ? "8) Full-mode plans must include exactly one fenced `aif-plan-manifest` JSON block with version, taskId, intent, scope, allowedChanges, forbiddenChanges, expectedArtifacts, acceptanceCriteria, and verificationCommands. Preserve a valid existing manifest or add/repair it when absent or malformed.\n9) Manifest acceptance criteria must be testable and verificationCommands must be concrete local commands.\n10) Manifest intent, allowedChanges, and forbiddenChanges must respect the task intent contract; do not convert audit, spike, docs, or tests work into feature/fix implementation."
+      ? "8) Full-mode plans must include exactly one fenced `aif-plan-manifest` JSON block with version, taskId, intent, scope, allowedChanges, forbiddenChanges, expectedArtifacts, acceptanceCriteria, and verificationCommands. Preserve a valid existing manifest or add/repair it when absent or malformed.\n9) Manifest acceptance criteria must be testable and verificationCommands must be concrete local commands.\n10) Manifest intent, allowedChanges, and forbiddenChanges must respect the task intent contract; do not convert audit, spike, docs, or tests work into feature/fix implementation.\n11) Broad, vague, or multi-area implementation cards must not be repaired into runnable plans. Preserve split-required feedback when scope spans broad directories, multiple major subsystems, setup/runtime/dev-stack commands, scaffold/base-configuration work, or unclear file boundaries."
       : "8) If an `aif-plan-manifest` block is already present, preserve and repair it. Do not add a manifest solely because the plan is fast-mode.";
 
   log.info({ taskId, title: task.title }, "Starting plan-checker agent");

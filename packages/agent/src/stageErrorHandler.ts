@@ -34,6 +34,15 @@ const NON_RETRYABLE_RUNTIME_CATEGORIES = new Set([
   "content_filter",
 ]);
 
+export const IMPLEMENTATION_RUNTIME_EXHAUSTED_REASON =
+  "implementation_runtime_exhausted_requires_split";
+
+const IMPLEMENTATION_RUNTIME_EXHAUSTION_STATUSES = new Set([
+  "max_tool_turns_exhausted",
+  "runtime_budget_exhausted",
+  "runtime_limit_exhausted",
+]);
+
 export type ErrorRecovery =
   | { kind: "fast_retry" }
   | {
@@ -52,6 +61,122 @@ interface StageErrorInput {
   sourceStatus: TaskStatus;
   retryCount: number;
   err: unknown;
+}
+
+type BlockedExternalRecovery = Extract<ErrorRecovery, { kind: "blocked_external" }>;
+
+function readRuntimeProviderMetaString(
+  runtimeError: ReturnType<typeof findRuntimeExecutionError>,
+  key: string,
+): string | null {
+  const providerMeta = runtimeError?.providerMeta;
+  if (!providerMeta || typeof providerMeta !== "object" || Array.isArray(providerMeta)) {
+    return null;
+  }
+  const raw = providerMeta[key];
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+}
+
+interface ImplementationRuntimeExhaustionDetails {
+  category: string;
+  status: string;
+  runtimeError: ReturnType<typeof findRuntimeExecutionError>;
+}
+
+function implementationRuntimeExhaustionStatus(
+  runtimeError: ReturnType<typeof findRuntimeExecutionError>,
+): string | null {
+  if (!runtimeError) return null;
+  const status = readRuntimeProviderMetaString(runtimeError, "status");
+  if (status && IMPLEMENTATION_RUNTIME_EXHAUSTION_STATUSES.has(status)) return status;
+  if (runtimeError.category === "timeout") return "runtime_timeout";
+  return null;
+}
+
+function isImplementerStageTimeoutError(err: unknown): boolean {
+  if (err instanceof Error) {
+    if (/^Stage implementer timed out after \d+ms$/i.test(err.message.trim())) return true;
+    if ("cause" in err && err.cause) return isImplementerStageTimeoutError(err.cause);
+  }
+  return false;
+}
+
+function implementationRuntimeExhaustionDetails(
+  input: Pick<StageErrorInput, "stageLabel" | "err">,
+): ImplementationRuntimeExhaustionDetails | null {
+  if (input.stageLabel !== "implementer") return null;
+  if (isRepositoryInspectionBudgetExhaustionError(input.err)) return null;
+  const runtimeError = findRuntimeExecutionError(input.err);
+  const runtimeStatus = implementationRuntimeExhaustionStatus(runtimeError);
+  if (runtimeStatus) {
+    return {
+      category: runtimeError?.category ?? "unknown",
+      status: runtimeStatus,
+      runtimeError,
+    };
+  }
+  if (isImplementerStageTimeoutError(input.err)) {
+    return {
+      category: "timeout",
+      status: "stage_timeout",
+      runtimeError: null,
+    };
+  }
+  return null;
+}
+
+export function isImplementationRuntimeExhaustionError(
+  input: Pick<StageErrorInput, "stageLabel" | "err">,
+): boolean {
+  return implementationRuntimeExhaustionDetails(input) !== null;
+}
+
+export function classifyImplementationRuntimeExhaustion(
+  input: StageErrorInput,
+): BlockedExternalRecovery | null {
+  const details = implementationRuntimeExhaustionDetails(input);
+  if (!details) return null;
+
+  const { category, status, runtimeError } = details;
+  const blockedReason =
+    `${IMPLEMENTATION_RUNTIME_EXHAUSTED_REASON}: implementer runtime exhausted ` +
+    `(category=${category}; status=${status}). Split scope, prepare a continuation package, ` +
+    "or choose an explicit supported recovery path before retry.";
+  const limitSnapshot = getEnv().AIF_USAGE_LIMITS_ENABLED
+    ? (runtimeError?.limitSnapshot ?? null)
+    : null;
+
+  logActivity(
+    input.taskId,
+    "Agent",
+    `coordinator moved to blocked_external from ${input.sourceStatus} at ${input.stageLabel}; retryAfter=manual; source=none; reason=${truncateReason(blockedReason)}`,
+  );
+
+  log.error(
+    {
+      taskId: input.taskId,
+      stage: input.stageLabel,
+      retryAfter: null,
+      retryAfterSource: "none",
+      runtimeCategory: category,
+      runtimeStatus: status,
+      errorName: input.err instanceof Error ? input.err.name : typeof input.err,
+      errorMessage:
+        input.err instanceof Error
+          ? redactProviderTextForLogs(input.err.message)
+          : redactProviderTextForLogs(String(input.err)),
+    },
+    "Subagent implementation runtime exhausted, task requires split or operator action",
+  );
+
+  return {
+    kind: "blocked_external",
+    blockedReason,
+    retryAfter: null,
+    retryAfterSource: "none",
+    retryCount: input.retryCount ?? 0,
+    limitSnapshot,
+  };
 }
 
 function buildUserSafeExternalReason(err: unknown): string {
@@ -88,6 +213,21 @@ function buildOperatorInputRuntimeReason(category: "auth" | "permission"): strin
   return (
     "operator_input_required: Runtime permissions blocked this task. " +
     "Grant the required runtime access or update the approval/sandbox policy before retry."
+  );
+}
+
+function buildRuntimeStageNotCapableReason(status: string | null, stageLabel: string): string {
+  if (status === "no_implementation_capable_profile") {
+    return (
+      "runtime_stage_not_capable: No implementation-capable runtime profile is configured. " +
+      "Select a runtime profile explicitly declared capable for tool-using implementation " +
+      "or pass a local Qwen implementation canary before retry."
+    );
+  }
+
+  return (
+    `runtime_stage_not_capable: Selected runtime profile is not capable for ${stageLabel}. ` +
+    "Choose a stage-capable runtime profile or update the profile capability contract before retry."
   );
 }
 
@@ -148,6 +288,9 @@ function resolveRetryAfter(
  */
 export function classifyStageError(input: StageErrorInput): ErrorRecovery {
   const { taskId, stageLabel, sourceStatus, err } = input;
+
+  const implementationRuntimeExhaustion = classifyImplementationRuntimeExhaustion(input);
+  if (implementationRuntimeExhaustion) return implementationRuntimeExhaustion;
 
   // Branch / worktree isolation failures must NEVER fall into the generic
   // revert path — generic revert triggers unbounded re-planning on a
@@ -218,6 +361,50 @@ export function classifyStageError(input: StageErrorInput): ErrorRecovery {
     runtimeError &&
     (runtimeError.category === "auth" || runtimeError.category === "permission")
   ) {
+    const stageCapabilityStatus = readRuntimeProviderMetaString(runtimeError, "status");
+    if (
+      runtimeError.category === "permission" &&
+      (stageCapabilityStatus === "runtime_stage_not_capable" ||
+        stageCapabilityStatus === "no_implementation_capable_profile")
+    ) {
+      const blockedReason = buildRuntimeStageNotCapableReason(stageCapabilityStatus, stageLabel);
+      const limitSnapshot = getEnv().AIF_USAGE_LIMITS_ENABLED
+        ? (runtimeError.limitSnapshot ?? null)
+        : null;
+
+      logActivity(
+        taskId,
+        "Agent",
+        `coordinator moved to blocked_external from ${sourceStatus} at ${stageLabel}; retryAfter=manual; source=none; reason=${truncateReason(blockedReason)}`,
+      );
+
+      log.error(
+        {
+          taskId,
+          stage: stageLabel,
+          retryAfter: null,
+          retryAfterSource: "none",
+          runtimeCategory: runtimeError.category,
+          runtimeStatus: stageCapabilityStatus,
+          errorName: err instanceof Error ? err.name : typeof err,
+          errorMessage:
+            err instanceof Error
+              ? redactProviderTextForLogs(err.message)
+              : redactProviderTextForLogs(String(err)),
+        },
+        "Subagent runtime profile is not capable for requested stage",
+      );
+
+      return {
+        kind: "blocked_external",
+        blockedReason,
+        retryAfter: null,
+        retryAfterSource: "none",
+        retryCount: input.retryCount ?? 0,
+        limitSnapshot,
+      };
+    }
+
     const blockedReason = buildOperatorInputRuntimeReason(runtimeError.category);
     const limitSnapshot = getEnv().AIF_USAGE_LIMITS_ENABLED
       ? (runtimeError.limitSnapshot ?? null)

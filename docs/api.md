@@ -317,7 +317,7 @@ Reads `.ai-factory/ROADMAP.md` from the project root, converts milestones into a
 POST /projects/:id/task-split-proposals/:proposalId/approve
 ```
 
-Approves a pending roadmap split proposal and creates the proposed container and child backlog tasks. Approval returns `201 Created`; approving an already-approved proposal returns `200 OK` with the existing proposal.
+Approves a pending task split proposal and creates the proposed container and child backlog tasks. Proposal sources include roadmap import/generation and implementation recovery (`sourceKind: "implementation_recovery"`). Approval returns `201 Created`; approving an already-approved proposal returns `200 OK` with the existing proposal.
 
 **Response:** proposal object with `status: "approved"`, `containerTaskId`, and `createdTaskIds`.
 
@@ -326,7 +326,7 @@ Approves a pending roadmap split proposal and creates the proposed container and
 - `404` — Project or proposal not found
 - `409` — Proposal was rejected, or an approved task would violate alias uniqueness
 
-**WebSocket events:** `task:created` for each created task. Approval does not emit `agent:wake`; operators decide when to start the new backlog tasks.
+**WebSocket events:** `task:created` for each created task. Approval may also emit `agent:wake` for created non-container tasks when `AIF_ROADMAP_IMPORT_CHILDREN_PAUSED_BY_DEFAULT` is disabled.
 
 ### Reject Task Split Proposal
 

@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260528-requirements-observability-docs-rollout::project-capsule
+memory_id: task::aif-handoff::work::work-20260530-roadmap-microtask-decomposition-contract::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260528-requirements-observability-docs-rollout
-source_path: docs/rdpi/work/work-20260528-requirements-observability-docs-rollout
+task_id: work-20260530-roadmap-microtask-decomposition-contract
+source_path: docs/rdpi/work/work-20260530-roadmap-microtask-decomposition-contract
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-05-29
+updated_at: 2026-05-30
 supersedes:
 expires_at:
 tags:
@@ -24,18 +24,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260528-requirements-observability-docs-rollout/research.md
-- docs/rdpi/work/work-20260528-requirements-observability-docs-rollout/design.md
-- docs/rdpi/work/work-20260528-requirements-observability-docs-rollout/plan.md
-- docs/rdpi/work/work-20260528-requirements-observability-docs-rollout/result.md
-  created_at: 2026-05-29
-  last_verified_at: 2026-05-29
+- docs/rdpi/work/work-20260530-roadmap-microtask-decomposition-contract/research.md
+- docs/rdpi/work/work-20260530-roadmap-microtask-decomposition-contract/design.md
+- docs/rdpi/work/work-20260530-roadmap-microtask-decomposition-contract/plan.md
+- docs/rdpi/work/work-20260530-roadmap-microtask-decomposition-contract/result.md
+  created_at: 2026-05-30
+  last_verified_at: 2026-05-30
 
 ---
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260528-requirements-observability-docs-rollout.
+Current capsule for project aif-handoff, refreshed by task work-20260530-roadmap-microtask-decomposition-contract.
 
 # Why it matters
 

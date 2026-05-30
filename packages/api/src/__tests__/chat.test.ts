@@ -851,6 +851,83 @@ describe("chat API", () => {
     expect(resolveCall.workflow.promptInput.systemPromptAppend).not.toContain("sk-SECRET");
   });
 
+  it("uses compact sanitized task activity context when chat activity history is oversized", async () => {
+    mockSharedEnvOverrides.AIF_RETRY_CONTEXT_ACTIVITY_MAX_CHARS = 20;
+    mockFindTaskById.mockReturnValue({ id: "task-1", title: "Fix bug", status: "implementing" });
+    mockToTaskResponse.mockReturnValue({
+      id: "task-1",
+      title: "Fix bug",
+      status: "implementing",
+      description: "Bug details",
+      plan: "Accepted plan summary",
+      implementationLog: null,
+      reviewComments: null,
+      agentActivityLog:
+        "[2026-01-01] Tool: provider diagnostics authorization Bearer SECRET\n" +
+        "oversized command output ".repeat(20),
+      retryCount: 1,
+    });
+
+    const res = await app.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "project-1",
+        message: "continue",
+        clientId: "client-1",
+        taskId: "task-1",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const resolveCall = mockResolveApiRuntimeContext.mock.calls[0][0] as {
+      workflow: { promptInput: { systemPromptAppend?: string } };
+    };
+    const append = resolveCall.workflow.promptInput.systemPromptAppend ?? "";
+    expect(append).toContain("Agent activity summary:");
+    expect(append).toContain("Compact retry context:");
+    expect(append).toContain("Accepted plan summary");
+    expect(append).not.toContain("Agent activity log:");
+    expect(append).not.toContain("Bearer SECRET");
+    expect(append).not.toContain("oversized command output");
+  });
+
+  it("uses compact task context when runtime usage exceeds threshold without activity replay", async () => {
+    mockSharedEnvOverrides.AIF_RETRY_CONTEXT_RUNTIME_USAGE_MAX_TOKENS = 10;
+    mockFindTaskById.mockReturnValue({ id: "task-1", title: "Fix bug", status: "review" });
+    mockToTaskResponse.mockReturnValue({
+      id: "task-1",
+      title: "Fix bug",
+      status: "review",
+      description: "Bug details",
+      plan: "Accepted plan summary",
+      implementationLog: null,
+      reviewComments: null,
+      agentActivityLog: null,
+      tokenTotal: 100,
+    });
+
+    const res = await app.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: "project-1",
+        message: "continue",
+        clientId: "client-1",
+        taskId: "task-1",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const resolveCall = mockResolveApiRuntimeContext.mock.calls[0][0] as {
+      workflow: { promptInput: { systemPromptAppend?: string } };
+    };
+    const append = resolveCall.workflow.promptInput.systemPromptAppend ?? "";
+    expect(append).toContain("Agent activity summary:");
+    expect(append).toContain("runtime_tokens");
+    expect(append).not.toContain("Agent activity log:");
+  });
+
   it("redacts implementation and review text before injecting task-aware chat context", async () => {
     mockFindTaskById.mockReturnValue({ id: "task-1", title: "Fix bug", status: "implementing" });
     mockToTaskResponse.mockReturnValue({

@@ -120,6 +120,7 @@ describe("classifyStageError", () => {
     const result = classifyStageError(
       makeInput({
         err: new RuntimeExecutionError("Usage limit exceeded", undefined, "rate_limit"),
+        stageLabel: "planner",
       }),
     );
 
@@ -203,12 +204,122 @@ describe("classifyStageError", () => {
     const result = classifyStageError(
       makeInput({
         err: new RuntimeExecutionError("timeout", undefined, "timeout"),
+        stageLabel: "planner",
         retryCount: 2,
       }),
     );
     expect(result.kind).toBe("blocked_external");
     if (result.kind === "blocked_external") {
       expect(result.retryCount).toBe(3);
+    }
+  });
+
+  it("fails closed for implementer timeout without retry window", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError(
+          "Run timeout: execution exceeded 3600000ms",
+          undefined,
+          "timeout",
+        ),
+        retryCount: 2,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toContain("implementation_runtime_exhausted_requires_split:");
+      expect(result.blockedReason).toContain("category=timeout");
+      expect(result.blockedReason).toContain("status=runtime_timeout");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(2);
+    }
+  });
+
+  it("fails closed for implementer stage timeout wrapper errors", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new Error("Stage implementer timed out after 3600000ms"),
+        retryCount: 7,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toContain("implementation_runtime_exhausted_requires_split:");
+      expect(result.blockedReason).toContain("category=timeout");
+      expect(result.blockedReason).toContain("status=stage_timeout");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(7);
+    }
+  });
+
+  it("does not use implementation exhaustion reason for non-implementer stage timeout wrappers", () => {
+    const result = classifyStageError(
+      makeInput({
+        stageLabel: "reviewer",
+        err: new Error("Stage reviewer timed out after 3600000ms"),
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).not.toContain(
+        "implementation_runtime_exhausted_requires_split:",
+      );
+    }
+  });
+
+  it("fails closed for implementer max tool turns without exposing raw provider text", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError(
+          "qwen-local-agent exceeded max tool turns (41) token=abc123",
+          undefined,
+          "timeout",
+          {
+            providerMeta: {
+              status: "max_tool_turns_exhausted",
+              category: "timeout",
+            },
+          },
+        ),
+        retryCount: 4,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toBe(
+        "implementation_runtime_exhausted_requires_split: implementer runtime exhausted (category=timeout; status=max_tool_turns_exhausted). Split scope, prepare a continuation package, or choose an explicit supported recovery path before retry.",
+      );
+      expect(result.blockedReason).not.toContain("abc123");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryCount).toBe(4);
+    }
+  });
+
+  it("fails closed for implementer runtime-budget exhaustion status", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError("budget exhausted", undefined, "rate_limit", {
+          providerMeta: {
+            status: "runtime_budget_exhausted",
+            category: "rate_limit",
+          },
+        }),
+        retryCount: 6,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toContain("status=runtime_budget_exhausted");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(6);
     }
   });
 
@@ -318,6 +429,64 @@ describe("classifyStageError", () => {
       expect(result.retryAfter).toBeNull();
       expect(result.retryAfterSource).toBe("none");
       expect(result.retryCount).toBe(7);
+    }
+  });
+
+  it("blocks stage-incapable runtime profiles with a sanitized operator message", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError(
+          "raw provider says token=abc123 cannot implement",
+          undefined,
+          "permission",
+          {
+            providerMeta: {
+              status: "runtime_stage_not_capable",
+              category: "permission",
+              reason: "selected runtime profile is not capable for this stage",
+            },
+          },
+        ),
+        stageLabel: "implementer",
+        retryCount: 4,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toContain("runtime_stage_not_capable:");
+      expect(result.blockedReason).toContain("Selected runtime profile is not capable");
+      expect(result.blockedReason).not.toContain("abc123");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(4);
+    }
+  });
+
+  it("blocks missing implementation-capable profile selection without raw runtime details", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError(
+          "raw profile qwen-local-agent token=abc123 denied",
+          undefined,
+          "permission",
+          {
+            providerMeta: {
+              status: "no_implementation_capable_profile",
+              category: "permission",
+            },
+          },
+        ),
+        retryCount: 3,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toContain("No implementation-capable runtime profile");
+      expect(result.blockedReason).not.toContain("abc123");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryCount).toBe(3);
     }
   });
 

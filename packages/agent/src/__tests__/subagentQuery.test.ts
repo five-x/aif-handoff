@@ -70,6 +70,10 @@ interface MockTaskRow {
   taskIntent?: string | null;
   agentActivityLog?: string | null;
   description?: string | null;
+  plan?: string | null;
+  implementationManifestJson?: string | null;
+  retryCount?: number | null;
+  tokenTotal?: number | null;
   roadmapAlias?: string | null;
 }
 
@@ -80,6 +84,8 @@ interface MockEffectiveRuntimeProfile {
     runtimeId: string;
     providerId: string;
     defaultModel?: string | null;
+    transport?: string | null;
+    options?: Record<string, unknown>;
   } | null;
   taskRuntimeProfileId: string | null;
   projectRuntimeProfileId: string | null;
@@ -521,6 +527,133 @@ describe("executeSubagentQuery attribution", () => {
           repositoryInspectionToolBudget: 12,
           repositoryInspectionBudgetFinalizationMode: "compact_final_response",
           runTimeoutMs: 123_000,
+        }),
+      }),
+    );
+  });
+
+  it("denies qwen-local-agent implementation by default before adapter dispatch", async () => {
+    const run = vi.fn(async () => ({ outputText: "unexpected", usage: null }));
+    const capabilities = auditRuntimeCapabilities();
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "qwen-local-agent",
+        providerId: "qwen",
+        displayName: "Qwen",
+        defaultTransport: RuntimeTransport.API,
+        supportedTransports: [RuntimeTransport.API],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      run,
+    };
+    runtimeAdapterOverride.current = { runtimeId: "qwen-local-agent", adapter };
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task_override",
+      profile: {
+        id: "profile-qwen",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        transport: RuntimeTransport.API,
+        defaultModel: "Qwen3-32B-Q4_K_M.gguf",
+        options: {},
+      },
+      taskRuntimeProfileId: "profile-qwen",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await expect(
+      executeSubagentQuery({
+        taskId: "task-qwen-denied",
+        projectRoot: "/tmp/project",
+        agentName: "implement-coordinator",
+        prompt: "implement",
+        workflowKind: "implementer",
+      }),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "runtime_stage_not_capable",
+      }),
+    });
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("allows explicitly enabled qwen implementation and applies stage caps", async () => {
+    const capabilities = auditRuntimeCapabilities();
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "qwen-local-agent",
+        providerId: "qwen",
+        displayName: "Qwen",
+        defaultTransport: RuntimeTransport.API,
+        supportedTransports: [RuntimeTransport.API],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      run: vi.fn(async () => ({ outputText: "done", usage: null })),
+    };
+    runtimeAdapterOverride.current = { runtimeId: "qwen-local-agent", adapter };
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task_override",
+      profile: {
+        id: "profile-qwen-enabled",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        transport: RuntimeTransport.API,
+        defaultModel: "Qwen3-32B-Q4_K_M.gguf",
+        options: {
+          qwenLocalAgent: { allowImplementation: true },
+          runtimeStageCaps: {
+            implementer: {
+              maxToolTurns: 5,
+              wallClockMs: 123_000,
+              contextWindowTokens: 16_000,
+              maxOutputTokens: 1_000,
+              maxBudgetUsd: 0.2,
+              retryCount: 0,
+              repositoryInspectionToolBudget: 4,
+            },
+          },
+        },
+      },
+      taskRuntimeProfileId: "profile-qwen-enabled",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-qwen-enabled",
+      projectRoot: "/tmp/project",
+      agentName: "implement-coordinator",
+      prompt: "implement",
+      workflowKind: "implementer",
+      maxBudgetUsd: 10,
+      maxTurns: 99,
+      repositoryInspectionToolBudget: 99,
+      runTimeoutMs: 999_999,
+      adapterOptions: {
+        maxTokens: 9_999,
+        contextWindowTokens: 64_000,
+      },
+    });
+
+    expect(adapter.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          maxBudgetUsd: 0.2,
+          maxTurns: 5,
+          repositoryInspectionToolBudget: 4,
+          runTimeoutMs: 123_000,
+        }),
+        options: expect.objectContaining({
+          contextWindowTokens: 16_000,
+          maxInputTokens: 16_000,
+          maxTokens: 1_000,
+          maxOutputTokens: 1_000,
+          repositoryInspectionToolBudget: 4,
         }),
       }),
     );
@@ -1278,6 +1411,7 @@ describe("executeSubagentQuery planner warmup fork", () => {
   afterEach(() => {
     delete mockEnvOverrides.AIF_WARMUP_ENABLED;
     delete mockEnvOverrides.AIF_RUNTIME_SESSION_FORK_ENABLED;
+    delete mockEnvOverrides.AIF_RETRY_CONTEXT_ACTIVITY_MAX_CHARS;
     vi.unstubAllGlobals();
   });
 
@@ -1395,6 +1529,74 @@ describe("executeSubagentQuery planner warmup fork", () => {
     const callOptions = queryMock.mock.calls[0][0].options;
     expect(callOptions.resume).toBe("existing-impl-session");
     expect(callOptions.forkSession).toBeUndefined();
+  });
+
+  it("uses compact retry context and skips prior session reuse when activity history is oversized", async () => {
+    mockEnvOverrides.AIF_RETRY_CONTEXT_ACTIVITY_MAX_CHARS = 20;
+    getTaskSessionIdMock.mockReturnValue("existing-impl-session");
+    findTaskByIdMock.mockReturnValue({
+      id: "task-implementer-compact",
+      projectId: "project-1",
+      runtimeOptionsJson: null,
+      modelOverride: null,
+      agentActivityLog:
+        "[2026-01-01] Tool: provider diagnostics authorization Bearer SECRET\n" +
+        "oversized command output ".repeat(20),
+      plan: "Accepted implementation plan",
+      implementationManifestJson: JSON.stringify({
+        version: 1,
+        taskId: "task-implementer-compact",
+        intent: "fix",
+        planManifestHash: null,
+        changedFiles: [{ path: "packages/agent/src/subagentQuery.ts", status: "modified" }],
+        diffSummary: { summary: "Compact retry context now reads persisted manifests." },
+        verificationEvidence: [
+          {
+            id: "ver-subagent",
+            command:
+              "npm.cmd test --workspace=@aif/agent -- --run src/__tests__/subagentQuery.test.ts",
+            status: "passed",
+            outputSha256: "a".repeat(64),
+            outputPreview: "passed",
+            outputPreviewTruncated: false,
+          },
+        ],
+        acceptanceCriteria: [
+          { id: "AC-manifest", status: "satisfied", evidenceRefs: ["ver-subagent"] },
+        ],
+        evidenceRefs: ["ver-subagent"],
+        planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+        reviewClosure: { status: "pending", evidenceRefs: [] },
+        commitEvidence: { status: "not_required", commitSha: null, evidenceRefs: [] },
+        regressionExplanation: null,
+        knownLimitations: [],
+      }),
+      retryCount: 1,
+    });
+    queryMock.mockImplementation(makeSuccessWithSession("fresh-impl-session", "done"));
+
+    await executeSubagentQuery({
+      taskId: "task-implementer-compact",
+      projectRoot: "/tmp/project",
+      agentName: "implement-coordinator",
+      prompt: "implement",
+      workflowKind: "implementer",
+    });
+
+    expect(findActiveReadyRuntimeWarmupSessionMock).not.toHaveBeenCalled();
+    const queryInput = queryMock.mock.calls[0][0];
+    expect(queryInput.prompt).toContain("Compact retry context:");
+    expect(queryInput.prompt).toContain("Accepted implementation plan");
+    expect(queryInput.prompt).toContain("packages/agent/src/subagentQuery.ts");
+    expect(queryInput.prompt).toContain("npm.cmd test --workspace=@aif/agent");
+    expect(queryInput.prompt).toContain("AC-manifest=satisfied");
+    expect(queryInput.prompt).toContain("implement");
+    expect(queryInput.prompt).not.toContain("Bearer SECRET");
+    expect(queryInput.prompt).not.toContain("oversized command output");
+    expect(queryInput.options.resume).toBeUndefined();
+    expect(queryInput.options.forkSession).toBeUndefined();
+    expect(saveTaskSessionIdMock).not.toHaveBeenCalled();
+    delete mockEnvOverrides.AIF_RETRY_CONTEXT_ACTIVITY_MAX_CHARS;
   });
 
   it("forks an active review warmup for review-sidecar workflows", async () => {

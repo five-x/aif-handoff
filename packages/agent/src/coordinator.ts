@@ -46,6 +46,8 @@ import {
   listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
   listAuditEvidenceEvents,
+  createOrReusePendingTaskSplitProposal,
+  recordTaskStageArtifactAttempt,
   recordTaskAcceptancePack,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
@@ -106,7 +108,10 @@ import {
   type TaskNotificationInfo,
 } from "./notifier.js";
 import { handleAutoReviewGate, type ReviewGateOutcome } from "./autoReviewHandler.js";
-import { classifyStageError } from "./stageErrorHandler.js";
+import {
+  classifyImplementationRuntimeExhaustion,
+  classifyStageError,
+} from "./stageErrorHandler.js";
 import {
   findRuntimeExecutionError,
   isRepositoryInspectionBudgetExhaustionError,
@@ -121,6 +126,12 @@ import {
   readFailedContextProfileIds,
   setContextFallbackRuntimeOption,
 } from "./runtimeRecoveryOptions.js";
+import {
+  buildImplementationRecoveryPack,
+  buildImplementationRecoverySplitProposalFingerprint,
+  renderImplementationRecoveryPackMarkdown,
+  type ImplementationRecoveryPack,
+} from "./implementationRecoveryPack.js";
 import { readGitWorktreeReworkSnapshot } from "./reworkSnapshot.js";
 import {
   getDeterministicBackoffMinutes,
@@ -380,6 +391,16 @@ function runtimeStageForCoordinatorTask(stage: CoordinatorStage, task: TaskRow):
 function fallbackStagesForCoordinatorTask(stage: CoordinatorStage, task: TaskRow): RuntimeStage[] {
   if (stage === "reviewer") return ["reviewer", "security"];
   return [runtimeStageForCoordinatorTask(stage, task)];
+}
+
+function runtimeSelectionHasConfiguredCandidates(input: {
+  taskRuntimeProfileId: string | null;
+  projectRuntimeProfileId: string | null;
+  systemRuntimeProfileId: string | null;
+}): boolean {
+  return Boolean(
+    input.taskRuntimeProfileId || input.projectRuntimeProfileId || input.systemRuntimeProfileId,
+  );
 }
 
 function backlogAdvanceTargetStatus(): TaskStatus {
@@ -818,6 +839,125 @@ function readRuntimeProviderMetaString(err: unknown, key: string): string | null
   }
   const raw = providerMeta[key];
   return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+}
+
+function implementationRecoveryRuntimeFields(blockedReason: string): {
+  category: string;
+  status: string;
+} {
+  const match = blockedReason.match(/\(category=([^;]+);\s*status=([^)]+)\)/);
+  return {
+    category: redactProviderText(match?.[1] ?? "unknown"),
+    status: redactProviderText(match?.[2] ?? "runtime_exhausted"),
+  };
+}
+
+function recoveryPackMetadata(input: {
+  pack: ImplementationRecoveryPack;
+  sourceFingerprint: string;
+  splitProposalStatus: "created" | "reused" | "conflict" | "failed";
+  splitProposalId: string | null;
+}): Record<string, unknown> {
+  return {
+    recoveryPack: input.pack,
+    sourceFingerprint: input.sourceFingerprint,
+    splitProposal: {
+      status: input.splitProposalStatus,
+      id: input.splitProposalId,
+    },
+  };
+}
+
+function recordImplementationRecoveryPack(input: {
+  task: TaskWithHydratedFields;
+  projectRoot: string;
+  sourceStatus: TaskStatus;
+  blockedFromStatus: TaskStatus;
+  recovery: Extract<
+    ReturnType<typeof classifyImplementationRuntimeExhaustion>,
+    { kind: "blocked_external" }
+  >;
+  err: unknown;
+}): {
+  blockedReasonSuffix: string;
+  activityLine: string;
+  artifactId: string | null;
+  attemptId: string | null;
+  splitProposalId: string | null;
+  splitProposalStatus: "created" | "reused" | "conflict" | "failed";
+} {
+  const nowIso = new Date().toISOString();
+  try {
+    const runtimeFields = implementationRecoveryRuntimeFields(input.recovery.blockedReason);
+    const pack = buildImplementationRecoveryPack({
+      task: input.task,
+      projectRoot: input.projectRoot,
+      generatedAt: nowIso,
+      sourceStatus: input.sourceStatus,
+      blockedFromStatus: input.blockedFromStatus,
+      retryCount: input.recovery.retryCount,
+      runtimeCategory: runtimeFields.category,
+      runtimeStatus: runtimeFields.status,
+      sourceRef: `implementation-recovery-pack:${input.task.id}`,
+    });
+    const sourceFingerprint = buildImplementationRecoverySplitProposalFingerprint(pack);
+    const proposalResult = createOrReusePendingTaskSplitProposal({
+      projectId: input.task.projectId,
+      parentTaskId: input.task.parentTaskId ?? null,
+      sourceKind: "implementation_recovery",
+      sourceRef: pack.sourceRef,
+      sourceFingerprint,
+      roadmapAlias: `implementation-recovery-${input.task.id}`,
+      taskIntent: input.task.taskIntent ?? "general",
+      summary: `Implementation recovery split proposed for ${input.task.id} after runtime exhaustion.`,
+      proposedChildren: pack.proposedChildren,
+    });
+    const proposal = proposalResult.proposal;
+    const splitProposalStatus = proposalResult.status;
+    const attempt = recordTaskStageArtifactAttempt({
+      taskId: input.task.id,
+      stage: "implementation",
+      kind: "recovery_pack",
+      label: "Implementation recovery pack",
+      path: pack.sourceRef,
+      state: "blocked",
+      outcome: "blocked",
+      trustLevel: "weak",
+      summary: pack.summary,
+      markdown: renderImplementationRecoveryPackMarkdown(pack),
+      metadata: recoveryPackMetadata({
+        pack,
+        sourceFingerprint,
+        splitProposalStatus,
+        splitProposalId: proposal.id,
+      }),
+    });
+    const suffix =
+      ` recoveryPackArtifact=${attempt.artifactId}; recoveryPackAttempt=${attempt.id};` +
+      ` splitProposalStatus=${splitProposalStatus}; splitProposal=${proposal.id}`;
+    const activityLine =
+      splitProposalStatus === "conflict"
+        ? `[${nowIso}] implementation_recovery_split_proposal_conflict: recoveryPackAttempt=${attempt.id}; existingSplitProposal=${proposal.id}`
+        : `[${nowIso}] implementation_recovery_pack_recorded: recoveryPackAttempt=${attempt.id}; splitProposalStatus=${splitProposalStatus}; splitProposal=${proposal.id}`;
+    return {
+      blockedReasonSuffix: suffix,
+      activityLine,
+      artifactId: attempt.artifactId,
+      attemptId: attempt.id,
+      splitProposalId: proposal.id,
+      splitProposalStatus,
+    };
+  } catch (err) {
+    const safeReason = redactProviderText(err instanceof Error ? err.message : String(err));
+    return {
+      blockedReasonSuffix: " recoveryPackStatus=failed",
+      activityLine: `[${nowIso}] recovery_pack_recording_failed: ${truncateReason(safeReason)}`,
+      artifactId: null,
+      attemptId: null,
+      splitProposalId: null,
+      splitProposalStatus: "failed",
+    };
+  }
 }
 
 function readAttemptedRuntimeProfileIdFromError(err: unknown): string | null {
@@ -1644,6 +1784,57 @@ function proactivelyBlockTaskForRuntimeGate(
       applied,
     },
     "Blocked task before claim due to runtime limit gate",
+  );
+}
+
+function buildNoImplementationCapableRuntimeReason(
+  selection: ReturnType<typeof resolveEffectiveRuntimeProfile>,
+): string {
+  const configured = [
+    selection.taskRuntimeProfileId ? `task=${selection.taskRuntimeProfileId}` : null,
+    selection.projectRuntimeProfileId ? `project=${selection.projectRuntimeProfileId}` : null,
+    selection.systemRuntimeProfileId ? `system=${selection.systemRuntimeProfileId}` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return (
+    "runtime_stage_not_capable: No implementation-capable runtime profile is configured. " +
+    "Select a profile explicitly declared capable for tool-using implementation or pass a local " +
+    `Qwen implementation canary before retry. configured=${configured || "none"}`
+  );
+}
+
+function proactivelyBlockTaskForNoImplementationCapableRuntime(
+  task: TaskRow,
+  selection: ReturnType<typeof resolveEffectiveRuntimeProfile>,
+): void {
+  const now = new Date().toISOString();
+  const blockedReason = buildNoImplementationCapableRuntimeReason(selection);
+  updateTaskStatus(
+    task.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: task.status,
+      retryAfter: null,
+      retryCount: task.retryCount ?? 0,
+      manualReviewRequired: false,
+    },
+    { title: task.title, fromStatus: task.status },
+  );
+  appendTaskActivityLog(
+    task.id,
+    `[${now}] Coordinator blocked before implementer: no implementation-capable runtime profile configured`,
+  );
+  log.error(
+    {
+      taskId: task.id,
+      projectId: task.projectId,
+      taskRuntimeProfileId: selection.taskRuntimeProfileId,
+      projectRuntimeProfileId: selection.projectRuntimeProfileId,
+      systemRuntimeProfileId: selection.systemRuntimeProfileId,
+    },
+    "Blocked task before claim because no implementation-capable runtime profile is configured",
   );
 }
 
@@ -3793,6 +3984,51 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
     }
 
     const runtimeStage = runtimeStageForCoordinatorTask(stage.label, task);
+    {
+      const latestTask = findTaskById(task.id) ?? task;
+      const implementationRuntimeExhaustion = classifyImplementationRuntimeExhaustion({
+        taskId: task.id,
+        stageLabel: stage.label,
+        sourceStatus,
+        retryCount: latestTask.retryCount ?? 0,
+        err,
+      });
+      if (implementationRuntimeExhaustion) {
+        const recoveryRecord = recordImplementationRecoveryPack({
+          task: latestTask as TaskWithHydratedFields,
+          projectRoot: executionRoot,
+          sourceStatus,
+          blockedFromStatus: stage.inProgress,
+          recovery: implementationRuntimeExhaustion,
+          err,
+        });
+        if (implementationRuntimeExhaustion.limitSnapshot) {
+          persistTaskRuntimeLimitSnapshot(task.id, implementationRuntimeExhaustion.limitSnapshot);
+        } else {
+          clearTaskRuntimeLimitSnapshot(task.id);
+        }
+        clearContextFallbackForTask(task.id, runtimeStage);
+        updateTaskStatus(
+          task.id,
+          "blocked_external",
+          {
+            blockedReason: `${implementationRuntimeExhaustion.blockedReason}${recoveryRecord.blockedReasonSuffix}`,
+            blockedFromStatus: stage.inProgress,
+            retryAfter: implementationRuntimeExhaustion.retryAfter,
+            retryCount: implementationRuntimeExhaustion.retryCount,
+          },
+          { title: taskTitle, fromStatus: stage.inProgress },
+        );
+        appendTaskActivityLog(
+          task.id,
+          `[${new Date().toISOString()}] Implementation runtime exhaustion failed closed before automatic runtime fallback: retryAfter=none`,
+        );
+        appendTaskActivityLog(task.id, recoveryRecord.activityLine);
+        void notifyTaskBroadcast(task.id, "task:timeline_updated");
+        flushActivityQueue(task.id);
+        return false;
+      }
+    }
     if (
       recoverWrittenAuditArtifactAfterRuntimeFailure({
         task,
@@ -4329,6 +4565,25 @@ export async function pollAndProcess(): Promise<void> {
         stage: runtimeStage,
         selection: runtimeSelection,
       });
+      if (
+        runtimeStage === "implementer" &&
+        !runtimeSelection.profile &&
+        runtimeSelectionHasConfiguredCandidates(runtimeSelection)
+      ) {
+        log.debug(
+          {
+            taskId: task.id,
+            stage: stage.label,
+            projectId: task.projectId,
+            taskRuntimeProfileId: runtimeSelection.taskRuntimeProfileId,
+            projectRuntimeProfileId: runtimeSelection.projectRuntimeProfileId,
+            systemRuntimeProfileId: runtimeSelection.systemRuntimeProfileId,
+          },
+          "Task candidate blocked because no implementation-capable runtime is configured",
+        );
+        proactivelyBlockTaskForNoImplementationCapableRuntime(task, runtimeSelection);
+        continue;
+      }
       let gateDecision = evaluateRuntimeLimitGate(runtimeSelection.profile);
       if (gateDecision.blocked) {
         if (!shouldBlockOnRuntimeLimit(runtimeStage) && runtimeSelection.profile?.id) {

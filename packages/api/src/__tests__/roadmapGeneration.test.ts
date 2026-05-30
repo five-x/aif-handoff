@@ -9,6 +9,7 @@ import {
   generatePlanPath,
   projects,
   roadmapBatches,
+  taskSplitProposals,
 } from "@aif/shared";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@aif/shared/server";
@@ -38,6 +39,7 @@ const {
   importGeneratedTasks,
   buildTaskTags,
   createRoadmapSplitProposal,
+  approveRoadmapSplitProposal,
   computeRoadmapSplitProposalFingerprint,
   commitGeneratedRoadmapIfNeeded,
   rejectReusedRoadmapAlias,
@@ -1388,6 +1390,148 @@ describe("roadmapGeneration", () => {
         generation,
       });
       expect(changed.status).toBe("conflict");
+    });
+
+    it("decomposes broad generated app children into proposal microtasks before persistence", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent:
+          "# Roadmap\n- [ ] Build zai-mi.com - scaffold the app, configure the dev stack, and implement app code",
+        generation: {
+          alias: "zai-mi",
+          taskIntent: "general",
+          tasks: [
+            {
+              title: "Build zai-mi.com",
+              description:
+                "Scaffold the app, configure the dev stack, set runtime config, implement app code, and add smoke verification.",
+              taskIntent: "general",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+            },
+            {
+              title: "Polish footer copy",
+              description:
+                "Scope: src/components/Footer.tsx\nAcceptance criteria: footer copy is updated.\nVerification: npm.cmd test -- footer",
+              taskIntent: "general",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+            },
+          ],
+        },
+      });
+
+      expect(result.status).toBe("created");
+      expect(result.proposal.proposedChildren.map((child) => child.title)).toEqual([
+        "Initialize zai-mi.com scaffold",
+        "Configure zai-mi.com development stack",
+        "Implement zai-mi.com first app slice",
+        "Add zai-mi.com smoke verification",
+        "Polish footer copy",
+      ]);
+      expect(result.proposal.proposedChildren.map((child) => child.sequence)).toEqual([
+        1, 2, 3, 4, 5,
+      ]);
+      for (const child of result.proposal.proposedChildren) {
+        expect(child.fileBoundaries?.length).toBeGreaterThan(0);
+        expect(child.acceptanceCriteria?.length).toBeGreaterThan(0);
+        expect(child.verificationCommands?.length).toBeGreaterThan(0);
+      }
+      expect(result.proposal.proposedChildren.slice(0, 4)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            splitRationale: expect.stringContaining("split into executable microtasks"),
+          }),
+        ]),
+      );
+      expect(findTasksByRoadmapAlias(projectId, "zai-mi")).toHaveLength(0);
+    });
+
+    it("rejects approval for a manually persisted stale broad proposal child", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      const proposalId = crypto.randomUUID();
+      testDb.current
+        .insert(taskSplitProposals)
+        .values({
+          id: proposalId,
+          projectId,
+          sourceKind: "roadmap_import",
+          sourceRef: "roadmap-import:ROADMAP.md",
+          sourceFingerprint: "f".repeat(64),
+          roadmapAlias: "stale-broad",
+          taskIntent: "general",
+          status: "pending",
+          summary: "Stale broad proposal",
+          proposedChildrenJson: JSON.stringify([
+            {
+              title: "Build zai-mi.com",
+              description:
+                "Scaffold the app, configure the dev stack, set runtime config, implement app code, and add smoke verification.",
+              taskIntent: "general",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+              fileBoundaries: ["package.json", "src/**", "config/**", "tests/**"],
+              acceptanceCriteria: ["The whole site is built and verified."],
+              verificationCommands: ["npm.cmd test"],
+              dependsOn: [],
+              splitRationale: "Spoofed marker: split into executable microtasks",
+            },
+          ]),
+        })
+        .run();
+
+      expect(() =>
+        approveRoadmapSplitProposal({ projectId, proposalId, approvedBy: "test" }),
+      ).toThrow("non-microtask executable children");
+      expect(findTasksByRoadmapAlias(projectId, "stale-broad")).toHaveLength(0);
+    });
+
+    it("approves legacy narrow proposals without stored microtask metadata", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      const proposalId = crypto.randomUUID();
+      testDb.current
+        .insert(taskSplitProposals)
+        .values({
+          id: proposalId,
+          projectId,
+          sourceKind: "roadmap_import",
+          sourceRef: "roadmap-import:ROADMAP.md",
+          sourceFingerprint: "a".repeat(64),
+          roadmapAlias: "legacy-narrow",
+          taskIntent: "general",
+          status: "pending",
+          summary: "Legacy narrow proposal",
+          proposedChildrenJson: JSON.stringify([
+            {
+              title: "Polish footer copy",
+              description:
+                "Scope: src/components/Footer.tsx\nAcceptance criteria: footer copy is updated.\nVerification: npm.cmd test -- footer",
+              taskIntent: "general",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+            },
+          ]),
+        })
+        .run();
+
+      const result = approveRoadmapSplitProposal({ projectId, proposalId, approvedBy: "test" });
+
+      expect(result.status).toBe("approved");
+      const created = findTasksByRoadmapAlias(projectId, "legacy-narrow");
+      expect(created).toHaveLength(2);
+      const child = created.find((task) => task.hierarchyRole !== "container");
+      expect(child?.title).toBe("Polish footer copy");
+      expect(child?.description).toContain("File boundaries:");
+      expect(child?.description).toContain("Acceptance criteria:");
+      expect(child?.description).toContain("Verification:");
     });
 
     it("fingerprints source content, alias, intent, and canonical proposed children", () => {

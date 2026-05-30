@@ -35,6 +35,7 @@ import {
   type TaskIntent,
   type TaskIntentChangedFilesIssue,
 } from "./taskIntent.js";
+import { evaluateTaskPlanQuality, type TaskPlanQualityIssueCode } from "./planQuality.js";
 
 export type TaskCompletionIssueCode =
   | "zero_delta"
@@ -55,6 +56,7 @@ export type TaskCompletionIssueCode =
   | "branch_isolation"
   | "manual_review_required"
   | "intent_changed_files_contradiction"
+  | TaskPlanQualityIssueCode
   | ImplementationManifestIssueCode
   | AuditReportValidationIssueCode;
 
@@ -67,6 +69,10 @@ export interface TaskCompletionEvidenceTask {
   roadmapAlias?: string | null;
   plan?: string | null;
   planPath?: string | null;
+  plannerMode?: string | null;
+  createdAt?: string | null;
+  blockedFromStatus?: string | null;
+  blockedReason?: string | null;
   implementationLog?: string | null;
   implementationManifestJson?: string | null;
   reviewComments?: string | null;
@@ -1440,6 +1446,12 @@ export function evaluateTaskCompletionEvidence(
   const inferenceTask = taskForEvidenceInference(task);
   const riskyTask = isRiskyTask(task);
   const genericPlan = hasGenericPlan(task);
+  const preImplementationPlanQuality =
+    phase === "pre_implementation"
+      ? evaluateTaskPlanQuality({ task: inferenceTask, plan: task.plan })
+      : null;
+  const includeAllPreImplementationPlanIssues =
+    task.plannerMode === "full" || /```aif-plan-manifest\b/i.test(task.plan ?? "");
   const gitEvidence = collectChangedFiles(projectRoot);
   const meaningfulChangedFiles = gitEvidence.files.filter(
     (file) => !isPlanArtifact(file, task) && !isMetadataOnlyPath(file),
@@ -1662,6 +1674,12 @@ export function evaluateTaskCompletionEvidence(
     issues.push(
       issue("generic_plan", "Task plan looks like placeholder or generic planner output."),
     );
+  }
+  for (const planIssue of preImplementationPlanQuality?.issues ?? []) {
+    if (!includeAllPreImplementationPlanIssues && planIssue.code !== "task_size_split_required") {
+      continue;
+    }
+    issues.push(issue(planIssue.code, planIssue.message));
   }
 
   if (phase === "completion") {

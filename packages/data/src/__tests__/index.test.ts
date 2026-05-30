@@ -5109,6 +5109,79 @@ describe("data layer", () => {
       expect(rolledUp.status).not.toBe("verified");
     });
 
+    it("rolls up implementation runtime exhaustion with a specific child-blocked reason", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Parent",
+        description: "",
+        hierarchyRole: "container",
+      })!;
+      const child = createTask({
+        projectId: "proj-1",
+        title: "Implementation child",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+
+      updateTaskStatus(child.id, "blocked_external", {
+        blockedFromStatus: "implementing",
+        blockedReason:
+          "implementation_runtime_exhausted_requires_split: implementer runtime exhausted (category=timeout; status=max_tool_turns_exhausted). Split scope before retry.",
+      });
+
+      const rolledUp = findTaskById(parent.id)!;
+      expect(rolledUp.status).toBe("blocked_external");
+      expect(rolledUp.blockedReason).toBe(
+        "hierarchy_rollup: child blocked by implementation_runtime_exhausted_requires_split",
+      );
+    });
+
+    it("upgrades stale generic hierarchy rollup reasons but preserves manual blockers", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Parent",
+        description: "",
+        hierarchyRole: "container",
+      })!;
+      const genericChild = createTask({
+        projectId: "proj-1",
+        title: "Generic child",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+      const exhaustedChild = createTask({
+        projectId: "proj-1",
+        title: "Exhausted child",
+        description: "",
+        parentTaskId: parent.id,
+      })!;
+
+      updateTaskStatus(genericChild.id, "blocked_external", {
+        blockedFromStatus: "review",
+        blockedReason: "external system unavailable",
+      });
+      expect(findTaskById(parent.id)?.blockedReason).toBe(
+        "hierarchy_rollup: child task is blocked",
+      );
+
+      updateTaskStatus(exhaustedChild.id, "blocked_external", {
+        blockedFromStatus: "implementing",
+        blockedReason:
+          "implementation_runtime_exhausted_requires_split: implementer runtime exhausted (category=timeout; status=runtime_timeout). Split scope before retry.",
+      });
+      expect(findTaskById(parent.id)?.blockedReason).toBe(
+        "hierarchy_rollup: child blocked by implementation_runtime_exhausted_requires_split",
+      );
+
+      setTaskFields(parent.id, { blockedReason: "operator hold" });
+      updateTaskStatus(exhaustedChild.id, "blocked_external", {
+        blockedFromStatus: "implementing",
+        blockedReason:
+          "implementation_runtime_exhausted_requires_split: implementer runtime exhausted (category=timeout; status=max_tool_turns_exhausted). Split scope before retry.",
+      });
+      expect(findTaskById(parent.id)?.blockedReason).toBe("operator hold");
+    });
+
     it("rolls up all_children_done parents when direct children are done or verified", () => {
       const parent = createTask({
         projectId: "proj-1",
@@ -5343,6 +5416,43 @@ describe("data layer", () => {
         proposalId: created.proposal.id,
       });
       expect(duplicate.status).toBe("already_rejected");
+    });
+
+    it("reuses and conflicts implementation recovery split proposals without creating tasks", () => {
+      const recoveryInput = (fingerprint: string) => ({
+        projectId: "proj-1",
+        parentTaskId: null,
+        sourceKind: "implementation_recovery" as const,
+        sourceRef: "implementation-recovery-pack:task-recovery",
+        sourceFingerprint: fingerprint,
+        roadmapAlias: "implementation-recovery-task-recovery",
+        taskIntent: "feature" as const,
+        summary: "Implementation recovery split proposed for task-recovery.",
+        proposedChildren: [
+          {
+            title: "Continue recovered implementation",
+            description: "Use the recovery pack and run focused verification.",
+            taskIntent: "feature" as const,
+            phase: 1,
+            phaseName: "Implementation recovery",
+            sequence: 1,
+            tags: ["implementation-recovery"],
+          },
+        ],
+      });
+
+      const created = createOrReusePendingTaskSplitProposal(recoveryInput("f".repeat(64)));
+      expect(created.status).toBe("created");
+
+      const reused = createOrReusePendingTaskSplitProposal(recoveryInput("f".repeat(64)));
+      expect(reused.status).toBe("reused");
+      expect(reused.proposal.id).toBe(created.proposal.id);
+
+      const conflict = createOrReusePendingTaskSplitProposal(recoveryInput("0".repeat(64)));
+      expect(conflict.status).toBe("conflict");
+      expect(conflict.proposal.id).toBe(created.proposal.id);
+      expect(findTaskSplitProposal("proj-1", created.proposal.id)?.status).toBe("pending");
+      expect(listTasks("proj-1")).toHaveLength(0);
     });
   });
 

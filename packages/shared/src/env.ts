@@ -80,6 +80,10 @@ const envSchema = z.object({
   ACTIVITY_LOG_BATCH_SIZE: z.coerce.number().min(1).default(20),
   ACTIVITY_LOG_BATCH_MAX_AGE_MS: z.coerce.number().min(100).default(5000),
   ACTIVITY_LOG_QUEUE_LIMIT: z.coerce.number().min(1).default(500),
+  AIF_RETRY_CONTEXT_ACTIVITY_MAX_CHARS: z.coerce.number().int().min(1).default(32_000),
+  AIF_RETRY_CONTEXT_ACTIVITY_MAX_LINES: z.coerce.number().int().min(1).default(500),
+  AIF_RETRY_CONTEXT_ACTIVITY_MAX_ESTIMATED_TOKENS: z.coerce.number().int().min(1).default(8_000),
+  AIF_RETRY_CONTEXT_RUNTIME_USAGE_MAX_TOKENS: z.coerce.number().int().min(1).default(24_000),
   AGENT_WAKE_ENABLED: z
     .preprocess((value) => {
       if (typeof value === "string") {

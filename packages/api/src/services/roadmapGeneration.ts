@@ -1883,7 +1883,8 @@ Generate a ROADMAP.md file with the following format:
 
 Rules:
 - Every unchecked item must be a ${intent} task.
-- Keep tasks small enough to implement or validate independently.
+- Keep each executable child to one bounded microtask with explicit file boundaries, acceptance criteria, verification, and dependencies.
+- If a roadmap bullet combines scaffold, dev stack, configuration, and app-code work, split it into multiple unchecked microtask bullets before it can be imported.
 - Preserve dependency order.
 - Do not create tasks for a different intent.
 - Output ONLY the markdown content for ROADMAP.md, nothing else`;
@@ -1910,12 +1911,13 @@ Generate a ROADMAP.md file with the following format:
 |-----------|------|
 
 Rules:
-- Each milestone is a HIGH-LEVEL goal, not a granular task
+- Each milestone is a HIGH-LEVEL non-executable roadmap summary, not an executable child task
 - 5-15 milestones is the sweet spot
 - Order by logical sequence (dependencies first)
 - If something appears already built based on the description, mark it [x] and add to Completed table with today's date
 - Milestones should be specific and actionable, not vague
 - Cover the full scope of the project from current state to production-ready
+- Executable children created later from these milestones must be microtasks with narrow file boundaries, acceptance criteria, dependencies, and verification commands
 - Output ONLY the markdown content for ROADMAP.md, nothing else`;
 }
 
@@ -2116,7 +2118,7 @@ Intent contract:
 ${formatTaskIntentContractForPrompt(intent)}
 
 Convert every unchecked ${intent} item into the following JSON structure.
-Each item becomes one task. Preserve all task constraints in the description.
+Each output task must be one executable microtask. Split any broad item that combines scaffold, dev stack, configuration, and app-code work into multiple microtasks. Preserve all task constraints in the description.
 Group by phase (numbered sequentially from 1).
 Assign each task a sequence number within its phase (starting from 1).
 
@@ -2140,6 +2142,7 @@ Rules:
 - Every task must set "taskIntent": "${intent}".
 - Do not create tasks for another intent.
 - Every task description must include the required markers shown in the output example.
+- Every executable child must be a microtask with bounded scope, acceptance criteria, dependencies, and verification.
 - Return ONLY valid JSON, no explanatory text`;
   }
 
@@ -2153,7 +2156,7 @@ ROADMAP
 ALIAS: ${alias}
 
 Convert all milestones/tasks from the roadmap into the following JSON structure.
-Each item becomes a task. Group by phase (numbered sequentially from 1).
+Each output item must be one executable microtask. Broad roadmap milestones are allowed in ROADMAP.md, but broad executable children are not: split any item that combines scaffold, dev stack, configuration, and app-code work into multiple microtasks. Group by phase (numbered sequentially from 1).
 Assign each task a sequence number within its phase (starting from 1).
 
 Required output format (JSON only, no markdown fences):
@@ -2175,9 +2178,11 @@ Rules:
 - Only include unchecked milestones (- [ ]). Skip completed milestones (- [x]) entirely — do NOT create tasks for them
 - Task titles should be short, imperative, and specific
 - Descriptions should include enough context for implementation
+- Descriptions should include file boundaries, acceptance criteria, dependencies, and verification when available
 - Set "taskIntent" to "general" for every task in a generic roadmap import
 - Phase numbers must be sequential (1, 2, 3, ...)
 - Sequence numbers restart at 1 for each phase
+- Do not output broad executable children such as "build the whole app/site"; split them into scaffold, configuration, app-code, and verification microtasks
 - Return ONLY valid JSON, no explanatory text`;
 }
 
@@ -2349,6 +2354,407 @@ function canonicalizeForFingerprint(value: unknown): string {
   return JSON.stringify(value);
 }
 
+const MICROTASK_DEFAULT_VERIFICATION = "Run focused verification for the touched files.";
+
+function splitLines(value: string | null | undefined): string[] {
+  return (value ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[-*]\s+/, ""))
+    .filter(Boolean);
+}
+
+function extractMetadataLines(description: string, label: string): string[] {
+  const pattern = new RegExp(`^${label}\\s*:\\s*(.+)$`, "i");
+  return splitLines(description)
+    .map((line) => line.match(pattern)?.[1]?.trim())
+    .filter((line): line is string => Boolean(line));
+}
+
+function splitMetadataList(values: string[]): string[] {
+  const result: string[] = [];
+  for (const value of values) {
+    for (const part of value.split(/[,;]|\s+\|\s+/)) {
+      const cleaned = part.trim();
+      if (cleaned && !result.includes(cleaned)) result.push(cleaned);
+    }
+  }
+  return result;
+}
+
+function inferFileBoundaries(task: GeneratedTask): string[] {
+  const fromDescription = splitMetadataList([
+    ...extractMetadataLines(task.description, "Scope"),
+    ...extractMetadataLines(task.description, "File boundaries"),
+    ...extractMetadataLines(task.description, "Allowed changes"),
+  ]).filter((value) => !/^(?:none|n\/a|not applicable)$/i.test(value));
+  if (fromDescription.length > 0) return fromDescription.slice(0, 6);
+
+  const text = `${task.title}\n${task.description}`.toLowerCase();
+  if (/\b(?:doc|docs|readme)\b/.test(text)) return ["docs/**", "README.md"];
+  if (/\b(?:test|tests|spec|coverage)\b/.test(text)) return ["tests/**", "**/*.test.*"];
+  if (/\b(?:config|env|settings|lint|build|vite|tsconfig|package)\b/.test(text)) {
+    return ["package.json", "tsconfig*.json", ".env.example", "config/**"];
+  }
+  if (/\b(?:ui|page|screen|component|route|frontend)\b/.test(text)) {
+    return ["src/app/**", "src/components/**", "src/routes/**"];
+  }
+  if (/\b(?:api|endpoint|server|backend|service)\b/.test(text)) {
+    return ["src/api/**", "src/server/**", "src/services/**"];
+  }
+  return ["task-specific implementation surface named by this child task"];
+}
+
+function inferAcceptanceCriteria(task: GeneratedTask): string[] {
+  const explicit = splitMetadataList([
+    ...extractMetadataLines(task.description, "Acceptance criteria"),
+    ...extractMetadataLines(task.description, "Acceptance"),
+  ]);
+  if (explicit.length > 0) return explicit.slice(0, 5);
+  return [`${task.title} is implemented within the declared file boundaries.`];
+}
+
+function inferVerificationCommands(task: GeneratedTask): string[] {
+  const explicit = splitMetadataList([
+    ...extractMetadataLines(task.description, "Verification"),
+    ...extractMetadataLines(task.description, "Command"),
+    ...extractMetadataLines(task.description, "Regression"),
+  ]);
+  return explicit.length > 0 ? explicit.slice(0, 4) : [MICROTASK_DEFAULT_VERIFICATION];
+}
+
+function inferDependsOn(task: GeneratedTask): string[] {
+  const explicit = splitMetadataList([
+    ...extractMetadataLines(task.description, "Dependencies"),
+    ...extractMetadataLines(task.description, "Depends on"),
+  ]).filter((value) => !/^none$/i.test(value));
+  return explicit.slice(0, 4);
+}
+
+function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
+  const descriptionForScopeCheck = task.description
+    .split(/\r?\n/)
+    .filter(
+      (line) =>
+        !/^\s*(?:original roadmap item|file boundaries|acceptance criteria|verification|dependencies)\s*:/i.test(
+          line,
+        ),
+    )
+    .join("\n");
+  const text = `${task.title}\n${descriptionForScopeCheck}`.toLowerCase();
+  const broadScopeSignal = /\b(?:entire|whole|complete|full|end-to-end|production-ready)\b/.test(
+    text,
+  );
+  const scaffoldSignal =
+    /\b(?:scaffold|scaffolding|bootstrap|initialize|skeleton|project architecture|project setup)\b/.test(
+      text,
+    );
+  const stackConfigSignal =
+    /\b(?:dev stack|developer stack|local dev|tooling|dependencies|config|configuration|base config|baseline configuration|environment|deployment)\b/.test(
+      text,
+    );
+  const appCodeSignal =
+    /\b(?:app code|application code|frontend|backend|api|database|ui|auth|payments|routing|state management|persistence)\b/.test(
+      text,
+    );
+  const verificationSignal = /\b(?:test|tests|smoke|verification|e2e|coverage)\b/.test(text);
+  const dimensionCount = [
+    scaffoldSignal,
+    stackConfigSignal,
+    appCodeSignal,
+    verificationSignal,
+  ].filter(Boolean).length;
+  const actionCount = (
+    text.match(/\b(?:setup|configure|implement|build|add|create|wire|integrate|deploy|test)\b/g) ??
+    []
+  ).length;
+  const domainLikeProduct = /\bbuild\s+[\w-]+\.[a-z]{2,}\b/i.test(task.title);
+  const normalizedTitle = task.title.trim().toLowerCase();
+  const setupLikeBroadWork =
+    /^(?:setup|set up|scaffold|bootstrap|initialize|build)\b/.test(normalizedTitle) &&
+    dimensionCount >= 3;
+  return (
+    domainLikeProduct ||
+    setupLikeBroadWork ||
+    (broadScopeSignal && dimensionCount >= 2) ||
+    (dimensionCount >= 3 && actionCount >= 3)
+  );
+}
+
+function formatMicrotaskDescription(input: {
+  source: GeneratedTask;
+  summary: string;
+  fileBoundaries: string[];
+  acceptanceCriteria: string[];
+  verificationCommands: string[];
+  dependsOn: string[];
+}): string {
+  return [
+    input.summary,
+    `Original roadmap item: ${input.source.title}`,
+    `File boundaries: ${input.fileBoundaries.join(", ")}`,
+    `Acceptance criteria: ${input.acceptanceCriteria.join("; ")}`,
+    `Verification: ${input.verificationCommands.join("; ")}`,
+    `Dependencies: ${input.dependsOn.length > 0 ? input.dependsOn.join(", ") : "none"}`,
+  ].join("\n");
+}
+
+function buildBroadTaskMicrotasks(
+  task: GeneratedTask,
+  taskIntent: TaskIntent,
+): TaskSplitProposedChild[] {
+  const phaseName = task.phaseName || "Implementation";
+  const sourceTitle = task.title.replace(/\.$/, "").replace(/^\s*build\s+/i, "");
+  const templates = [
+    {
+      suffix: "scaffold",
+      title: `Initialize ${sourceTitle} scaffold`,
+      summary: "Create only the minimal project or feature skeleton needed for later slices.",
+      fileBoundaries: ["package.json", "src/app/**", "src/main.*", "src/index.*"],
+      acceptanceCriteria: [
+        "The app or feature entrypoint exists and starts without placeholder-only wiring.",
+      ],
+      verificationCommands: ["npm.cmd run build"],
+      dependsOn: [] as string[],
+    },
+    {
+      suffix: "configuration",
+      title: `Configure ${sourceTitle} development stack`,
+      summary:
+        "Add only configuration, scripts, and environment defaults required by the scaffold.",
+      fileBoundaries: [
+        "package.json",
+        "tsconfig*.json",
+        "vite.config.*",
+        ".env.example",
+        "config/**",
+      ],
+      acceptanceCriteria: [
+        "Required scripts and configuration files are present and documented by names.",
+      ],
+      verificationCommands: ["npm.cmd run build"],
+      dependsOn: [`Initialize ${sourceTitle} scaffold`],
+    },
+    {
+      suffix: "app-code",
+      title: `Implement ${sourceTitle} first app slice`,
+      summary: "Implement the first user-visible app slice without broad follow-on features.",
+      fileBoundaries: ["src/app/**", "src/components/**", "src/routes/**", "src/services/**"],
+      acceptanceCriteria: [
+        "The first visible workflow renders or executes with deterministic sample data.",
+      ],
+      verificationCommands: ["npm.cmd test"],
+      dependsOn: [`Configure ${sourceTitle} development stack`],
+    },
+    {
+      suffix: "smoke-verification",
+      title: `Add ${sourceTitle} smoke verification`,
+      summary: "Add focused smoke coverage for the scaffold, configuration, and first app slice.",
+      fileBoundaries: ["tests/**", "src/**/*.test.*", "package.json"],
+      acceptanceCriteria: [
+        "A focused smoke check fails before regressions and passes for the first app slice.",
+      ],
+      verificationCommands: ["npm.cmd test"],
+      dependsOn: [`Implement ${sourceTitle} first app slice`],
+    },
+  ];
+
+  return templates.map((template, index) => ({
+    title: template.title,
+    description: formatMicrotaskDescription({
+      source: task,
+      summary: template.summary,
+      fileBoundaries: template.fileBoundaries,
+      acceptanceCriteria: template.acceptanceCriteria,
+      verificationCommands: template.verificationCommands,
+      dependsOn: template.dependsOn,
+    }),
+    taskIntent,
+    phase: task.phase,
+    phaseName,
+    sequence: task.sequence * 100 + index + 1,
+    fileBoundaries: template.fileBoundaries,
+    acceptanceCriteria: template.acceptanceCriteria,
+    verificationCommands: template.verificationCommands,
+    dependsOn: template.dependsOn,
+    splitRationale: `Roadmap item "${task.title}" combined scaffold, stack/config, app-code, or verification work; split into executable microtasks.`,
+  }));
+}
+
+function enrichMicrotaskChild(
+  generation: RoadmapGenerationResult,
+  task: GeneratedTask,
+): TaskSplitProposedChild {
+  const taskIntent = task.taskIntent ?? generation.taskIntent ?? "general";
+  const fileBoundaries = inferFileBoundaries(task);
+  const acceptanceCriteria = inferAcceptanceCriteria(task);
+  const verificationCommands = inferVerificationCommands(task);
+  const dependsOn = inferDependsOn(task);
+  const description = formatMicrotaskDescription({
+    source: task,
+    summary: task.description || `${task.title} is a bounded executable roadmap child.`,
+    fileBoundaries,
+    acceptanceCriteria,
+    verificationCommands,
+    dependsOn,
+  });
+  return {
+    title: task.title,
+    description,
+    taskIntent,
+    phase: task.phase,
+    phaseName: task.phaseName,
+    sequence: task.sequence,
+    tags: [...buildTaskTags(generation.alias, task), `kind:${taskIntent}`],
+    fileBoundaries,
+    acceptanceCriteria,
+    verificationCommands,
+    dependsOn,
+    splitRationale: "Roadmap item is already narrow enough for one executable microtask.",
+  };
+}
+
+function prepareRoadmapSplitProposalChildren(
+  generation: RoadmapGenerationResult,
+): TaskSplitProposedChild[] {
+  const taskIntent = generation.taskIntent ?? "general";
+  const children: Array<{
+    child: TaskSplitProposedChild;
+    originalSequence: number;
+    taskIndex: number;
+    childIndex: number;
+  }> = [];
+  generation.tasks.forEach((task, taskIndex) => {
+    const childIntent = task.taskIntent ?? taskIntent;
+    if (isBroadExecutableGeneratedTask(task)) {
+      buildBroadTaskMicrotasks(task, childIntent).forEach((child, childIndex) =>
+        children.push({
+          child,
+          originalSequence: task.sequence,
+          taskIndex,
+          childIndex,
+        }),
+      );
+      return;
+    }
+    children.push({
+      child: enrichMicrotaskChild(generation, task),
+      originalSequence: task.sequence,
+      taskIndex,
+      childIndex: 0,
+    });
+  });
+
+  const nextSequenceByPhase = new Map<number, number>();
+  return children
+    .sort(
+      (left, right) =>
+        left.child.phase - right.child.phase ||
+        left.originalSequence - right.originalSequence ||
+        left.taskIndex - right.taskIndex ||
+        left.childIndex - right.childIndex ||
+        left.child.title.localeCompare(right.child.title),
+    )
+    .map(({ child }) => {
+      const sequence = nextSequenceByPhase.get(child.phase) ?? 1;
+      nextSequenceByPhase.set(child.phase, sequence + 1);
+      const normalized = { ...child, sequence };
+      const childIntent = normalized.taskIntent ?? taskIntent;
+      return {
+        ...normalized,
+        tags: [
+          ...buildTaskTags(generation.alias, {
+            title: normalized.title,
+            description: normalized.description,
+            taskIntent: childIntent,
+            phase: normalized.phase,
+            phaseName: normalized.phaseName,
+            sequence,
+          }),
+          `kind:${childIntent}`,
+          "microtask",
+        ],
+      };
+    });
+}
+
+function validateProposalChildrenAreMicrotasks(proposal: TaskSplitProposal): void {
+  const invalid = proposal.proposedChildren
+    .map((child) => {
+      const metadata = resolveProposalChildMicrotaskMetadata(proposal, child);
+      const issues: string[] = [];
+      if (metadata.fileBoundaries.length === 0) {
+        issues.push("child is missing file boundaries");
+      }
+      if (metadata.acceptanceCriteria.length === 0) {
+        issues.push("child is missing acceptance criteria");
+      }
+      if (metadata.verificationCommands.length === 0) {
+        issues.push("child is missing verification commands");
+      }
+      if (isBroadExecutableGeneratedTask(metadata.task)) {
+        issues.push("child is still broad and must be split before approval");
+      }
+      return { child, issues };
+    })
+    .filter((entry) => entry.issues.length > 0);
+
+  if (invalid.length > 0) {
+    const details = invalid
+      .slice(0, 5)
+      .map((entry) => `${entry.child.title} (${entry.issues.join("; ")})`)
+      .join(", ");
+    throw new RoadmapGenerationError(
+      "VALIDATION_ERROR",
+      `Roadmap split proposal contains non-microtask executable children: ${details}`,
+    );
+  }
+}
+
+function resolveProposalChildMicrotaskMetadata(
+  proposal: TaskSplitProposal,
+  child: TaskSplitProposedChild,
+): {
+  task: GeneratedTask;
+  fileBoundaries: string[];
+  acceptanceCriteria: string[];
+  verificationCommands: string[];
+  dependsOn: string[];
+} {
+  const task: GeneratedTask = {
+    title: child.title,
+    description: child.description,
+    taskIntent: child.taskIntent ?? proposal.taskIntent,
+    phase: child.phase,
+    phaseName: child.phaseName,
+    sequence: child.sequence,
+  };
+  return {
+    task,
+    fileBoundaries:
+      child.fileBoundaries && child.fileBoundaries.length > 0
+        ? child.fileBoundaries
+        : inferFileBoundaries(task),
+    acceptanceCriteria:
+      child.acceptanceCriteria && child.acceptanceCriteria.length > 0
+        ? child.acceptanceCriteria
+        : inferAcceptanceCriteria(task),
+    verificationCommands:
+      child.verificationCommands && child.verificationCommands.length > 0
+        ? child.verificationCommands
+        : inferVerificationCommands(task),
+    dependsOn:
+      child.dependsOn && child.dependsOn.length > 0 ? child.dependsOn : inferDependsOn(task),
+  };
+}
+
+function hasStandardMicrotaskMetadata(description: string): boolean {
+  return (
+    /^\s*file boundaries\s*:/im.test(description) &&
+    /^\s*acceptance criteria\s*:/im.test(description) &&
+    /^\s*verification\s*:/im.test(description)
+  );
+}
+
 function normalizeSourceContentForFingerprint(content: string): string {
   return content.replace(/\r\n/g, "\n").trim();
 }
@@ -2376,30 +2782,33 @@ export function computeRoadmapSplitProposalFingerprint(input: {
 }
 
 function toProposedChildren(generation: RoadmapGenerationResult): TaskSplitProposedChild[] {
-  const taskIntent = generation.taskIntent ?? "general";
-  return generation.tasks.map((task) => ({
-    title: task.title,
-    description: task.description,
-    taskIntent: task.taskIntent ?? taskIntent,
-    phase: task.phase,
-    phaseName: task.phaseName,
-    sequence: task.sequence,
-    tags: [...buildTaskTags(generation.alias, task), `kind:${task.taskIntent ?? taskIntent}`],
-  }));
+  return prepareRoadmapSplitProposalChildren(generation);
 }
 
 function generationFromProposal(proposal: TaskSplitProposal): RoadmapGenerationResult {
   return {
     alias: proposal.roadmapAlias,
     taskIntent: proposal.taskIntent,
-    tasks: proposal.proposedChildren.map((child) => ({
-      title: child.title,
-      description: child.description,
-      taskIntent: child.taskIntent ?? proposal.taskIntent,
-      phase: child.phase,
-      phaseName: child.phaseName,
-      sequence: child.sequence,
-    })),
+    tasks: proposal.proposedChildren.map((child) => {
+      const metadata = resolveProposalChildMicrotaskMetadata(proposal, child);
+      return {
+        title: child.title,
+        description: hasStandardMicrotaskMetadata(child.description)
+          ? child.description
+          : formatMicrotaskDescription({
+              source: metadata.task,
+              summary: child.description || `${child.title} is a bounded executable microtask.`,
+              fileBoundaries: metadata.fileBoundaries,
+              acceptanceCriteria: metadata.acceptanceCriteria,
+              verificationCommands: metadata.verificationCommands,
+              dependsOn: metadata.dependsOn,
+            }),
+        taskIntent: child.taskIntent ?? proposal.taskIntent,
+        phase: child.phase,
+        phaseName: child.phaseName,
+        sequence: child.sequence,
+      };
+    }),
   };
 }
 
@@ -2433,6 +2842,7 @@ export function createRoadmapSplitProposal(input: {
   generation: RoadmapGenerationResult;
 }): CreateTaskSplitProposalResult {
   const taskIntent = input.generation.taskIntent ?? "general";
+  const proposedChildren = toProposedChildren(input.generation);
   const sourceFingerprint = computeRoadmapSplitProposalFingerprint({
     sourceContent: input.sourceContent,
     roadmapAlias: input.generation.alias,
@@ -2446,8 +2856,8 @@ export function createRoadmapSplitProposal(input: {
     sourceFingerprint,
     roadmapAlias: input.generation.alias,
     taskIntent,
-    summary: `Split required for ${input.generation.tasks.length} proposed roadmap task(s).`,
-    proposedChildren: toProposedChildren(input.generation),
+    summary: `Split required for ${proposedChildren.length} executable microtask(s) from ${input.generation.tasks.length} roadmap item(s).`,
+    proposedChildren,
   });
 }
 
@@ -2462,6 +2872,7 @@ export function approveRoadmapSplitProposal(input: {
     proposalId: input.proposalId,
     approvedBy: input.approvedBy ?? null,
     createTasks: (proposal) => {
+      validateProposalChildrenAreMicrotasks(proposal);
       const result = importGeneratedTasks(input.projectId, generationFromProposal(proposal), {
         createHierarchyParent: true,
         pauseCreatedTasks: childrenPausedByDefault,

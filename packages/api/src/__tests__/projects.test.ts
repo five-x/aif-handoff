@@ -12,6 +12,7 @@ import {
   projects,
   runtimeProfiles,
   runtimeWarmupSessions,
+  taskSplitProposals,
   tasks,
   usageEvents,
 } from "@aif/shared";
@@ -705,6 +706,160 @@ describe("projects API", () => {
       );
       expect(duplicateApprove.status).toBe(200);
       expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(2);
+    });
+
+    it("imports and approves a broad app roadmap child as executable microtasks", async () => {
+      createRoadmapProject(
+        "roadmap-broad-microtasks",
+        "# Roadmap\n- [ ] Build zai-mi.com - scaffold the app, configure the dev stack, and implement app code\n",
+      );
+      mockRunApiRuntimeOneShot.mockResolvedValueOnce({
+        result: {
+          outputText: JSON.stringify({
+            alias: "zai-mi",
+            tasks: [
+              {
+                title: "Build zai-mi.com",
+                description:
+                  "Scaffold the app, configure the dev stack, set runtime config, implement app code, and add smoke verification.",
+                taskIntent: "general",
+                phase: 1,
+                phaseName: "MVP",
+                sequence: 1,
+              },
+            ],
+          }),
+          sessionId: "roadmap-extract-session",
+          usage: null,
+        },
+        context: {},
+      });
+
+      const importRes = await app.request("/projects/roadmap-broad-microtasks/roadmap/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roadmapAlias: "zai-mi" }),
+      });
+
+      expect(importRes.status).toBe(201);
+      const importBody = await importRes.json();
+      expect(
+        importBody.proposal.proposedChildren.map((child: { title: string }) => child.title),
+      ).toEqual([
+        "Initialize zai-mi.com scaffold",
+        "Configure zai-mi.com development stack",
+        "Implement zai-mi.com first app slice",
+        "Add zai-mi.com smoke verification",
+      ]);
+
+      const approveRes = await app.request(
+        `/projects/roadmap-broad-microtasks/task-split-proposals/${importBody.proposal.id}/approve`,
+        { method: "POST" },
+      );
+
+      const approved = await approveRes.json();
+      expect(approveRes.status, JSON.stringify(approved)).toBe(201);
+      expect(approved.status).toBe("approved");
+      expect(approved.containerTaskId).toBeTruthy();
+      const created = findTasksByRoadmapAlias("roadmap-broad-microtasks", "zai-mi");
+      expect(created).toHaveLength(5);
+      expect(
+        created.filter((task) => task.hierarchyRole !== "container").map((task) => task.title),
+      ).toEqual([
+        "Initialize zai-mi.com scaffold",
+        "Configure zai-mi.com development stack",
+        "Implement zai-mi.com first app slice",
+        "Add zai-mi.com smoke verification",
+      ]);
+    });
+
+    it("rejects approval for a manually persisted stale broad proposal child", async () => {
+      createRoadmapProject("roadmap-stale-broad", "# Roadmap\n");
+      const proposalId = crypto.randomUUID();
+      testDb.current
+        .insert(taskSplitProposals)
+        .values({
+          id: proposalId,
+          projectId: "roadmap-stale-broad",
+          sourceKind: "roadmap_import",
+          sourceRef: "roadmap-import:ROADMAP.md",
+          sourceFingerprint: "e".repeat(64),
+          roadmapAlias: "stale-broad",
+          taskIntent: "general",
+          status: "pending",
+          summary: "Stale broad proposal",
+          proposedChildrenJson: JSON.stringify([
+            {
+              title: "Build zai-mi.com",
+              description:
+                "Scaffold the app, configure the dev stack, set runtime config, implement app code, and add smoke verification.",
+              taskIntent: "general",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+              fileBoundaries: ["package.json", "src/**", "config/**", "tests/**"],
+              acceptanceCriteria: ["The whole site is built and verified."],
+              verificationCommands: ["npm.cmd test"],
+              dependsOn: [],
+              splitRationale: "Spoofed marker: split into executable microtasks",
+            },
+          ]),
+        })
+        .run();
+
+      const approveRes = await app.request(
+        `/projects/roadmap-stale-broad/task-split-proposals/${proposalId}/approve`,
+        { method: "POST" },
+      );
+
+      expect(approveRes.status).toBe(400);
+      expect(await approveRes.json()).toMatchObject({ code: "VALIDATION_ERROR" });
+      expect(findTasksByRoadmapAlias("roadmap-stale-broad", "stale-broad")).toHaveLength(0);
+    });
+
+    it("approves legacy narrow proposals without stored microtask metadata", async () => {
+      createRoadmapProject("roadmap-legacy-narrow", "# Roadmap\n");
+      const proposalId = crypto.randomUUID();
+      testDb.current
+        .insert(taskSplitProposals)
+        .values({
+          id: proposalId,
+          projectId: "roadmap-legacy-narrow",
+          sourceKind: "roadmap_import",
+          sourceRef: "roadmap-import:ROADMAP.md",
+          sourceFingerprint: "b".repeat(64),
+          roadmapAlias: "legacy-narrow",
+          taskIntent: "general",
+          status: "pending",
+          summary: "Legacy narrow proposal",
+          proposedChildrenJson: JSON.stringify([
+            {
+              title: "Polish footer copy",
+              description:
+                "Scope: src/components/Footer.tsx\nAcceptance criteria: footer copy is updated.\nVerification: npm.cmd test -- footer",
+              taskIntent: "general",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+            },
+          ]),
+        })
+        .run();
+
+      const approveRes = await app.request(
+        `/projects/roadmap-legacy-narrow/task-split-proposals/${proposalId}/approve`,
+        { method: "POST" },
+      );
+
+      const approved = await approveRes.json();
+      expect(approveRes.status, JSON.stringify(approved)).toBe(201);
+      expect(approved.status).toBe("approved");
+      const created = findTasksByRoadmapAlias("roadmap-legacy-narrow", "legacy-narrow");
+      expect(created).toHaveLength(2);
+      const child = created.find((task) => task.hierarchyRole !== "container");
+      expect(child?.description).toContain("File boundaries:");
+      expect(child?.description).toContain("Acceptance criteria:");
+      expect(child?.description).toContain("Verification:");
     });
 
     it("canaries split_required reject and approve decisions without executing generated tasks", async () => {

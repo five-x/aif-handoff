@@ -54,13 +54,17 @@ import {
   decidePolicyBypass,
   getEnv,
   getPermissionExecutionPolicy,
+  buildRetryContextForRuntimePrompt,
+  getRetryContextThresholds,
   isPermissionPolicyIntent,
   isWarmupWorkflowKind,
   logger,
   normalizeRuntimeStage,
+  evaluateRuntimeProfileStageCapability,
   redactProviderTextForLogs,
   type EffectiveRuntimeProfileSource,
   type RuntimeStage,
+  type RuntimeStageCaps,
   type RuntimeStageOrProfileMode,
 } from "@aif/shared";
 import { createAuditEvidenceLogger, logActivity, persistAuditEvidencePayload } from "./hooks.js";
@@ -430,6 +434,93 @@ function getRuntimeStageFallbackProfile(
   return { profileId: fallback.profileId, source: fallback.source };
 }
 
+function hasConfiguredRuntimeProfileCandidate(input: {
+  taskRuntimeProfileId: string | null;
+  projectRuntimeProfileId: string | null;
+  systemRuntimeProfileId: string | null;
+}): boolean {
+  return Boolean(
+    input.taskRuntimeProfileId || input.projectRuntimeProfileId || input.systemRuntimeProfileId,
+  );
+}
+
+function runtimeStageCapabilityError(input: {
+  status: "runtime_stage_not_capable" | "no_implementation_capable_profile";
+  stage: RuntimeStage;
+  runtimeId?: string | null;
+  providerId?: string | null;
+  profileId?: string | null;
+  reason?: string | null;
+}): RuntimeExecutionError {
+  const reason =
+    input.status === "no_implementation_capable_profile"
+      ? "no implementation-capable runtime profile is configured"
+      : "selected runtime profile is not capable for this stage";
+  return new RuntimeExecutionError(
+    "Runtime profile is not capable for this stage.",
+    undefined,
+    "permission",
+    {
+      providerMeta: {
+        status: input.status,
+        category: "permission",
+        reason,
+        stage: input.stage,
+        runtimeId: input.runtimeId ?? null,
+        profileId: input.profileId ?? null,
+        policyReason: input.reason ?? null,
+      },
+    },
+  );
+}
+
+function capNumber(value: number | null | undefined, cap: number | undefined): number | null {
+  if (cap === undefined) return value ?? null;
+  if (value === null || value === undefined || !Number.isFinite(value)) return cap;
+  return Math.min(value, cap);
+}
+
+function capInteger(value: number | null | undefined, cap: number | undefined): number | undefined {
+  const capped = capNumber(value, cap);
+  if (capped === null || !Number.isFinite(capped)) return undefined;
+  return Math.max(0, Math.floor(capped));
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function applyNumericOptionCap(
+  target: Record<string, unknown>,
+  key: string,
+  cap: number | undefined,
+): void {
+  if (cap === undefined) return;
+  const current = readFiniteNumber(target[key]);
+  target[key] = current === undefined ? cap : Math.min(current, cap);
+}
+
+function applyRuntimeStageCapsToAdapterOptions(
+  options: Record<string, unknown>,
+  caps: RuntimeStageCaps,
+): Record<string, unknown> {
+  const capped = { ...options };
+  applyNumericOptionCap(capped, "maxToolTurns", caps.maxToolTurns);
+  applyNumericOptionCap(capped, "runTimeoutMs", caps.wallClockMs);
+  applyNumericOptionCap(capped, "tokenBudget", caps.tokenBudget);
+  applyNumericOptionCap(capped, "contextTokens", caps.contextTokens);
+  applyNumericOptionCap(capped, "contextWindowTokens", caps.contextTokens);
+  applyNumericOptionCap(capped, "maxInputTokens", caps.contextTokens);
+  applyNumericOptionCap(capped, "maxTokens", caps.maxOutputTokens);
+  applyNumericOptionCap(capped, "maxOutputTokens", caps.maxOutputTokens);
+  applyNumericOptionCap(
+    capped,
+    "repositoryInspectionToolBudget",
+    caps.repositoryInspectionToolBudget,
+  );
+  return capped;
+}
+
 export interface SubagentQueryOptions {
   taskId: string;
   projectRoot: string;
@@ -484,6 +575,7 @@ export interface SubagentQueryResult {
 
 type WarmupSkipReason =
   | "feature_disabled"
+  | "retry_context_compacted"
   | "workflow_not_enabled"
   | "existing_task_session"
   | "expired"
@@ -611,6 +703,7 @@ function buildWorkflowSpec(options: SubagentQueryOptions): RuntimeWorkflowSpec {
 async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
   workflow: RuntimeWorkflowSpec;
   runtimeStage: RuntimeStage;
+  stageCaps: RuntimeStageCaps;
   runtimeId: string;
   providerId: string;
   profileId: string | null;
@@ -624,6 +717,7 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
   systemPromptAppend: string;
   agentDefinitionName?: string;
   canResume: boolean;
+  retryContextCompacted: boolean;
 }> {
   const task = findTaskById(options.taskId);
   const profileMode = options.profileMode ?? "task";
@@ -665,6 +759,31 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
       });
     }
   }
+  const stageDecision = effective.profile
+    ? evaluateRuntimeProfileStageCapability(effective.profile, runtimeStage)
+    : null;
+  if (stageDecision && !stageDecision.allowed) {
+    throw runtimeStageCapabilityError({
+      status: "runtime_stage_not_capable",
+      stage: runtimeStage,
+      runtimeId: effective.profile?.runtimeId ?? null,
+      providerId: effective.profile?.providerId ?? null,
+      profileId: effective.profile?.id ?? null,
+      reason: stageDecision.reason,
+    });
+  }
+  if (
+    !effective.profile &&
+    runtimeStage === "implementer" &&
+    hasConfiguredRuntimeProfileCandidate(effective)
+  ) {
+    throw runtimeStageCapabilityError({
+      status: "no_implementation_capable_profile",
+      stage: runtimeStage,
+      reason: "configured runtime profiles are unavailable or not implementer-capable",
+    });
+  }
+  let stageCaps = stageDecision?.caps ?? {};
   const suppressModelFallback = options.suppressModelFallback === true;
   const modelOverride =
     options.modelOverride ?? (suppressModelFallback ? null : (task?.modelOverride ?? null));
@@ -691,6 +810,29 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
       },
     },
   });
+
+  if (!effective.profile) {
+    const fallbackDecision = evaluateRuntimeProfileStageCapability(
+      {
+        id: resolved.profileId ?? "environment-runtime-default",
+        runtimeId: resolved.runtimeId,
+        providerId: resolved.providerId,
+        options: resolved.options,
+      },
+      runtimeStage,
+    );
+    if (!fallbackDecision.allowed) {
+      throw runtimeStageCapabilityError({
+        status: "runtime_stage_not_capable",
+        stage: runtimeStage,
+        runtimeId: resolved.runtimeId,
+        providerId: resolved.providerId,
+        profileId: resolved.profileId,
+        reason: fallbackDecision.reason,
+      });
+    }
+    stageCaps = fallbackDecision.caps;
+  }
 
   // Resolve adapter after profile — lightModel is NOT injected into the
   // general resolution chain. Callers that need lightModel (reviewGate)
@@ -745,9 +887,17 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
     effective.profileMode === "review"
       ? `${promptPolicy.systemPromptAppend}\n\n${REVIEW_DIFF_SCOPE_SYSTEM_APPEND}`.trim()
       : promptPolicy.systemPromptAppend;
+  const retryContext = task
+    ? buildRetryContextForRuntimePrompt(task, getRetryContextThresholds(getEnv()))
+    : null;
+  const effectivePrompt =
+    retryContext?.compacted === true
+      ? `${retryContext.prompt}\n\n---\n\n${promptPolicy.prompt}`
+      : promptPolicy.prompt;
 
   const canResume =
     workflow.sessionReusePolicy === "resume_if_available" && capabilities.supportsResume;
+  const effectiveCanResume = canResume && retryContext?.compacted !== true;
 
   const profileLogContext = redactResolvedRuntimeProfile(resolved);
   log.info(
@@ -757,7 +907,8 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
       ...profileLogContext,
       usedFallbackSlashCommand: promptPolicy.usedFallbackSlashCommand,
       suppressModelFallback,
-      canResume,
+      canResume: effectiveCanResume,
+      retryContextCompacted: retryContext?.compacted === true,
     },
     "Resolved runtime execution context for subagent query",
   );
@@ -785,16 +936,23 @@ async function resolveExecutionContext(options: SubagentQueryOptions): Promise<{
     effort: pickEffort(resolved.options),
     headers: resolved.headers,
     options: {
-      ...resolved.options,
-      ...(options.adapterOptions ?? {}),
-      ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
-      ...(resolved.apiKeyEnvVar ? { apiKeyEnvVar: resolved.apiKeyEnvVar } : {}),
-      projectRoot: options.projectRoot,
+      ...applyRuntimeStageCapsToAdapterOptions(
+        {
+          ...resolved.options,
+          ...(options.adapterOptions ?? {}),
+          ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
+          ...(resolved.apiKeyEnvVar ? { apiKeyEnvVar: resolved.apiKeyEnvVar } : {}),
+          projectRoot: options.projectRoot,
+        },
+        stageCaps,
+      ),
     },
-    prompt: promptPolicy.prompt,
+    prompt: effectivePrompt,
     systemPromptAppend: effectiveSystemPromptAppend,
     agentDefinitionName: promptPolicy.agentDefinitionName,
-    canResume,
+    canResume: effectiveCanResume,
+    retryContextCompacted: retryContext?.compacted === true,
+    stageCaps,
   };
 }
 
@@ -803,6 +961,7 @@ function buildExecutionIntent(
   systemPromptAppend: string,
   agentDefinitionName: string | undefined,
   workflowMetadata: Record<string, unknown> | undefined,
+  stageCaps: RuntimeStageCaps,
   stderr: (chunk: string) => void,
 ): import("@aif/runtime").RuntimeExecutionIntent {
   const env = getEnv();
@@ -865,13 +1024,18 @@ function buildExecutionIntent(
     : {};
 
   return {
-    maxBudgetUsd: options.maxBudgetUsd ?? null,
-    maxTurns: options.maxTurns,
-    repositoryInspectionToolBudget: options.repositoryInspectionToolBudget,
+    maxBudgetUsd: capNumber(options.maxBudgetUsd ?? null, stageCaps.maxBudgetUsd),
+    maxTurns: capInteger(options.maxTurns, stageCaps.maxToolTurns),
+    repositoryInspectionToolBudget: capInteger(
+      options.repositoryInspectionToolBudget,
+      stageCaps.repositoryInspectionToolBudget,
+    ),
     repositoryInspectionBudgetFinalizationMode: options.repositoryInspectionBudgetFinalizationMode,
     startTimeoutMs: options.queryStartTimeoutMs ?? env.AGENT_QUERY_START_TIMEOUT_MS,
     startRetryDelayMs: options.queryStartRetryDelayMs ?? env.AGENT_QUERY_START_RETRY_DELAY_MS,
-    runTimeoutMs: options.runTimeoutMs ?? env.AGENT_STAGE_RUN_TIMEOUT_MS,
+    runTimeoutMs:
+      capInteger(options.runTimeoutMs ?? env.AGENT_STAGE_RUN_TIMEOUT_MS, stageCaps.wallClockMs) ??
+      env.AGENT_STAGE_RUN_TIMEOUT_MS,
     includePartialMessages: options.includePartialMessages ?? false,
     agentDefinitionName,
     systemPromptAppend,
@@ -1034,6 +1198,8 @@ export async function executeSubagentQuery(
 
     if (!getEnv().AIF_WARMUP_ENABLED) {
       logWarmupSkip("feature_disabled");
+    } else if (context.retryContextCompacted) {
+      logWarmupSkip("retry_context_compacted");
     } else if (!isWarmupWorkflowKind(context.workflow.workflowKind)) {
       logWarmupSkip("workflow_not_enabled");
     } else if (existingSessionId) {
@@ -1113,10 +1279,17 @@ export async function executeSubagentQuery(
         : context.transport === "cli"
           ? baseFirstActivityTimeoutMs * 2
           : baseFirstActivityTimeoutMs;
+    const firstActivityMaxRetries =
+      context.stageCaps.retryCount === undefined
+        ? FIRST_ACTIVITY_MAX_RETRIES
+        : Math.min(
+            FIRST_ACTIVITY_MAX_RETRIES,
+            Math.max(0, Math.floor(context.stageCaps.retryCount)),
+          );
     let result: Awaited<ReturnType<RuntimeAdapter["run"]>> | undefined;
 
     // Retry loop: if agent stalls (no runtime activity after start), kill and restart
-    for (let attempt = 0; attempt <= FIRST_ACTIVITY_MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= firstActivityMaxRetries; attempt++) {
       latestLimitSnapshot = null;
       // Fresh AbortController per attempt — AbortController is single-use
       const attemptAbort = new AbortController();
@@ -1139,6 +1312,7 @@ export async function executeSubagentQuery(
         context.systemPromptAppend,
         context.agentDefinitionName,
         context.workflow.metadata,
+        context.stageCaps,
         stderrCollector.onStderr,
       );
       // Override the abort controller with our per-attempt one
@@ -1157,7 +1331,7 @@ export async function executeSubagentQuery(
         logActivity(
           taskId,
           "Agent",
-          `${agentName} stalled — no runtime activity within ${timeoutSec}s after start (attempt ${attempt + 1}/${FIRST_ACTIVITY_MAX_RETRIES + 1}), restarting`,
+          `${agentName} stalled — no runtime activity within ${timeoutSec}s after start (attempt ${attempt + 1}/${firstActivityMaxRetries + 1}), restarting`,
         );
         log.warn(
           { taskId, agentName, firstActivityTimeoutMs, attempt: attempt + 1 },
@@ -1259,10 +1433,10 @@ export async function executeSubagentQuery(
         watchdog.clear();
         clearOperatorCancelWatcher(operatorCancelWatcher);
         operatorCancelWatcher = null;
-        if (stalledByWatchdog && attempt < FIRST_ACTIVITY_MAX_RETRIES) {
+        if (stalledByWatchdog && attempt < firstActivityMaxRetries) {
           // Agent stalled — kill and retry
           log.info(
-            { taskId, agentName, attempt: attempt + 1, maxRetries: FIRST_ACTIVITY_MAX_RETRIES },
+            { taskId, agentName, attempt: attempt + 1, maxRetries: firstActivityMaxRetries },
             "Restarting agent after first-activity stall",
           );
           continue;
@@ -1274,7 +1448,7 @@ export async function executeSubagentQuery(
 
     if (!result) {
       throw new Error(
-        `${agentName}: all ${FIRST_ACTIVITY_MAX_RETRIES + 1} attempts stalled without runtime activity`,
+        `${agentName}: all ${firstActivityMaxRetries + 1} attempts stalled without runtime activity`,
       );
     }
 

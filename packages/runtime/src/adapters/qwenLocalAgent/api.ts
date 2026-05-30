@@ -164,6 +164,61 @@ function isRepositoryInspectionToolCall(input, toolContext, toolName, args) {
 function readNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
+function readPositiveInteger(value) {
+  const parsed = readNumber(value);
+  return parsed == null || parsed < 0 ? null : Math.floor(parsed);
+}
+function firstPositiveInteger(options, keys) {
+  for (const key of keys) {
+    const parsed = readPositiveInteger(options[key]);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+function capPositiveInteger(current, cap) {
+  if (cap == null) return current;
+  if (current == null) return cap;
+  return Math.min(current, cap);
+}
+function applyEndpointBudgetCaps(options, budget) {
+  const contextCap = firstPositiveInteger(options, [
+    "contextWindowTokens",
+    "contextTokens",
+    "maxInputTokens",
+    "tokenBudget",
+  ]);
+  const outputCap = firstPositiveInteger(options, ["maxOutputTokens", "maxTokens"]);
+  if (!budget && contextCap == null && outputCap == null) return null;
+
+  const base = budget ?? {
+    maxInputTokens: contextCap ?? Number.MAX_SAFE_INTEGER,
+    compactTargetInputTokens:
+      contextCap == null ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.floor(contextCap * 0.8)),
+    maxOutputTokens: outputCap ?? Number.MAX_SAFE_INTEGER,
+    highInputMaxOutputTokens: outputCap ?? Number.MAX_SAFE_INTEGER,
+    totalTokens: contextCap ?? Number.MAX_SAFE_INTEGER,
+    toolResultMaxChars: 1_500,
+    ledgerPreviewMaxChars: 320,
+  };
+
+  const maxInputTokens = capPositiveInteger(base.maxInputTokens, contextCap);
+  const totalTokens = capPositiveInteger(base.totalTokens, contextCap);
+  const maxOutputTokens = capPositiveInteger(base.maxOutputTokens, outputCap);
+  const highInputMaxOutputTokens = capPositiveInteger(base.highInputMaxOutputTokens, outputCap);
+  const compactTargetInputTokens = Math.min(
+    base.compactTargetInputTokens,
+    Math.max(1, Math.floor(maxInputTokens * 0.8)),
+  );
+
+  return {
+    ...base,
+    maxInputTokens,
+    compactTargetInputTokens,
+    maxOutputTokens,
+    highInputMaxOutputTokens,
+    totalTokens,
+  };
+}
 function safeProviderErrorMessage(rawText, fallbackMessage) {
   const trimmed = rawText.trim();
   return trimmed.length > 0 ? redactProviderText(trimmed) : fallbackMessage;
@@ -208,9 +263,13 @@ function parseEndpoint(baseUrl) {
   }
 }
 function resolveEndpointPolicy(input) {
+  const options = asRecord(input.options);
   const baseUrl = resolveBaseUrl(input);
   const endpoint = parseEndpoint(baseUrl);
-  const budget = endpoint ? (LOCAL_ENDPOINT_BUDGETS.get(endpoint.port) ?? null) : null;
+  const budget = applyEndpointBudgetCaps(
+    options,
+    endpoint ? (LOCAL_ENDPOINT_BUDGETS.get(endpoint.port) ?? null) : null,
+  );
   return { baseUrl, endpoint, budget };
 }
 export function resetQwenLocalAgentEndpointStateForTests() {
@@ -437,7 +496,11 @@ function endpointMaxOutputTokensForInput(budget, estimatedInputTokens) {
   return Math.min(endpointMax, Math.max(0, budget.totalTokens - estimatedInputTokens));
 }
 function maxOutputTokensForBudget(options, budget, estimatedInputTokens) {
-  const configured = readNumber(options.maxTokens);
+  const configuredValues = [
+    readNumber(options.maxTokens),
+    readNumber(options.maxOutputTokens),
+  ].filter((value) => value != null);
+  const configured = configuredValues.length > 0 ? Math.min(...configuredValues) : null;
   if (!budget) return configured;
   const endpointCap = endpointMaxOutputTokensForInput(budget, estimatedInputTokens);
   const requested = configured == null ? budget.maxOutputTokens : configured;
@@ -445,7 +508,7 @@ function maxOutputTokensForBudget(options, budget, estimatedInputTokens) {
 }
 function remainingEndpointOutputBudget(budget, estimatedInputTokens) {
   if (!budget) return null;
-  return Math.min(budget.maxOutputTokens, Math.max(0, budget.totalTokens - estimatedInputTokens));
+  return Math.max(0, budget.totalTokens - estimatedInputTokens);
 }
 function shouldCompactAuditTranscriptForSoftEndpointBudget(
   input,
@@ -2679,6 +2742,13 @@ export async function runQwenLocalAgentApi(input, logger) {
       `qwen-local-agent exceeded max tool turns (${maxTurns})`,
       undefined,
       "timeout",
+      {
+        providerMeta: {
+          status: "max_tool_turns_exhausted",
+          category: "timeout",
+          maxToolTurns: maxTurns,
+        },
+      },
     );
   } catch (error) {
     if (isAbortTimeoutError(error)) {

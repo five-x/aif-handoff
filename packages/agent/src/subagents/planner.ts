@@ -212,6 +212,7 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
           "The manifest must include version 1, taskId, intent, scope, allowedChanges, forbiddenChanges, expectedArtifacts, acceptanceCriteria, and verificationCommands.",
           "Acceptance criteria must be testable and verificationCommands must be concrete local commands.",
           "The manifest intent, allowedChanges, and forbiddenChanges must respect the task intent contract and must not convert audit, spike, docs, or tests tasks into feature/fix implementation work.",
+          "Do not write a runnable manifest for broad, vague, or multi-area implementation work. If the task spans broad file boundaries, multiple major subsystems, setup/runtime/dev-stack commands, or scaffold/base-configuration work, return split-required planning feedback that tells the operator to create smaller children with concrete files, acceptance checks, and focused verification commands.",
         ].join(" ")
       : "Fast-mode planning compatibility: do not require an aif-plan-manifest block unless one already exists; preserve and repair any existing manifest instead of deleting it.";
 
