@@ -203,12 +203,12 @@ export const QWEN_LOCAL_AGENT_TOOLS = [
     function: {
       name: "run_shell",
       description:
-        "Run a narrow structured command inside the project root. This is not a shell string.",
+        "Run a narrow structured command inside the project root. This is not a shell string. Supports pwd, ls, and package-manager verification scripts such as npm.cmd run build.",
       parameters: objectSchema(
         {
           command: {
             type: "string",
-            enum: ["pwd", "ls"],
+            enum: ["pwd", "ls", "npm", "npm.cmd", "pnpm", "yarn", "bun"],
           },
           args: {
             type: "array",
@@ -825,7 +825,52 @@ function validateStructuredShellCommand(command, args) {
     }
     return;
   }
+  if (isPackageManagerCommand(command)) {
+    validatePackageManagerShellArgs(command, args);
+    return;
+  }
   throw new RuntimeExecutionError(`unsupported shell command: ${command}`, undefined, "permission");
+}
+function isPackageManagerCommand(command) {
+  return ["npm", "npm.cmd", "pnpm", "yarn", "bun"].includes(command);
+}
+function validatePackageManagerShellArgs(command, args) {
+  const verb = args[0];
+  if (!verb) {
+    throw new RuntimeExecutionError(
+      `${command} requires an allowlisted script verb`,
+      undefined,
+      "permission",
+    );
+  }
+  if (verb === "test") return;
+  if (verb === "run") {
+    if (!args[1] || args[1].startsWith("-")) {
+      throw new RuntimeExecutionError(
+        `${command} run requires a script name`,
+        undefined,
+        "permission",
+      );
+    }
+    return;
+  }
+  throw new RuntimeExecutionError(
+    `${command} supports only test or run <script>`,
+    undefined,
+    "permission",
+  );
+}
+function resolveStructuredShellInvocation(command, args) {
+  if (command === "npm.cmd" && process.platform !== "win32") {
+    return { command: "npm", args };
+  }
+  if (command === "npm.cmd" && process.platform === "win32") {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", "npm.cmd", ...args],
+    };
+  }
+  return { command, args };
 }
 export function spawnProcess(input) {
   if (input.signal?.aborted) {
@@ -1293,9 +1338,10 @@ async function runShellTool(args, context) {
       touchedFiles: [],
     };
   }
+  const invocation = resolveStructuredShellInvocation(command, commandArgs);
   return spawnProcess({
-    command,
-    args: commandArgs,
+    command: invocation.command,
+    args: invocation.args,
     cwd: cwd.absolutePath,
     env: buildSanitizedToolEnv(context.env),
     timeoutMs,

@@ -407,11 +407,15 @@ function collectChangedFiles(projectRoot: string): {
     }
   }
 
-  const baseBranch = getProjectConfig(projectRoot).git.base_branch || "main";
-  const diffArgs = [
-    ["diff", "--name-only", `${baseBranch}...HEAD`],
-    ["diff", "--name-only", `${baseBranch}..HEAD`],
-  ];
+  const configuredBaseBranch = getProjectConfig(projectRoot).git.base_branch || "main";
+  const baseBranch = resolveExistingBaseBranch(projectRoot, configuredBaseBranch);
+  const baseDiffArgs = baseBranch
+    ? [
+        ["diff", "--name-only", `${baseBranch}...HEAD`],
+        ["diff", "--name-only", `${baseBranch}..HEAD`],
+      ]
+    : [];
+  const diffArgs = [...baseDiffArgs, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]];
   for (const args of diffArgs) {
     const diff = runGit(projectRoot, args);
     if (diff) {
@@ -421,19 +425,6 @@ function collectChangedFiles(projectRoot: string): {
       }
     }
   }
-  const headCommitFiles = runGit(projectRoot, [
-    "diff-tree",
-    "--no-commit-id",
-    "--name-only",
-    "-r",
-    "HEAD",
-  ]);
-  if (headCommitFiles) {
-    for (const file of headCommitFiles.split(/\r?\n/).map(normalizeRelativePath).filter(Boolean)) {
-      committedFiles.add(file);
-      files.add(file);
-    }
-  }
 
   return {
     gitAvailable: true,
@@ -441,6 +432,27 @@ function collectChangedFiles(projectRoot: string): {
     dirtyFiles: [...dirtyFiles].sort(),
     committedFiles: [...committedFiles].sort(),
   };
+}
+
+function resolveExistingBaseBranch(
+  projectRoot: string,
+  configuredBaseBranch: string,
+): string | null {
+  const candidates = [
+    configuredBaseBranch,
+    configuredBaseBranch && !configuredBaseBranch.includes("/")
+      ? `origin/${configuredBaseBranch}`
+      : null,
+    "main",
+    "origin/main",
+    "master",
+    "origin/master",
+  ].filter((entry): entry is string => Boolean(entry));
+  for (const candidate of [...new Set(candidates)]) {
+    const ref = runGit(projectRoot, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]);
+    if (ref) return candidate;
+  }
+  return null;
 }
 
 function isPlanArtifact(path: string, task: TaskCompletionEvidenceTask): boolean {

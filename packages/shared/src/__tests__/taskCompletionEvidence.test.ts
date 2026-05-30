@@ -25,6 +25,20 @@ function initRepo(): string {
   return root;
 }
 
+function initRepoOnBranch(branch: string): string {
+  const root = mkdtempSync(join(tmpdir(), "aif-evidence-"));
+  execFileSync("git", ["init", `--initial-branch=${branch}`], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
+  writeFileSync(join(root, "README.md"), "# test\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  return root;
+}
+
 function codes(result: ReturnType<typeof evaluateTaskCompletionEvidence>): string[] {
   return result.issues.map((issue) => issue.code);
 }
@@ -96,6 +110,33 @@ function planWithManifest(input: {
       allowedChanges: ["source", "tests"],
       forbiddenChanges: ["audit-report"],
       expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+      acceptanceCriteria: input.acceptanceCriteria,
+      verificationCommands: ["npm.cmd test"],
+    }),
+    "```",
+    "",
+    "## Plan",
+    "- [x] Implement feature",
+    "- [x] Run tests",
+  ].join("\n");
+}
+
+function planWithManifestScope(input: {
+  taskId: string;
+  intent: "feature" | "fix" | "docs" | "tests";
+  scope: string[];
+  acceptanceCriteria: Array<{ id: string; description: string; verification: string }>;
+}): string {
+  return [
+    "```aif-plan-manifest",
+    JSON.stringify({
+      version: 1,
+      taskId: input.taskId,
+      intent: input.intent,
+      scope: input.scope,
+      allowedChanges: ["source", "tests"],
+      forbiddenChanges: ["audit-report"],
+      expectedArtifacts: [{ kind: "source_diff", paths: input.scope }],
       acceptanceCriteria: input.acceptanceCriteria,
       verificationCommands: ["npm.cmd test"],
     }),
@@ -1011,6 +1052,61 @@ describe("taskCompletionEvidence", () => {
 
     expect(result.ok).toBe(true);
     expect(codes(result)).not.toContain("unintended_uncommitted_changes");
+    expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
+  });
+
+  it("falls back to an existing base branch when configured base is missing", () => {
+    const root = initRepoOnBranch("master");
+    execFileSync("git", ["checkout", "-b", "feature/task"], { cwd: root, stdio: "ignore" });
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, ".ai-factory", "plans"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add feature", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    writeFileSync(join(root, ".ai-factory", "plans", "feature.md"), "- [x] done\n", "utf8");
+    execFileSync("git", ["add", ".ai-factory/plans/feature.md"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["commit", "-m", "update plan", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+
+    const plan = planWithManifestScope({
+      taskId: "feature-master-fallback",
+      intent: "feature",
+      scope: ["src/feature.ts"],
+      acceptanceCriteria: [
+        {
+          id: "AC1",
+          description: "Feature behavior is implemented.",
+          verification: "npm.cmd test",
+        },
+      ],
+    });
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-master-fallback",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan,
+        planPath: ".ai-factory/plans/feature.md",
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-master-fallback",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+          planManifestHash: hashAifPlanManifest(plan),
+        }),
+      },
+    });
+
     expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
   });
 

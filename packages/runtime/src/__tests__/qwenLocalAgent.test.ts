@@ -178,7 +178,15 @@ describe("qwen-local-agent adapter", () => {
     );
     const shellTool = QWEN_LOCAL_AGENT_TOOLS.find((tool) => tool.function.name === "run_shell");
     const parameters = shellTool?.function.parameters;
-    expect(parameters.properties?.command?.enum).toEqual(["pwd", "ls"]);
+    expect(parameters.properties?.command?.enum).toEqual([
+      "pwd",
+      "ls",
+      "npm",
+      "npm.cmd",
+      "pnpm",
+      "yarn",
+      "bun",
+    ]);
   });
   it("builds chat-completions requests with function tools", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-request-"));
@@ -4071,7 +4079,7 @@ describe("qwen-local-agent adapter", () => {
       buildSanitizedToolEnv({ OPENAI_API_KEY: "sk-SECRET", PATH: "x" }).OPENAI_API_KEY,
     ).toBeUndefined();
   });
-  it("denies npm script execution even after package.json is model-editable", async () => {
+  it("allows package-manager verification scripts with a sanitized environment", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-timeout-"));
     await writeFile(
       path.join(root, "package.json"),
@@ -4087,8 +4095,19 @@ describe("qwen-local-agent adapter", () => {
       { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
       { projectRoot: root, maxOutputChars: 2_000 },
     );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("none");
+    expect(result.output).not.toContain("sk-");
+  });
+  it("denies package-manager install commands", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-deny-"));
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["install"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("unsupported shell command");
+    expect(result.error).toContain("supports only test or run");
   });
   it("does not execute git hooks during git_commit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-git-hooks-"));

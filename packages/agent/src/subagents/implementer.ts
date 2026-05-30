@@ -36,6 +36,7 @@ import {
   formatAuditSynthesisOutcomeForArtifact,
   hashAifPlanManifest,
   isLowSignalAuditEvidenceLine,
+  readAifPlanManifestSnapshot,
   resolveAuditPlanId,
   toAuditPublicReportOutcome,
   type AuditCardDecision,
@@ -436,6 +437,7 @@ function formatImplementationManifestPrompt(
   if (!shouldRequestImplementationManifest(task)) return "";
   const intent = task.isFix ? "fix" : task.taskIntent;
   const expectedPlanManifestHash = hashAifPlanManifest(planText);
+  const planManifest = readAifPlanManifestSnapshot(planText);
   const regressionInstruction =
     intent === "fix"
       ? "\n- Because this is a fix task, `regressionExplanation` is required and must explain the regression or failure mode that was fixed."
@@ -443,6 +445,25 @@ function formatImplementationManifestPrompt(
   const planHashInstruction = expectedPlanManifestHash
     ? `\n- The approved plan contains an \`aif-plan-manifest\`; set \`planManifestHash\` exactly to \`${expectedPlanManifestHash}\`.`
     : "\n- The approved plan has no `aif-plan-manifest`; set `planManifestHash` to null.";
+  const acceptanceIdInstruction =
+    planManifest.acceptanceCriterionIds.length > 0
+      ? `\n- The approved plan acceptance criteria ids are: ${planManifest.acceptanceCriterionIds.map((id) => `\`${id}\``).join(", ")}. Your manifest \`acceptanceCriteria\` MUST use these exact ids; do not invent ids like \`AC-1\`.`
+      : "";
+  const scopeInstruction =
+    planManifest.scope.length > 0 || planManifest.expectedArtifactPaths.length > 0
+      ? `\n- The approved changed-file boundary is: ${[
+          ...planManifest.scope,
+          ...planManifest.expectedArtifactPaths,
+        ]
+          .map((path) => `\`${path}\``)
+          .join(
+            ", ",
+          )}. \`changedFiles\` must match the actual meaningful changed files and must not include paths outside this boundary. If a needed path is outside the boundary, stop and report the scope conflict instead of editing it.`
+      : "\n- `changedFiles` must match the actual meaningful changed files for this task.";
+  const verificationInstruction =
+    planManifest.verificationCommands.length > 0
+      ? `\n- Required verification command(s) from the approved plan: ${planManifest.verificationCommands.map((command) => `\`${command}\``).join(", ")}. In qwen-local-agent, execute package-manager verification with \`run_shell\` (for example command \`npm.cmd\`, args \`[\"run\", \"build\"]\`); the tool maps \`npm.cmd\` to \`npm\` on Linux. Do not mark \`read_file\`, \`list_files\`, or \`git_status\` as passed verification for build/test criteria.`
+      : "\n- Execute the concrete build/test/lint verification command with `run_shell` before marking verification evidence as passed; do not substitute repository inspection tools for build/test verification.";
   return `- Your final result MUST include exactly one fenced \`aif-implementation-manifest\` JSON block. Use the fence language exactly \`aif-implementation-manifest\`, not \`json\`, and do not put the manifest in a repository file.
 - The manifest must be a JSON object with this schema shape:
 \`\`\`aif-implementation-manifest
@@ -464,6 +485,7 @@ function formatImplementationManifestPrompt(
 \`\`\`
 - Set \`taskId\` exactly to \`${task.id}\` and \`intent\` to \`${intent}\`. Every passed \`verificationEvidence\` item must include \`command\`, \`status\`, \`outputSha256\`, \`outputPreview\`, and \`outputPreviewTruncated\`; \`acceptanceCriteria\` and \`reviewClosure\` evidence refs must point to concrete verification evidence or actual review comments. Never use placeholder hashes or invented command output; if a required verification cannot run, mark that criterion unsatisfied and explain the limitation.${planHashInstruction}${regressionInstruction}
 - Required field names include \`changedFiles\`, \`diffSummary\`, \`verificationEvidence\`, \`acceptanceCriteria\`, \`evidenceRefs\`, \`planChecklist\`, \`reviewClosure\`, \`commitEvidence\`, and \`knownLimitations\`.
+- Completion guard checks are strict: \`changedFiles\` must equal the guard's actual meaningful changed files; every passed verification command must be observed as a tool call in the latest implementer run; every approved plan acceptance criterion id must be present and supported by evidence refs.${acceptanceIdInstruction}${scopeInstruction}${verificationInstruction}
 - Put the manifest in the final result text, not in a repository file.`;
 }
 

@@ -141,11 +141,12 @@ export interface ImplementationManifestValidationResult {
   issues: ImplementationManifestIssue[];
 }
 
-interface AifPlanManifestSnapshot {
+export interface AifPlanManifestSnapshot {
   hash: string | null;
   acceptanceCriterionIds: string[];
   scope: string[];
   expectedArtifactPaths: string[];
+  verificationCommands: string[];
 }
 
 const IMPLEMENTATION_MANIFEST_BLOCK_PATTERN =
@@ -352,13 +353,27 @@ function expectedArtifactPathsFromManifest(parsed: Record<string, unknown> | nul
   });
 }
 
-function readAifPlanManifestSnapshot(plan: string | null | undefined): AifPlanManifestSnapshot {
+export function readAifPlanManifestSnapshot(
+  plan: string | null | undefined,
+): AifPlanManifestSnapshot {
   if (!plan)
-    return { hash: null, acceptanceCriterionIds: [], scope: [], expectedArtifactPaths: [] };
+    return {
+      hash: null,
+      acceptanceCriterionIds: [],
+      scope: [],
+      expectedArtifactPaths: [],
+      verificationCommands: [],
+    };
   PLAN_MANIFEST_BLOCK_PATTERN.lastIndex = 0;
   const matches = [...plan.matchAll(PLAN_MANIFEST_BLOCK_PATTERN)];
   if (matches.length !== 1) {
-    return { hash: null, acceptanceCriterionIds: [], scope: [], expectedArtifactPaths: [] };
+    return {
+      hash: null,
+      acceptanceCriterionIds: [],
+      scope: [],
+      expectedArtifactPaths: [],
+      verificationCommands: [],
+    };
   }
   const raw = matches[0]?.[1]?.trim() ?? "";
   const parsed = parseJsonObject(raw);
@@ -377,6 +392,10 @@ function readAifPlanManifestSnapshot(plan: string | null | undefined): AifPlanMa
     acceptanceCriterionIds,
     scope: parsed && isStringArray(parsed.scope) ? sortedUniquePaths(parsed.scope) : [],
     expectedArtifactPaths: sortedUniquePaths(expectedArtifactPathsFromManifest(parsed)),
+    verificationCommands:
+      parsed && isStringArray(parsed.verificationCommands)
+        ? [...new Set(parsed.verificationCommands.map((entry) => entry.trim()).filter(Boolean))]
+        : [],
   };
 }
 

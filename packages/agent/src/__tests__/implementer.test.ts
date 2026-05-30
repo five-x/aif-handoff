@@ -5944,6 +5944,9 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain(
       "`acceptanceCriteria` and `reviewClosure` evidence refs must point to concrete verification evidence or actual review comments",
     );
+    expect(call.prompt).toContain("approved plan acceptance criteria ids are: `AC1`");
+    expect(call.prompt).toContain("approved changed-file boundary is: `src/feature.ts`");
+    expect(call.prompt).toContain("Required verification command(s) from the approved plan");
 
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-feature-plan-hash")).get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
