@@ -241,6 +241,44 @@ describe("evaluateTaskPlanQuality", () => {
     });
   });
 
+  it("treats src/index.ts as source, not metadata, in plan manifests", () => {
+    const task = {
+      id: "task-index-source",
+      title: "Add entrypoint",
+      description: "Scope: src/index.ts.",
+      taskIntent: "feature" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+    };
+    const plan = [
+      "## Plan",
+      "",
+      planManifest({
+        taskId: "task-index-source",
+        scope: ["src/index.ts"],
+        allowedChanges: ["source"],
+        forbiddenChanges: ["report"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["src/index.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-entrypoint",
+            description: "The application entrypoint is implemented as source.",
+            verification: "npm.cmd run build",
+          },
+        ],
+        verificationCommands: ["npm.cmd run build"],
+      }),
+      "",
+      "- [ ] Update src/index.ts with the entrypoint wiring.",
+      "- [ ] Run npm.cmd run build.",
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({ task, plan });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("plan_manifest_expected_artifact_violation");
+  });
+
   it("does not require a missing manifest for pre-rollout full-mode plans", () => {
     const result = evaluateTaskPlanQuality({
       task: {

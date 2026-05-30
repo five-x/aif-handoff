@@ -488,6 +488,12 @@ function classifyManifestArtifactText(value: string): TaskIntentChangeCategory |
     return "docs";
   }
   if (
+    /(?:^|\/)src(?:\/|$)/.test(normalized) ||
+    /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|cs|c|cpp|h|hpp)$/.test(normalized)
+  ) {
+    return "source";
+  }
+  if (
     /\b(?:config|configuration|settings|env|profile)\b/.test(normalized) ||
     /(?:^|\/)(?:config|configs|\.github|\.codex)(?:\/|$)/.test(normalized) ||
     /(?:^|\/)(?:package|tsconfig|vite|vitest|eslint|prettier|turbo|dockerfile|docker_compose)\b/.test(

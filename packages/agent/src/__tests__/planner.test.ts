@@ -742,6 +742,39 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).not.toContain("Stale Plan");
   });
 
+  it("uses deterministic implementation fallback for concrete roadmap child plans", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-implementation-fallback-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-implementation-fallback",
+        projectId: "project-1",
+        title: "Initialize skeleton: Project structure initialization",
+        description:
+          "Create only the minimal project skeleton.\nFile boundaries: package.json, src/app/**, src/main.*, src/index.*\nAcceptance criteria: The application entry point exists and starts without placeholder-only wiring.\nVerification: npm.cmd run build\nDependencies: none",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-fallback",
+      })
+      .run();
+
+    queryMock.mockReturnValue(streamSuccess("Plan written to PLAN.md"));
+
+    await runPlanner("task-implementation-fallback", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-implementation-fallback"))
+      .get();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain("- [ ] Inspect the declared file boundaries");
+    expect(updatedTask?.plan).toContain("npm.cmd run build");
+    expect(updatedTask?.plan).toContain("package.json");
+  });
+
   it("creates a feature branch when plannerMode=full and git.create_branches=true", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-git-"));
