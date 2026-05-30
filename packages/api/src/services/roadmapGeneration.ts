@@ -2481,6 +2481,11 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
     appCodeSignal,
     verificationSignal,
   ].filter(Boolean).length;
+  const stackConfigConcernCount = (
+    text.match(
+      /\b(?:dev stack|local dev|docker|docker-compose|compose|env|environment|ci\/cd|ci|cd|config|configuration|deployment|tooling|dependencies|secrets?)\b|(?:\u043b\u043e\u043a\u0430\u043b\u044c\u043d|\u0441\u0440\u0435\u0434|\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a|\u043e\u043a\u0440\u0443\u0436\u0435\u043d\u0438|\u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d|\u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446|\u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442|\u0441\u0435\u043a\u0440\u0435\u0442)/giu,
+    ) ?? []
+  ).length;
   const actionCount = (
     text.match(
       /\b(?:setup|configure|implement|build|add|create|wire|integrate|deploy|test|harden|minimize)\b|(?:настройк|создани|создать|реализац|реализ|разработк|разработать|добав|внедр|интеграц|подключ|провер|защит|инициализац|минимизац|хеширован)/giu,
@@ -2497,10 +2502,15 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
     ) ?? []
   ).length;
   const compoundTitleSignal = /[:;,]|\s(?:and|и)\s/i.test(title);
+  const fileBoundaryCount = inferFileBoundaries(task).length;
   const featureFanoutSignal =
     domainSignalCount >= 3 && (compoundTitleSignal || /[;\n]/.test(descriptionForScopeCheck));
+  const stackConfigFanoutSignal =
+    stackConfigSignal &&
+    (compoundTitleSignal || /[;\n]/.test(descriptionForScopeCheck)) &&
+    (stackConfigConcernCount >= 3 || fileBoundaryCount >= 4);
   const explicitScopeFanoutSignal =
-    inferFileBoundaries(task).length >= 3 && (dimensionCount >= 2 || actionCount >= 2);
+    fileBoundaryCount >= 3 && (dimensionCount >= 2 || actionCount >= 2);
   const verificationSuiteBroadSignal =
     verificationSignal && domainSignalCount >= 2 && compoundTitleSignal;
   return (
@@ -2510,6 +2520,7 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
     (broadScopeSignal && dimensionCount >= 2) ||
     (dimensionCount >= 3 && actionCount >= 3) ||
     (featureFanoutSignal && (actionCount >= 1 || dimensionCount >= 1)) ||
+    stackConfigFanoutSignal ||
     (compoundTitleSignal && actionCount >= 1 && domainSignalCount >= 2) ||
     explicitScopeFanoutSignal ||
     verificationSuiteBroadSignal

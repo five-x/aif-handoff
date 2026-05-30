@@ -1498,6 +1498,44 @@ describe("roadmapGeneration", () => {
       expect(findTasksByRoadmapAlias(projectId, "zai-mi-ru")).toHaveLength(0);
     });
 
+    it("decomposes local environment config fanout into proposal microtasks", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      const sourceTitle =
+        "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u0441\u0440\u0435\u0434\u044b: Docker, \u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u044b\u0435 \u043e\u043a\u0440\u0443\u0436\u0435\u043d\u0438\u044f \u0438 CI/CD \u0431\u0430\u0437\u043e\u0432\u0430\u044f \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044f";
+
+      const result = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent: `# Roadmap\n- [ ] ${sourceTitle}`,
+        generation: {
+          alias: "zai-mi-local-env",
+          taskIntent: "feature",
+          tasks: [
+            {
+              title: sourceTitle,
+              description:
+                "Acceptance criteria: local services start; env defaults are documented; CI command exists.\nVerification: npm.cmd run build; npm.cmd test\nScope: docker-compose.yml, .env.example, .github/workflows/ci.yml, src/config/index.ts, package.json",
+              taskIntent: "feature",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+            },
+          ],
+        },
+      });
+
+      expect(result.status).toBe("created");
+      expect(result.proposal.proposedChildren).toHaveLength(4);
+      for (const child of result.proposal.proposedChildren) {
+        expect(child.title).toContain(sourceTitle);
+        expect(child.taskIntent).toBe("feature");
+        expect(child.tags).toContain("microtask");
+        expect(child.splitRationale).toContain("split into executable microtasks");
+      }
+      expect(findTasksByRoadmapAlias(projectId, "zai-mi-local-env")).toHaveLength(0);
+    });
+
     it("rejects approval for a manually persisted stale broad proposal child", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
       const proposalId = crypto.randomUUID();
