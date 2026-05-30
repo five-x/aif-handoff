@@ -161,9 +161,26 @@ export interface ConfigAuditEvent {
 
 const SECRET_KEY_PATTERN =
   /(?:api[_-]?key|secret|token|password|credential|authorization|bearer|cookie|session)/i;
+const NON_SECRET_TOKEN_KEY_NAMES = new Set([
+  "completiontokens",
+  "contexttokens",
+  "contextwindowtokens",
+  "estimatedinputtokens",
+  "inputtokens",
+  "maxinputtokens",
+  "maxoutputtokens",
+  "maxtokens",
+  "maxtokenstotal",
+  "outputtokens",
+  "prompttokens",
+  "tokenbudget",
+  "totaltokens",
+]);
 const VALID_LANGUAGE_TAG = /^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})*$/;
 
 export function isSecretLikeConfigKey(key: string): boolean {
+  const normalized = key.replace(/[_-]+/g, "").toLowerCase();
+  if (NON_SECRET_TOKEN_KEY_NAMES.has(normalized)) return false;
   return SECRET_KEY_PATTERN.test(key);
 }
 

@@ -31,6 +31,22 @@ describe("config governance helpers", () => {
     ).toEqual(["nested.apiKey", "nested.token_header"]);
   });
 
+  it("does not treat runtime token budget keys as secrets", () => {
+    expect(
+      findSecretLikeKeys({
+        qwenLocalAgent: {
+          implementationCanary: {
+            contextTokens: 81_920,
+            maxInputTokens: 60_000,
+            maxOutputTokens: 12_000,
+            tokenBudget: 100_000,
+          },
+        },
+        access_token: "still-secret",
+      }),
+    ).toEqual(["access_token"]);
+  });
+
   it("fingerprints objects deterministically regardless of key order", () => {
     expect(fingerprintConfig({ b: 1, a: { y: 2, x: 3 } })).toBe(
       fingerprintConfig({ a: { x: 3, y: 2 }, b: 1 }),
