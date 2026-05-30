@@ -244,6 +244,43 @@ describe("runPlanner comment selection", () => {
     expect(call.prompt).toContain("must not convert audit, spike, docs, or tests tasks");
   });
 
+  it("includes plan-quality feedback from planning-stage retries", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-quality-feedback-"));
+    const feedback =
+      "Plan quality guard replan 2/3: Plan quality guard (missing_checklist): Plan must contain actionable markdown checklist items.";
+    queryMock.mockReturnValue(
+      streamSuccess(
+        fullModePlan({
+          taskId: "task-quality-feedback-prompt",
+          intent: "feature",
+          scope: ["src/main.ts"],
+          verificationCommand: "npm.cmd run build",
+        }),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-quality-feedback-prompt",
+        projectId: "project-1",
+        title: "Quality feedback prompt",
+        description: "Use the captured plan quality feedback.",
+        status: "planning",
+        blockedFromStatus: "planning",
+        blockedReason: feedback,
+        plannerMode: "full",
+        taskIntent: "feature",
+        useSubagents: true,
+      })
+      .run();
+
+    await runPlanner("task-quality-feedback-prompt", projectRoot);
+
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain("Previous plan-quality feedback that must be addressed:");
+    expect(call.prompt).toContain(feedback);
+  });
+
   it("includes requirements snapshot markdown in planner prompts", async () => {
     const db = testDb.current;
     db.insert(tasks)

@@ -254,8 +254,11 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
   const planDocs = task.planDocs ? "true" : "false";
   const planTests = task.planTests ? "true" : "false";
   const taskIntentContract = formatTaskIntentContractForPrompt(task.taskIntent);
+  const hasPlanQualityFeedback =
+    task.blockedReason?.toLowerCase().startsWith("plan quality guard") ||
+    task.blockedFromStatus === "plan_ready";
   const planningFeedback =
-    task.blockedFromStatus === "plan_ready" && task.blockedReason
+    hasPlanQualityFeedback && task.blockedReason
       ? `Previous plan-quality feedback that must be addressed:\n${task.blockedReason}`
       : "No prior plan-quality feedback was recorded.";
   const diagnosticPlanningConstraint = [
