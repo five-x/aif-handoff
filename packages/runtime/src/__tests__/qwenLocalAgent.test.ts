@@ -3414,6 +3414,47 @@ describe("qwen-local-agent adapter", () => {
     expect(denied.ok).toBe(false);
     expect(denied.error).toContain("allowed write paths (src/app/**, tsconfig*.json)");
   });
+  it("denies writes to generated dependency directories even when no explicit write scope is set", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-generated-write-deny-"));
+    const context = createDefaultQwenToolContext({ projectRoot: root });
+
+    const deniedWrite = await executeQwenLocalTool(
+      "write_file",
+      { path: "node_modules/@types/node/index.d.ts", content: "declare const process: unknown;\n" },
+      context,
+    );
+    const deniedPatch = await executeQwenLocalTool(
+      "apply_patch",
+      {
+        patch: [
+          "diff --git a/dist/index.js b/dist/index.js",
+          "new file mode 100644",
+          "--- /dev/null",
+          "+++ b/dist/index.js",
+          "@@ -0,0 +1 @@",
+          "+console.log('built');",
+          "",
+        ].join("\n"),
+      },
+      context,
+    );
+    const deniedCommit = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["dist/index.js"], message: "commit build output" },
+      context,
+    );
+
+    expect(deniedWrite.ok).toBe(false);
+    expect(deniedPatch.ok).toBe(false);
+    expect(deniedCommit.ok).toBe(false);
+    expect(`${deniedWrite.error} ${deniedPatch.error} ${deniedCommit.error}`).toContain(
+      "generated/dependency directory",
+    );
+    await expect(
+      readFile(path.join(root, "node_modules", "@types", "node", "index.d.ts"), "utf8"),
+    ).rejects.toThrow();
+    await expect(readFile(path.join(root, "dist", "index.js"), "utf8")).rejects.toThrow();
+  });
   it("computes and finalizes audit report manifest hashes for the scoped artifact only", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-hash-"));
     await mkdir(path.join(root, "audit"), { recursive: true });

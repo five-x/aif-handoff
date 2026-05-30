@@ -68,6 +68,18 @@ const SEARCH_SKIP_DIRECTORY_SEGMENTS = new Set([
   ".venv",
   "venv",
 ]);
+const GENERATED_WRITE_DENY_DIRECTORY_SEGMENTS = new Set([
+  "node_modules",
+  ".npm-cache",
+  ".pnpm-store",
+  ".yarn",
+  ".cache",
+  ".turbo",
+  "dist",
+  "build",
+  "coverage",
+  "out",
+]);
 const SEARCH_SKIP_FILE_EXTENSIONS = new Set([
   ".7z",
   ".bin",
@@ -812,8 +824,19 @@ export function appendQwenAuditEvidenceUnit(context, payload) {
 }
 function assertWritePathAllowed(context, relativePath, label) {
   const allowed = context.allowedWritePaths ?? [];
-  if (allowed.length === 0) return;
   const normalized = normalizePathForPolicy(relativePath);
+  const segments = normalized.split("/").filter(Boolean);
+  const deniedSegment = segments.find((segment) =>
+    GENERATED_WRITE_DENY_DIRECTORY_SEGMENTS.has(segment),
+  );
+  if (deniedSegment) {
+    throw new RuntimeExecutionError(
+      `${label} targets generated/dependency directory ${deniedSegment}`,
+      undefined,
+      "permission",
+    );
+  }
+  if (allowed.length === 0) return;
   if (allowed.some((allowedPath) => pathMatchesAllowedWriteBoundary(normalized, allowedPath))) {
     return;
   }
@@ -1499,8 +1522,12 @@ async function computeAuditReportHashTool(args, context) {
 }
 function isAllowedPathForContext(context, relativePath) {
   const allowed = context.allowedWritePaths ?? [];
-  if (allowed.length === 0) return true;
   const normalized = normalizePathForPolicy(relativePath);
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.some((segment) => GENERATED_WRITE_DENY_DIRECTORY_SEGMENTS.has(segment))) {
+    return false;
+  }
+  if (allowed.length === 0) return true;
   return allowed.some((allowedPath) => pathMatchesAllowedWriteBoundary(normalized, allowedPath));
 }
 const MIN_EXPANDABLE_AUDIT_EVIDENCE_REF_LENGTH = "ev_00000000".length;
