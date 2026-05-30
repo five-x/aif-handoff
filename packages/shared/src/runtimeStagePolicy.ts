@@ -168,6 +168,15 @@ function readPositiveInteger(value: unknown): number | undefined {
   return parsed === undefined ? undefined : Math.floor(parsed);
 }
 
+function readCanaryContextTokens(canary: Record<string, unknown>): number | undefined {
+  return (
+    readPositiveInteger(canary.contextTokens) ??
+    readPositiveInteger(canary.contextWindowTokens) ??
+    readPositiveInteger(canary.maxInputTokens) ??
+    readPositiveInteger(canary.context)
+  );
+}
+
 function readCapObject(
   options: Record<string, unknown>,
   stage: RuntimeStage,
@@ -220,8 +229,7 @@ function readCanaryApprovedCaps(
   const maxOutputTokens =
     readPositiveInteger(canary.maxOutputTokens) ?? readPositiveInteger(canary.maxOutput);
   if (maxOutputTokens !== undefined) caps.maxOutputTokens = maxOutputTokens;
-  const contextTokens =
-    readPositiveInteger(canary.contextTokens) ?? readPositiveInteger(canary.contextWindowTokens);
+  const contextTokens = readCanaryContextTokens(canary);
   if (contextTokens !== undefined) caps.contextTokens = contextTokens;
   const repositoryInspectionToolBudget = readPositiveInteger(canary.repositoryInspectionToolBudget);
   if (repositoryInspectionToolBudget !== undefined) {
@@ -309,6 +317,8 @@ export function isStructuredQwenImplementationCanaryEvidence(value: unknown): bo
   if (!source || !(QWEN_IMPLEMENTATION_CANARY_SOURCES as readonly string[]).includes(source)) {
     return false;
   }
+
+  if (readCanaryContextTokens(canary) === undefined) return false;
 
   return isPassVerdict(canary.testVerdict) && isPassVerdict(canary.reviewVerdict);
 }

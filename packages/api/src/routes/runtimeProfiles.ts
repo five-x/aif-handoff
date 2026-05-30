@@ -89,6 +89,10 @@ const implementerCanaryEvidenceSchema = z
     maxToolTurns: z.number().int().positive().max(500),
     timeoutMs: z.number().int().positive().max(3_600_000),
     wallClockTimeoutMs: z.number().int().positive().max(3_600_000).optional(),
+    context: z.number().int().positive().max(1_000_000).optional(),
+    contextTokens: z.number().int().positive().max(1_000_000).optional(),
+    contextWindowTokens: z.number().int().positive().max(1_000_000).optional(),
+    maxInputTokens: z.number().int().positive().max(1_000_000).optional(),
     maxOutput: z.number().int().positive().max(200_000).optional(),
     verificationCommand: z.string().trim().min(1).max(300),
     verificationExitCode: z.literal(0),
@@ -120,6 +124,15 @@ const implementerCanaryEvidenceSchema = z
         code: z.ZodIssueCode.custom,
         path: ["wallClockMs"],
         message: "wallClockMs must not exceed the configured wall-clock limit",
+      });
+    }
+    const contextTokens =
+      value.contextTokens ?? value.contextWindowTokens ?? value.maxInputTokens ?? value.context;
+    if (!contextTokens) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["contextTokens"],
+        message: "Canary evidence must include the runtime context window token limit",
       });
     }
   });
@@ -287,6 +300,11 @@ function buildImplementerCanaryRecord(input: {
   evidence: ImplementerCanaryEvidencePayload;
 }): Record<string, unknown> {
   const evidence = input.evidence;
+  const contextTokens =
+    evidence.contextTokens ??
+    evidence.contextWindowTokens ??
+    evidence.maxInputTokens ??
+    evidence.context;
   return {
     passed: true,
     source: "structured_evidence",
@@ -306,6 +324,7 @@ function buildImplementerCanaryRecord(input: {
     maxToolTurns: evidence.maxToolTurns,
     timeoutMs: evidence.timeoutMs,
     wallClockTimeoutMs: evidence.wallClockTimeoutMs ?? evidence.timeoutMs,
+    contextTokens,
     maxOutput: evidence.maxOutput ?? null,
     verificationCommand: evidence.verificationCommand,
     verificationExitCode: evidence.verificationExitCode,

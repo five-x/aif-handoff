@@ -443,6 +443,7 @@ describe("runtimeProfiles API", () => {
           maxToolTurns: 40,
           timeoutMs: 600_000,
           wallClockTimeoutMs: 600_000,
+          contextTokens: 81_920,
           maxOutput: 8192,
           verificationCommand: "npm test",
           verificationExitCode: 0,
@@ -461,6 +462,7 @@ describe("runtimeProfiles API", () => {
       source: "structured_evidence",
       testVerdict: "TEST PASS",
       reviewVerdict: "REVIEW PASS",
+      contextTokens: 81_920,
     });
     expect(body.profile.options.qwenLocalAgent.implementationCanary.canaryId).toBeTruthy();
     expect(evaluateRuntimeProfileStageCapability(body.profile, "implementer")).toMatchObject({
@@ -471,6 +473,44 @@ describe("runtimeProfiles API", () => {
       type: "runtime_profile:updated",
       payload: expect.objectContaining({ id: profile.id }),
     });
+  });
+
+  it("rejects qwen implementer canary evidence without a context window", async () => {
+    const createRes = await app.request("/runtime-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "MI50",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const profile = await createRes.json();
+
+    const evidenceRes = await app.request(
+      `/runtime-profiles/${profile.id}/implementer-canary/evidence`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wallClockMs: 120_000,
+          toolTurns: 18,
+          repeatedToolCalls: 1,
+          repeatedToolCallLimit: 3,
+          maxToolTurns: 40,
+          timeoutMs: 600_000,
+          verificationCommand: "npm test",
+          verificationExitCode: 0,
+          changedFiles: ["src/index.ts"],
+          toolUseObserved: true,
+          testVerdict: "TEST PASS",
+          reviewVerdict: "REVIEW PASS",
+          summary: "Canary completed a repository edit with tool use and tests.",
+        }),
+      },
+    );
+    expect(evidenceRes.status).toBe(400);
   });
 
   it("rejects canary evidence with raw provider diagnostics", async () => {
@@ -498,6 +538,7 @@ describe("runtimeProfiles API", () => {
           repeatedToolCallLimit: 3,
           maxToolTurns: 40,
           timeoutMs: 600_000,
+          contextTokens: 81_920,
           verificationCommand: "npm test",
           verificationExitCode: 0,
           changedFiles: ["src/index.ts"],

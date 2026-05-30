@@ -41,6 +41,7 @@ function implementationCanaryEvidence() {
     maxToolTurns: 200,
     timeoutMs: 1_800_000,
     wallClockTimeoutMs: 1_800_000,
+    contextTokens: 81_920,
     maxOutput: 12_000,
   };
 }
@@ -87,6 +88,19 @@ describe("runtime stage policy", () => {
     expect(decision.reason).toBe("qwen_implementation_canary");
   });
 
+  it("does not allow qwen-local-agent implementation when canary evidence omits context", () => {
+    const { contextTokens: _contextTokens, ...canary } = implementationCanaryEvidence();
+    const decision = evaluateRuntimeProfileStageCapability(
+      profile({
+        options: { qwenLocalAgent: { implementationCanary: canary } },
+      }),
+      "implementer",
+    );
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toBe("qwen_implementation_not_enabled");
+  });
+
   it("lets explicit stage deny override otherwise allowed stages", () => {
     const decision = evaluateRuntimeProfileStageCapability(
       profile({
@@ -126,6 +140,7 @@ describe("runtime stage policy", () => {
 
     expect(caps.maxToolTurns).toBe(200);
     expect(caps.wallClockMs).toBe(1_800_000);
+    expect(caps.contextTokens).toBe(81_920);
     expect(caps.maxOutputTokens).toBe(12_000);
     expect(caps.repositoryInspectionToolBudget).toBe(200);
     expect(caps.retryCount).toBe(0);
