@@ -2431,6 +2431,15 @@ function inferDependsOn(task: GeneratedTask): string[] {
 }
 
 function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
+  if (
+    hasStandardMicrotaskMetadata(task.description) &&
+    /^\s*original roadmap item\s*:/im.test(task.description) &&
+    /^(?:initialize|configure|implement|add|инициализировать|настроить|реализовать|добавить)\b/i.test(
+      task.title.trim(),
+    )
+  ) {
+    return false;
+  }
   const descriptionForScopeCheck = task.description
     .split(/\r?\n/)
     .filter(
@@ -2441,22 +2450,31 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
     )
     .join("\n");
   const text = `${task.title}\n${descriptionForScopeCheck}`.toLowerCase();
-  const broadScopeSignal = /\b(?:entire|whole|complete|full|end-to-end|production-ready)\b/.test(
-    text,
-  );
+  const title = task.title.trim().toLowerCase();
+  const broadScopeSignal =
+    /\b(?:entire|whole|complete|full|end-to-end|production-ready)\b/.test(text) ||
+    /(?:\bmvp\b|\bcore\b|полностью|полный|полная|весь|вся|сквозн|комплексн)/i.test(text);
   const scaffoldSignal =
     /\b(?:scaffold|scaffolding|bootstrap|initialize|skeleton|project architecture|project setup)\b/.test(
       text,
-    );
+    ) || /(?:скелет|каркас|базов\w*\s+структур|структур\w+\s+директор|инициализац)/i.test(text);
   const stackConfigSignal =
     /\b(?:dev stack|developer stack|local dev|tooling|dependencies|config|configuration|base config|baseline configuration|environment|deployment)\b/.test(
+      text,
+    ) ||
+    /(?:dev-стек|локальн\w+\s+dev|настройк|конфигурац|окружени|зависимост|переменн\w+\s+окружени|секрет|docker|compose|ci\/cd|env)/i.test(
       text,
     );
   const appCodeSignal =
     /\b(?:app code|application code|frontend|backend|api|database|ui|auth|payments|routing|state management|persistence)\b/.test(
       text,
+    ) ||
+    /(?:реализац|разработк|api|эндпоинт|бд|баз\w+\s+данн|модел|миграц|сервис|движок|интерфейс|компонент|админ|crud|оффер|партнер|лид|квиз|анкета|матчинг|скоринг|редирект|постбэк|согласи|consent|click_id|utm|pii|rate limit)/i.test(
+      text,
     );
-  const verificationSignal = /\b(?:test|tests|smoke|verification|e2e|coverage)\b/.test(text);
+  const verificationSignal =
+    /\b(?:test|tests|smoke|verification|e2e|coverage)\b/.test(text) ||
+    /(?:тест|провер|верификац|скрапинг|линтер|smoke|coverage)/i.test(text);
   const dimensionCount = [
     scaffoldSignal,
     stackConfigSignal,
@@ -2464,19 +2482,37 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
     verificationSignal,
   ].filter(Boolean).length;
   const actionCount = (
-    text.match(/\b(?:setup|configure|implement|build|add|create|wire|integrate|deploy|test)\b/g) ??
-    []
+    text.match(
+      /\b(?:setup|configure|implement|build|add|create|wire|integrate|deploy|test|harden|minimize)\b|(?:настройк|создани|создать|реализац|реализ|разработк|разработать|добав|внедр|интеграц|подключ|провер|защит|инициализац|минимизац|хеширован)/giu,
+    ) ?? []
   ).length;
   const domainLikeProduct = /\bbuild\s+[\w-]+\.[a-z]{2,}\b/i.test(task.title);
-  const normalizedTitle = task.title.trim().toLowerCase();
   const setupLikeBroadWork =
-    /^(?:setup|set up|scaffold|bootstrap|initialize|build)\b/.test(normalizedTitle) &&
-    dimensionCount >= 3;
+    /^(?:setup|set up|scaffold|bootstrap|initialize|build)\b/.test(title) && dimensionCount >= 3;
+  const russianSetupLikeBroadWork =
+    /^(?:настройк|создани|инициализац|скелет|каркас|сборк)/i.test(title) && dimensionCount >= 2;
+  const domainSignalCount = (
+    text.match(
+      /\b(?:api|endpoint|database|db|model|migration|crud|utm|click_id|postback|consent|security|privacy|pii|rate|admin|offer|lead|quiz|matching|redirect|docs|runbook|seed|test|compliance)\b|(?:эндпоинт|бд|модел|миграц|постбэк|согласи|безопасност|приватност|партнер|оффер|лид|квиз|анкета|матчинг|скоринг|редирект|документ|runbook|сид|тест|комплаенс|модерац)/giu,
+    ) ?? []
+  ).length;
+  const compoundTitleSignal = /[:;,]|\s(?:and|и)\s/i.test(title);
+  const featureFanoutSignal =
+    domainSignalCount >= 3 && (compoundTitleSignal || /[;\n]/.test(descriptionForScopeCheck));
+  const explicitScopeFanoutSignal =
+    inferFileBoundaries(task).length >= 3 && (dimensionCount >= 2 || actionCount >= 2);
+  const verificationSuiteBroadSignal =
+    verificationSignal && domainSignalCount >= 2 && compoundTitleSignal;
   return (
     domainLikeProduct ||
     setupLikeBroadWork ||
+    russianSetupLikeBroadWork ||
     (broadScopeSignal && dimensionCount >= 2) ||
-    (dimensionCount >= 3 && actionCount >= 3)
+    (dimensionCount >= 3 && actionCount >= 3) ||
+    (featureFanoutSignal && (actionCount >= 1 || dimensionCount >= 1)) ||
+    (compoundTitleSignal && actionCount >= 1 && domainSignalCount >= 2) ||
+    explicitScopeFanoutSignal ||
+    verificationSuiteBroadSignal
   );
 }
 
@@ -2504,23 +2540,41 @@ function buildBroadTaskMicrotasks(
 ): TaskSplitProposedChild[] {
   const phaseName = task.phaseName || "Implementation";
   const sourceTitle = task.title.replace(/\.$/, "").replace(/^\s*build\s+/i, "");
+  const cyrillicTitle = /[а-яё]/i.test(sourceTitle);
+  const scaffoldTitle = cyrillicTitle
+    ? `Инициализировать скелет: ${sourceTitle}`
+    : `Initialize ${sourceTitle} scaffold`;
+  const configurationTitle = cyrillicTitle
+    ? `Настроить dev-стек: ${sourceTitle}`
+    : `Configure ${sourceTitle} development stack`;
+  const appSliceTitle = cyrillicTitle
+    ? `Реализовать первый срез: ${sourceTitle}`
+    : `Implement ${sourceTitle} first app slice`;
+  const smokeTitle = cyrillicTitle
+    ? `Добавить smoke-проверку: ${sourceTitle}`
+    : `Add ${sourceTitle} smoke verification`;
   const templates = [
     {
       suffix: "scaffold",
-      title: `Initialize ${sourceTitle} scaffold`,
-      summary: "Create only the minimal project or feature skeleton needed for later slices.",
+      title: scaffoldTitle,
+      summary: cyrillicTitle
+        ? "Создать только минимальный скелет проекта или фичи для следующих срезов."
+        : "Create only the minimal project or feature skeleton needed for later slices.",
       fileBoundaries: ["package.json", "src/app/**", "src/main.*", "src/index.*"],
       acceptanceCriteria: [
-        "The app or feature entrypoint exists and starts without placeholder-only wiring.",
+        cyrillicTitle
+          ? "Точка входа приложения или фичи существует и запускается без placeholder-only wiring."
+          : "The app or feature entrypoint exists and starts without placeholder-only wiring.",
       ],
       verificationCommands: ["npm.cmd run build"],
       dependsOn: [] as string[],
     },
     {
       suffix: "configuration",
-      title: `Configure ${sourceTitle} development stack`,
-      summary:
-        "Add only configuration, scripts, and environment defaults required by the scaffold.",
+      title: configurationTitle,
+      summary: cyrillicTitle
+        ? "Добавить только конфигурацию, скрипты и env-defaults, нужные для скелета."
+        : "Add only configuration, scripts, and environment defaults required by the scaffold.",
       fileBoundaries: [
         "package.json",
         "tsconfig*.json",
@@ -2529,32 +2583,42 @@ function buildBroadTaskMicrotasks(
         "config/**",
       ],
       acceptanceCriteria: [
-        "Required scripts and configuration files are present and documented by names.",
+        cyrillicTitle
+          ? "Нужные scripts и configuration files присутствуют и документированы по именам."
+          : "Required scripts and configuration files are present and documented by names.",
       ],
       verificationCommands: ["npm.cmd run build"],
-      dependsOn: [`Initialize ${sourceTitle} scaffold`],
+      dependsOn: [scaffoldTitle],
     },
     {
       suffix: "app-code",
-      title: `Implement ${sourceTitle} first app slice`,
-      summary: "Implement the first user-visible app slice without broad follow-on features.",
+      title: appSliceTitle,
+      summary: cyrillicTitle
+        ? "Реализовать первый пользовательский или API-срез без последующих широких функций."
+        : "Implement the first user-visible app slice without broad follow-on features.",
       fileBoundaries: ["src/app/**", "src/components/**", "src/routes/**", "src/services/**"],
       acceptanceCriteria: [
-        "The first visible workflow renders or executes with deterministic sample data.",
+        cyrillicTitle
+          ? "Первый видимый workflow рендерится или выполняется на deterministic sample data."
+          : "The first visible workflow renders or executes with deterministic sample data.",
       ],
       verificationCommands: ["npm.cmd test"],
-      dependsOn: [`Configure ${sourceTitle} development stack`],
+      dependsOn: [configurationTitle],
     },
     {
       suffix: "smoke-verification",
-      title: `Add ${sourceTitle} smoke verification`,
-      summary: "Add focused smoke coverage for the scaffold, configuration, and first app slice.",
+      title: smokeTitle,
+      summary: cyrillicTitle
+        ? "Добавить focused smoke coverage для скелета, конфигурации и первого среза."
+        : "Add focused smoke coverage for the scaffold, configuration, and first app slice.",
       fileBoundaries: ["tests/**", "src/**/*.test.*", "package.json"],
       acceptanceCriteria: [
-        "A focused smoke check fails before regressions and passes for the first app slice.",
+        cyrillicTitle
+          ? "Focused smoke check падает до регрессии и проходит для первого среза."
+          : "A focused smoke check fails before regressions and passes for the first app slice.",
       ],
       verificationCommands: ["npm.cmd test"],
-      dependsOn: [`Implement ${sourceTitle} first app slice`],
+      dependsOn: [appSliceTitle],
     },
   ];
 

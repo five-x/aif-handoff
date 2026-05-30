@@ -651,7 +651,12 @@ describe("projects API", () => {
         proposal: {
           roadmapAlias: "split-v1",
           status: "pending",
-          proposedChildren: [expect.objectContaining({ title: "Build split child" })],
+          proposedChildren: [
+            expect.objectContaining({ title: "Initialize split child scaffold" }),
+            expect.objectContaining({ title: "Configure split child development stack" }),
+            expect.objectContaining({ title: "Implement split child first app slice" }),
+            expect.objectContaining({ title: "Add split child smoke verification" }),
+          ],
         },
       });
       expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(0);
@@ -681,7 +686,7 @@ describe("projects API", () => {
       expect(approved.createdTaskIds).toEqual(expect.arrayContaining([approved.containerTaskId]));
 
       const stored = findTasksByRoadmapAlias("roadmap-split-import", "split-v1");
-      expect(stored).toHaveLength(2);
+      expect(stored).toHaveLength(5);
       const parent = findTaskById(approved.containerTaskId)!;
       const childId = approved.createdTaskIds.find(
         (taskId: string) => taskId !== approved.containerTaskId,
@@ -705,7 +710,7 @@ describe("projects API", () => {
         { method: "POST" },
       );
       expect(duplicateApprove.status).toBe(200);
-      expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(2);
+      expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(5);
     });
 
     it("imports and approves a broad app roadmap child as executable microtasks", async () => {
@@ -920,7 +925,7 @@ describe("projects API", () => {
       expect(approved.containerTaskId).toBeTruthy();
       expect(approved.createdTaskIds).toEqual(expect.arrayContaining([approved.containerTaskId]));
       const created = findTasksByRoadmapAlias("roadmap-split-canary", "split-approve");
-      expect(created).toHaveLength(2);
+      expect(created).toHaveLength(5);
       const parent = findTaskById(approved.containerTaskId)!;
       const childId = approved.createdTaskIds.find(
         (taskId: string) => taskId !== approved.containerTaskId,

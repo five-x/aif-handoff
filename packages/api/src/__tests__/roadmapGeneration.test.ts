@@ -1453,6 +1453,51 @@ describe("roadmapGeneration", () => {
       expect(findTasksByRoadmapAlias(projectId, "zai-mi")).toHaveLength(0);
     });
 
+    it("decomposes Russian broad feature children into proposal microtasks before persistence", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent:
+          "# Roadmap\n- [ ] Настройка инфраструктуры: docker-compose, env и базовая структура",
+        generation: {
+          alias: "zai-mi-ru",
+          taskIntent: "feature",
+          tasks: [
+            {
+              title: "Настройка инфраструктуры: docker-compose, env и базовая структура",
+              description:
+                "Acceptance criteria: приложение запускается локально; секреты берутся из env; структура директорий соответствует стандартам.\nVerification: npm.cmd run build; npm.cmd test\nScope: docker-compose.yml, .env.example, src/main, src/config, package.json, tests/**",
+              taskIntent: "feature",
+              phase: 1,
+              phaseName: "MVP",
+              sequence: 1,
+            },
+          ],
+        },
+      });
+
+      expect(result.status).toBe("created");
+      expect(result.proposal.proposedChildren.map((child) => child.title)).toEqual([
+        "Инициализировать скелет: Настройка инфраструктуры: docker-compose, env и базовая структура",
+        "Настроить dev-стек: Настройка инфраструктуры: docker-compose, env и базовая структура",
+        "Реализовать первый срез: Настройка инфраструктуры: docker-compose, env и базовая структура",
+        "Добавить smoke-проверку: Настройка инфраструктуры: docker-compose, env и базовая структура",
+      ]);
+      expect(result.proposal.proposedChildren).toHaveLength(4);
+      for (const child of result.proposal.proposedChildren) {
+        expect(child.taskIntent).toBe("feature");
+        expect(child.tags).toContain("microtask");
+        expect(child.fileBoundaries?.length).toBeGreaterThan(0);
+        expect(child.acceptanceCriteria?.length).toBeGreaterThan(0);
+        expect(child.verificationCommands?.length).toBeGreaterThan(0);
+        expect(child.splitRationale).toContain("split into executable microtasks");
+      }
+      expect(findTasksByRoadmapAlias(projectId, "zai-mi-ru")).toHaveLength(0);
+    });
+
     it("rejects approval for a manually persisted stale broad proposal child", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
       const proposalId = crypto.randomUUID();
