@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PLAN_MANIFEST_REQUIRED_CREATED_AT,
+  TaskPlanQualityError,
   projects,
   resetEnvCache,
   taskComments,
@@ -35,6 +36,7 @@ const { runPlanner } = await import("../subagents/planner.js");
 const {
   createCurrentRequirementsSnapshot,
   createRoadmapBatchContract,
+  findTaskById,
   recordTaskStageArtifactAttempt,
 } = await import("@aif/data");
 
@@ -48,6 +50,48 @@ function streamSuccess(result: string): AsyncIterable<{
       yield { type: "result", subtype: "success", result };
     },
   };
+}
+
+function fullModePlan(input: {
+  taskId: string;
+  intent?: "general" | "feature";
+  scope?: string[];
+  allowedChanges?: string[];
+  forbiddenChanges?: string[];
+  verificationCommand?: string;
+}): string {
+  const intent = input.intent ?? "general";
+  const scope = input.scope ?? ["src/main.ts"];
+  const verificationCommand = input.verificationCommand ?? "npm.cmd run build";
+  return [
+    "## Plan",
+    `- [ ] Update ${scope[0]} for ${input.taskId} within the declared task scope.`,
+    `- [ ] Run ${verificationCommand} and record the result.`,
+    "",
+    "```aif-plan-manifest",
+    JSON.stringify(
+      {
+        version: 1,
+        taskId: input.taskId,
+        intent,
+        scope,
+        allowedChanges: input.allowedChanges ?? ["source"],
+        forbiddenChanges: input.forbiddenChanges ?? ["report"],
+        expectedArtifacts: [{ kind: "source_diff", paths: scope }],
+        acceptanceCriteria: [
+          {
+            id: "ac-1",
+            description: "The task-specific implementation delta is complete.",
+            verification: verificationCommand,
+          },
+        ],
+        verificationCommands: [verificationCommand],
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
 }
 
 describe("runPlanner comment selection", () => {
@@ -158,6 +202,18 @@ describe("runPlanner comment selection", () => {
 
   it("requires an aif-plan-manifest block in full-mode planner prompts", async () => {
     const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-full-manifest-"));
+    queryMock.mockReturnValue(
+      streamSuccess(
+        fullModePlan({
+          taskId: "task-full-manifest-prompt",
+          intent: "feature",
+          scope: ["packages/shared/src/planQuality.ts"],
+          verificationCommand:
+            "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts",
+        }),
+      ),
+    );
     db.insert(tasks)
       .values({
         id: "task-full-manifest-prompt",
@@ -171,7 +227,7 @@ describe("runPlanner comment selection", () => {
       })
       .run();
 
-    await runPlanner("task-full-manifest-prompt", "/tmp/planner-test");
+    await runPlanner("task-full-manifest-prompt", projectRoot);
 
     const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
     expect(call.prompt).toContain("Full-mode planning requirement");
@@ -225,6 +281,52 @@ describe("runPlanner comment selection", () => {
     expect(call.prompt).toContain("# Task Requirements Context");
     expect(call.prompt).toContain("Answer: Administrators");
     expect(call.prompt).not.toContain("[object Object]");
+  });
+
+  it("rejects malformed raise-questions text instead of persisting it as a plan", async () => {
+    queryMock.mockReturnValue(
+      streamSuccess(`аиф-raise-questions
+{
+  "version": 1,
+  "action": "raise_questions",
+  "stage": "planning",
+  "targetResumeStage": "planning",
+  "reason": "Product clarification is required before planning can continue.",
+  "questions": [
+    {
+      "idempotencyKey": "planning-product-clarification",
+      "question": "What product behavior should this stage assume?",
+      "whyNeeded": "The stage cannot proceed safely without this product decision.",
+      "blocking": true,
+      "answerType": "textarea"
+    }
+  ]
+}`),
+    );
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-malformed-raise-questions-plan",
+        projectId: "project-1",
+        title: "Инициализировать скелет",
+        description: [
+          "File boundaries: package.json, src/main.ts",
+          "Acceptance criteria: entry point builds.",
+          "Verification: npm.cmd run build",
+        ].join("\n"),
+        status: "planning",
+        useSubagents: false,
+        plannerMode: "full",
+        planPath: ".ai-factory/plans/skeleton.md",
+        taskIntent: "feature",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      })
+      .run();
+
+    await expect(
+      runPlanner("task-malformed-raise-questions-plan", "/tmp/planner-test"),
+    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+    expect(findTaskById("task-malformed-raise-questions-plan")?.plan).toBeNull();
   });
 
   it("includes accepted research and design artifact bodies in planner prompts", async () => {
@@ -597,9 +699,21 @@ describe("runPlanner comment selection", () => {
         description: "Implement JWT login",
         status: "planning",
         plannerMode: "full",
+        taskIntent: "feature",
         useSubagents: true,
       })
       .run();
+
+    queryMock.mockReturnValue(
+      streamSuccess(
+        fullModePlan({
+          taskId: "task-git-1",
+          intent: "feature",
+          scope: ["src/auth.ts"],
+          verificationCommand: "npm.cmd run build",
+        }),
+      ),
+    );
 
     await runPlanner("task-git-1", projectRoot);
 
@@ -651,9 +765,21 @@ describe("runPlanner comment selection", () => {
         description: "",
         status: "planning",
         plannerMode: "full",
+        taskIntent: "feature",
         useSubagents: true,
       })
       .run();
+
+    queryMock.mockReturnValue(
+      streamSuccess(
+        fullModePlan({
+          taskId: "task-worktree-1",
+          intent: "feature",
+          scope: ["src/worktree.ts"],
+          verificationCommand: "npm.cmd run build",
+        }),
+      ),
+    );
 
     await runPlanner("task-worktree-1", projectRoot);
 
@@ -820,9 +946,21 @@ describe("runPlanner comment selection", () => {
         description: "",
         status: "planning",
         plannerMode: "full",
+        taskIntent: "feature",
         useSubagents: true,
       })
       .run();
+
+    queryMock.mockReturnValue(
+      streamSuccess(
+        fullModePlan({
+          taskId: "task-env-1",
+          intent: "feature",
+          scope: ["src/env.ts"],
+          verificationCommand: "npm.cmd run build",
+        }),
+      ),
+    );
 
     await runPlanner("task-env-1", projectRoot);
 

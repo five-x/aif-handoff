@@ -19,6 +19,8 @@ import {
   getEnv,
   getProjectConfig,
   normalizeAifPlanManifestForTask,
+  evaluateTaskPlanQuality,
+  TaskPlanQualityError,
   type TaskPlanQualityTask,
 } from "@aif/shared";
 import { executeSubagentQuery } from "../subagentQuery.js";
@@ -63,6 +65,16 @@ function buildPlannerPlanQualityTaskContext(task: PlannerTask): PlannerTask & Ta
     roadmapBatchId: artifact?.batchId ?? null,
     sourceReportArtifacts,
   };
+}
+
+function assertPlannerOutputQuality(task: PlannerTask, planText: string): void {
+  const result = evaluateTaskPlanQuality({
+    task: buildPlannerPlanQualityTaskContext(task),
+    plan: planText,
+  });
+  if (!result.ok) {
+    throw new TaskPlanQualityError(result);
+  }
 }
 
 function extractPlanPathFromResult(resultText: string): string | null {
@@ -470,6 +482,8 @@ ${taskContext}`;
     task: buildPlannerPlanQualityTaskContext(task),
     plan: diskPlan ?? normalizePlannerResult(rawResult),
   });
+
+  assertPlannerOutputQuality(task, resultText);
 
   persistTaskPlanForTask({
     taskId,

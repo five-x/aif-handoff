@@ -3955,7 +3955,10 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       return false;
     }
 
-    const planQualityError = stage.label === "plan-checker" ? findTaskPlanQualityError(err) : null;
+    const planQualityError =
+      stage.label === "planner" || stage.label === "plan-checker"
+        ? findTaskPlanQualityError(err)
+        : null;
     if (planQualityError) {
       handlePlanQualityFailure({
         task,
