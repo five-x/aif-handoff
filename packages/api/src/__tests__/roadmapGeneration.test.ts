@@ -1534,6 +1534,18 @@ describe("roadmapGeneration", () => {
         expect(child.splitRationale).toContain("split into executable microtasks");
       }
       expect(findTasksByRoadmapAlias(projectId, "zai-mi-local-env")).toHaveLength(0);
+
+      const approved = approveRoadmapSplitProposal({
+        projectId,
+        proposalId: result.proposal.id,
+        approvedBy: "test",
+      });
+
+      expect(approved.status).toBe("approved");
+      if (approved.status !== "approved")
+        throw new Error(`Unexpected approval status ${approved.status}`);
+      expect(approved.proposal.createdTaskIds).toHaveLength(5);
+      expect(findTasksByRoadmapAlias(projectId, "zai-mi-local-env")).toHaveLength(5);
     });
 
     it("rejects approval for a manually persisted stale broad proposal child", () => {

@@ -2431,6 +2431,24 @@ function inferDependsOn(task: GeneratedTask): string[] {
 }
 
 function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
+  const generatedMicrotaskTitle = task.title.trim().toLowerCase();
+  const hasGeneratedMicrotaskPrefix =
+    /^(?:initialize|configure|implement|add)\b/i.test(generatedMicrotaskTitle) ||
+    generatedMicrotaskTitle.startsWith(
+      "\u0438\u043d\u0438\u0446\u0438\u0430\u043b\u0438\u0437\u0438\u0440\u043e\u0432\u0430\u0442\u044c",
+    ) ||
+    generatedMicrotaskTitle.startsWith("\u043d\u0430\u0441\u0442\u0440\u043e\u0438\u0442\u044c") ||
+    generatedMicrotaskTitle.startsWith(
+      "\u0440\u0435\u0430\u043b\u0438\u0437\u043e\u0432\u0430\u0442\u044c",
+    ) ||
+    generatedMicrotaskTitle.startsWith("\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c");
+  if (
+    hasStandardMicrotaskMetadata(task.description) &&
+    /^\s*original roadmap item\s*:/im.test(task.description) &&
+    hasGeneratedMicrotaskPrefix
+  ) {
+    return false;
+  }
   if (
     hasStandardMicrotaskMetadata(task.description) &&
     /^\s*original roadmap item\s*:/im.test(task.description) &&
