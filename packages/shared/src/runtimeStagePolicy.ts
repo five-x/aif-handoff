@@ -202,6 +202,46 @@ function readConfiguredCaps(
   return caps;
 }
 
+function readCanaryApprovedCaps(
+  options: Record<string, unknown>,
+  stage: RuntimeStage,
+): RuntimeStageCaps {
+  if (stage !== "implementer") return {};
+  const qwenOptions = asRecord(options.qwenLocalAgent);
+  const canary = asRecord(qwenOptions.implementationCanary);
+  if (!isStructuredQwenImplementationCanaryEvidence(canary)) return {};
+
+  const caps: RuntimeStageCaps = {};
+  const maxToolTurns = readPositiveInteger(canary.maxToolTurns);
+  if (maxToolTurns !== undefined) caps.maxToolTurns = maxToolTurns;
+  const wallClockMs =
+    readPositiveInteger(canary.wallClockTimeoutMs) ?? readPositiveInteger(canary.timeoutMs);
+  if (wallClockMs !== undefined) caps.wallClockMs = wallClockMs;
+  const maxOutputTokens =
+    readPositiveInteger(canary.maxOutputTokens) ?? readPositiveInteger(canary.maxOutput);
+  if (maxOutputTokens !== undefined) caps.maxOutputTokens = maxOutputTokens;
+  const contextTokens =
+    readPositiveInteger(canary.contextTokens) ?? readPositiveInteger(canary.contextWindowTokens);
+  if (contextTokens !== undefined) caps.contextTokens = contextTokens;
+  const repositoryInspectionToolBudget = readPositiveInteger(canary.repositoryInspectionToolBudget);
+  if (repositoryInspectionToolBudget !== undefined) {
+    caps.repositoryInspectionToolBudget = repositoryInspectionToolBudget;
+  }
+  const retryCount = readPositiveInteger(canary.retryCount);
+  if (retryCount !== undefined) caps.retryCount = retryCount;
+  return caps;
+}
+
+function getQwenStageDefaultCaps(
+  options: Record<string, unknown>,
+  stage: RuntimeStage,
+): RuntimeStageCaps {
+  return {
+    ...(QWEN_DEFAULT_STAGE_CAPS[stage] ?? {}),
+    ...readCanaryApprovedCaps(options, stage),
+  };
+}
+
 function mergeStrictCaps(
   defaults: RuntimeStageCaps,
   configured: RuntimeStageCaps,
@@ -307,7 +347,7 @@ export function getRuntimeStageCaps(
   const options = asRecord(profile.options);
   const configured = readConfiguredCaps(options, stage);
   if (!isQwenLocalRuntimeProfile(profile)) return configured;
-  return mergeStrictCaps(QWEN_DEFAULT_STAGE_CAPS[stage] ?? {}, configured);
+  return mergeStrictCaps(getQwenStageDefaultCaps(options, stage), configured);
 }
 
 export function evaluateRuntimeProfileStageCapability(

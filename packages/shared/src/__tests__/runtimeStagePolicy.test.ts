@@ -38,6 +38,10 @@ function implementationCanaryEvidence() {
     passedAt: "2026-05-30T00:00:00.000Z",
     testVerdict: "TEST PASS",
     reviewVerdict: "REVIEW PASS",
+    maxToolTurns: 200,
+    timeoutMs: 1_800_000,
+    wallClockTimeoutMs: 1_800_000,
+    maxOutput: 12_000,
   };
 }
 
@@ -110,6 +114,20 @@ describe("runtime stage policy", () => {
     expect(caps.maxToolTurns).toBe(20);
     expect(caps.maxOutputTokens).toBe(4_000);
     expect(caps.repositoryInspectionToolBudget).toBe(16);
+  });
+
+  it("uses structured canary caps for approved qwen implementation", () => {
+    const caps = getRuntimeStageCaps(
+      profile({
+        options: { qwenLocalAgent: { implementationCanary: implementationCanaryEvidence() } },
+      }),
+      "implementer",
+    );
+
+    expect(caps.maxToolTurns).toBe(200);
+    expect(caps.wallClockMs).toBe(1_800_000);
+    expect(caps.maxOutputTokens).toBe(12_000);
+    expect(caps.retryCount).toBe(0);
   });
 
   it("parses configured caps and keeps qwen defaults strict", () => {
