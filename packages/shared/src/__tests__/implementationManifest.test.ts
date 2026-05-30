@@ -294,4 +294,67 @@ describe("implementation manifest extraction", () => {
     expect(result.ok).toBe(true);
     expect(result.issues).toEqual([]);
   });
+
+  it("treats npm.cmd and npm as the same observed verification command on Linux runners", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog("npm run build"),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          verificationEvidence: [
+            {
+              id: "ver-1",
+              command: "npm.cmd run build",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "> app@1.0.0 build\n> tsc\n",
+              outputPreviewTruncated: false,
+            },
+          ],
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues.map((entry) => entry.code)).not.toContain(
+      "verification_command_not_observed",
+    );
+  });
+
+  it("does not block on synced=false when plan checklist counts are complete", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          planChecklist: {
+            total: 4,
+            completed: 4,
+            pending: 0,
+            synced: false,
+            pendingItems: [],
+          },
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues.map((entry) => entry.code)).not.toContain("plan_checklist_drift");
+  });
 });

@@ -575,7 +575,11 @@ function verificationHasOutputIdentity(entry: ImplementationManifestVerification
 }
 
 function normalizeCommandText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLowerCase();
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .replace(/\b(npm|npx|pnpm|yarn|bun)\.cmd\b/g, "$1");
 }
 
 function latestImplementationActivitySection(
@@ -874,8 +878,12 @@ export function validateImplementationManifest(
   const checklistCountsConsistent =
     manifest.planChecklist.total ===
     manifest.planChecklist.completed + manifest.planChecklist.pending;
+  const checklistHasCompleteCounts =
+    manifest.planChecklist.total > 0 &&
+    manifest.planChecklist.pending === 0 &&
+    manifest.planChecklist.completed === manifest.planChecklist.total;
   if (
-    !manifest.planChecklist.synced ||
+    !checklistHasCompleteCounts ||
     manifest.planChecklist.pending > 0 ||
     !checklistCountsConsistent ||
     manifest.planChecklist.completed > manifest.planChecklist.total
