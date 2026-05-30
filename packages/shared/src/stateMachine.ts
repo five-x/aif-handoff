@@ -48,6 +48,13 @@ export function isManualReviewBlockedTask(
   );
 }
 
+function isRetryablePlanQualityBlock(
+  task: Pick<Task, "blockedReason" | "blockedFromStatus">,
+): boolean {
+  const reason = task.blockedReason?.toLowerCase() ?? "";
+  return task.blockedFromStatus === "planning" && reason.startsWith("plan quality guard");
+}
+
 export function applyHumanTaskEvent(
   task: Pick<
     Task,
@@ -177,7 +184,7 @@ export function applyHumanTaskEvent(
       if (!task.blockedFromStatus) {
         return { ok: false, error: "blockedFromStatus is missing for retry_from_blocked" };
       }
-      if (isManualReviewBlockedTask(task)) {
+      if (isManualReviewBlockedTask(task) && !isRetryablePlanQualityBlock(task)) {
         return {
           ok: false,
           error: "retry_from_blocked is not allowed for manual review blocks",

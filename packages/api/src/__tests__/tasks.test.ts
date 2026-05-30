@@ -5199,6 +5199,37 @@ describe("tasks API", () => {
       expect(persisted?.manualReviewRequired).toBe(true);
     });
 
+    it("should allow retry_from_blocked for exhausted plan quality guard blocks", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-plan-quality-retry",
+          projectId: "test-project",
+          title: "Plan quality retry task",
+          status: "blocked_external",
+          blockedFromStatus: "planning",
+          blockedReason:
+            "Plan quality guard (missing_plan_manifest): Retry limit reached (3). Operator next step: edit the task prompt or plan constraints, then retry from blocked.",
+          manualReviewRequired: true,
+          retryCount: 4,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-quality-retry/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("planning");
+      expect(body.blockedReason).toBeNull();
+      expect(body.blockedFromStatus).toBeNull();
+      expect(body.manualReviewRequired).toBe(false);
+      expect(body.retryCount).toBe(0);
+    });
+
     it("should reject operator input retry when the only human comment is stale", async () => {
       const db = testDb.current;
       db.insert(tasks)

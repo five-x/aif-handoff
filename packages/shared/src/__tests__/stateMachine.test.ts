@@ -221,6 +221,26 @@ describe("task state machine", () => {
     }
   });
 
+  it("allows retry_from_blocked for exhausted plan-quality guard blocks", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "planning" as const,
+      blockedReason:
+        "Plan quality guard (missing_plan_manifest): Retry limit reached (3). Operator next step: edit the task prompt or plan constraints, then retry from blocked.",
+      manualReviewRequired: true,
+      retryCount: 4,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("planning");
+      expect(result.patch.blockedReason).toBeNull();
+      expect(result.patch.manualReviewRequired).toBe(false);
+      expect(result.patch.retryCount).toBe(0);
+    }
+  });
+
   it("rejects retry_from_blocked for manual-review blocked reasons", () => {
     const blocked = {
       ...makeTask("blocked_external"),
