@@ -2563,13 +2563,30 @@ function formatMicrotaskDescription(input: {
   ].join("\n");
 }
 
+function isInfrastructureOrConfigSubjectTitle(title: string): boolean {
+  return (
+    /\b(?:docker|docker-compose|compose|env|ci\/cd|infrastructure|environment|config|configuration|dev stack|local dev|tooling|dependencies)\b/i.test(
+      title,
+    ) ||
+    /(?:\u0438\u043d\u0444\u0440\u0430\u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440|\u043e\u043a\u0440\u0443\u0436\u0435\u043d|\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a|\u043a\u043e\u043d\u0444\u0438\u0433|\u0437\u0430\u0432\u0438\u0441\u0438\u043c)/iu.test(
+      title,
+    )
+  );
+}
+
 function buildBroadTaskMicrotasks(
   task: GeneratedTask,
   taskIntent: TaskIntent,
 ): TaskSplitProposedChild[] {
   const phaseName = task.phaseName || "Implementation";
-  const sourceTitle = task.title.replace(/\.$/, "").replace(/^\s*build\s+/i, "");
+  let sourceTitle = task.title.replace(/\.$/, "").replace(/^\s*build\s+/i, "");
   const cyrillicTitle = /[а-яё]/i.test(sourceTitle);
+  const scaffoldSubject = isInfrastructureOrConfigSubjectTitle(sourceTitle)
+    ? cyrillicTitle
+      ? "\u043f\u0440\u043e\u0435\u043a\u0442"
+      : "project"
+    : sourceTitle;
+  sourceTitle = scaffoldSubject;
   const scaffoldTitle = cyrillicTitle
     ? `Инициализировать скелет: ${sourceTitle}`
     : `Initialize ${sourceTitle} scaffold`;
@@ -2589,7 +2606,15 @@ function buildBroadTaskMicrotasks(
       summary: cyrillicTitle
         ? "Создать только минимальный скелет проекта или фичи для следующих срезов."
         : "Create only the minimal project or feature skeleton needed for later slices.",
-      fileBoundaries: ["package.json", "src/app/**", "src/main.*", "src/index.*"],
+      fileBoundaries: [
+        "package.json",
+        "package-lock.json",
+        "tsconfig*.json",
+        ".gitignore",
+        "src/app/**",
+        "src/main.*",
+        "src/index.*",
+      ],
       acceptanceCriteria: [
         cyrillicTitle
           ? "Точка входа приложения или фичи существует и запускается без placeholder-only wiring."
@@ -2606,9 +2631,15 @@ function buildBroadTaskMicrotasks(
         : "Add only configuration, scripts, and environment defaults required by the scaffold.",
       fileBoundaries: [
         "package.json",
+        "package-lock.json",
         "tsconfig*.json",
         "vite.config.*",
+        "Dockerfile",
+        ".dockerignore",
+        "docker-compose*.yml",
+        "compose*.yml",
         ".env.example",
+        ".github/workflows/**",
         "config/**",
       ],
       acceptanceCriteria: [

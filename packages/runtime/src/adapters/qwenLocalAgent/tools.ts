@@ -112,6 +112,12 @@ const ALLOWED_ENV_KEYS = new Set([
   "HANDOFF_BRANCH_PREPARED",
   "HANDOFF_BRANCH_NAME",
   "HANDOFF_SKIP_REVIEW",
+  "NPM_CONFIG_AUDIT",
+  "NPM_CONFIG_CACHE",
+  "NPM_CONFIG_FUND",
+  "npm_config_audit",
+  "npm_config_cache",
+  "npm_config_fund",
 ]);
 function objectSchema(properties, required = []) {
   return {
@@ -319,6 +325,31 @@ function readPositiveInt(value, fallback, max = Number.MAX_SAFE_INTEGER) {
 }
 function normalizePathForPolicy(value) {
   return value.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+}
+function globBoundaryToRegExp(boundary) {
+  let pattern = "^";
+  for (let index = 0; index < boundary.length; index += 1) {
+    const char = boundary[index];
+    const next = boundary[index + 1];
+    if (char === "*" && next === "*") {
+      pattern += ".*";
+      index += 1;
+      continue;
+    }
+    if (char === "*") {
+      pattern += "[^/]*";
+      continue;
+    }
+    pattern += char.replace(/[\\^$+?.()|[\]{}]/g, "\\$&");
+  }
+  pattern += "$";
+  return new RegExp(pattern);
+}
+function pathMatchesAllowedWriteBoundary(normalizedPath, allowedBoundary) {
+  if (allowedBoundary.includes("*")) {
+    return globBoundaryToRegExp(allowedBoundary).test(normalizedPath);
+  }
+  return normalizedPath === allowedBoundary || normalizedPath.startsWith(`${allowedBoundary}/`);
 }
 export function isSecretLikePath(value) {
   const normalized = normalizePathForPolicy(value);
@@ -783,7 +814,9 @@ function assertWritePathAllowed(context, relativePath, label) {
   const allowed = context.allowedWritePaths ?? [];
   if (allowed.length === 0) return;
   const normalized = normalizePathForPolicy(relativePath);
-  if (allowed.includes(normalized)) return;
+  if (allowed.some((allowedPath) => pathMatchesAllowedWriteBoundary(normalized, allowedPath))) {
+    return;
+  }
   throw new RuntimeExecutionError(
     `${label} is outside this workflow's allowed write paths (${allowed.join(", ")})`,
     undefined,
@@ -834,6 +867,33 @@ function validateStructuredShellCommand(command, args) {
 function isPackageManagerCommand(command) {
   return ["npm", "npm.cmd", "pnpm", "yarn", "bun"].includes(command);
 }
+const DISALLOWED_PACKAGE_MANAGER_SCRIPT_NAMES = new Set([
+  "add",
+  "audit",
+  "ci",
+  "i",
+  "install",
+  "pack",
+  "postinstall",
+  "preinstall",
+  "prepare",
+  "prepack",
+  "prepublish",
+  "publish",
+  "rebuild",
+  "remove",
+  "uninstall",
+  "update",
+  "upgrade",
+]);
+const DEPENDENCY_MUTATION_SCRIPT_PATTERN =
+  /\b(?:npm(?:\.cmd)?|pnpm|yarn|bun)\s+(?:add|audit|ci|i|install|pack|publish|rebuild|remove|uninstall|update|upgrade)\b|\bnpx\b/i;
+function packageManagerScriptName(args) {
+  const verb = args[0];
+  if (verb === "test") return "test";
+  if (verb === "run") return args[1] ?? null;
+  return null;
+}
 function validatePackageManagerShellArgs(command, args) {
   const verb = args[0];
   if (!verb) {
@@ -852,6 +912,13 @@ function validatePackageManagerShellArgs(command, args) {
         "permission",
       );
     }
+    if (DISALLOWED_PACKAGE_MANAGER_SCRIPT_NAMES.has(args[1].toLowerCase())) {
+      throw new RuntimeExecutionError(
+        `${command} run ${args[1]} is not supported; dependency-management scripts require an explicit operator workflow`,
+        undefined,
+        "permission",
+      );
+    }
     return;
   }
   throw new RuntimeExecutionError(
@@ -859,6 +926,48 @@ function validatePackageManagerShellArgs(command, args) {
     undefined,
     "permission",
   );
+}
+async function validatePackageManagerProjectScript(command, args, cwd) {
+  const scriptName = packageManagerScriptName(args);
+  if (!scriptName) return;
+  const packageJsonPath = path.join(cwd, "package.json");
+  let packageJsonText;
+  try {
+    packageJsonText = await readFile(packageJsonPath, "utf8");
+  } catch {
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(packageJsonText);
+  } catch {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} cannot run because package.json is not valid JSON`,
+      undefined,
+      "permission",
+    );
+  }
+  const script = parsed?.scripts?.[scriptName];
+  if (typeof script !== "string") return;
+  if (DEPENDENCY_MUTATION_SCRIPT_PATTERN.test(script)) {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} mutates dependencies or executes package-manager install/update commands`,
+      undefined,
+      "permission",
+    );
+  }
+}
+function packageManagerEnvExtras(command) {
+  if (!isPackageManagerCommand(command)) return {};
+  const cachePath = path.join(tmpdir(), "aif-qwen-npm-cache");
+  return {
+    NPM_CONFIG_AUDIT: "false",
+    NPM_CONFIG_CACHE: cachePath,
+    NPM_CONFIG_FUND: "false",
+    npm_config_audit: "false",
+    npm_config_cache: cachePath,
+    npm_config_fund: "false",
+  };
 }
 function resolveStructuredShellInvocation(command, args) {
   if (command === "npm.cmd" && process.platform !== "win32") {
@@ -1325,6 +1434,9 @@ async function runShellTool(args, context) {
   if (!cwd.info.isDirectory()) {
     throw new RuntimeExecutionError("shell cwd is not a directory", undefined, "permission");
   }
+  if (isPackageManagerCommand(command)) {
+    await validatePackageManagerProjectScript(command, commandArgs, cwd.absolutePath);
+  }
   const timeoutMs = readPositiveInt(
     args.timeoutMs,
     context.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
@@ -1343,7 +1455,7 @@ async function runShellTool(args, context) {
     command: invocation.command,
     args: invocation.args,
     cwd: cwd.absolutePath,
-    env: buildSanitizedToolEnv(context.env),
+    env: buildSanitizedToolEnv(context.env, packageManagerEnvExtras(command)),
     timeoutMs,
     maxOutputChars: context.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
     signal: context.signal,
@@ -1388,7 +1500,8 @@ async function computeAuditReportHashTool(args, context) {
 function isAllowedPathForContext(context, relativePath) {
   const allowed = context.allowedWritePaths ?? [];
   if (allowed.length === 0) return true;
-  return allowed.includes(normalizePathForPolicy(relativePath));
+  const normalized = normalizePathForPolicy(relativePath);
+  return allowed.some((allowedPath) => pathMatchesAllowedWriteBoundary(normalized, allowedPath));
 }
 const MIN_EXPANDABLE_AUDIT_EVIDENCE_REF_LENGTH = "ev_00000000".length;
 

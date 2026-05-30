@@ -1055,6 +1055,74 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
   });
 
+  it("ignores generated dependency artifacts but still blocks real out-of-scope files", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
+    mkdirSync(join(root, ".npm-cache", "tmp"), { recursive: true });
+    mkdirSync(join(root, "dist"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    writeFileSync(join(root, "node_modules", "pkg", "index.js"), "module.exports = {};\n", "utf8");
+    writeFileSync(join(root, ".npm-cache", "tmp", "cache"), "cache\n", "utf8");
+    writeFileSync(join(root, "dist", "main.js"), "console.log('built');\n", "utf8");
+    const plan = planWithManifestScope({
+      taskId: "feature-with-generated-artifacts",
+      intent: "feature",
+      scope: ["src/feature.ts"],
+      acceptanceCriteria: [
+        {
+          id: "AC1",
+          description: "Feature behavior is implemented.",
+          verification: "npm.cmd test",
+        },
+      ],
+    });
+
+    const cleanGeneratedResult = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-with-generated-artifacts",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan,
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-with-generated-artifacts",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+          planManifestHash: hashAifPlanManifest(plan),
+        }),
+      },
+    });
+
+    expect(cleanGeneratedResult.evidence.meaningfulChangedFiles).toEqual(["src/feature.ts"]);
+    expect(codes(cleanGeneratedResult)).not.toContain("unintended_uncommitted_changes");
+    expect(codes(cleanGeneratedResult)).not.toContain("implementation_changed_files_mismatch");
+
+    writeFileSync(join(root, "Dockerfile"), "FROM node:22\n", "utf8");
+    const outOfScopeResult = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-with-generated-artifacts",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan,
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-with-generated-artifacts",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+          planManifestHash: hashAifPlanManifest(plan),
+        }),
+      },
+    });
+
+    expect(codes(outOfScopeResult)).toContain("implementation_changed_files_mismatch");
+    expect(outOfScopeResult.evidence.meaningfulChangedFiles).toContain("Dockerfile");
+  });
+
   it("falls back to an existing base branch when configured base is missing", () => {
     const root = initRepoOnBranch("master");
     execFileSync("git", ["checkout", "-b", "feature/task"], { cwd: root, stdio: "ignore" });
@@ -1108,6 +1176,45 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
+  });
+
+  it("accepts implementation manifest changed files inside globbed plan scope", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src", "app"), { recursive: true });
+    writeFileSync(join(root, "src", "app", "index.ts"), "export const app = true;\n", "utf8");
+    writeFileSync(join(root, "tsconfig.node.json"), "{}\n", "utf8");
+    const plan = planWithManifestScope({
+      taskId: "feature-glob-scope",
+      intent: "feature",
+      scope: ["src/app/**", "tsconfig*.json"],
+      acceptanceCriteria: [
+        {
+          id: "AC1",
+          description: "Scoped files are updated.",
+          verification: "npm.cmd test",
+        },
+      ],
+    });
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-glob-scope",
+        title: "Add scoped app",
+        taskIntent: "feature",
+        plan,
+        agentActivityLog: RISKY_COMPLETION_ACTIVITY,
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-glob-scope",
+          intent: "feature",
+          changedFiles: ["src/app/index.ts", "tsconfig.node.json"],
+          planManifestHash: hashAifPlanManifest(plan),
+        }),
+      },
+    });
+
+    expect(codes(result)).not.toContain("implementation_scope_mismatch");
   });
 
   it("blocks implementation evidence when acceptance refs do not resolve", () => {

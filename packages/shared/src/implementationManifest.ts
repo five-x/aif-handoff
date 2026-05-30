@@ -631,6 +631,24 @@ function manifestAdmitsFabricatedVerification(manifest: ImplementationManifest):
 }
 
 function pathMatchesApprovedBoundary(path: string, boundary: string): boolean {
+  if (boundary.includes("*")) {
+    let pattern = "^";
+    for (let index = 0; index < boundary.length; index += 1) {
+      const char = boundary[index];
+      const next = boundary[index + 1];
+      if (char === "*" && next === "*") {
+        pattern += ".*";
+        index += 1;
+        continue;
+      }
+      if (char === "*") {
+        pattern += "[^/]*";
+        continue;
+      }
+      pattern += char.replace(/[\\^$+?.()|[\]{}]/g, "\\$&");
+    }
+    return new RegExp(`${pattern}$`).test(path);
+  }
   return path === boundary || path.startsWith(`${boundary}/`);
 }
 

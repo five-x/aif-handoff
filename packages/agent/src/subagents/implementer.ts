@@ -489,6 +489,18 @@ function formatImplementationManifestPrompt(
 - Put the manifest in the final result text, not in a repository file.`;
 }
 
+function implementationAllowedWritePathsFromPlan(
+  task: Pick<TaskRow, "taskIntent" | "isFix">,
+  planText: string | null | undefined,
+): string[] {
+  if (!shouldRequestImplementationManifest(task)) return [];
+  const planManifest = readAifPlanManifestSnapshot(planText);
+  const paths = [...planManifest.scope, ...planManifest.expectedArtifactPaths]
+    .map((entry) => entry.trim().replaceAll("\\", "/"))
+    .filter((entry) => entry.length > 0);
+  return [...new Set(paths)];
+}
+
 function serializeImplementationManifest(value: unknown): string | null {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -4310,6 +4322,10 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
   const expectedSynthesisArtifactPath = isAuditSynthesisTask ? roadmapArtifact.artifactPath : null;
   const expectedAuditReportArtifactPath =
     roadmapArtifact?.role === "report" ? roadmapArtifact.artifactPath : null;
+  const implementationAllowedWritePaths =
+    !expectedSynthesisArtifactPath && !expectedAuditReportArtifactPath
+      ? implementationAllowedWritePathsFromPlan(task, selectedPlan)
+      : [];
   const auditEvidenceRepairMode = isAuditEvidenceRepairMode(task, expectedAuditReportArtifactPath);
   const repeatedDeterministicAuditReportRepair =
     expectedAuditReportArtifactPath && hasAttemptedDeterministicAuditReportRepair(task);
@@ -5269,7 +5285,11 @@ ${formatImplementationManifestPrompt(task, selectedPlan)}
             allowedWritePaths: [expectedAuditReportArtifactPath],
             auditReportArtifactPath: expectedAuditReportArtifactPath,
           }
-        : {}),
+        : implementationAllowedWritePaths.length > 0
+          ? {
+              allowedWritePaths: implementationAllowedWritePaths,
+            }
+          : {}),
     },
   });
 

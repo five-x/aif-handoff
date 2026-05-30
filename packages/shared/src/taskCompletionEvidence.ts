@@ -482,6 +482,22 @@ function isMetadataOnlyPath(path: string): boolean {
   );
 }
 
+function isGeneratedDependencyArtifactPath(path: string): boolean {
+  const normalized = normalizeRelativePath(path);
+  return (
+    normalized.startsWith("node_modules/") ||
+    normalized.startsWith(".npm-cache/") ||
+    normalized.startsWith(".pnpm-store/") ||
+    normalized.startsWith(".yarn/cache/") ||
+    normalized.startsWith(".cache/") ||
+    normalized.startsWith(".turbo/") ||
+    normalized.startsWith("dist/") ||
+    normalized.startsWith("build/") ||
+    normalized.startsWith("coverage/") ||
+    normalized.startsWith("out/")
+  );
+}
+
 function isReportArtifactPath(path: string, task: TaskCompletionEvidenceTask): boolean {
   const normalized = normalizeRelativePath(path);
   if (isPlanArtifact(normalized, task)) return false;
@@ -1466,10 +1482,16 @@ export function evaluateTaskCompletionEvidence(
     task.plannerMode === "full" || /```aif-plan-manifest\b/i.test(task.plan ?? "");
   const gitEvidence = collectChangedFiles(projectRoot);
   const meaningfulChangedFiles = gitEvidence.files.filter(
-    (file) => !isPlanArtifact(file, task) && !isMetadataOnlyPath(file),
+    (file) =>
+      !isPlanArtifact(file, task) &&
+      !isMetadataOnlyPath(file) &&
+      !isGeneratedDependencyArtifactPath(file),
   );
   const meaningfulDirtyChangedFiles = gitEvidence.dirtyFiles.filter(
-    (file) => !isPlanArtifact(file, task) && !isMetadataOnlyPath(file),
+    (file) =>
+      !isPlanArtifact(file, task) &&
+      !isMetadataOnlyPath(file) &&
+      !isGeneratedDependencyArtifactPath(file),
   );
   const intentPolicyResult =
     phase !== "pre_implementation"

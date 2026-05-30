@@ -3386,6 +3386,34 @@ describe("qwen-local-agent adapter", () => {
     await expect(readFile(path.join(root, "tmp_hash.py"), "utf8")).rejects.toThrow();
     await expect(readFile(path.join(root, "tmp_body.txt"), "utf8")).rejects.toThrow();
   });
+  it("treats directory and glob allowed write paths as scoped boundaries", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-allowed-write-glob-"));
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: { allowedWritePaths: ["src/app/**", "tsconfig*.json"] },
+    });
+
+    const nested = await executeQwenLocalTool(
+      "write_file",
+      { path: "src/app/index.ts", content: "export const ok = true;\n" },
+      context,
+    );
+    const globbed = await executeQwenLocalTool(
+      "write_file",
+      { path: "tsconfig.node.json", content: "{}\n" },
+      context,
+    );
+    const denied = await executeQwenLocalTool(
+      "write_file",
+      { path: "src/other.ts", content: "export const no = true;\n" },
+      context,
+    );
+
+    expect(nested.ok).toBe(true);
+    expect(globbed.ok).toBe(true);
+    expect(denied.ok).toBe(false);
+    expect(denied.error).toContain("allowed write paths (src/app/**, tsconfig*.json)");
+  });
   it("computes and finalizes audit report manifest hashes for the scoped artifact only", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-report-hash-"));
     await mkdir(path.join(root, "audit"), { recursive: true });
@@ -4108,6 +4136,35 @@ describe("qwen-local-agent adapter", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.error).toContain("supports only test or run");
+  });
+  it("denies package-manager dependency mutation through run scripts", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-script-install-deny-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          install: "npm install --ignore-scripts --cache ./.npm-cache",
+          build: "npm install && tsc",
+        },
+      }),
+      "utf8",
+    );
+
+    const installScript = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["run", "install"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+    const mutatingBuildScript = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["run", "build"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+
+    expect(installScript.ok).toBe(false);
+    expect(installScript.error).toContain("dependency-management scripts");
+    expect(mutatingBuildScript.ok).toBe(false);
+    expect(mutatingBuildScript.error).toContain("mutates dependencies");
   });
   it("does not execute git hooks during git_commit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-git-hooks-"));

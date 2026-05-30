@@ -1480,12 +1480,15 @@ describe("roadmapGeneration", () => {
       });
 
       expect(result.status).toBe("created");
-      expect(result.proposal.proposedChildren.map((child) => child.title)).toEqual([
+      expect(result.proposal.proposedChildren.map((child) => child.title)).not.toEqual([
         "Инициализировать скелет: Настройка инфраструктуры: docker-compose, env и базовая структура",
         "Настроить dev-стек: Настройка инфраструктуры: docker-compose, env и базовая структура",
         "Реализовать первый срез: Настройка инфраструктуры: docker-compose, env и базовая структура",
         "Добавить smoke-проверку: Настройка инфраструктуры: docker-compose, env и базовая структура",
       ]);
+      expect(
+        result.proposal.proposedChildren.every((child) => !/docker-compose|env/i.test(child.title)),
+      ).toBe(true);
       expect(result.proposal.proposedChildren).toHaveLength(4);
       for (const child of result.proposal.proposedChildren) {
         expect(child.taskIntent).toBe("feature");
@@ -1527,8 +1530,12 @@ describe("roadmapGeneration", () => {
 
       expect(result.status).toBe("created");
       expect(result.proposal.proposedChildren).toHaveLength(4);
+      expect(result.proposal.proposedChildren[0]?.fileBoundaries).not.toContain("Dockerfile");
+      expect(result.proposal.proposedChildren[1]?.fileBoundaries).toEqual(
+        expect.arrayContaining(["Dockerfile", ".dockerignore", "docker-compose*.yml"]),
+      );
       for (const child of result.proposal.proposedChildren) {
-        expect(child.title).toContain(sourceTitle);
+        expect(child.title).not.toContain(sourceTitle);
         expect(child.taskIntent).toBe("feature");
         expect(child.tags).toContain("microtask");
         expect(child.splitRationale).toContain("split into executable microtasks");
