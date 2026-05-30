@@ -63,8 +63,14 @@ function hasActorSignal(text: string): boolean {
   );
 }
 
+function hasActorDependentBehaviorSignal(text: string): boolean {
+  return /\b(ui|ux|screen|page|form|copy|workflow|permission|permissions|access|auth|login|signup|dashboard|notification|approval|moderation|visibility|public|private|права|доступ|интерфейс|экран|форма|авторизац|уведомлен|согласован|модерац|публичн|приватн)\b/i.test(
+    text,
+  );
+}
+
 function hasScopeSignal(text: string): boolean {
-  return /\b(scope|out of scope|include|exclude|first version|mvp|must|must not|в scope|состав|включить|исключить|mvp|первая версия)\b/i.test(
+  return /\b(scope|out of scope|include|exclude|first version|mvp|must|must not|file boundaries|allowed changes|allowed write paths|minimal|в scope|состав|включить|исключить|mvp|первая версия|минималь|только|границ)\b/i.test(
     text,
   );
 }
@@ -78,7 +84,9 @@ function hasAcceptanceSignal(text: string): boolean {
 function buildMissingQuestions(taskId: string, text: string): TaskRequirementQuestionInput[] {
   const normalized = normalizeText(text);
   const missingKeys = new Set<string>();
-  if (!hasActorSignal(normalized)) missingKeys.add("primary-user-role");
+  if (hasActorDependentBehaviorSignal(normalized) && !hasActorSignal(normalized)) {
+    missingKeys.add("primary-user-role");
+  }
   if (!hasScopeSignal(normalized)) missingKeys.add("first-version-scope");
   if (!hasAcceptanceSignal(normalized)) missingKeys.add("acceptance-criteria");
 

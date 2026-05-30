@@ -1729,6 +1729,15 @@ describe("tasks API", () => {
           projectId: "question-project",
           title: "Question target",
           status: "review",
+          tags: JSON.stringify(["qa-decision"]),
+          attachments: JSON.stringify([
+            {
+              name: "qa-notes.txt",
+              mimeType: "text/plain",
+              size: 12,
+              path: ".ai-factory/files/tasks/api-question-target/qa-notes.txt",
+            },
+          ]),
         })
         .run();
 
@@ -1787,6 +1796,20 @@ describe("tasks API", () => {
       const answerBody = await answerRes.json();
       expect(answerBody.resumed).toBe(true);
       expect(answerBody.resumeStatus).toBe("qa");
+      expect(answerBody.task).toEqual(
+        expect.objectContaining({
+          id: "api-question-target",
+          status: "qa",
+          tags: ["qa-decision"],
+          attachments: [
+            expect.objectContaining({
+              name: "qa-notes.txt",
+              path: ".ai-factory/files/tasks/api-question-target/qa-notes.txt",
+            }),
+          ],
+        }),
+      );
+      expect(Object.prototype.hasOwnProperty.call(answerBody.task, "artifactTrust")).toBe(true);
       expect(mockBroadcast).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "task:question_batch_answered",

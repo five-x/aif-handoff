@@ -1073,7 +1073,10 @@ tasksRouter.post(
       if (result.resumed) {
         broadcast({ type: "agent:wake", payload: { id } });
       }
-      return c.json(result);
+      return c.json({
+        ...result,
+        task: result.task ? toTaskRouteResponse(result.task) : undefined,
+      });
     } catch (error) {
       const routeError = requirementQuestionRouteError(error);
       return c.json(routeError.body, routeError.status);
