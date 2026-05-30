@@ -13,6 +13,7 @@ import {
 import {
   getEnv,
   findSecretLikeKeys,
+  isQwenLocalRuntimeProfile,
   logger,
   normalizeRuntimeLimitSnapshot,
   summarizeRuntimeProfileForAudit,
@@ -50,11 +51,85 @@ const log = logger("runtime-profile-route");
 const validationRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 10 });
 const mutationRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 30 });
 
+const canaryPassVerdictSchema = z.enum([
+  "pass",
+  "test_pass",
+  "review_pass",
+  "TEST PASS",
+  "REVIEW PASS",
+]);
+const canaryChangedFileSchema = z
+  .string()
+  .min(1)
+  .max(300)
+  .refine(
+    (value) =>
+      !value.includes("\0") &&
+      !value.startsWith("/") &&
+      !value.startsWith("\\") &&
+      !/^[A-Za-z]:[\\/]/.test(value) &&
+      !value.split(/[\\/]+/).includes(".."),
+    "changedFiles must contain relative repository paths",
+  );
+
+const implementerCanaryEvidenceSchema = z
+  .object({
+    operator: z.string().trim().min(1).max(200).optional(),
+    canaryId: z.string().trim().min(1).max(120).optional(),
+    runtimeStage: z.literal("implementer").optional(),
+    profileId: z.string().trim().min(1).optional(),
+    runtimeId: z.string().trim().min(1).max(100).optional(),
+    providerId: z.string().trim().min(1).max(100).optional(),
+    model: z.string().trim().min(1).max(300).optional(),
+    endpoint: z.string().trim().min(1).max(1000).optional(),
+    wallClockMs: z.number().int().positive().max(3_600_000),
+    toolTurns: z.number().int().positive().max(500),
+    repeatedToolCalls: z.number().int().min(0).max(50),
+    repeatedToolCallLimit: z.number().int().positive().max(20),
+    maxToolTurns: z.number().int().positive().max(500),
+    timeoutMs: z.number().int().positive().max(3_600_000),
+    wallClockTimeoutMs: z.number().int().positive().max(3_600_000).optional(),
+    maxOutput: z.number().int().positive().max(200_000).optional(),
+    verificationCommand: z.string().trim().min(1).max(300),
+    verificationExitCode: z.literal(0),
+    changedFiles: z.array(canaryChangedFileSchema).min(1).max(50),
+    toolUseObserved: z.literal(true),
+    testVerdict: canaryPassVerdictSchema,
+    reviewVerdict: canaryPassVerdictSchema,
+    summary: z.string().trim().min(10).max(1000),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.toolTurns > value.maxToolTurns) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["toolTurns"],
+        message: "toolTurns must not exceed maxToolTurns",
+      });
+    }
+    if (value.repeatedToolCalls > value.repeatedToolCallLimit) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repeatedToolCalls"],
+        message: "repeatedToolCalls must not exceed repeatedToolCallLimit",
+      });
+    }
+    const wallClockLimit = value.wallClockTimeoutMs ?? value.timeoutMs;
+    if (value.wallClockMs > wallClockLimit) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["wallClockMs"],
+        message: "wallClockMs must not exceed the configured wall-clock limit",
+      });
+    }
+  });
+
 export const runtimeProfilesRouter = new Hono();
 type CreateRuntimeProfilePayload = z.infer<typeof createRuntimeProfileSchema>;
 type UpdateRuntimeProfilePayload = z.infer<typeof updateRuntimeProfileSchema>;
 type RuntimeProfileValidationPayload = z.infer<typeof runtimeProfileValidationSchema>;
 type RuntimeProfileModelsPayload = z.infer<typeof runtimeProfileModelsSchema>;
+type ImplementerCanaryEvidencePayload = z.infer<typeof implementerCanaryEvidenceSchema>;
 
 const ALLOWED_HEADER_PREFIXES = [
   "content-",
@@ -112,6 +187,134 @@ function sanitizeBooleanQuery(value: string | undefined, fallback = false): bool
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readImplementerCapabilityFlag(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  const record = isObjectRecord(value) ? value : {};
+  for (const key of ["enabled", "allowed", "capable"] as const) {
+    if (typeof record[key] === "boolean") return record[key];
+  }
+  return null;
+}
+
+function listDisallowedQwenImplementerOptionPaths(input: {
+  id?: string | null;
+  runtimeId: string;
+  providerId: string;
+  options?: Record<string, unknown> | null;
+}): string[] {
+  if (
+    !isQwenLocalRuntimeProfile({
+      id: input.id ?? "pending-runtime-profile",
+      runtimeId: input.runtimeId,
+      providerId: input.providerId,
+      options: input.options ?? {},
+    })
+  ) {
+    return [];
+  }
+
+  const options = input.options ?? {};
+  const paths: string[] = [];
+  const stageCapabilities = isObjectRecord(options.stageCapabilities)
+    ? options.stageCapabilities
+    : {};
+  if (readImplementerCapabilityFlag(stageCapabilities.implementer) === true) {
+    paths.push("options.stageCapabilities.implementer");
+  }
+
+  const qwenOptions = isObjectRecord(options.qwenLocalAgent) ? options.qwenLocalAgent : {};
+  for (const key of [
+    "allowImplementation",
+    "implementationEnabled",
+    "implementationCapable",
+    "implementationCanaryPassed",
+  ] as const) {
+    if (qwenOptions[key] === true) {
+      paths.push(`options.qwenLocalAgent.${key}`);
+    }
+  }
+
+  const implementationCanary = isObjectRecord(qwenOptions.implementationCanary)
+    ? qwenOptions.implementationCanary
+    : {};
+  if (implementationCanary.passed === true) {
+    paths.push("options.qwenLocalAgent.implementationCanary");
+  }
+
+  const canaryOptions = isObjectRecord(options.canary) ? options.canary : {};
+  const legacyImplementationCanary = isObjectRecord(canaryOptions.implementation)
+    ? canaryOptions.implementation
+    : {};
+  if (isObjectRecord(legacyImplementationCanary) && legacyImplementationCanary.passed === true) {
+    paths.push("options.canary.implementation");
+  }
+
+  return paths;
+}
+
+function stripQwenImplementationBypassFlags(
+  options: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...options };
+  const qwenOptions = isObjectRecord(next.qwenLocalAgent) ? { ...next.qwenLocalAgent } : {};
+  delete qwenOptions.allowImplementation;
+  delete qwenOptions.implementationEnabled;
+  delete qwenOptions.implementationCapable;
+  delete qwenOptions.implementationCanaryPassed;
+  next.qwenLocalAgent = qwenOptions;
+  return next;
+}
+
+function normalizeCanaryVerdict(
+  value: ImplementerCanaryEvidencePayload["testVerdict"],
+  defaultPassVerdict: "TEST PASS" | "REVIEW PASS",
+): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s-]+/g, "_");
+  if (normalized === "review_pass") return "REVIEW PASS";
+  if (normalized === "test_pass") return "TEST PASS";
+  if (normalized === "pass") return defaultPassVerdict;
+  return "TEST PASS";
+}
+
+function buildImplementerCanaryRecord(input: {
+  id: string;
+  profile: ReturnType<typeof toRuntimeProfileResponse>;
+  evidence: ImplementerCanaryEvidencePayload;
+}): Record<string, unknown> {
+  const evidence = input.evidence;
+  return {
+    passed: true,
+    source: "structured_evidence",
+    canaryId: evidence.canaryId ?? crypto.randomUUID(),
+    passedAt: new Date().toISOString(),
+    operator: evidence.operator ?? "api",
+    runtimeStage: "implementer",
+    profileId: input.id,
+    runtimeId: input.profile.runtimeId,
+    providerId: input.profile.providerId,
+    model: evidence.model ?? input.profile.defaultModel ?? null,
+    endpoint: evidence.endpoint ?? input.profile.baseUrl ?? null,
+    wallClockMs: evidence.wallClockMs,
+    toolTurns: evidence.toolTurns,
+    repeatedToolCalls: evidence.repeatedToolCalls,
+    repeatedToolCallLimit: evidence.repeatedToolCallLimit,
+    maxToolTurns: evidence.maxToolTurns,
+    timeoutMs: evidence.timeoutMs,
+    wallClockTimeoutMs: evidence.wallClockTimeoutMs ?? evidence.timeoutMs,
+    maxOutput: evidence.maxOutput ?? null,
+    verificationCommand: evidence.verificationCommand,
+    verificationExitCode: evidence.verificationExitCode,
+    changedFiles: evidence.changedFiles,
+    toolUseObserved: evidence.toolUseObserved,
+    testVerdict: normalizeCanaryVerdict(evidence.testVerdict, "TEST PASS"),
+    reviewVerdict: normalizeCanaryVerdict(evidence.reviewVerdict, "REVIEW PASS"),
+    summary: evidence.summary,
+  };
 }
 
 function isLocalCodexProfile(profile: { runtimeId: string; transport?: string | null }): boolean {
@@ -612,6 +815,25 @@ runtimeProfilesRouter.post(
         400,
       );
     }
+    const disallowedImplementerPaths = listDisallowedQwenImplementerOptionPaths({
+      runtimeId: body.runtimeId,
+      providerId: body.providerId,
+      options: body.options ?? {},
+    });
+    if (disallowedImplementerPaths.length > 0) {
+      return c.json(
+        {
+          error:
+            "Qwen implementer approval cannot be set through runtime profile options; submit structured canary evidence instead",
+          fieldErrors: {
+            options: disallowedImplementerPaths.map(
+              (path) => `Disallowed implementer approval path: ${path}`,
+            ),
+          },
+        },
+        400,
+      );
+    }
 
     const created = createRuntimeProfile(body);
     if (!created) return c.json({ error: "Failed to create runtime profile" }, 500);
@@ -672,6 +894,28 @@ runtimeProfilesRouter.put(
         400,
       );
     }
+    if (body.options !== undefined) {
+      const disallowedImplementerPaths = listDisallowedQwenImplementerOptionPaths({
+        id,
+        runtimeId: body.runtimeId ?? existing.runtimeId,
+        providerId: body.providerId ?? existing.providerId,
+        options: body.options,
+      });
+      if (disallowedImplementerPaths.length > 0) {
+        return c.json(
+          {
+            error:
+              "Qwen implementer approval cannot be set through runtime profile options; submit structured canary evidence instead",
+            fieldErrors: {
+              options: disallowedImplementerPaths.map(
+                (path) => `Disallowed implementer approval path: ${path}`,
+              ),
+            },
+          },
+          400,
+        );
+      }
+    }
     const before = toRuntimeProfileResponse(existing);
     const updated = updateRuntimeProfile(id, body);
     if (!updated) return c.json({ error: "Failed to update runtime profile" }, 500);
@@ -687,6 +931,80 @@ runtimeProfilesRouter.put(
     });
     broadcast({ type: "runtime_profile:updated", payload: response });
     return c.json(response);
+  },
+);
+
+// POST /runtime-profiles/:id/implementer-canary/evidence
+runtimeProfilesRouter.post(
+  "/:id/implementer-canary/evidence",
+  mutationRateLimit,
+  jsonValidator(implementerCanaryEvidenceSchema),
+  async (c) => {
+    const { id } = c.req.param();
+    const body = c.req.valid("json") as ImplementerCanaryEvidencePayload;
+    const existing = findRuntimeProfileById(id);
+    if (!existing) return c.json({ error: "Runtime profile not found" }, 404);
+
+    const before = toRuntimeProfileResponse(existing);
+    if (!before.enabled) {
+      return c.json(
+        { error: "Runtime profile must be enabled before implementer canary approval" },
+        409,
+      );
+    }
+    if (
+      !isQwenLocalRuntimeProfile({
+        id,
+        runtimeId: before.runtimeId,
+        providerId: before.providerId,
+        options: before.options,
+      })
+    ) {
+      return c.json(
+        { error: "Implementer canary approvals are only supported for Qwen local profiles" },
+        409,
+      );
+    }
+    if (body.profileId && body.profileId !== id) {
+      return c.json({ error: "Canary evidence profileId does not match route profile id" }, 400);
+    }
+    if (body.runtimeId && body.runtimeId !== before.runtimeId) {
+      return c.json({ error: "Canary evidence runtimeId does not match runtime profile" }, 409);
+    }
+    if (body.providerId && body.providerId !== before.providerId) {
+      return c.json({ error: "Canary evidence providerId does not match runtime profile" }, 409);
+    }
+    if (body.model && before.defaultModel && body.model !== before.defaultModel) {
+      return c.json({ error: "Canary evidence model does not match runtime profile" }, 409);
+    }
+    if (body.endpoint && before.baseUrl && body.endpoint !== before.baseUrl) {
+      return c.json({ error: "Canary evidence endpoint does not match runtime profile" }, 409);
+    }
+
+    const canary = buildImplementerCanaryRecord({ id, profile: before, evidence: body });
+    const nextOptions = stripQwenImplementationBypassFlags(
+      isObjectRecord(before.options) ? before.options : {},
+    );
+    const qwenOptions = isObjectRecord(nextOptions.qwenLocalAgent)
+      ? { ...nextOptions.qwenLocalAgent }
+      : {};
+    qwenOptions.implementationCanary = canary;
+    nextOptions.qwenLocalAgent = qwenOptions;
+
+    const updated = updateRuntimeProfile(id, { options: nextOptions });
+    if (!updated) return c.json({ error: "Failed to update runtime profile" }, 500);
+    const response = toRuntimeProfileResponse(updated);
+    appendConfigAuditEvent({
+      projectId: updated.projectId ?? existing.projectId ?? "global",
+      runtimeProfileId: id,
+      action: "runtime_profile_updated",
+      sourceKind: "runtime_profile",
+      actor: "api",
+      before: summarizeRuntimeProfileForAudit(before),
+      after: summarizeRuntimeProfileForAudit(response),
+    });
+    broadcast({ type: "runtime_profile:updated", payload: response });
+    return c.json({ profile: response, canary });
   },
 );
 

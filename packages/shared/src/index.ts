@@ -806,8 +806,11 @@ export {
 export {
   evaluateRuntimeProfileStageCapability,
   getRuntimeStageCaps,
+  hasStructuredQwenImplementationCanary,
+  isStructuredQwenImplementationCanaryEvidence,
   isQwenLocalRuntimeProfile,
   isRuntimeProfileAllowedForStage,
+  QWEN_IMPLEMENTATION_CANARY_SOURCES,
   type RuntimeStageCapabilityDecision,
   type RuntimeStageCapabilityReason,
   type RuntimeStageCaps,

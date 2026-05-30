@@ -31,6 +31,11 @@ export interface RuntimeStageCapabilityDecision {
   caps: RuntimeStageCaps;
 }
 
+export const QWEN_IMPLEMENTATION_CANARY_SOURCES = [
+  "structured_evidence",
+  "aif_implementer_canary",
+] as const;
+
 type RuntimeProfileStagePolicyInput = Pick<
   RuntimeProfile,
   "id" | "runtimeId" | "providerId" | "options"
@@ -232,12 +237,43 @@ function readAllowedStages(options: Record<string, unknown>): Set<string> | null
   return new Set(stages);
 }
 
-function readBooleanPath(record: Record<string, unknown>, path: string[]): boolean {
-  let current: unknown = record;
-  for (const key of path) {
-    current = asRecord(current)[key];
+function readNonEmptyString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function isPassVerdict(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s-]+/g, "_");
+  return normalized === "pass" || normalized === "test_pass" || normalized === "review_pass";
+}
+
+function hasValidIsoTimestamp(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed);
+}
+
+export function isStructuredQwenImplementationCanaryEvidence(value: unknown): boolean {
+  const canary = asRecord(value);
+  if (canary.passed !== true) return false;
+  if (!readNonEmptyString(canary, "canaryId")) return false;
+  if (!hasValidIsoTimestamp(canary.passedAt)) return false;
+
+  const source = readNonEmptyString(canary, "source");
+  if (!source || !(QWEN_IMPLEMENTATION_CANARY_SOURCES as readonly string[]).includes(source)) {
+    return false;
   }
-  return current === true;
+
+  return isPassVerdict(canary.testVerdict) && isPassVerdict(canary.reviewVerdict);
+}
+
+export function hasStructuredQwenImplementationCanary(options: unknown): boolean {
+  const qwenOptions = asRecord(asRecord(options).qwenLocalAgent);
+  return isStructuredQwenImplementationCanaryEvidence(qwenOptions.implementationCanary);
 }
 
 export function isQwenLocalRuntimeProfile(profile: RuntimeProfileStagePolicyInput): boolean {
@@ -253,24 +289,11 @@ export function isQwenLocalRuntimeProfile(profile: RuntimeProfileStagePolicyInpu
 
 function qwenImplementationOptInReason(
   options: Record<string, unknown>,
-  explicitStageCapability: boolean | null,
+  _explicitStageCapability: boolean | null,
 ): RuntimeStageCapabilityReason | null {
-  if (explicitStageCapability === true) return "explicit_stage_allow";
-
   const qwenOptions = asRecord(options.qwenLocalAgent);
-  if (
-    qwenOptions.allowImplementation === true ||
-    qwenOptions.implementationEnabled === true ||
-    qwenOptions.implementationCapable === true
-  ) {
-    return "qwen_implementation_flag";
-  }
 
-  if (
-    qwenOptions.implementationCanaryPassed === true ||
-    readBooleanPath(qwenOptions, ["implementationCanary", "passed"]) ||
-    readBooleanPath(qwenOptions, ["canary", "implementation", "passed"])
-  ) {
+  if (isStructuredQwenImplementationCanaryEvidence(qwenOptions.implementationCanary)) {
     return "qwen_implementation_canary";
   }
 

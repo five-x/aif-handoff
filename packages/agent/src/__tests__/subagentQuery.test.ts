@@ -605,7 +605,16 @@ describe("executeSubagentQuery attribution", () => {
         transport: RuntimeTransport.API,
         defaultModel: "Qwen3-32B-Q4_K_M.gguf",
         options: {
-          qwenLocalAgent: { allowImplementation: true },
+          qwenLocalAgent: {
+            implementationCanary: {
+              passed: true,
+              source: "structured_evidence",
+              canaryId: "canary-test",
+              passedAt: "2026-05-30T00:00:00.000Z",
+              testVerdict: "TEST PASS",
+              reviewVerdict: "REVIEW PASS",
+            },
+          },
           runtimeStageCaps: {
             implementer: {
               maxToolTurns: 5,

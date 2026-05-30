@@ -280,7 +280,18 @@ describe("runtime profile resolution", () => {
         runtimeId: "qwen-local-agent",
         providerId: "qwen",
         enabled: true,
-        optionsJson: JSON.stringify({ qwenLocalAgent: { allowImplementation: true } }),
+        optionsJson: JSON.stringify({
+          qwenLocalAgent: {
+            implementationCanary: {
+              passed: true,
+              source: "structured_evidence",
+              canaryId: "canary-test",
+              passedAt: "2026-05-30T00:00:00.000Z",
+              testVerdict: "TEST PASS",
+              reviewVerdict: "REVIEW PASS",
+            },
+          },
+        }),
       })
       .run();
     testDb.current

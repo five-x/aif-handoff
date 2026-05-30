@@ -5,6 +5,7 @@ import { createTestDb } from "@aif/shared/server";
 import {
   appSettings,
   codexLimitHeads,
+  evaluateRuntimeProfileStageCapability,
   projects,
   resetEnvCache,
   runtimeProfiles,
@@ -361,6 +362,154 @@ describe("runtimeProfiles API", () => {
       }),
     });
     expect(invalidUpdateRes.status).toBe(400);
+  });
+
+  it("rejects qwen implementer approval through generic runtime profile options", async () => {
+    const createRes = await app.request("/runtime-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Qwen Manual Bypass",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        options: {
+          stageCapabilities: { implementer: { enabled: true } },
+          qwenLocalAgent: { implementationCanary: { passed: true } },
+        },
+      }),
+    });
+    expect(createRes.status).toBe(400);
+    const createBody = await createRes.json();
+    expect(createBody.fieldErrors.options).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("options.stageCapabilities.implementer"),
+        expect.stringContaining("options.qwenLocalAgent.implementationCanary"),
+      ]),
+    );
+
+    const safeCreateRes = await app.request("/runtime-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Qwen Safe",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+      }),
+    });
+    expect(safeCreateRes.status).toBe(201);
+    const safeProfile = await safeCreateRes.json();
+
+    const updateRes = await app.request(`/runtime-profiles/${safeProfile.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        options: { qwenLocalAgent: { allowImplementation: true } },
+      }),
+    });
+    expect(updateRes.status).toBe(400);
+  });
+
+  it("records structured qwen implementer canary evidence and enables implementer stage", async () => {
+    const createRes = await app.request("/runtime-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "MI50",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        transport: "api",
+        baseUrl: "http://192.168.88.62:8005/v1",
+        defaultModel: "Qwen3.6-35B-A3B-MTP-UD-Q5_K_XL.gguf",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const profile = await createRes.json();
+
+    const evidenceRes = await app.request(
+      `/runtime-profiles/${profile.id}/implementer-canary/evidence`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          operator: "gpu-support",
+          runtimeId: "qwen-local-agent",
+          providerId: "qwen",
+          model: "Qwen3.6-35B-A3B-MTP-UD-Q5_K_XL.gguf",
+          endpoint: "http://192.168.88.62:8005/v1",
+          wallClockMs: 120_000,
+          toolTurns: 18,
+          repeatedToolCalls: 1,
+          repeatedToolCallLimit: 3,
+          maxToolTurns: 40,
+          timeoutMs: 600_000,
+          wallClockTimeoutMs: 600_000,
+          maxOutput: 8192,
+          verificationCommand: "npm test",
+          verificationExitCode: 0,
+          changedFiles: ["src/index.ts", "test/index.test.ts"],
+          toolUseObserved: true,
+          testVerdict: "TEST PASS",
+          reviewVerdict: "REVIEW PASS",
+          summary: "Canary completed a repository edit with tool use and tests.",
+        }),
+      },
+    );
+    expect(evidenceRes.status).toBe(200);
+    const body = await evidenceRes.json();
+    expect(body.canary).toMatchObject({
+      passed: true,
+      source: "structured_evidence",
+      testVerdict: "TEST PASS",
+      reviewVerdict: "REVIEW PASS",
+    });
+    expect(body.profile.options.qwenLocalAgent.implementationCanary.canaryId).toBeTruthy();
+    expect(evaluateRuntimeProfileStageCapability(body.profile, "implementer")).toMatchObject({
+      allowed: true,
+      reason: "qwen_implementation_canary",
+    });
+    expect(mockBroadcast).toHaveBeenCalledWith({
+      type: "runtime_profile:updated",
+      payload: expect.objectContaining({ id: profile.id }),
+    });
+  });
+
+  it("rejects canary evidence with raw provider diagnostics", async () => {
+    const createRes = await app.request("/runtime-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "MI50",
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const profile = await createRes.json();
+
+    const evidenceRes = await app.request(
+      `/runtime-profiles/${profile.id}/implementer-canary/evidence`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wallClockMs: 120_000,
+          toolTurns: 18,
+          repeatedToolCalls: 1,
+          repeatedToolCallLimit: 3,
+          maxToolTurns: 40,
+          timeoutMs: 600_000,
+          verificationCommand: "npm test",
+          verificationExitCode: 0,
+          changedFiles: ["src/index.ts"],
+          toolUseObserved: true,
+          testVerdict: "TEST PASS",
+          reviewVerdict: "REVIEW PASS",
+          summary: "Canary completed a repository edit with tool use and tests.",
+          providerDiagnostics: { raw: "secret raw provider output" },
+        }),
+      },
+    );
+    expect(evidenceRes.status).toBe(400);
   });
 
   it("lists project + global profiles", async () => {

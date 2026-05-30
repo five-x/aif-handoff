@@ -30,6 +30,17 @@ function profile(overrides: Partial<RuntimeProfile> = {}): RuntimeProfile {
   };
 }
 
+function implementationCanaryEvidence() {
+  return {
+    passed: true,
+    source: "structured_evidence",
+    canaryId: "canary-test",
+    passedAt: "2026-05-30T00:00:00.000Z",
+    testVerdict: "TEST PASS",
+    reviewVerdict: "REVIEW PASS",
+  };
+}
+
 describe("runtime stage policy", () => {
   it("denies qwen-local-agent implementation by default", () => {
     const decision = evaluateRuntimeProfileStageCapability(profile(), "implementer");
@@ -40,19 +51,31 @@ describe("runtime stage policy", () => {
     expect(decision.caps.retryCount).toBe(0);
   });
 
-  it("allows qwen-local-agent implementation with an explicit stage flag", () => {
+  it("does not allow qwen-local-agent implementation with only an explicit stage flag", () => {
     const decision = evaluateRuntimeProfileStageCapability(
       profile({ options: { stageCapabilities: { implementer: { enabled: true } } } }),
       "implementer",
     );
 
-    expect(decision.allowed).toBe(true);
-    expect(decision.reason).toBe("explicit_stage_allow");
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toBe("qwen_implementation_not_enabled");
   });
 
-  it("allows qwen-local-agent implementation with canary evidence", () => {
+  it("does not allow qwen-local-agent implementation with bare canary passed flag", () => {
     const decision = evaluateRuntimeProfileStageCapability(
       profile({ options: { qwenLocalAgent: { implementationCanary: { passed: true } } } }),
+      "implementer",
+    );
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toBe("qwen_implementation_not_enabled");
+  });
+
+  it("allows qwen-local-agent implementation with structured canary evidence", () => {
+    const decision = evaluateRuntimeProfileStageCapability(
+      profile({
+        options: { qwenLocalAgent: { implementationCanary: implementationCanaryEvidence() } },
+      }),
       "implementer",
     );
 
@@ -64,7 +87,7 @@ describe("runtime stage policy", () => {
     const decision = evaluateRuntimeProfileStageCapability(
       profile({
         options: {
-          qwenLocalAgent: { allowImplementation: true },
+          qwenLocalAgent: { implementationCanary: implementationCanaryEvidence() },
           stageCapabilities: { implementer: false },
         },
       }),

@@ -450,7 +450,14 @@ describe("coordinator", () => {
             ...(input.options ?? {}),
             qwenLocalAgent: {
               ...((input.options?.qwenLocalAgent as Record<string, unknown> | undefined) ?? {}),
-              allowImplementation: true,
+              implementationCanary: {
+                passed: true,
+                source: "structured_evidence",
+                canaryId: "canary-test",
+                passedAt: "2026-05-30T00:00:00.000Z",
+                testVerdict: "TEST PASS",
+                reviewVerdict: "REVIEW PASS",
+              },
             },
           }
         : (input.options ?? {});
