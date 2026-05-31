@@ -20,6 +20,7 @@ import {
   findCoordinatorTaskCandidates,
   findProjectById,
   findTaskById,
+  listTasks,
   getFreshAcceptedTaskQaArtifact,
   getAppDefaultRuntimeProfileId,
   getTaskStageArtifactGateState,
@@ -67,6 +68,7 @@ import {
   evaluateTaskCompletionEvidence,
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
+  findSequentialBranchDependencyBlocker,
   buildAuditFailureSignature,
   isRecoverableAuditFailureFamily,
   selectAuditArtifactFailureFamily,
@@ -4262,6 +4264,48 @@ export function processDueScheduledTasks(): number {
   return fired;
 }
 
+function shouldEnforceSequentialBranchDependency(project: {
+  rootPath: string;
+  parallelEnabled: boolean;
+}): boolean {
+  if (!projectUsesSharedBranchIsolation(project.rootPath)) return false;
+  return (
+    !project.parallelEnabled ||
+    !env.AIF_TASK_WORKTREES_ENABLED ||
+    !projectSupportsTaskWorktrees(project.rootPath)
+  );
+}
+
+function blockBacklogTaskForSequentialBranchDependency(input: {
+  task: TaskRow;
+  reason: string;
+  title: string;
+}): void {
+  const nowIso = new Date().toISOString();
+  setTaskFields(input.task.id, {
+    status: "blocked_external",
+    blockedReason: input.reason,
+    blockedFromStatus: input.task.status,
+    retryAfter: null,
+    retryCount: input.task.retryCount ?? 0,
+    reworkRequested: false,
+    reviewIterationCount: input.task.reviewIterationCount ?? 0,
+    manualReviewRequired: true,
+    paused: true,
+    lastHeartbeatAt: nowIso,
+    updatedAt: nowIso,
+  });
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] [auto-queue] Blocked by sequential branch dependency: ${input.reason}`,
+  );
+  void notifyTaskBroadcast(input.task.id, "task:moved", {
+    title: input.title,
+    fromStatus: input.task.status,
+    toStatus: "blocked_external",
+  });
+}
+
 // ── Auto-queue advance ───────────────────────────────────────
 
 /**
@@ -4352,6 +4396,30 @@ export function processAutoQueueAdvance(): number {
           "Auto-queue: no more backlog tasks ready to advance",
         );
         break;
+      }
+
+      if (shouldEnforceSequentialBranchDependency(project)) {
+        const blocker = findSequentialBranchDependencyBlocker({
+          projectRoot: project.rootPath,
+          nextTask: next,
+          projectTasks: listTasks(project.id),
+        });
+        if (blocker) {
+          blockBacklogTaskForSequentialBranchDependency({
+            task: next,
+            title: next.title,
+            reason: blocker.message,
+          });
+          log.warn(
+            {
+              projectId: project.id,
+              taskId: next.id,
+              blocker,
+            },
+            "Auto-queue blocked next task because a prior task branch is not integrated",
+          );
+          break;
+        }
       }
 
       const nowIso = new Date().toISOString();

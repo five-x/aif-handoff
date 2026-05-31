@@ -552,6 +552,56 @@ describe("processAutoQueueAdvance", () => {
       expect(findTaskById("t-clean-1")?.status).toBe("planning");
     });
 
+    it("blocks the next sequential branch task when a prior terminal task branch is unmerged", () => {
+      const root = mkdtempSync(join(tmpdir(), "autoqueue-unmerged-branch-"));
+      execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.name", "T"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: root, stdio: "ignore" });
+      mkdirSync(join(root, ".ai-factory"), { recursive: true });
+      writeFileSync(
+        join(root, ".ai-factory", "config.yaml"),
+        "git:\n  enabled: true\n  base_branch: main\n  create_branches: true\n",
+      );
+      writeFileSync(join(root, "README.md"), "# t\n");
+      execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "init", "--no-verify"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["checkout", "-b", "feature/previous"], {
+        cwd: root,
+        stdio: "ignore",
+      });
+      writeFileSync(join(root, "package.json"), '{"scripts":{"test":"node -e ok"}}\n');
+      execFileSync("git", ["add", "package.json"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "previous task", "--no-verify"], {
+        cwd: root,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["checkout", "main"], { cwd: root, stdio: "ignore" });
+
+      testDb.current
+        .insert(projects)
+        .values({
+          id: "unmerged-branch",
+          name: "unmerged-branch",
+          rootPath: root,
+          parallelEnabled: false,
+          autoQueueMode: true,
+        })
+        .run();
+      seedTask("previous", "unmerged-branch", 100, {
+        status: "done",
+        branchName: "feature/previous",
+      });
+      seedTask("next", "unmerged-branch", 200);
+
+      expect(processAutoQueueAdvance()).toBe(0);
+      const next = findTaskById("next");
+      expect(next?.status).toBe("blocked_external");
+      expect(next?.paused).toBe(true);
+      expect(next?.blockedReason).toContain("sequential_branch_dependency_blocked");
+      expect(next?.blockedReason).toContain("feature/previous");
+    });
+
     it("fills the parallel pool for worktree-capable branch-isolated git projects", () => {
       const root = mkdtempSync(join(tmpdir(), "autoqueue-parallel-branch-"));
       execFileSync("git", ["init", "--initial-branch=main"], { cwd: root, stdio: "ignore" });

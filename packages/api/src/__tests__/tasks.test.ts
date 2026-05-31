@@ -3546,6 +3546,68 @@ describe("tasks API", () => {
       expect(body.status).toBe("implementing");
     });
 
+    it("should block start_implementation when a prior sequential task branch is not integrated", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-start-unmerged-branch-"));
+      initGitProject(rootPath);
+      mkdirSync(join(rootPath, ".ai-factory"), { recursive: true });
+      writeFileSync(
+        join(rootPath, ".ai-factory", "config.yaml"),
+        "git:\n  enabled: true\n  base_branch: main\n  create_branches: true\n",
+      );
+      execFileSync("git", ["add", ".ai-factory/config.yaml"], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "aif config", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["checkout", "-b", "feature/previous"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      writeFileSync(join(rootPath, "package.json"), '{"scripts":{"test":"node -e ok"}}\n');
+      execFileSync("git", ["add", "package.json"], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "previous task", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["checkout", "main"], { cwd: rootPath, stdio: "ignore" });
+      insertTestProject(db, rootPath);
+      db.insert(tasks)
+        .values([
+          {
+            id: "ev-prior-branch",
+            projectId: "test-project",
+            title: "Prior branch task",
+            status: "done",
+            position: 100,
+            branchName: "feature/previous",
+          },
+          {
+            id: "ev-plan-branch-block",
+            projectId: "test-project",
+            title: "Next task",
+            status: "plan_ready",
+            autoMode: false,
+            position: 200,
+            plan: "Update src/index.ts and run npm.cmd test.",
+          },
+        ])
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-branch-block/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_implementation" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("plan_ready");
+      expect(body.blockedReason).toContain("sequential_branch_dependency_blocked");
+      expect(body.blockedReason).toContain("feature/previous");
+    });
+
     it("should block start_implementation when the plan is generic placeholder output", async () => {
       const db = testDb.current;
       insertTestProject(db);

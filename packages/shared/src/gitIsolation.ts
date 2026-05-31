@@ -434,6 +434,12 @@ function resolveBaseBranch(
   return { branchName: configuredBase, createFromRemote: false };
 }
 
+export function resolveProjectBaseBranch(projectRoot: string): string {
+  const config = resolveGitConfig(projectRoot);
+  return resolveBaseBranch(projectRoot, config.base_branch, hasProjectConfigFile(projectRoot))
+    .branchName;
+}
+
 function handleBaseBranchRefreshResult(input: {
   projectRoot: string;
   branchName: string;

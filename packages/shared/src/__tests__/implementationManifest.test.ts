@@ -348,6 +348,42 @@ describe("implementation manifest extraction", () => {
     expect(result.issues.map((issue) => issue.code)).toContain("verification_command_not_observed");
   });
 
+  it("rejects repository inspection tools as passed implementation verification", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: [
+          "[2026-05-29T10:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-29T10:00:01.000Z] Tool: read_file src/index.ts",
+          "[2026-05-29T10:00:02.000Z] Agent: implement-coordinator complete",
+        ].join("\n"),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          verificationEvidence: [
+            {
+              id: "ver-1",
+              command: "read_file src/index.ts",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "src/index.ts contains the implementation.",
+              outputPreviewTruncated: false,
+            },
+          ],
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("unsupported_verification_command");
+    expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
+  });
+
   it("accepts passed verification command observed in latest implementation activity", () => {
     const result = validateImplementationManifest({
       task: {

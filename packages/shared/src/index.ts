@@ -696,6 +696,13 @@ export {
 // Path validation
 export { validateProjectRootPath } from "./pathValidation.js";
 
+// Sequential branch dependency guard
+export {
+  findSequentialBranchDependencyBlocker,
+  type SequentialBranchDependencyBlocker,
+  type SequentialBranchDependencyTask,
+} from "./branchDependency.js";
+
 // Git/worktree isolation utilities (Node-only)
 export {
   BranchIsolationError,
@@ -712,6 +719,7 @@ export {
   isGitRepo,
   projectSupportsTaskWorktrees,
   projectUsesSharedBranchIsolation,
+  resolveProjectBaseBranch,
   restorePersistedBranch,
   slugifyTitle,
   validateBranchName,

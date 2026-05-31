@@ -93,6 +93,7 @@ export type ImplementationManifestIssueCode =
   | "implementation_changed_files_mismatch"
   | "implementation_scope_mismatch"
   | "missing_verification_evidence"
+  | "unsupported_verification_command"
   | "verification_command_not_observed"
   | "contradictory_verification_claim"
   | "missing_acceptance_evidence"
@@ -599,6 +600,10 @@ function normalizeCommandText(value: string): string {
     .replace(/\b(npm|npx|pnpm|yarn|bun)\.cmd\b/g, "$1");
 }
 
+function isRepositoryInspectionOnlyVerificationCommand(value: string): boolean {
+  return /^(?:read_file|list_files|search_files|git_status)\b/i.test(value.trim());
+}
+
 function latestImplementationActivitySection(
   agentActivityLog: string | null | undefined,
 ): string[] {
@@ -804,6 +809,9 @@ export function validateImplementationManifest(
   const contradictoryPassedEntries = passedEntries.filter((entry) =>
     looksLikeFabricatedVerificationText(entry.outputPreview),
   );
+  const unsupportedPassedEntries = passedEntries.filter((entry) =>
+    isRepositoryInspectionOnlyVerificationCommand(entry.command),
+  );
   const unobservedPassedEntries = passedEntries.filter(
     (entry) =>
       usefulString(entry.command) &&
@@ -818,6 +826,7 @@ export function validateImplementationManifest(
     passedEntriesWithoutIdentity.length === 0 &&
     !admitsFabricatedVerification &&
     contradictoryPassedEntries.length === 0 &&
+    unsupportedPassedEntries.length === 0 &&
     unobservedPassedEntries.length === 0;
   if (
     contradictoryPassedEntries.length > 0 ||
@@ -835,6 +844,14 @@ export function validateImplementationManifest(
       issue(
         "verification_command_not_observed",
         `Passed verification command(s) were not observed in the latest implementation activity: ${unobservedPassedEntries.map((entry) => entry.command).join(", ")}.`,
+      ),
+    );
+  }
+  if (unsupportedPassedEntries.length > 0) {
+    issues.push(
+      issue(
+        "unsupported_verification_command",
+        `Repository-inspection tool(s) cannot be marked as passed implementation verification: ${unsupportedPassedEntries.map((entry) => entry.command).join(", ")}. Run a concrete build/test/lint shell command, or mark verification as skipped/failed with the observed limitation.`,
       ),
     );
   }

@@ -13,6 +13,7 @@ export {
   isGitRepo,
   projectSupportsTaskWorktrees,
   projectUsesSharedBranchIsolation,
+  resolveProjectBaseBranch,
   restorePersistedBranch,
   slugifyTitle,
   validateBranchName,

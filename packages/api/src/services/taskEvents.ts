@@ -11,11 +11,14 @@ import {
   formatTaskPlanQualityBlockedReason,
   formatTaskCompletionBlockedReason,
   buildAuditFailureSignature,
+  findSequentialBranchDependencyBlocker,
   isRecoverableAuditFailureFamily,
   isBranchIsolationError,
   looksLikeFullPlanUpdate,
   getEnv,
   getProjectConfig,
+  projectSupportsTaskWorktrees,
+  projectUsesSharedBranchIsolation,
   selectAuditArtifactFailureFamily,
   selectTaskCompletionAuditFailureFamily,
   resolveAuditPlanId,
@@ -32,6 +35,7 @@ import {
   hasFreshAcceptedTaskAcceptancePack,
   hasFreshAcceptedTaskQaArtifact,
   getLatestHumanComment,
+  listTasks,
   appendTaskActivityLog,
   auditRoadmapTaskDependenciesReleaseReady,
   listProjectConfigWorkBlockers,
@@ -147,6 +151,61 @@ function assertTaskBranchPostRun(task: TaskRow, projectRoot: string): EventHandl
         : String(err);
     return { ok: false, status: 409, error };
   }
+}
+
+function shouldEnforceSequentialBranchDependency(project: {
+  rootPath: string;
+  parallelEnabled: boolean;
+}): boolean {
+  if (!projectUsesSharedBranchIsolation(project.rootPath)) return false;
+  return (
+    !project.parallelEnabled ||
+    !getEnv().AIF_TASK_WORKTREES_ENABLED ||
+    !projectSupportsTaskWorktrees(project.rootPath)
+  );
+}
+
+function blockTaskForSequentialBranchDependency(input: {
+  task: TaskRow;
+  reason: string;
+}): EventHandlerResult {
+  const nowIso = new Date().toISOString();
+  setTaskFields(input.task.id, {
+    status: "blocked_external",
+    blockedReason: input.reason,
+    blockedFromStatus: input.task.status,
+    retryAfter: null,
+    retryCount: input.task.retryCount ?? 0,
+    reworkRequested: false,
+    reviewIterationCount: input.task.reviewIterationCount ?? 0,
+    manualReviewRequired: true,
+    paused: true,
+    lastHeartbeatAt: nowIso,
+    updatedAt: nowIso,
+  });
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] Blocked by sequential branch dependency: ${input.reason}`,
+  );
+  const updated = findTaskById(input.task.id);
+  if (!updated) return { ok: false, status: 404, error: "Task not found after block" };
+  return { ok: true, task: updated, broadcastType: "task:moved" };
+}
+
+function checkSequentialBranchDependencyBeforeRuntimeStart(
+  task: TaskRow,
+): EventHandlerResult | null {
+  if (task.isFix) return null;
+  const project = findProjectById(task.projectId);
+  if (!project) return null;
+  if (!shouldEnforceSequentialBranchDependency(project)) return null;
+  const blocker = findSequentialBranchDependencyBlocker({
+    projectRoot: project.rootPath,
+    nextTask: task,
+    projectTasks: listTasks(project.id),
+  });
+  if (!blocker) return null;
+  return blockTaskForSequentialBranchDependency({ task, reason: blocker.message });
 }
 
 function isOperatorInputHold(task: TaskRow): boolean {
@@ -707,6 +766,11 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     return { ok: false, status: 409, error: transition.error };
   }
 
+  if (RUNTIME_STARTING_EVENTS.has(event)) {
+    const branchDependencyBlock = checkSequentialBranchDependencyBeforeRuntimeStart(task);
+    if (branchDependencyBlock) return branchDependencyBlock;
+  }
+
   if (event === "start_implementation") {
     const project = findProjectById(task.projectId);
     if (!project) {
@@ -919,6 +983,9 @@ function handleAcceptExistingPlan(input: EventHandlerInput): EventHandlerResult 
   if (!project) {
     return { ok: false, status: 404, error: "Project not found for task" };
   }
+
+  const branchDependencyBlock = checkSequentialBranchDependencyBeforeRuntimeStart(task);
+  if (branchDependencyBlock) return branchDependencyBlock;
 
   // Branch handling MUST happen before resolving/reading the plan file:
   // task.branchName is a source-of-truth contract, and an already-bound
