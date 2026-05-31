@@ -243,11 +243,42 @@ function isAifGeneratedPlanningPath(projectRoot: string, pathValue: string): boo
   return normalized === planPath || normalized === fixPlanPath || normalized.startsWith(plansDir);
 }
 
+function isUntrackedStatusLine(line: string): boolean {
+  return line.startsWith("?? ");
+}
+
+function isGeneratedBuildArtifactPath(pathValue: string): boolean {
+  const normalized = normalizeStatusPath(pathValue);
+  return (
+    normalized === "node_modules" ||
+    normalized.startsWith("node_modules/") ||
+    normalized === ".npm-cache" ||
+    normalized.startsWith(".npm-cache/") ||
+    normalized === ".turbo" ||
+    normalized.startsWith(".turbo/") ||
+    normalized === ".vite" ||
+    normalized.startsWith(".vite/") ||
+    normalized === "dist" ||
+    normalized.startsWith("dist/") ||
+    normalized === "build" ||
+    normalized.startsWith("build/") ||
+    normalized === "coverage" ||
+    normalized.startsWith("coverage/") ||
+    normalized === "out" ||
+    normalized.startsWith("out/") ||
+    normalized.endsWith(".tsbuildinfo")
+  );
+}
+
 function getBlockingDirtyStatusLines(projectRoot: string, statusOutput: string): string[] {
   return statusOutput
     .split("\n")
     .filter((line) => line.trim().length > 0)
-    .filter((line) => !isAifGeneratedPlanningPath(projectRoot, statusLinePath(line)));
+    .filter((line) => {
+      const pathValue = statusLinePath(line);
+      if (isAifGeneratedPlanningPath(projectRoot, pathValue)) return false;
+      return !(isUntrackedStatusLine(line) && isGeneratedBuildArtifactPath(pathValue));
+    });
 }
 
 export function assertWorkingTreeClean(projectRoot: string, branchName: string | null): void {

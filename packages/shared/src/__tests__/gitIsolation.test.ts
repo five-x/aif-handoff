@@ -274,6 +274,25 @@ describe("gitIsolation", () => {
   );
 
   it(
+    "ignores untracked generated build artifacts while preserving tracked-file dirty checks",
+    () => {
+      initRepo(projectRoot);
+      mkdirSync(join(projectRoot, "dist"), { recursive: true });
+      writeFileSync(join(projectRoot, "dist", "main.js"), "console.log('built');\n");
+      writeFileSync(join(projectRoot, "tsconfig.tsbuildinfo"), "{}\n");
+
+      expect(workingTreeClean(projectRoot)).toBe(true);
+      expect(describeDirtyWorkingTree(projectRoot)).toBeNull();
+      expect(() => assertWorkingTreeClean(projectRoot, "feature/x")).not.toThrow();
+
+      writeFileSync(join(projectRoot, "README.md"), "changed\n");
+      expect(workingTreeClean(projectRoot)).toBe(false);
+      expect(describeDirtyWorkingTree(projectRoot)).toContain("README.md");
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  it(
     "reports branch drift as a structured isolation error",
     () => {
       initRepo(projectRoot);
