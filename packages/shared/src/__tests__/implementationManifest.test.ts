@@ -175,6 +175,48 @@ describe("implementation manifest extraction", () => {
     );
   });
 
+  it("normalizes blocked environment verification evidence without rejecting the manifest shape", () => {
+    const raw = JSON.stringify({
+      ...validManifest({
+        verificationEvidence: [
+          {
+            id: "ver-1",
+            command: "npm test",
+            status: "blocked_by_environment",
+            outputSha256: "b".repeat(64),
+            outputPreview: "npm test could not run because package.json was unavailable.",
+            outputPreviewTruncated: false,
+          },
+        ],
+        acceptanceCriteria: [{ id: "AC-1", status: "unsatisfied", evidenceRefs: [] }],
+        evidenceRefs: ["ver-1"],
+      }),
+    });
+
+    const normalized = normalizeImplementationManifestJson(raw);
+    expect(normalized).toBeTruthy();
+    expect(JSON.parse(normalized as string).verificationEvidence[0].status).toBe("skipped");
+
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: normalized,
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).not.toContain(
+      "invalid_implementation_manifest",
+    );
+    expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
+  });
+
   it("rejects passed verification that uses the empty-output sha as placeholder evidence", () => {
     const manifest = {
       version: 1,

@@ -295,8 +295,22 @@ function normalizeVerificationEvidenceShape(value: unknown): unknown {
     return {
       ...entry,
       id: usefulString(entry.id) ? entry.id : `ver-${index + 1}`,
+      status: normalizeVerificationStatus(entry.status),
     };
   });
+}
+
+function normalizeVerificationStatus(value: unknown): unknown {
+  if (value === "blocked_by_environment" || value === "blocked" || value === "not_run") {
+    return "skipped";
+  }
+  if (value === "completed" || value === "success") {
+    return "passed";
+  }
+  if (value === "error") {
+    return "failed";
+  }
+  return value;
 }
 
 function normalizeAcceptanceCriteriaShape(value: unknown): unknown {
