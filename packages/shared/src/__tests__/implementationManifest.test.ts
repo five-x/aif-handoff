@@ -145,6 +145,36 @@ describe("implementation manifest extraction", () => {
     expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
   });
 
+  it("normalizes completed commit evidence without rejecting the manifest shape", () => {
+    const raw = JSON.stringify({
+      ...validManifest({
+        commitEvidence: { status: "completed", evidenceRefs: ["git_status"] },
+      }),
+    });
+
+    const normalized = normalizeImplementationManifestJson(raw);
+    expect(normalized).toBeTruthy();
+    expect(JSON.parse(normalized as string).commitEvidence.status).toBe("committed");
+
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: normalized,
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).not.toContain(
+      "invalid_implementation_manifest",
+    );
+  });
+
   it("rejects passed verification that uses the empty-output sha as placeholder evidence", () => {
     const manifest = {
       version: 1,

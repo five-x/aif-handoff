@@ -494,7 +494,8 @@ function isGeneratedDependencyArtifactPath(path: string): boolean {
     normalized.startsWith("dist/") ||
     normalized.startsWith("build/") ||
     normalized.startsWith("coverage/") ||
-    normalized.startsWith("out/")
+    normalized.startsWith("out/") ||
+    normalized.endsWith(".tsbuildinfo")
   );
 }
 

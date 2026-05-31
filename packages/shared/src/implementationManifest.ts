@@ -344,6 +344,9 @@ function normalizeCommitEvidenceShape(value: unknown): unknown {
   if (isObject(value) && value.status === "already_committed") {
     return { ...value, status: "committed" };
   }
+  if (isObject(value) && value.status === "completed") {
+    return { ...value, status: "committed" };
+  }
   return value;
 }
 

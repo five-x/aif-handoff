@@ -1065,6 +1065,7 @@ describe("taskCompletionEvidence", () => {
     writeFileSync(join(root, "node_modules", "pkg", "index.js"), "module.exports = {};\n", "utf8");
     writeFileSync(join(root, ".npm-cache", "tmp", "cache"), "cache\n", "utf8");
     writeFileSync(join(root, "dist", "main.js"), "console.log('built');\n", "utf8");
+    writeFileSync(join(root, "tsconfig.tsbuildinfo"), "{}", "utf8");
     const plan = planWithManifestScope({
       taskId: "feature-with-generated-artifacts",
       intent: "feature",
