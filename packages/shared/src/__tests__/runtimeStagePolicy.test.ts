@@ -41,6 +41,7 @@ function implementationCanaryEvidence() {
     maxToolTurns: 200,
     timeoutMs: 1_800_000,
     wallClockTimeoutMs: 1_800_000,
+    repeatedToolCallLimit: 3,
     contextTokens: 81_920,
     maxOutput: 12_000,
   };
@@ -140,6 +141,7 @@ describe("runtime stage policy", () => {
 
     expect(caps.maxToolTurns).toBe(200);
     expect(caps.wallClockMs).toBe(1_800_000);
+    expect(caps.repeatedToolCallLimit).toBe(3);
     expect(caps.contextTokens).toBe(81_920);
     expect(caps.maxOutputTokens).toBe(12_000);
     expect(caps.repositoryInspectionToolBudget).toBe(200);
@@ -154,6 +156,7 @@ describe("runtime stage policy", () => {
             implementer: {
               maxToolTurns: 40,
               wallClockMs: 2_000_000,
+              repeatedToolCallLimit: 6,
               contextWindowTokens: 16_000,
               maxOutputTokens: 8_000,
               maxBudgetUsd: 1.25,
@@ -169,6 +172,7 @@ describe("runtime stage policy", () => {
     expect(caps).toEqual({
       maxToolTurns: 12,
       wallClockMs: 900_000,
+      repeatedToolCallLimit: 3,
       contextTokens: 16_000,
       maxOutputTokens: 4_000,
       maxBudgetUsd: 1.25,

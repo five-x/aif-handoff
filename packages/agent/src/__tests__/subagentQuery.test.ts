@@ -620,6 +620,7 @@ describe("executeSubagentQuery attribution", () => {
             implementer: {
               maxToolTurns: 5,
               wallClockMs: 123_000,
+              repeatedToolCallLimit: 3,
               contextWindowTokens: 16_000,
               maxOutputTokens: 1_000,
               maxBudgetUsd: 0.2,
@@ -660,6 +661,7 @@ describe("executeSubagentQuery attribution", () => {
         }),
         options: expect.objectContaining({
           contextWindowTokens: 16_000,
+          repeatedToolCallLimit: 3,
           maxInputTokens: 16_000,
           maxTokens: 1_000,
           maxOutputTokens: 1_000,

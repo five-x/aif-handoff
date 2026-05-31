@@ -2286,7 +2286,7 @@ describe("qwen-local-agent adapter", () => {
     );
 
     expect(result.outputText).toContain("repeated run_shell tool-call loop");
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.stringify(result.events)).toContain("Repeated identical run_shell call suppressed");
   });
   it("stops interleaved repeated git_commit loops before exhausting the run turn limit", async () => {
@@ -2352,6 +2352,60 @@ describe("qwen-local-agent adapter", () => {
     expect(JSON.stringify(result.events)).toContain(
       "Repeated identical git_commit call suppressed",
     );
+  }, 15_000);
+
+  it("stops interleaved repeated run_shell loops before exhausting the run turn limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-run-shell-loop-"));
+    const repeatedShellCall = {
+      type: "function",
+      function: {
+        name: "run_shell",
+        arguments: JSON.stringify({ command: "ls", args: ["-la"] }),
+      },
+    };
+    const statusCall = {
+      type: "function",
+      function: {
+        name: "git_status",
+        arguments: JSON.stringify({}),
+      },
+    };
+    for (const [index, toolCall] of [
+      repeatedShellCall,
+      statusCall,
+      repeatedShellCall,
+      statusCall,
+      repeatedShellCall,
+    ].entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-run-shell-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: `call-${index + 1}`, ...toolCall }],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const result = await runQwenLocalAgentApi(
+      createRunInput(root, {
+        options: {
+          baseUrl: "http://qwen.local/v1",
+          repeatedToolCallLimit: 2,
+          maxToolTurns: 20,
+        },
+      }),
+    );
+
+    expect(result.outputText).toContain("repeated run_shell tool-call loop");
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(JSON.stringify(result.events)).toContain("Repeated identical run_shell call suppressed");
   }, 15_000);
 
   it("stops repeated audit report validation fingerprints before generic tool-loop suppression", async () => {

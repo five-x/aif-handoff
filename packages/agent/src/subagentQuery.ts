@@ -507,6 +507,7 @@ function applyRuntimeStageCapsToAdapterOptions(
   const capped = { ...options };
   applyNumericOptionCap(capped, "maxToolTurns", caps.maxToolTurns);
   applyNumericOptionCap(capped, "runTimeoutMs", caps.wallClockMs);
+  applyNumericOptionCap(capped, "repeatedToolCallLimit", caps.repeatedToolCallLimit);
   applyNumericOptionCap(capped, "tokenBudget", caps.tokenBudget);
   applyNumericOptionCap(capped, "contextTokens", caps.contextTokens);
   applyNumericOptionCap(capped, "contextWindowTokens", caps.contextTokens);

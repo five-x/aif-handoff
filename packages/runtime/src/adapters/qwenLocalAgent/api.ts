@@ -77,6 +77,7 @@ const LOCAL_ENDPOINT_BUDGETS = new Map([
 const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set([
   "finalize_audit_report_manifest",
   "git_commit",
+  "run_shell",
   "validate_audit_report",
 ]);
 const AUDIT_REPORT_REPEATED_TOOL_CALL_LIMIT = 2;

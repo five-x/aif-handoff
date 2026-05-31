@@ -4,6 +4,7 @@ import type { RuntimeStage } from "./constants.js";
 export interface RuntimeStageCaps {
   maxToolTurns?: number;
   wallClockMs?: number;
+  repeatedToolCallLimit?: number;
   tokenBudget?: number;
   contextTokens?: number;
   maxOutputTokens?: number;
@@ -90,6 +91,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   implementer: {
     maxToolTurns: 12,
     wallClockMs: 15 * 60 * 1000,
+    repeatedToolCallLimit: 3,
     contextTokens: 24_000,
     maxOutputTokens: 4_000,
     retryCount: 0,
@@ -140,6 +142,11 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
 const CAP_ALIASES: Record<keyof RuntimeStageCaps, string[]> = {
   maxToolTurns: ["maxToolTurns", "toolTurns", "max_tool_turns"],
   wallClockMs: ["wallClockMs", "timeoutMs", "runTimeoutMs", "wall_clock_ms"],
+  repeatedToolCallLimit: [
+    "repeatedToolCallLimit",
+    "repeated_tool_call_limit",
+    "repeatToolCallLimit",
+  ],
   tokenBudget: ["tokenBudget", "maxTokensTotal", "token_budget"],
   contextTokens: ["contextTokens", "contextWindowTokens", "maxInputTokens", "context_tokens"],
   maxOutputTokens: ["maxOutputTokens", "maxTokens", "max_output_tokens"],
@@ -223,6 +230,8 @@ function readCanaryApprovedCaps(
   const caps: RuntimeStageCaps = {};
   const maxToolTurns = readPositiveInteger(canary.maxToolTurns);
   if (maxToolTurns !== undefined) caps.maxToolTurns = maxToolTurns;
+  const repeatedToolCallLimit = readPositiveInteger(canary.repeatedToolCallLimit);
+  if (repeatedToolCallLimit !== undefined) caps.repeatedToolCallLimit = repeatedToolCallLimit;
   const wallClockMs =
     readPositiveInteger(canary.wallClockTimeoutMs) ?? readPositiveInteger(canary.timeoutMs);
   if (wallClockMs !== undefined) caps.wallClockMs = wallClockMs;
