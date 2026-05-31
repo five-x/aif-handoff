@@ -2786,7 +2786,6 @@ function auditArtifactRequiresLedgerEvidence(input: {
 }
 
 const IMPLEMENTATION_EVIDENCE_REWORK_ISSUES = new Set<ImplementationManifestIssueCode>([
-  "missing_implementation_manifest",
   "invalid_implementation_manifest",
   "implementation_plan_manifest_hash_mismatch",
   "implementation_changed_files_mismatch",
@@ -3057,7 +3056,11 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
         input.requireManualReview ||
         repeatedFailureMustBlock ||
         auditReworkLimitReached ||
-        result.issues.some((entry) => entry.code === "manual_review_required"),
+        result.issues.some(
+          (entry) =>
+            entry.code === "manual_review_required" ||
+            entry.code === "missing_implementation_manifest",
+        ),
     },
     { title: input.title, fromStatus: input.fromStatus },
   );

@@ -5445,7 +5445,7 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
-  it("should return development tasks to rework before review when implementation manifest is missing", async () => {
+  it("should fail fast before review when implementation manifest is missing", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-dev-handoff-");
     db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
@@ -5464,14 +5464,14 @@ describe("coordinator", () => {
     expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-manifest", rootPath);
     expect(runReviewer).not.toHaveBeenCalled();
     const task = db.select().from(tasks).where(eq(tasks.id, "task-dev-handoff-manifest")).get();
-    expect(task!.status).toBe("implementing");
-    expect(task!.blockedFromStatus).toBeNull();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
     expect(task!.blockedReason).toContain("Completion evidence guard");
     expect(task!.blockedReason).toContain("missing_implementation_manifest");
-    expect(task!.blockedReason).toContain("Implementation evidence guard rework 1/");
-    expect(task!.reworkRequested).toBe(true);
-    expect(task!.manualReviewRequired).toBe(false);
-    expect(task!.reviewIterationCount).toBe(1);
+    expect(task!.blockedReason).not.toContain("Implementation evidence guard rework");
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.reviewIterationCount).toBe(0);
   });
 
   it("should cap implementation evidence guard rework before exhausting the general review budget", async () => {
