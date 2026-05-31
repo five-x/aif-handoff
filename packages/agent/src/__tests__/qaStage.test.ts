@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseQaArtifactOutput } from "../subagents/qa.js";
+import {
+  parseQaArtifactOutput,
+  synthesizeQaArtifactFromMandatoryInventory,
+} from "../subagents/qa.js";
 
 const inventory = [
   { id: "tests", label: "Targeted tests" },
@@ -152,5 +155,65 @@ describe("QA stage artifact parser", () => {
         risk: "Production-only regressions may remain unobserved.",
       }),
     );
+  });
+
+  it("synthesizes a strict passed artifact from implementation manifest evidence", () => {
+    const parsed = synthesizeQaArtifactFromMandatoryInventory({
+      parserError: "Expected exactly one fenced aif-qa-artifact JSON block, found 0",
+      mandatoryInventory: [
+        {
+          id: "manifest:unit-tests",
+          label: "Implementation verification: unit-tests",
+          command: "npm.cmd test",
+          source: "implementation_manifest",
+          mandatory: true,
+          originalStatus: "passed",
+          outputSha256: "a".repeat(64),
+        },
+      ],
+    });
+
+    expect(parsed).toEqual(
+      expect.objectContaining({
+        version: 1,
+        stage: "qa",
+        status: "passed",
+      }),
+    );
+    expect(parsed?.mandatoryChecks).toEqual([
+      expect.objectContaining({
+        id: "manifest:unit-tests",
+        command: "npm.cmd test",
+        status: "passed",
+      }),
+    ]);
+  });
+
+  it("does not synthesize when mandatory evidence is blocked or not from implementation evidence", () => {
+    expect(
+      synthesizeQaArtifactFromMandatoryInventory({
+        parserError: "missing block",
+        mandatoryInventory: [
+          {
+            id: "implementation-manifest:verification-evidence",
+            source: "completion_guard",
+            blockingReason: "Implementation manifest has no verification evidence.",
+          },
+        ],
+      }),
+    ).toBeNull();
+
+    expect(
+      synthesizeQaArtifactFromMandatoryInventory({
+        parserError: "missing block",
+        mandatoryInventory: [
+          {
+            id: "plan:verification:test",
+            command: "npm.cmd test",
+            source: "plan_manifest",
+          },
+        ],
+      }),
+    ).toBeNull();
   });
 });

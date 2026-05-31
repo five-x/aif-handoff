@@ -19,6 +19,10 @@ export interface QaMandatoryInventoryItem {
   description?: string | null;
   command?: string | null;
   source?: string | null;
+  mandatory?: boolean | null;
+  originalStatus?: string | null;
+  outputSha256?: string | null;
+  outputSummary?: string | null;
   blockingReason?: string | null;
 }
 
@@ -97,6 +101,10 @@ export function normalizeQaMandatoryInventory(input: unknown): QaMandatoryInvent
       description: isRecord(item) ? readOptionalString(item.description) : null,
       command: isRecord(item) ? readOptionalString(item.command) : null,
       source: isRecord(item) ? readOptionalString(item.source) : null,
+      mandatory: isRecord(item) && item.mandatory === true ? true : null,
+      originalStatus: isRecord(item) ? readOptionalString(item.originalStatus) : null,
+      outputSha256: isRecord(item) ? readOptionalString(item.outputSha256) : null,
+      outputSummary: isRecord(item) ? readOptionalString(item.outputSummary) : null,
       blockingReason: isRecord(item) ? readOptionalString(item.blockingReason) : null,
     };
   });
@@ -233,6 +241,66 @@ export function parseQaArtifactOutput(
     optionalChecks,
     limitations,
     rollbackNotes,
+  };
+}
+
+function summarizeDeterministicCheck(item: QaMandatoryInventoryItem): string {
+  const label = item.label ?? item.id;
+  const command = item.command ? ` Command: ${item.command}.` : "";
+  const digest = item.outputSha256 ? ` Output sha256: ${item.outputSha256}.` : "";
+  return `${label} passed in implementation manifest evidence.${command}${digest}`.trim();
+}
+
+export function synthesizeQaArtifactFromMandatoryInventory(input: {
+  mandatoryInventory: QaMandatoryInventoryItem[];
+  parserError: string;
+}): ParsedQaArtifactOutput | null {
+  if (input.mandatoryInventory.length === 0) return null;
+  const unsupported = input.mandatoryInventory.find(
+    (item) =>
+      Boolean(item.blockingReason) ||
+      item.source === "completion_guard" ||
+      item.source !== "implementation_manifest" ||
+      item.originalStatus !== "passed",
+  );
+  if (unsupported) return null;
+
+  const mandatoryChecks = input.mandatoryInventory.map(
+    (item): ParsedQaCheck => ({
+      id: item.id,
+      command: item.command ?? null,
+      status: "passed",
+      summary: summarizeDeterministicCheck(item),
+      evidence: item.outputSha256
+        ? `Implementation manifest recorded passed evidence with output sha256 ${item.outputSha256}.`
+        : "Implementation manifest recorded passed verification evidence.",
+      reason: null,
+      risk: null,
+    }),
+  );
+
+  return {
+    version: 1,
+    stage: "qa",
+    status: "passed",
+    summary: "QA passed using deterministic mandatory evidence fallback.",
+    markdown: [
+      "# QA",
+      "",
+      "Mandatory implementation verification evidence is present and passed.",
+      "QA model output missed the required structured artifact block, so AIF synthesized this strict artifact from the mandatory evidence inventory.",
+      "",
+      "Mandatory checks:",
+      ...mandatoryChecks.map(
+        (check) => `- ${check.id}: passed${check.command ? ` (${check.command})` : ""}`,
+      ),
+    ].join("\n"),
+    mandatoryChecks,
+    optionalChecks: [],
+    limitations: [
+      "No new command output was introduced by QA fallback; evidence is derived from the implementation manifest mandatory inventory.",
+    ],
+    rollbackNotes: [],
   };
 }
 
@@ -473,6 +541,10 @@ export async function runQaStage(taskId: string, projectRoot: string): Promise<v
   });
 
   let parsed: ParsedQaArtifactOutput;
+  let deterministicFallback: {
+    parserError: string;
+    reason: string;
+  } | null = null;
   try {
     parsed = parseQaArtifactOutput(resultText, sourceContext.mandatoryInventory);
   } catch (error) {
@@ -494,7 +566,26 @@ export async function runQaStage(taskId: string, projectRoot: string): Promise<v
         ...baseMetadata,
       },
     });
-    throw error;
+    const synthesized = synthesizeQaArtifactFromMandatoryInventory({
+      mandatoryInventory: sourceContext.mandatoryInventory,
+      parserError: message,
+    });
+    if (!synthesized) {
+      blockTaskFromQa({
+        taskId,
+        summary: `QA output failed schema validation and deterministic fallback is unavailable: ${message}`,
+      });
+      return;
+    }
+    deterministicFallback = {
+      parserError: message,
+      reason: "qa_artifact_schema_repair_from_mandatory_inventory",
+    };
+    data.appendTaskActivityLog(
+      taskId,
+      `[${new Date().toISOString()}] QA artifact synthesized from mandatory evidence inventory after parser validation failed: ${message}`,
+    );
+    parsed = synthesized;
   }
 
   const accepted = parsed.status === "passed";
@@ -535,6 +626,7 @@ export async function runQaStage(taskId: string, projectRoot: string): Promise<v
       ],
       limitations: parsed.limitations,
       rollbackNotes: parsed.rollbackNotes,
+      deterministicFallback,
       ...baseMetadata,
     },
   });
