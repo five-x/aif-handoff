@@ -225,6 +225,16 @@ function hasFreshOperatorInputAnswer(task: TaskRow): boolean {
   return commentTime > taskUpdateTime;
 }
 
+function readProjectPackageJsonText(projectRoot: string): string | null {
+  const packageJsonPath = resolve(projectRoot, "package.json");
+  if (!existsSync(packageJsonPath)) return null;
+  try {
+    return readFileSync(packageJsonPath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 function firstAuditFailureFamily(
   result: ReturnType<typeof evaluateTaskCompletionEvidence>,
 ): AuditFailureFamily {
@@ -1053,6 +1063,9 @@ function handleAcceptExistingPlan(input: EventHandlerInput): EventHandlerResult 
       blockedReason: task.blockedReason,
     },
     plan: filePlan,
+    executionContext: {
+      packageJsonText: readProjectPackageJsonText(executionRoot),
+    },
   });
   if (!planQuality.ok) {
     const blockedReason = `${formatTaskPlanQualityBlockedReason(planQuality)} Operator next step: edit the plan file and retry accept_existing_plan.`;

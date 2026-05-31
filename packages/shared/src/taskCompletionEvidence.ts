@@ -1464,6 +1464,16 @@ function taskExplicitlyRequiresImplementationManifest(task: TaskCompletionEviden
   return isDevelopmentImplementationIntent(taskIntent);
 }
 
+function readProjectPackageJsonText(projectRoot: string): string | null {
+  const packageJsonPath = resolve(projectRoot, "package.json");
+  if (!existsSync(packageJsonPath)) return null;
+  try {
+    return readFileSync(packageJsonPath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 export function evaluateTaskCompletionEvidence(
   input: TaskCompletionEvidenceInput,
 ): TaskCompletionEvidenceResult {
@@ -1477,7 +1487,13 @@ export function evaluateTaskCompletionEvidence(
   const genericPlan = hasGenericPlan(task);
   const preImplementationPlanQuality =
     phase === "pre_implementation"
-      ? evaluateTaskPlanQuality({ task: inferenceTask, plan: task.plan })
+      ? evaluateTaskPlanQuality({
+          task: inferenceTask,
+          plan: task.plan,
+          executionContext: {
+            packageJsonText: readProjectPackageJsonText(projectRoot),
+          },
+        })
       : null;
   const includeAllPreImplementationPlanIssues =
     task.plannerMode === "full" || /```aif-plan-manifest\b/i.test(task.plan ?? "");

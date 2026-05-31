@@ -41,6 +41,7 @@ export const TASK_PLAN_QUALITY_ISSUE_CODES = [
   "plan_manifest_expected_artifact_violation",
   "plan_manifest_untestable_acceptance_criteria",
   "plan_manifest_missing_verification_commands",
+  "plan_manifest_infeasible_verification",
   "plan_manifest_allowed_change_violation",
   "plan_manifest_forbidden_change_violation",
   "task_size_split_required",
@@ -89,6 +90,11 @@ export interface TaskPlanQualityResult {
 export interface TaskPlanQualityInput {
   task: TaskPlanQualityTask;
   plan: string | null | undefined;
+  executionContext?: TaskPlanQualityExecutionContext;
+}
+
+export interface TaskPlanQualityExecutionContext {
+  packageJsonText?: string | null;
 }
 
 export interface AifPlanManifestExpectedArtifact {
@@ -1196,11 +1202,76 @@ function evaluateTaskSizeTextOnlySplitIssue(input: {
   );
 }
 
+function parsePackageJsonScripts(packageJsonText: string | null | undefined): Set<string> | null {
+  if (!packageJsonText?.trim()) return null;
+  try {
+    const parsed: unknown = JSON.parse(packageJsonText);
+    if (!isObject(parsed)) return null;
+    const scripts = parsed.scripts;
+    if (!isObject(scripts)) return new Set();
+    return new Set(
+      Object.entries(scripts)
+        .filter(([, value]) => typeof value === "string")
+        .map(([key]) => key),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function npmScriptNameFromVerificationCommand(command: string): string | null {
+  const normalized = command.trim().replace(/^`+|`+$/g, "");
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+  if (!/^npm(?:\.cmd)?$/i.test(tokens[0] ?? "")) return null;
+  const subcommand = tokens[1]?.toLowerCase();
+  if (subcommand === "run" || subcommand === "run-script") {
+    const script = tokens[2]?.trim();
+    return script && !script.startsWith("-") ? script : null;
+  }
+  return subcommand === "test" ? "test" : null;
+}
+
+function manifestScopeAllowsPackageJsonChange(manifest: Partial<AifPlanManifest>): boolean {
+  const allowedChanges = normalizeManifestChangeCategories(manifest.allowedChanges);
+  if (!allowedChanges.has("config")) return false;
+  if (!Array.isArray(manifest.scope)) return false;
+  return manifest.scope
+    .filter(isUsefulManifestString)
+    .map(normalizePath)
+    .some((path) => path === "package.json" || path === "." || path === "*" || path === "**");
+}
+
+function planManifestExecutionFeasibilityIssues(input: {
+  manifest: Partial<AifPlanManifest>;
+  executionContext?: TaskPlanQualityExecutionContext;
+}): TaskPlanQualityIssue[] {
+  const scripts = parsePackageJsonScripts(input.executionContext?.packageJsonText);
+  if (scripts === null || !Array.isArray(input.manifest.verificationCommands)) return [];
+  const canChangePackageJson = manifestScopeAllowsPackageJsonChange(input.manifest);
+  const issues: TaskPlanQualityIssue[] = [];
+
+  for (const command of input.manifest.verificationCommands) {
+    if (!isConcreteVerificationCommand(command)) continue;
+    const scriptName = npmScriptNameFromVerificationCommand(command);
+    if (!scriptName || scripts.has(scriptName) || canChangePackageJson) continue;
+    issues.push(
+      issue(
+        "plan_manifest_infeasible_verification",
+        `aif-plan-manifest verification command \`${command.trim()}\` requires package.json script \`${scriptName}\`, but package.json does not define it and the manifest scope does not allow package.json/config changes.`,
+      ),
+    );
+  }
+
+  return issues;
+}
+
 function validatePlanManifest(input: {
   task: TaskPlanQualityTask;
   plan: string;
   taskIntent: TaskIntent;
   taskPaths: string[];
+  executionContext?: TaskPlanQualityExecutionContext;
 }): {
   manifest: Partial<AifPlanManifest> | null;
   summary: AifPlanManifestValidationSummary;
@@ -1394,6 +1465,14 @@ function validatePlanManifest(input: {
       "plan_manifest_missing_verification_commands",
       "aif-plan-manifest verificationCommands must include concrete commands.",
     );
+  }
+
+  for (const feasibilityIssue of planManifestExecutionFeasibilityIssues({
+    manifest,
+    executionContext: input.executionContext,
+  })) {
+    issues.push(feasibilityIssue);
+    issueCodes.push(feasibilityIssue.code);
   }
 
   const policy = getTaskIntentPolicy(input.taskIntent);
@@ -1884,6 +1963,7 @@ export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQu
     plan,
     taskIntent,
     taskPaths,
+    executionContext: input.executionContext,
   });
 
   if (!plan) {

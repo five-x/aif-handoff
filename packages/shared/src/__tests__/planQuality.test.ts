@@ -456,6 +456,46 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).toContain("task_size_split_required");
   });
 
+  it("rejects npm test verification when package.json lacks the script and scope cannot change package config", () => {
+    const plan = fullPlanWithManifest(
+      planManifest({
+        scope: ["src/app"],
+        allowedChanges: ["source"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["src/app"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-visible-workflow",
+            description: "The first visible workflow renders deterministic sample data.",
+            verification: "npm.cmd test",
+          },
+        ],
+        verificationCommands: ["npm.cmd test"],
+      }),
+    );
+
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Implement first slice",
+        description: "File boundaries: src/app/**",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan,
+      executionContext: {
+        packageJsonText: JSON.stringify({
+          scripts: {
+            build: "vite build",
+          },
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_infeasible_verification");
+  });
+
   it("rejects malformed present manifests even when manifest is optional", () => {
     const result = evaluateTaskPlanQuality({
       task: {

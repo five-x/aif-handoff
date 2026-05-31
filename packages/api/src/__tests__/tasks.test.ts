@@ -3635,6 +3635,90 @@ describe("tasks API", () => {
       expect(body.blockedReason).toContain("generic_plan");
     });
 
+    it("should block start_implementation when npm test is impossible within declared plan scope", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-plan-infeasible-"));
+      initGitProject(rootPath);
+      writeFileSync(
+        join(rootPath, "package.json"),
+        JSON.stringify(
+          {
+            name: "infeasible-plan",
+            private: true,
+            scripts: {
+              build: "vite build",
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      mkdirSync(join(rootPath, "src", "app"), { recursive: true });
+      writeFileSync(join(rootPath, "src", "app", "index.ts"), "export const app = true;\n");
+      execFileSync("git", ["add", "package.json", "src/app/index.ts"], { cwd: rootPath });
+      execFileSync("git", ["commit", "-m", "add app skeleton", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      insertTestProject(db, rootPath);
+      const plan = [
+        "## Plan",
+        "- [ ] Implement the first visible workflow under src/app.",
+        "- [ ] Run npm.cmd test.",
+        "",
+        "```aif-plan-manifest",
+        JSON.stringify(
+          {
+            version: 1,
+            taskId: "ev-plan-infeasible-verification",
+            intent: "feature",
+            scope: ["src/app"],
+            allowedChanges: ["source"],
+            forbiddenChanges: ["report"],
+            expectedArtifacts: [{ kind: "source_diff", paths: ["src/app"] }],
+            acceptanceCriteria: [
+              {
+                id: "ac-visible-workflow",
+                description: "The first visible workflow renders deterministic sample data.",
+                verification: "npm.cmd test",
+              },
+            ],
+            verificationCommands: ["npm.cmd test"],
+          },
+          null,
+          2,
+        ),
+        "```",
+      ].join("\n");
+      db.insert(tasks)
+        .values({
+          id: "ev-plan-infeasible-verification",
+          projectId: "test-project",
+          title: "Implement first slice",
+          description: "File boundaries: src/app/**",
+          taskIntent: "feature",
+          plannerMode: "full",
+          status: "plan_ready",
+          autoMode: false,
+          plan,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-plan-infeasible-verification/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "start_implementation" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("blocked_external");
+      expect(body.blockedFromStatus).toBe("plan_ready");
+      expect(body.blockedReason).toContain("plan_manifest_infeasible_verification");
+      expect(body.blockedReason).toContain("package.json script `test`");
+    });
+
     it("should block manual start_implementation when a broad plan requires splitting", async () => {
       const db = testDb.current;
       insertTestProject(db);
