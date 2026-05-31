@@ -587,6 +587,7 @@ function verificationHasOutputIdentity(entry: ImplementationManifestVerification
     SHA256_HEX_PATTERN.test(entry.outputSha256) &&
     entry.outputSha256 !== EMPTY_OUTPUT_SHA256 &&
     !looksLikeFabricatedVerificationText(entry.outputPreview) &&
+    !looksLikeFailedVerificationOutput(entry.outputPreview) &&
     usefulString(entry.outputPreview) &&
     typeof entry.outputPreviewTruncated === "boolean"
   );
@@ -649,6 +650,25 @@ const FABRICATED_VERIFICATION_PATTERN =
 
 function looksLikeFabricatedVerificationText(value: string | null | undefined): boolean {
   return typeof value === "string" && FABRICATED_VERIFICATION_PATTERN.test(value);
+}
+
+const FAILED_VERIFICATION_OUTPUT_PATTERNS = [
+  /\berror\s+TS\d+:/i,
+  /\bnpm\s+ERR!/i,
+  /\b(?:command not found|not recognized as an internal or external command)\b/i,
+  /\b(?:Cannot find module|Module not found)\b/i,
+  /\b(?:build|compilation|compile)\s+failed\b/i,
+  /\bTest Files\s+[1-9]\d*\s+failed\b/i,
+  /\bTests\s+[1-9]\d*\s+failed\b/i,
+  /\bFAIL\s+(?:[^\r\n]+\.(?:test|spec)\.[cm]?[jt]sx?|[^\r\n]+)\b/i,
+  /\b[1-9]\d*\s+problems?\s+\([1-9]\d*\s+errors?\b/i,
+];
+
+function looksLikeFailedVerificationOutput(value: string | null | undefined): boolean {
+  return (
+    typeof value === "string" &&
+    FAILED_VERIFICATION_OUTPUT_PATTERNS.some((pattern) => pattern.test(value))
+  );
 }
 
 function manifestAdmitsFabricatedVerification(manifest: ImplementationManifest): boolean {
@@ -806,8 +826,10 @@ export function validateImplementationManifest(
   const passedEntriesWithoutIdentity = passedEntries.filter(
     (entry) => !verificationHasOutputIdentity(entry),
   );
-  const contradictoryPassedEntries = passedEntries.filter((entry) =>
-    looksLikeFabricatedVerificationText(entry.outputPreview),
+  const contradictoryPassedEntries = passedEntries.filter(
+    (entry) =>
+      looksLikeFabricatedVerificationText(entry.outputPreview) ||
+      looksLikeFailedVerificationOutput(entry.outputPreview),
   );
   const unsupportedPassedEntries = passedEntries.filter((entry) =>
     isRepositoryInspectionOnlyVerificationCommand(entry.command),
@@ -835,7 +857,7 @@ export function validateImplementationManifest(
     issues.push(
       issue(
         "contradictory_verification_claim",
-        "Implementation manifest cannot mark verification as passed while its evidence or limitations state that the command was not actually executed.",
+        "Implementation manifest cannot mark verification as passed while its evidence or limitations state that the command was not actually executed or printed a compiler/test failure.",
       ),
     );
   }

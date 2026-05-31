@@ -326,6 +326,49 @@ describe("implementation manifest extraction", () => {
     expect(result.issues.map((issue) => issue.code)).toContain("contradictory_verification_claim");
   });
 
+  it("rejects passed verification when command output contains a compiler failure masked by the shell", () => {
+    const manifest = validManifest({
+      verificationEvidence: [
+        {
+          id: "ver-1",
+          command: "npm.cmd run build",
+          status: "passed",
+          outputSha256: "c".repeat(64),
+          outputPreview: [
+            "> zai-mi@0.0.1 build",
+            "> tsc --noEmit --skipLibCheck --allowJs --checkJs false 2>/dev/null || echo 'TypeScript check complete'",
+            "",
+            "error TS18003: No inputs were found in config file '/home/www/zai-mi/tsconfig.json'.",
+            "TypeScript check complete",
+          ].join("\n"),
+          outputPreviewTruncated: false,
+        },
+      ],
+    });
+
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog("npm.cmd run build"),
+      },
+      manifestJson: JSON.stringify(manifest),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining([
+        "contradictory_verification_claim",
+        "missing_verification_evidence",
+        "missing_acceptance_evidence",
+      ]),
+    );
+  });
+
   it("rejects passed verification command absent from latest implementation activity", () => {
     const result = validateImplementationManifest({
       task: {
