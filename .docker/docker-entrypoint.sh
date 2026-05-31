@@ -17,7 +17,8 @@ if [ "$(id -u)" = "0" ]; then
           -exec chown node:node {} + 2>/dev/null || true
       done
     fi
-    for projects_safe_dir in "$projects_mount/botIntevra" "$projects_mount/*"; do
+    for projects_safe_dir in "$projects_mount" "$projects_mount"/*; do
+      [ -d "$projects_safe_dir" ] || continue
       if ! gosu node git config --global --get-all safe.directory 2>/dev/null | grep -Fx "$projects_safe_dir" >/dev/null 2>&1; then
         gosu node git config --global --add safe.directory "$projects_safe_dir" 2>/dev/null || true
       fi

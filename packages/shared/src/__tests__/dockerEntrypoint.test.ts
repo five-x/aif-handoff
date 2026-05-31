@@ -19,4 +19,12 @@ describe("docker entrypoint", () => {
       entrypoint.indexOf("exec gosu node"),
     );
   });
+
+  it("expands project mount children before adding git safe directories", () => {
+    const entrypoint = readFileSync(resolve(repoRoot, ".docker", "docker-entrypoint.sh"), "utf8");
+
+    expect(entrypoint).toContain('for projects_safe_dir in "$projects_mount" "$projects_mount"/*');
+    expect(entrypoint).toContain('[ -d "$projects_safe_dir" ] || continue');
+    expect(entrypoint).not.toContain('"$projects_mount/*"');
+  });
 });
