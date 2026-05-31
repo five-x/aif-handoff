@@ -18,6 +18,7 @@ type TransitionResult = { ok: true; patch: TransitionPatch } | { ok: false; erro
 
 export interface TaskTransitionOptions {
   requirementsIntakeEnabled?: boolean;
+  allowOperatorInputRetry?: boolean;
 }
 
 /** Default reset values applied when transitioning out of blocked/retry states. */
@@ -53,6 +54,11 @@ function isRetryablePlanQualityBlock(
 ): boolean {
   const reason = task.blockedReason?.toLowerCase() ?? "";
   return task.blockedFromStatus === "planning" && reason.startsWith("plan quality guard");
+}
+
+function isRetryableOperatorInputHold(task: Pick<Task, "blockedReason">): boolean {
+  const reason = task.blockedReason?.toLowerCase() ?? "";
+  return reason.startsWith("operator_input_required:") || reason.startsWith("operator_cancelled:");
 }
 
 export function applyHumanTaskEvent(
@@ -184,7 +190,13 @@ export function applyHumanTaskEvent(
       if (!task.blockedFromStatus) {
         return { ok: false, error: "blockedFromStatus is missing for retry_from_blocked" };
       }
-      if (isManualReviewBlockedTask(task) && !isRetryablePlanQualityBlock(task)) {
+      const allowOperatorInputRetry =
+        options.allowOperatorInputRetry === true && isRetryableOperatorInputHold(task);
+      if (
+        isManualReviewBlockedTask(task) &&
+        !isRetryablePlanQualityBlock(task) &&
+        !allowOperatorInputRetry
+      ) {
         return {
           ok: false,
           error: "retry_from_blocked is not allowed for manual review blocks",

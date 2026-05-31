@@ -5233,6 +5233,47 @@ describe("tasks API", () => {
       expect(persisted?.manualReviewRequired).toBe(true);
     });
 
+    it("should retry operator-cancelled tasks after a newer human answer", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-operator-cancelled-answered",
+          projectId: "test-project",
+          title: "Operator cancelled task",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "operator_cancelled: task cancelled by operator from implementing",
+          manualReviewRequired: true,
+          paused: true,
+          updatedAt: "2026-05-14T10:00:00.000Z",
+        })
+        .run();
+      db.insert(taskComments)
+        .values({
+          id: "ev-operator-cancelled-answer",
+          taskId: "ev-operator-cancelled-answered",
+          author: "human",
+          message: "Operator approved retry after triage.",
+          attachments: "[]",
+          createdAt: "2026-05-14T10:05:00.000Z",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-operator-cancelled-answered/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+      expect(body.paused).toBe(false);
+      expect(body.manualReviewRequired).toBe(false);
+      expect(body.blockedFromStatus).toBeNull();
+      expect(body.blockedReason).toBeNull();
+    });
+
     it("should reject retry_from_blocked for manual review required blocks", async () => {
       const db = testDb.current;
       db.insert(tasks)

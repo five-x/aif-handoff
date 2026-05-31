@@ -221,6 +221,30 @@ describe("task state machine", () => {
     }
   });
 
+  it("allows explicit operator retry for operator-cancelled blocks", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "implementing" as const,
+      blockedReason: "operator_cancelled: task cancelled by operator from implementing",
+      manualReviewRequired: true,
+      paused: true,
+    };
+
+    const rejected = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(rejected.ok).toBe(false);
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked", {
+      allowOperatorInputRetry: true,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("implementing");
+      expect(result.patch.paused).toBe(false);
+      expect(result.patch.manualReviewRequired).toBe(false);
+      expect(result.patch.blockedReason).toBeNull();
+    }
+  });
+
   it("allows retry_from_blocked for exhausted plan-quality guard blocks", () => {
     const blocked = {
       ...makeTask("blocked_external"),

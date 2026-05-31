@@ -743,14 +743,14 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     return { ok: false, status: 404, error: "Task not found" };
   }
   const { event } = input;
-  if (event !== "cancel_task" && isOperatorCancelledTask(task)) {
+  const operatorInputRetry = event === "retry_from_blocked" && isOperatorInputHold(task);
+  if (event !== "cancel_task" && isOperatorCancelledTask(task) && !operatorInputRetry) {
     return {
       ok: false,
       status: 409,
       error: "operator_cancelled tasks require operator triage before any further event",
     };
   }
-  const operatorInputRetry = event === "retry_from_blocked" && isOperatorInputHold(task);
   if (operatorInputRetry && !hasFreshOperatorInputAnswer(task)) {
     return {
       ok: false,
@@ -761,6 +761,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
   }
   const transition = applyHumanTaskEvent(task, event, {
     requirementsIntakeEnabled: getEnv().AIF_REQUIREMENTS_INTAKE_ENABLED,
+    allowOperatorInputRetry: operatorInputRetry,
   });
   if (!transition.ok) {
     return { ok: false, status: 409, error: transition.error };
