@@ -69,6 +69,15 @@ function hasActorDependentBehaviorSignal(text: string): boolean {
   );
 }
 
+function hasBlockingActorQuestionSignal(text: string): boolean {
+  return (
+    hasActorDependentBehaviorSignal(text) &&
+    /\b(permission|permissions|access|auth|login|signup|approval|moderation|visibility)\b/i.test(
+      text,
+    )
+  );
+}
+
 function hasScopeSignal(text: string): boolean {
   return /\b(scope|out of scope|include|exclude|first version|mvp|must|must not|file boundaries|allowed changes|allowed write paths|minimal|в scope|состав|включить|исключить|mvp|первая версия|минималь|только|границ)\b/i.test(
     text,
@@ -84,7 +93,7 @@ function hasAcceptanceSignal(text: string): boolean {
 function buildMissingQuestions(taskId: string, text: string): TaskRequirementQuestionInput[] {
   const normalized = normalizeText(text);
   const missingKeys = new Set<string>();
-  if (hasActorDependentBehaviorSignal(normalized) && !hasActorSignal(normalized)) {
+  if (hasBlockingActorQuestionSignal(normalized) && !hasActorSignal(normalized)) {
     missingKeys.add("primary-user-role");
   }
   if (!hasScopeSignal(normalized)) missingKeys.add("first-version-scope");

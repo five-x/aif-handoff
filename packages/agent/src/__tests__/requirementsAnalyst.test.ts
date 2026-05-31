@@ -65,6 +65,30 @@ describe("requirements analyst", () => {
     expect(questions?.openBlockingCount ?? 0).toBe(0);
   });
 
+  it("does not block roadmap first-slice tasks just because acceptance mentions a workflow", async () => {
+    seedTask({
+      id: "first-slice-task",
+      title: "Implement first slice: project",
+      description: [
+        "Implement the first API or visible slice without broad follow-up functions.",
+        "Original roadmap item: application skeleton and base configuration",
+        "File boundaries: src/app/**, src/components/**, src/routes/**, src/services/**",
+        "Acceptance criteria: first visible workflow renders or runs on deterministic sample data.",
+        "Verification: npm.cmd test",
+        "Dependencies: configure dev stack",
+      ].join("\n"),
+    });
+
+    await runRequirementsAnalyst("first-slice-task");
+
+    const task = findTaskById("first-slice-task");
+    const questions = getTaskRequirementQuestionsResponse("first-slice-task");
+    expect(task?.status).toBe("requirements_analysis");
+    expect(task?.requirementsConfidence).toBe(0.86);
+    expect(task?.requirementsSnapshotId).toBeTruthy();
+    expect(questions?.openBlockingCount ?? 0).toBe(0);
+  });
+
   it("still asks for an actor when the task is actor-dependent and no actor is supplied", async () => {
     seedTask({
       id: "permissions-task",
