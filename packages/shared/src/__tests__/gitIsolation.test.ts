@@ -256,6 +256,24 @@ describe("gitIsolation", () => {
   );
 
   it(
+    "ignores generated AIF plan artifacts when checking branch cleanliness",
+    () => {
+      initRepo(projectRoot);
+      mkdirSync(join(projectRoot, ".ai-factory", "plans"), { recursive: true });
+      writeFileSync(join(projectRoot, ".ai-factory", "plans", "feature.md"), "## Plan\n");
+
+      expect(workingTreeClean(projectRoot)).toBe(true);
+      expect(describeDirtyWorkingTree(projectRoot)).toBeNull();
+      expect(() => assertWorkingTreeClean(projectRoot, "feature/x")).not.toThrow();
+
+      writeFileSync(join(projectRoot, "dirty.txt"), "dirty\n");
+      expect(workingTreeClean(projectRoot)).toBe(false);
+      expect(describeDirtyWorkingTree(projectRoot)).toContain("dirty.txt");
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  it(
     "reports branch drift as a structured isolation error",
     () => {
       initRepo(projectRoot);

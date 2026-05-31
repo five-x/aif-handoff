@@ -198,16 +198,56 @@ function getOriginHeadBranch(projectRoot: string): string | null {
 }
 
 export function workingTreeClean(projectRoot: string): boolean {
-  const { stdout, status } = runGit(projectRoot, ["status", "--porcelain"], { ignoreExit: true });
-  return status === 0 && stdout.length === 0;
+  const { stdout, status } = runGit(
+    projectRoot,
+    ["status", "--porcelain", "--untracked-files=all"],
+    { ignoreExit: true },
+  );
+  return status === 0 && getBlockingDirtyStatusLines(projectRoot, stdout).length === 0;
 }
 
 export function describeDirtyWorkingTree(projectRoot: string): string | null {
-  const { stdout, status } = runGit(projectRoot, ["status", "--porcelain"], { ignoreExit: true });
+  const { stdout, status } = runGit(
+    projectRoot,
+    ["status", "--porcelain", "--untracked-files=all"],
+    { ignoreExit: true },
+  );
   if (status !== 0 || stdout.length === 0) return null;
-  const lines = stdout.split("\n").filter((line) => line.trim().length > 0);
+  const lines = getBlockingDirtyStatusLines(projectRoot, stdout);
+  if (lines.length === 0) return null;
   const summary = lines.slice(0, 5).join(", ");
   return lines.length > 5 ? `${summary}, +${lines.length - 5} more` : summary;
+}
+
+function normalizeStatusPath(pathValue: string): string {
+  return pathValue
+    .trim()
+    .replace(/^"|"$/g, "")
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "");
+}
+
+function statusLinePath(line: string): string {
+  const rawPath = line.length > 3 ? line.slice(3).trim() : line.trim();
+  const renameIndex = rawPath.indexOf(" -> ");
+  return normalizeStatusPath(renameIndex >= 0 ? rawPath.slice(renameIndex + 4) : rawPath);
+}
+
+function isAifGeneratedPlanningPath(projectRoot: string, pathValue: string): boolean {
+  const cfg = getProjectConfig(projectRoot);
+  const normalized = normalizeStatusPath(pathValue);
+  const planPath = normalizeStatusPath(cfg.paths.plan);
+  const fixPlanPath = normalizeStatusPath(cfg.paths.fix_plan);
+  const plansDir = `${normalizeStatusPath(cfg.paths.plans).replace(/\/+$/, "")}/`;
+  return normalized === planPath || normalized === fixPlanPath || normalized.startsWith(plansDir);
+}
+
+function getBlockingDirtyStatusLines(projectRoot: string, statusOutput: string): string[] {
+  return statusOutput
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !isAifGeneratedPlanningPath(projectRoot, statusLinePath(line)));
 }
 
 export function assertWorkingTreeClean(projectRoot: string, branchName: string | null): void {
