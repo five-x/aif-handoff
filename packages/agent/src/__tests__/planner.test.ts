@@ -812,6 +812,34 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toContain("npm.cmd run build");
   });
 
+  it("uses deterministic implementation fallback before runtime for legacy broad CI workflow child plans", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-ci-fallback-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-ci-fallback",
+        projectId: "project-1",
+        title: "Add CI workflow skeleton: project",
+        description:
+          "Add only a minimal CI workflow skeleton for build and test verification.\nFile boundaries: .github/workflows/**\nAcceptance criteria: CI workflow runs the documented build and test commands.\nVerification: npm.cmd test\nDependencies: Add Compose dev runtime: project",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-ci-fallback",
+      })
+      .run();
+
+    await runPlanner("task-ci-fallback", projectRoot);
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-ci-fallback")).get();
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain(".github/workflows/ci.yml");
+    expect(updatedTask?.plan).not.toContain(".github/workflows/**");
+    expect(updatedTask?.plan).toContain("npm.cmd test");
+  });
+
   it("uses deterministic implementation fallback for .env.example roadmap children", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-env-fallback-"));

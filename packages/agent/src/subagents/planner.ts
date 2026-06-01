@@ -124,10 +124,27 @@ function isComposeDevRuntimeTask(task: PlannerTask): boolean {
   );
 }
 
+function isCiWorkflowSkeletonTask(task: PlannerTask): boolean {
+  const text = `${task.title}\n${task.description ?? ""}`;
+  return /\b(?:add\s+ci\s+workflow\s+skeleton|minimal\s+ci\s+workflow\s+skeleton|ci\s+workflow\s+runs)\b/i.test(
+    text,
+  );
+}
+
 function normalizeDeterministicPlanScope(task: PlannerTask, fileBoundaries: string[]): string[] {
   const scope = fileBoundaries
-    .map(normalizeDeterministicPlanScopePath)
-    .filter((entry): entry is string => entry !== null)
+    .flatMap((entry) => {
+      const raw = entry
+        .trim()
+        .replace(/^`|`$/g, "")
+        .replaceAll("\\", "/")
+        .replace(/^\.\/+/, "");
+      if (isCiWorkflowSkeletonTask(task) && /^\.github\/workflows\/\*\*$/i.test(raw)) {
+        return [".github/workflows/ci.yml"];
+      }
+      const normalizedEntry = normalizeDeterministicPlanScopePath(entry);
+      return normalizedEntry ? [normalizedEntry] : [];
+    })
     .flatMap((entry) => {
       if (!isComposeDevRuntimeTask(task)) return [entry];
       const normalized = entry.toLowerCase();

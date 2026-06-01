@@ -1152,6 +1152,48 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("task_size_split_required");
   });
 
+  it("accepts concrete CI workflow file plans for legacy broad workflow boundaries", () => {
+    const plan = [
+      "## Plan",
+      "- [ ] Create or update `.github/workflows/ci.yml` with build and test jobs.",
+      "- [ ] Run `npm.cmd test` and record the result.",
+      "",
+      "## aif-plan-manifest",
+      "",
+      planManifest({
+        taskId: "ci-task",
+        scope: [".github/workflows/ci.yml"],
+        allowedChanges: ["config"],
+        forbiddenChanges: ["report"],
+        expectedArtifacts: [{ kind: "config_update", paths: [".github/workflows/ci.yml"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-ci-workflow",
+            description: "CI workflow runs the documented build and test commands.",
+            verification: "npm.cmd test",
+          },
+        ],
+        verificationCommands: ["npm.cmd test"],
+      }),
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "ci-task",
+        title: "Add CI workflow skeleton: project",
+        description:
+          "Add only a minimal CI workflow skeleton for build and test verification.\nFile boundaries: .github/workflows/**\nAcceptance criteria: CI workflow runs the documented build and test commands.\nVerification: npm.cmd test",
+        taskIntent: "feature",
+      },
+      plan,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("missing_task_specific_artifact_path");
+    expect(result.categories).not.toContain("plan_manifest_scope_mismatch");
+    expect(result.categories).not.toContain("task_size_split_required");
+  });
+
   it("requires diagnostic report path and diagnostic-only constraints", () => {
     const result = evaluateTaskPlanQuality({
       task: { title: "Audit planner output quality", description: "Discovery task." },
