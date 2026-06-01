@@ -131,7 +131,7 @@ describe("runtime stage policy", () => {
     expect(caps.repositoryInspectionToolBudget).toBe(16);
   });
 
-  it("uses structured canary caps for approved qwen implementation", () => {
+  it("keeps structured canary caps within production qwen implementation defaults", () => {
     const caps = getRuntimeStageCaps(
       profile({
         options: { qwenLocalAgent: { implementationCanary: implementationCanaryEvidence() } },
@@ -139,12 +139,12 @@ describe("runtime stage policy", () => {
       "implementer",
     );
 
-    expect(caps.maxToolTurns).toBe(200);
-    expect(caps.wallClockMs).toBe(1_800_000);
+    expect(caps.maxToolTurns).toBe(12);
+    expect(caps.wallClockMs).toBe(900_000);
     expect(caps.repeatedToolCallLimit).toBe(3);
-    expect(caps.contextTokens).toBe(81_920);
-    expect(caps.maxOutputTokens).toBe(12_000);
-    expect(caps.repositoryInspectionToolBudget).toBe(200);
+    expect(caps.contextTokens).toBe(24_000);
+    expect(caps.maxOutputTokens).toBe(4_000);
+    expect(caps.repositoryInspectionToolBudget).toBe(12);
     expect(caps.retryCount).toBe(0);
   });
 

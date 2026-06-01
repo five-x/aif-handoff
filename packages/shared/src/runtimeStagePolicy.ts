@@ -251,16 +251,6 @@ function readCanaryApprovedCaps(
   return caps;
 }
 
-function getQwenStageDefaultCaps(
-  options: Record<string, unknown>,
-  stage: RuntimeStage,
-): RuntimeStageCaps {
-  return {
-    ...(QWEN_DEFAULT_STAGE_CAPS[stage] ?? {}),
-    ...readCanaryApprovedCaps(options, stage),
-  };
-}
-
 function mergeStrictCaps(
   defaults: RuntimeStageCaps,
   configured: RuntimeStageCaps,
@@ -274,6 +264,15 @@ function mergeStrictCaps(
       defaultValue === undefined ? configuredValue : Math.min(defaultValue, configuredValue);
   }
   return merged;
+}
+
+function getQwenStageDefaultCaps(
+  options: Record<string, unknown>,
+  stage: RuntimeStage,
+): RuntimeStageCaps {
+  const defaults = QWEN_DEFAULT_STAGE_CAPS[stage] ?? {};
+  const canaryCaps = readCanaryApprovedCaps(options, stage);
+  return mergeStrictCaps(defaults, canaryCaps);
 }
 
 function readStageCapability(
