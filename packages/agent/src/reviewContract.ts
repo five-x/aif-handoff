@@ -136,20 +136,30 @@ function collectSectionData(text: string): CollectedSections {
 function normalizeListSection(lines: string[] | undefined): string[] | null {
   if (!lines) return null;
 
-  const normalized = lines.map((line) => line.trim()).filter((line) => line.length > 0);
-  if (normalized.length === 0) return [];
-  if (normalized.every((line) => line.startsWith("- "))) {
-    const items = normalized.map((line) => line.slice(2).trim());
-    if (items.length === 1 && items[0]?.toLowerCase() === "none") {
-      return [];
+  const items: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.startsWith("- ")) {
+      const item = trimmed.slice(2).trim();
+      if (item.length === 0) return null;
+      items.push(item);
+      continue;
     }
-    if (items.some((item) => item.length === 0 || item.toLowerCase() === "none")) {
+    if (items.length === 0) {
       return null;
     }
-    return items;
+    items[items.length - 1] = normalizeFindingText(`${items[items.length - 1]} ${trimmed}`);
   }
 
-  return null;
+  if (items.length === 0) return [];
+  if (items.length === 1 && items[0]?.toLowerCase() === "none") {
+    return [];
+  }
+  if (items.some((item) => item.length === 0 || item.toLowerCase() === "none")) {
+    return null;
+  }
+  return items;
 }
 
 function parseIssue(input: {

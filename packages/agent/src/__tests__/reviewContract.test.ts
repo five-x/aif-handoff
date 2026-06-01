@@ -378,6 +378,34 @@ describe("reviewContract", () => {
     expect(parsed?.previousFindings).toEqual([]);
   });
 
+  it("accepts specialized reviewer output with multiline advisory evidence", () => {
+    const parsed = parseSpecializedRoleOutput(
+      [
+        "## Verdict",
+        "- PASS",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- Content inspection of `src/types/domain.ts`:",
+        "  ```typescript",
+        "  export interface UserProfile {",
+        "    id: string;",
+        "  }",
+        "  ```",
+        "",
+        "## Previous Findings",
+        "- none",
+      ].join("\n"),
+      "correctness",
+    );
+
+    expect(parsed?.blockingFindings).toEqual([]);
+    expect(parsed?.advisories[0]?.text).toContain("src/types/domain.ts");
+    expect(parsed?.advisories[0]?.text).toContain("UserProfile");
+  });
+
   it("rejects specialized reviewer output without previous findings section when previous blockers exist", () => {
     const result = parseSpecializedRoleOutputResult(
       [
