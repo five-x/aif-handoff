@@ -504,6 +504,31 @@ Here is unrelated JSON:
     expect(result.issues).toEqual([]);
   });
 
+  it("keeps previous tool-bearing implementation activity when latest retry has no tools", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: [
+          "[2026-05-29T10:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-29T10:00:01.000Z] Tool: run_shell npm test",
+          "[2026-05-29T10:00:02.000Z] Agent: implement-coordinator complete",
+          "[2026-05-29T10:01:00.000Z] Agent: implement-coordinator started",
+          "[2026-05-29T10:01:01.000Z] Agent: implement-coordinator failed (runtime=qwen-local-agent) - Runtime request timed out.",
+        ].join("\n"),
+      },
+      manifestJson: JSON.stringify(validManifest()),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues).toEqual([]);
+  });
+
   it("treats npm.cmd and npm as the same observed verification command on Linux runners", () => {
     const result = validateImplementationManifest({
       task: {

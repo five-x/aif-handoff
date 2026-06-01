@@ -682,25 +682,28 @@ function latestImplementationActivitySection(
 ): string[] {
   if (!agentActivityLog?.trim()) return [];
   const lines = agentActivityLog.split(/\r?\n/);
-  let startIndex = -1;
+  const sections: string[][] = [];
+  let currentSection: string[] | null = null;
   for (let index = 0; index < lines.length; index++) {
-    if (/\bAgent:\s+(?:aif-implement|implement-coordinator)\b.*\bstarted\b/i.test(lines[index])) {
-      startIndex = index;
-    }
-  }
-  if (startIndex < 0) return [];
-  const section: string[] = [];
-  for (let index = startIndex; index < lines.length; index++) {
     const line = lines[index];
-    section.push(line);
-    if (
-      index > startIndex &&
-      /\bAgent:\s+(?:aif-implement|implement-coordinator)\b.*\bcomplete\b/i.test(line)
-    ) {
-      break;
+    if (/\bAgent:\s+(?:aif-implement|implement-coordinator)\b.*\bstarted\b/i.test(line)) {
+      if (currentSection) sections.push(currentSection);
+      currentSection = [line];
+      continue;
+    }
+    if (!currentSection) continue;
+    currentSection.push(line);
+    if (/\bAgent:\s+(?:aif-implement|implement-coordinator)\b.*\bcomplete\b/i.test(line)) {
+      sections.push(currentSection);
+      currentSection = null;
     }
   }
-  return section;
+  if (currentSection) sections.push(currentSection);
+  const latestSectionWithTools = sections
+    .slice()
+    .reverse()
+    .find((section) => section.some((line) => /\bTool:/i.test(line)));
+  return latestSectionWithTools ?? sections.at(-1) ?? [];
 }
 
 function verificationCommandObservedInLatestImplementationActivity(input: {

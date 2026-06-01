@@ -6096,6 +6096,10 @@ describe("runImplementer rework behavior", () => {
       cwd: projectRoot,
       stdio: "ignore",
     });
+    execFileSync("git", ["checkout", "-b", "feature/runtime-recovery"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
     writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n", "utf8");
 
     const plan = [
@@ -6229,6 +6233,199 @@ describe("runImplementer rework behavior", () => {
       changedFiles: ["src/feature.ts"],
       meaningfulChangedFiles: ["src/feature.ts"],
       dirtyChangedFiles: ["src/feature.ts"],
+      phase: "review_handoff",
+    });
+    expect(validation.ok).toBe(true);
+  });
+
+  it("recovers a deterministic implementation manifest when runtime exhausts after valid evidence", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "commit.gpgsign", "false"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "feature.ts"),
+      "export const feature = false;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/runtime-recovery"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feature", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+    }).trim();
+
+    const plan = [
+      "```aif-plan-manifest",
+      JSON.stringify({
+        version: 1,
+        taskId: "task-feature-runtime-recovery",
+        intent: "feature",
+        scope: ["src/feature.ts"],
+        allowedChanges: ["source"],
+        forbiddenChanges: ["audit-report"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "AC1",
+            description: "Feature behavior is implemented.",
+            verification: "npm.cmd test",
+          },
+        ],
+        verificationCommands: ["npm.cmd test"],
+      }),
+      "```",
+      "",
+      "## Plan",
+      "- [ ] Implement feature behavior",
+      "- [ ] Run tests",
+    ].join("\n");
+    const startedAt = new Date(Date.now() + 5_000).toISOString();
+    const verifiedAt = new Date(Date.now() + 10_000).toISOString();
+    appendAuditEvidenceEvent({
+      id: "ev-feature-runtime-recovery-build",
+      taskId: "task-feature-runtime-recovery",
+      auditPlanId: "task:task-feature-runtime-recovery",
+      sourceSnapshotId: "git:test",
+      toolName: "run_shell",
+      evidenceKind: "shell_command",
+      evidenceGrade: "substantive",
+      scopeIds: ["src/feature.ts"],
+      riskHypothesisIds: [],
+      pathHashes: [],
+      pathRangeHashes: [],
+      command: { command: "npm.cmd", args: ["test"], cwd: null },
+      exitCode: 0,
+      outputSha256: "d".repeat(64),
+      outputPreview: "tests passed",
+      outputPreviewTruncated: false,
+      parsedSummary: {
+        outputBytes: "tests passed".length,
+        outputLineCount: 1,
+        previewChars: "tests passed".length,
+        exitCode: 0,
+      },
+      redactionStatus: "clean",
+      createdAt: verifiedAt,
+    });
+    queryMock.mockImplementationOnce(() => {
+      throw new RuntimeExecutionError(
+        "qwen-local-agent exceeded max tool turns (20)",
+        undefined,
+        "timeout",
+        {
+          providerMeta: {
+            status: "max_tool_turns_exhausted",
+            category: "timeout",
+          },
+        },
+      );
+    });
+    db.insert(tasks)
+      .values({
+        id: "task-feature-runtime-recovery",
+        projectId: "project-1",
+        title: "Feature runtime recovery",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan,
+        agentActivityLog: [
+          `[${startedAt}] Agent: aif-implement started`,
+          `[${verifiedAt}] Tool: run_shell npm.cmd test`,
+        ].join("\n"),
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+    appendAuditEvidenceEvent({
+      id: "ev-feature-runtime-recovery-build-after-task",
+      taskId: "task-feature-runtime-recovery",
+      auditPlanId: "task:task-feature-runtime-recovery",
+      sourceSnapshotId: "git:test",
+      toolName: "run_shell",
+      evidenceKind: "shell_command",
+      evidenceGrade: "substantive",
+      scopeIds: ["src/feature.ts"],
+      riskHypothesisIds: [],
+      pathHashes: [],
+      pathRangeHashes: [],
+      command: { command: "npm.cmd", args: ["test"], cwd: null },
+      exitCode: 0,
+      outputSha256: "d".repeat(64),
+      outputPreview: "tests passed",
+      outputPreviewTruncated: false,
+      parsedSummary: {
+        outputBytes: "tests passed".length,
+        outputLineCount: 1,
+        previewChars: "tests passed".length,
+        exitCode: 0,
+      },
+      redactionStatus: "clean",
+      createdAt: verifiedAt,
+    });
+
+    await runImplementer("task-feature-runtime-recovery", projectRoot);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-runtime-recovery"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain(
+      "Deterministic implementation runtime recovery completed after runtime exhaustion",
+    );
+    expect(updatedTask?.agentActivityLog).toContain(
+      "deterministic implementation manifest recovery completed after runtime exhaustion",
+    );
+    const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
+      ?.implementationManifestJson;
+    const manifest = JSON.parse(manifestJson ?? "{}");
+    expect(manifest).toMatchObject({
+      taskId: "task-feature-runtime-recovery",
+      intent: "feature",
+      changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+      verificationEvidence: [
+        {
+          id: "verify-1",
+          command: "npm.cmd test",
+          status: "passed",
+          outputSha256: "d".repeat(64),
+          outputPreview: "tests passed",
+          outputPreviewTruncated: false,
+        },
+      ],
+      acceptanceCriteria: [{ id: "AC1", status: "satisfied", evidenceRefs: ["verify-1"] }],
+      commitEvidence: { status: "committed", commitSha: head, evidenceRefs: [] },
+    });
+    const validation = validateImplementationManifest({
+      task: updatedTask!,
+      manifestJson,
+      changedFiles: ["src/feature.ts"],
+      meaningfulChangedFiles: ["src/feature.ts"],
+      dirtyChangedFiles: [],
       phase: "review_handoff",
     });
     expect(validation.ok).toBe(true);

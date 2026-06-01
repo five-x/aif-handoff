@@ -571,16 +571,35 @@ function auditEvidenceCommandText(unit: AuditEvidenceUnit): string {
   return [unit.command.command, ...unit.command.args].filter(Boolean).join(" ").trim();
 }
 
-function latestImplementerStartMs(agentActivityLog: string | null | undefined): number | null {
+function latestToolBearingImplementerStartMs(
+  agentActivityLog: string | null | undefined,
+): number | null {
   if (!agentActivityLog) return null;
-  const matches = [
-    ...agentActivityLog.matchAll(
-      /^\[([^\]]+)\]\s+Agent:\s+(?:aif-implement|implement-coordinator)\b.*\bstarted\b/gm,
-    ),
-  ];
-  const latest = matches.at(-1)?.[1];
-  if (!latest) return null;
-  const parsed = Date.parse(latest);
+  const lines = agentActivityLog.split(/\r?\n/);
+  const sections: Array<{ startedAt: string; hasTool: boolean }> = [];
+  let currentSection: { startedAt: string; hasTool: boolean } | null = null;
+  for (const line of lines) {
+    const startedMatch =
+      /^\[([^\]]+)\]\s+Agent:\s+(?:aif-implement|implement-coordinator)\b.*\bstarted\b/i.exec(line);
+    if (startedMatch) {
+      if (currentSection) sections.push(currentSection);
+      currentSection = { startedAt: startedMatch[1], hasTool: false };
+      continue;
+    }
+    if (!currentSection) continue;
+    if (/\bTool:/i.test(line)) currentSection.hasTool = true;
+    if (/\bAgent:\s+(?:aif-implement|implement-coordinator)\b.*\bcomplete\b/i.test(line)) {
+      sections.push(currentSection);
+      currentSection = null;
+    }
+  }
+  if (currentSection) sections.push(currentSection);
+
+  const section = sections
+    .slice()
+    .reverse()
+    .find((candidate) => candidate.hasTool);
+  const parsed = Date.parse(section?.startedAt ?? "");
   return Number.isFinite(parsed) ? parsed : null;
 }
 
@@ -600,7 +619,7 @@ function findPassedVerificationEvidence(input: {
 }): ImplementationManifest["verificationEvidence"][number] | null {
   const planManifest = readAifPlanManifestSnapshot(input.planText);
   const requiredCommands = planManifest.verificationCommands.map(normalizeVerificationCommandText);
-  const latestStartMs = latestImplementerStartMs(input.agentActivityLog);
+  const latestStartMs = latestToolBearingImplementerStartMs(input.agentActivityLog);
   const units = listAuditEvidenceEvents({ taskId: input.taskId })
     .filter((unit) => unit.toolName === "run_shell")
     .filter((unit) => unit.exitCode === 0)
@@ -1612,6 +1631,31 @@ function formatAuditEvidenceLedgerForPrompt(input: {
 function shouldAttemptAuditLedgerWriterRecovery(error: unknown): boolean {
   const runtimeError = findRuntimeExecutionError(error);
   return runtimeError?.category === "timeout" || runtimeError?.category === "context_length";
+}
+
+function shouldAttemptDevelopmentImplementationRuntimeRecovery(input: {
+  error: unknown;
+  task: Pick<TaskRow, "taskIntent" | "isFix">;
+  expectedAuditReportArtifactPath?: string | null;
+}): boolean {
+  if (input.expectedAuditReportArtifactPath) return false;
+  if (!shouldRequestImplementationManifest(input.task)) return false;
+  const runtimeError = findRuntimeExecutionError(input.error);
+  if (!runtimeError) return false;
+  if (runtimeError.category !== "timeout" && runtimeError.category !== "context_length") {
+    return false;
+  }
+  const status =
+    runtimeError.providerMeta && typeof runtimeError.providerMeta.status === "string"
+      ? runtimeError.providerMeta.status
+      : null;
+  return (
+    runtimeError.category === "context_length" ||
+    runtimeError.category === "timeout" ||
+    status === "max_tool_turns_exhausted" ||
+    status === "repository_inspection_budget_exhausted" ||
+    /max tool turns|context limit|context length/i.test(runtimeError.message)
+  );
 }
 
 function isRepositoryInspectionBudgetExhaustionStatus(error: unknown): boolean {
@@ -5770,6 +5814,7 @@ Writer rules:
   };
 
   let resultText: string | null = null;
+  let deterministicImplementationRuntimeRecovery = false;
   const deterministicAuditCanaryKind = inferAuditCanaryKind(task);
   if (
     expectedAuditReportArtifactPath &&
@@ -5832,6 +5877,45 @@ Writer rules:
           const runtimeError = findRuntimeExecutionError(error);
           if (runtimeError) throw runtimeError;
           throw error;
+        }
+      }
+      if (
+        !recoveredResultText &&
+        shouldAttemptDevelopmentImplementationRuntimeRecovery({
+          error,
+          task,
+          expectedAuditReportArtifactPath,
+        })
+      ) {
+        const recoveredManifestJson = buildDeterministicImplementationManifest({
+          task,
+          projectRoot,
+          planText: selectedPlan,
+        });
+        if (recoveredManifestJson) {
+          recoveredResultText = [
+            "Deterministic implementation runtime recovery completed after runtime exhaustion.",
+            "A structured implementation manifest was rebuilt from observed repository-tool evidence and current git state.",
+            "",
+            "```aif-implementation-manifest",
+            recoveredManifestJson,
+            "```",
+          ].join("\n");
+          deterministicImplementationRuntimeRecovery = true;
+          logActivity(
+            taskId,
+            "Agent",
+            "deterministic implementation manifest recovery completed after runtime exhaustion",
+          );
+          log.info(
+            { taskId },
+            "Recovered implementation stage from runtime exhaustion with deterministic manifest",
+          );
+        } else {
+          log.warn(
+            { taskId },
+            "Deterministic implementation runtime recovery had no valid manifest evidence",
+          );
         }
       }
       if (!recoveredResultText) {
@@ -6002,6 +6086,7 @@ Writer rules:
   const checklistBeforeSync = getChecklistProgress(syncedPlan);
 
   if (
+    !deterministicImplementationRuntimeRecovery &&
     syncedPlan &&
     checklistBeforeSync.parsedTaskCount > 0 &&
     checklistBeforeSync.pendingTaskCount > 0
@@ -6039,6 +6124,13 @@ Writer rules:
     log.warn(
       { taskId, pendingTaskCount: checklistAfterSync.pendingTaskCount },
       "Checklist remains incomplete after auto-sync; continuing without blocking",
+    );
+  }
+  if (deterministicImplementationRuntimeRecovery && checklistWarning) {
+    logActivity(
+      taskId,
+      "Agent",
+      "Skipped checklist auto-sync subagent during deterministic implementation runtime recovery",
     );
   }
 
