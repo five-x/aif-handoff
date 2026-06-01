@@ -935,6 +935,46 @@ describe("roadmapGeneration", () => {
       expect(mockRunApiRuntimeOneShot.mock.calls[0][0].profileMode).toBe("plan");
     });
 
+    it("extracts typed feature roadmap markdown deterministically without runtime metadata loss", async () => {
+      const { projectId } = createProjectWithRoadmap(`# Project Feature Roadmap
+
+> Build a clean feature roadmap.
+
+## Feature Tasks
+
+- [ ] **Initialize repository and test harness** - Create the first runnable scaffold.
+  - Task intent: feature
+  - Acceptance criteria: package.json defines build and test scripts.
+  - Verification: npm.cmd run build; npm.cmd test
+  - Dependencies: none
+  - Scope: package.json, vitest.config.*, src/**/*.test.*
+  - Evidence requirements: verification command output.
+  - Allowed changes: Source, tests, docs, and config only as needed for the feature.
+`);
+
+      const result = await generateRoadmapTasks({
+        projectId,
+        roadmapAlias: "feature-v1",
+        taskIntent: "feature",
+      });
+
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ alias: "feature-v1", taskIntent: "feature" });
+      expect(result.tasks).toHaveLength(1);
+      expect(result.tasks[0]).toMatchObject({
+        title: "Initialize repository and test harness",
+        taskIntent: "feature",
+        phase: 1,
+        phaseName: "Feature Tasks",
+        sequence: 1,
+      });
+      expect(result.tasks[0].description).toContain("Acceptance criteria:");
+      expect(result.tasks[0].description).toContain(
+        "Verification: npm.cmd run build; npm.cmd test",
+      );
+      expect(result.tasks[0].description).toContain("Scope: package.json");
+    });
+
     it("should reject audit-shaped aliases without audit intent before runtime extraction", async () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap\n- [ ] Task A");
 

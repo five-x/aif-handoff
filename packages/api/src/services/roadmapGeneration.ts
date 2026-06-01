@@ -1980,6 +1980,24 @@ export async function generateRoadmapTasks(
     );
     return deterministicResult;
   }
+  const typedMarkdownResult = convertTypedRoadmapMarkdownToTasks({
+    roadmapContent,
+    roadmapAlias,
+    intent,
+  });
+  if (typedMarkdownResult) {
+    validateRoadmapTasks(typedMarkdownResult, intent);
+    log.info(
+      {
+        projectId,
+        roadmapAlias,
+        taskCount: typedMarkdownResult.tasks.length,
+        source: "deterministic-typed-markdown",
+      },
+      "Roadmap generation complete through deterministic typed markdown extraction",
+    );
+    return typedMarkdownResult;
+  }
   const prompt = buildExtractionPrompt(roadmapContent, roadmapAlias, intent);
 
   let rawResult = "";
@@ -2191,6 +2209,179 @@ Rules:
 - Sequence numbers restart at 1 for each phase
 - Do not output broad executable children such as "build the whole app/site"; split them into scaffold, configuration, app-code, and verification microtasks
 - Return ONLY valid JSON, no explanatory text`;
+}
+
+type ParsedTypedRoadmapItem = {
+  title: string;
+  summary: string;
+  phase: number;
+  phaseName: string;
+  sequence: number;
+  metadata: Map<string, string[]>;
+};
+
+const TYPED_ROADMAP_METADATA_ORDER = [
+  "Task intent",
+  "Acceptance criteria",
+  "Verification",
+  "Dependencies",
+  "Scope",
+  "Evidence requirements",
+  "Allowed changes",
+] as const;
+
+function canonicalTypedRoadmapMetadataLabel(label: string): string | null {
+  const normalized = label.trim().toLowerCase().replace(/\s+/g, " ");
+  if (normalized === "task intent") return "Task intent";
+  if (normalized === "acceptance" || normalized === "acceptance criteria") {
+    return "Acceptance criteria";
+  }
+  if (normalized === "verification" || normalized === "verify") return "Verification";
+  if (normalized === "dependencies" || normalized === "depends on") return "Dependencies";
+  if (normalized === "scope" || normalized === "file boundaries") return "Scope";
+  if (normalized === "evidence requirements") return "Evidence requirements";
+  if (normalized === "allowed changes") return "Allowed changes";
+  return null;
+}
+
+function extractRoadmapItemTitleAndSummary(raw: string): { title: string; summary: string } {
+  const bold = raw.match(/^\*\*(.+?)\*\*\s*(?:[-\u2013\u2014]\s*(.*))?$/);
+  if (bold) {
+    return { title: (bold[1] ?? "").trim(), summary: (bold[2] ?? "").trim() };
+  }
+  const split = raw.match(/^(.+?)\s+[-\u2013\u2014]\s+(.+)$/);
+  if (split) {
+    return { title: (split[1] ?? "").trim(), summary: (split[2] ?? "").trim() };
+  }
+  return { title: raw.trim(), summary: "" };
+}
+
+function buildTypedRoadmapTaskDescription(
+  item: ParsedTypedRoadmapItem,
+  intent: TaskIntent,
+): string {
+  const lines: string[] = [];
+  if (item.summary) lines.push(item.summary);
+
+  const emitted = new Set<string>();
+  const valuesFor = (label: string) =>
+    (item.metadata.get(label) ?? [])
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join("; ");
+
+  for (const label of TYPED_ROADMAP_METADATA_ORDER) {
+    emitted.add(label);
+    const value = label === "Task intent" ? valuesFor(label) || intent : valuesFor(label);
+    if (value) lines.push(`${label}: ${value}`);
+  }
+
+  for (const [label, values] of item.metadata.entries()) {
+    if (emitted.has(label)) continue;
+    const value = values
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .join("; ");
+    if (value) lines.push(`${label}: ${value}`);
+  }
+
+  return lines.join("\n");
+}
+
+function convertTypedRoadmapMarkdownToTasks(input: {
+  roadmapContent: string;
+  roadmapAlias: string;
+  intent: TaskIntent;
+}): RoadmapGenerationResult | null {
+  const { roadmapContent, roadmapAlias, intent } = input;
+  if (intent === "general" || intent === "audit") return null;
+
+  const lines = roadmapContent.split(/\r?\n/);
+  const items: ParsedTypedRoadmapItem[] = [];
+  let phase = 0;
+  let phaseName = TASK_INTENT_CONTRACTS[intent].label;
+  let sequence = 0;
+  let current: ParsedTypedRoadmapItem | null = null;
+  let lastMetadataLabel: string | null = null;
+
+  const startPhase = (nextPhaseName: string) => {
+    phase += 1;
+    phaseName = nextPhaseName.trim() || TASK_INTENT_CONTRACTS[intent].label;
+    sequence = 0;
+  };
+
+  for (const rawLine of lines) {
+    const heading = rawLine.match(/^#{2,6}\s+(.+?)\s*$/);
+    if (heading) {
+      const headingText = (heading[1] ?? "").trim();
+      if (!/^completed$/i.test(headingText)) startPhase(headingText);
+      current = null;
+      lastMetadataLabel = null;
+      continue;
+    }
+
+    const checkbox = rawLine.match(/^\s*-\s*\[([ xX])\]\s+(.+?)\s*$/);
+    if (checkbox) {
+      current = null;
+      lastMetadataLabel = null;
+      if ((checkbox[1] ?? "").trim().toLowerCase() === "x") continue;
+      if (phase === 0) startPhase(TASK_INTENT_CONTRACTS[intent].label);
+      const { title, summary } = extractRoadmapItemTitleAndSummary(checkbox[2] ?? "");
+      if (!title) continue;
+      sequence += 1;
+      current = {
+        title,
+        summary,
+        phase,
+        phaseName,
+        sequence,
+        metadata: new Map(),
+      };
+      items.push(current);
+      continue;
+    }
+
+    if (!current) continue;
+
+    const metadata = rawLine.match(/^\s{2,}[-*]\s+([^:]{2,80}):\s*(.*?)\s*$/);
+    if (metadata) {
+      const canonicalLabel = canonicalTypedRoadmapMetadataLabel(metadata[1] ?? "");
+      if (!canonicalLabel) {
+        lastMetadataLabel = null;
+        continue;
+      }
+      const value = (metadata[2] ?? "").trim();
+      const values = current.metadata.get(canonicalLabel) ?? [];
+      if (value) values.push(value);
+      current.metadata.set(canonicalLabel, values);
+      lastMetadataLabel = canonicalLabel;
+      continue;
+    }
+
+    const continuation = rawLine.match(/^\s{4,}(.+?)\s*$/);
+    if (continuation && lastMetadataLabel) {
+      const values = current.metadata.get(lastMetadataLabel) ?? [];
+      values.push(continuation[1] ?? "");
+      current.metadata.set(lastMetadataLabel, values);
+    }
+  }
+
+  const tasks = items
+    .filter((item) => {
+      const taskIntent = (item.metadata.get("Task intent") ?? [intent])[0]?.trim().toLowerCase();
+      return !taskIntent || taskIntent === intent;
+    })
+    .map((item) => ({
+      title: item.title,
+      taskIntent: intent,
+      description: buildTypedRoadmapTaskDescription(item, intent),
+      phase: item.phase,
+      phaseName: item.phaseName,
+      sequence: item.sequence,
+    }));
+
+  if (tasks.length === 0) return null;
+  return { alias: roadmapAlias, taskIntent: intent, tasks };
 }
 
 function extractJsonObject(text: string): string | null {
