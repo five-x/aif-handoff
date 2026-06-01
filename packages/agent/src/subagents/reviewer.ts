@@ -24,6 +24,7 @@ import {
   validateAuditReportArtifact,
   type AutoReviewState,
   type AutoReviewFinding,
+  type AutoReviewFindingSource,
   type AutoReviewStrategy,
   SPECIALIZED_REVIEWER_ROLES,
   type SpecializedReviewerRole,
@@ -344,13 +345,21 @@ async function runSpecializedReviewerInputs(input: {
   return results;
 }
 
-function formatReviewerAutoReviewStateForPrompt(state: AutoReviewState | null | undefined): string {
+function formatReviewerAutoReviewStateForPrompt(
+  state: AutoReviewState | null | undefined,
+  sources?: AutoReviewFindingSource[],
+): string {
   if (!state) {
     return "No persisted auto-review rework context.";
   }
 
-  const visibleFindings = state.findings.slice(0, REVIEWER_PROMPT_SECTION_LIMITS.blockerCount);
-  const omittedCount = Math.max(0, state.findings.length - visibleFindings.length);
+  const sourceSet = sources ? new Set<AutoReviewFindingSource>(sources) : null;
+  const matchingFindings = sourceSet
+    ? state.findings.filter((finding) => sourceSet.has(finding.source))
+    : state.findings;
+  const visibleFindings = matchingFindings.slice(0, REVIEWER_PROMPT_SECTION_LIMITS.blockerCount);
+  const visibleFindingIds = new Set(visibleFindings.map((finding) => finding.id));
+  const omittedCount = Math.max(0, matchingFindings.length - visibleFindings.length);
   const lines = [
     `strategy: ${state.strategy}`,
     `iteration: ${state.iteration}`,
@@ -415,8 +424,11 @@ function formatReviewerAutoReviewStateForPrompt(state: AutoReviewState | null | 
       )}`,
     );
   }
-  if (snapshot.findingIds.length > 0) {
-    const findingIds = snapshot.findingIds.map((findingId) =>
+  const snapshotFindingIds = sourceSet
+    ? snapshot.findingIds.filter((findingId) => visibleFindingIds.has(findingId))
+    : snapshot.findingIds;
+  if (snapshotFindingIds.length > 0) {
+    const findingIds = snapshotFindingIds.map((findingId) =>
       compactReviewerPromptText(
         "FINDING_ID",
         findingId,
@@ -426,8 +438,13 @@ function formatReviewerAutoReviewStateForPrompt(state: AutoReviewState | null | 
     lines.push(`- exact blocker ids: ${findingIds.join(", ")}`);
   }
   if (snapshot.requiredEvidenceByFindingId) {
-    lines.push("- required evidence by blocker id:");
-    for (const [findingId, evidence] of Object.entries(snapshot.requiredEvidenceByFindingId)) {
+    const requiredEvidenceEntries = Object.entries(snapshot.requiredEvidenceByFindingId).filter(
+      ([findingId]) => !sourceSet || visibleFindingIds.has(findingId),
+    );
+    if (requiredEvidenceEntries.length > 0) {
+      lines.push("- required evidence by blocker id:");
+    }
+    for (const [findingId, evidence] of requiredEvidenceEntries) {
       lines.push(
         `  - [${findingId}] ${compactReviewerPromptText(
           "REQUIRED_EVIDENCE",
@@ -1212,7 +1229,14 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
   );
   const reviewPreviousFindings = formatPreviousFindingsForPrompt(reviewPreviousFindingState);
   const securityPreviousFindings = formatPreviousFindingsForPrompt(securityPreviousFindingState);
-  const autoReviewReworkContext = formatReviewerAutoReviewStateForPrompt(task.autoReviewState);
+  const reviewAutoReviewReworkContext = formatReviewerAutoReviewStateForPrompt(
+    task.autoReviewState,
+    ["code_review", "review_gate"],
+  );
+  const securityAutoReviewReworkContext = formatReviewerAutoReviewStateForPrompt(
+    task.autoReviewState,
+    ["security_audit"],
+  );
   const roadmapArtifact = findRoadmapBatchArtifactByTaskId(taskId);
   const specializedReviewerRoles = resolveRequiredSpecializedReviewerRoles(task, roadmapArtifact);
   const auditSynthesisContext =
@@ -1338,7 +1362,9 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
         strategy,
         reviewIteration,
         previousFindings: formatPreviousFindingsForPrompt(previousFindingState, role),
-        autoReviewReworkContext,
+        autoReviewReworkContext: formatReviewerAutoReviewStateForPrompt(task.autoReviewState, [
+          role,
+        ]),
       }),
     };
   });
@@ -1543,13 +1569,13 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
     task,
     workflowKind: "reviewer",
     source: "agent:reviewer",
-    queryParts: [auditSynthesisContext, reviewPreviousFindings, autoReviewReworkContext],
+    queryParts: [auditSynthesisContext, reviewPreviousFindings, reviewAutoReviewReworkContext],
   });
   const securityMemoryContext = buildTaskMemoryContext({
     task,
     workflowKind: "security_review",
     source: "agent:security-review",
-    queryParts: [auditSynthesisContext, securityPreviousFindings, autoReviewReworkContext],
+    queryParts: [auditSynthesisContext, securityPreviousFindings, securityAutoReviewReworkContext],
   });
   const reviewMemoryBlock = reviewMemoryContext ? `\n\n${reviewMemoryContext}\n` : "";
   const securityMemoryBlock = securityMemoryContext ? `\n\n${securityMemoryContext}\n` : "";
@@ -1632,7 +1658,7 @@ Previous Findings Input:
 ${reviewPreviousFindings}
 
 Auto-review rework context:
-${autoReviewReworkContext}
+${reviewAutoReviewReworkContext}
 
 Review changed code for correctness, regression risks, performance, and maintainability.
 
@@ -1662,7 +1688,7 @@ Previous Findings Input:
 ${securityPreviousFindings}
 
 Auto-review rework context:
-${autoReviewReworkContext}
+${securityAutoReviewReworkContext}
 
 Focus on auth, validation, secret leak checks, permission/sandbox boundaries, injection, unsafe shell/file/network behavior, and dependency/config risks in changed code.
 

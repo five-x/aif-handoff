@@ -41,25 +41,6 @@ const { parseStructuredReviewComments } = await import("../reviewContract.js");
 const { appendAuditEvidenceEvent, createRoadmapBatchContract, updateRoadmapBatchArtifactState } =
   await import("@aif/data");
 
-function sidecarOutput(previousFindingId: string): string {
-  return [
-    "## Blocking Findings",
-    "- none",
-    "",
-    "## Advisories",
-    "- src/review.ts:1 was inspected for the current attempt.",
-    "",
-    "## Previous Findings",
-    `- [${previousFindingId}] still_blocking | Current attempt still lacks verification evidence in src/review.ts:1.`,
-    "",
-    "## Security Coverage",
-    "- secret_leaks | covered | Checked changed review paths for raw secrets.",
-    "- permissions_sandbox | covered | Checked permission and sandbox boundaries.",
-    "- unsafe_shell_network_file | covered | Checked shell, network, and file operations.",
-    "- dependency_config | covered | Checked dependency and configuration risks.",
-  ].join("\n");
-}
-
 function passingSidecarOutput(previousFindingIds: string[] = []): string {
   return [
     "## Blocking Findings",
@@ -536,8 +517,8 @@ describe("runReviewer", () => {
         prompts.set(input.agentName, input.prompt);
         return {
           resultText: input.agentName.includes("security")
-            ? sidecarOutput("sec-1")
-            : sidecarOutput("code-1"),
+            ? passingSidecarOutput(["sec-1"])
+            : passingSidecarOutput(["code-1", "gate-1"]),
         };
       },
     );
@@ -574,12 +555,17 @@ describe("runReviewer", () => {
               source: "security_audit",
               text: "Verify secret leak handling remains redacted",
             },
+            {
+              id: "gate-1",
+              source: "review_gate",
+              text: "Structured review contract must be repaired without leaking into security-only context",
+            },
           ],
           reworkSnapshot: {
             iteration: 2,
             artifactPath: ".",
             artifactContentSha: null,
-            findingIds: ["code-1", "sec-1"],
+            findingIds: ["code-1", "sec-1", "gate-1"],
             baselineHeadSha: "abc123",
             changedFilesDigest: "digest-abc",
             changedFilesSummary: [
@@ -590,6 +576,7 @@ describe("runReviewer", () => {
               "code-1":
                 "Run npm.cmd test and do not expose sk-proj-abcdefghijklmnopqrstuvwxyz1234567890.",
               "sec-1": "Confirm https://private.example.invalid/secrets is redacted.",
+              "gate-1": "Return one canonical Previous Findings row for the review-gate blocker.",
             },
             forbiddenChanges: [
               "Do not edit unrelated files or print token=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890.",
@@ -606,10 +593,6 @@ describe("runReviewer", () => {
 
     for (const prompt of [reviewPrompt, securityPrompt]) {
       expect(prompt).toContain("Auto-review rework context:");
-      expect(prompt).toContain("exact blocker ids: code-1, sec-1");
-      expect(prompt).toContain("required evidence by blocker id:");
-      expect(prompt).toContain("[code-1]");
-      expect(prompt).toContain("[sec-1]");
       expect(prompt).toContain("forbidden unrelated changes:");
       expect(prompt).toContain("baselineHeadSha: abc123");
       expect(prompt).toContain("changedFilesDigest: digest-abc");
@@ -617,6 +600,14 @@ describe("runReviewer", () => {
       expect(prompt).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz1234567890");
       expect(prompt).not.toContain("https://private.example.invalid/secrets");
     }
+    expect(reviewPrompt).toContain("exact blocker ids: code-1, gate-1");
+    expect(reviewPrompt).toContain("[code-1]");
+    expect(reviewPrompt).toContain("[gate-1]");
+    expect(reviewPrompt).not.toContain("[sec-1]");
+    expect(securityPrompt).toContain("exact blocker ids: sec-1");
+    expect(securityPrompt).toContain("[sec-1]");
+    expect(securityPrompt).not.toContain("[code-1]");
+    expect(securityPrompt).not.toContain("[gate-1]");
   });
 
   it("fans out base specialized reviewers for high-risk non-audit tasks", async () => {

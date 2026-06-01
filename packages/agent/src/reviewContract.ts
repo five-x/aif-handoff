@@ -704,6 +704,49 @@ function mergeSecurityCoverage(
   );
 }
 
+const PREVIOUS_FINDING_STATUS_PRIORITY: Record<AutoReviewPreviousFindingStatus, number> = {
+  resolved: 1,
+  not_reproducible: 2,
+  new_blocker: 3,
+  still_blocking: 4,
+  manual_review_required: 5,
+};
+
+function mergePreviousFindings(
+  previousFindings: AutoReviewPreviousFinding[],
+): AutoReviewPreviousFinding[] {
+  const byId = new Map<string, AutoReviewPreviousFinding>();
+
+  for (const finding of previousFindings) {
+    const existing = byId.get(finding.id);
+    if (!existing) {
+      byId.set(finding.id, finding);
+      continue;
+    }
+
+    const existingPriority = PREVIOUS_FINDING_STATUS_PRIORITY[existing.status] ?? 0;
+    const candidatePriority = PREVIOUS_FINDING_STATUS_PRIORITY[finding.status] ?? 0;
+    const selected = candidatePriority > existingPriority ? finding : existing;
+    const source = existing.source === finding.source ? selected.source : existing.source;
+    const note =
+      existing.note === finding.note
+        ? selected.note
+        : normalizeReviewText(
+            `${selected.note} Conflicting reviewer status for [${finding.id}] was consolidated from ${existing.source}:${existing.status} and ${finding.source}:${finding.status}.`,
+          );
+
+    byId.set(finding.id, {
+      ...selected,
+      source,
+      note,
+      text: note,
+      closureEvidence: note,
+    });
+  }
+
+  return [...byId.values()];
+}
+
 export function buildStructuredReviewComments(input: {
   strategy: AutoReviewStrategy;
   iteration: number;
@@ -714,11 +757,11 @@ export function buildStructuredReviewComments(input: {
   rawSecurityAudit: string;
   rawSpecializedReviews?: Array<{ role: SpecializedReviewerRole; rawOutput: string }>;
 }): string {
-  const previousFindings = [
+  const previousFindings = mergePreviousFindings([
     ...input.codeReview.previousFindings,
     ...input.securityAudit.previousFindings,
     ...(input.specializedReviews ?? []).flatMap((review) => review.previousFindings),
-  ];
+  ]);
   const advisories = [
     ...input.codeReview.advisories,
     ...input.securityAudit.advisories,

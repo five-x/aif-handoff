@@ -574,6 +574,73 @@ describe("reviewContract", () => {
     expect(reviewComments).toContain("## Raw Specialized Review: correctness");
   });
 
+  it("consolidates duplicate previous finding rows before canonical review validation", () => {
+    const previousId = "review-gate-1";
+    const reviewComments = buildStructuredReviewComments({
+      strategy: "full_re_review",
+      iteration: 3,
+      codeReview: {
+        previousFindings: [
+          {
+            id: previousId,
+            source: "review_gate",
+            status: "resolved",
+            note: "Code reviewer confirmed the structured review contract is repaired.",
+            text: "Code reviewer confirmed the structured review contract is repaired.",
+          },
+        ],
+        blockingFindings: [],
+        advisories: [],
+        securityCoverage: completeCodeReviewSecurityCoverage,
+      },
+      securityAudit: {
+        previousFindings: [
+          {
+            id: previousId,
+            source: "security_audit",
+            status: "still_blocking",
+            note: "Security reviewer still needs complete security coverage evidence.",
+            text: "Security reviewer still needs complete security coverage evidence.",
+          },
+        ],
+        blockingFindings: [],
+        advisories: [],
+        securityCoverage: completeSecurityAuditCoverage,
+      },
+      rawCodeReview: "structured code review",
+      rawSecurityAudit: "structured security audit",
+    });
+
+    expect(
+      reviewComments
+        .split("\n")
+        .filter((line) => line.startsWith("- [review-gate-1] review_gate |")),
+    ).toHaveLength(2);
+    const result = parseStructuredReviewCommentsResult(reviewComments, [
+      {
+        id: previousId,
+        source: "review_gate",
+        text: "Structured review contract blocker",
+      },
+    ]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected canonical review comments to parse");
+    expect(result.value.previousFindings).toEqual([
+      expect.objectContaining({
+        id: previousId,
+        source: "review_gate",
+        status: "still_blocking",
+      }),
+    ]);
+    expect(result.value.blockingFindings).toEqual([
+      expect.objectContaining({
+        id: previousId,
+        source: "review_gate",
+      }),
+    ]);
+  });
+
   it("round-trips expanded previous statuses and redacts secret-like review text", () => {
     const manualId = "manual-1";
     const newBlockerId = "new-1";
