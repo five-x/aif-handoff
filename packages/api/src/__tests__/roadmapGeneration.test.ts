@@ -1540,6 +1540,45 @@ describe("roadmapGeneration", () => {
       expect(findTasksByRoadmapAlias(projectId, "zai-mi")).toHaveLength(0);
     });
 
+    it("keeps structured domain feature tasks as one proposal child", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent: "# Roadmap\n- [ ] Define domain types",
+        generation: {
+          alias: "domain-types",
+          taskIntent: "feature",
+          tasks: [
+            {
+              title: "Define domain types and data contracts",
+              description:
+                "Acceptance criteria: Offer, UserProfile, Consent, and RoutingResult types exist without passport fields.\nVerification: npm.cmd test -- domain-types\nScope: src/types/domain.ts, src/types/offer.ts, src/types/consent.ts, src/types/routing.ts",
+              taskIntent: "feature",
+              phase: 1,
+              phaseName: "Feature",
+              sequence: 1,
+            },
+          ],
+        },
+      });
+
+      expect(result.status).toBe("created");
+      expect(result.proposal.proposedChildren).toHaveLength(1);
+      expect(result.proposal.proposedChildren[0]).toEqual(
+        expect.objectContaining({
+          title: "Define domain types and data contracts",
+          verificationCommands: ["npm.cmd test -- domain-types"],
+          fileBoundaries: expect.arrayContaining(["src/types/domain.ts", "src/types/offer.ts"]),
+          splitRationale: "Roadmap item is already narrow enough for one executable microtask.",
+        }),
+      );
+      expect(result.proposal.proposedChildren[0]?.title).not.toContain("development stack");
+      expect(findTasksByRoadmapAlias(projectId, "domain-types")).toHaveLength(0);
+    });
+
     it("decomposes Russian broad feature children into proposal microtasks before persistence", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 

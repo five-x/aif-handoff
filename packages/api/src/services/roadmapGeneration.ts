@@ -2719,6 +2719,15 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
   ).length;
   const compoundTitleSignal = /[:;,]|\s(?:and|и)\s/i.test(title);
   const fileBoundaryCount = inferFileBoundaries(task).length;
+  if (
+    hasStandardMicrotaskMetadata(task.description) &&
+    !isInfrastructureOrConfigSubjectTitle(task.title) &&
+    !broadScopeSignal &&
+    dimensionCount <= 2 &&
+    fileBoundaryCount <= 6
+  ) {
+    return false;
+  }
   const featureFanoutSignal =
     domainSignalCount >= 3 && (compoundTitleSignal || /[;\n]/.test(descriptionForScopeCheck));
   const stackConfigFanoutSignal =
@@ -2764,6 +2773,9 @@ function formatMicrotaskDescription(input: {
 function isInfrastructureOrConfigSubjectTitle(title: string): boolean {
   return (
     /\b(?:docker|docker-compose|compose|env|ci\/cd|infrastructure|environment|config|configuration|dev stack|local dev|tooling|dependencies)\b/i.test(
+      title,
+    ) ||
+    /(?:\u0438\u043d\u0438\u0446\u0438\u0430\u043b\u0438\u0437|\u0440\u0435\u043f\u043e\u0437\u0438\u0442\u043e\u0440|\u0441\u043a\u0435\u043b\u0435\u0442|dev-\u0441\u0442\u0435\u043a|\u043e\u043a\u0440\u0443\u0436\u0435\u043d|\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a|\u043a\u043e\u043d\u0444\u0438\u0433|\u0437\u0430\u0432\u0438\u0441\u0438\u043c|\u0438\u043d\u0444\u0440\u0430\u0441\u0442\u0440\u0443\u043a\u0442)/iu.test(
       title,
     ) ||
     /(?:\u0438\u043d\u0444\u0440\u0430\u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440|\u043e\u043a\u0440\u0443\u0436\u0435\u043d|\u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a|\u043a\u043e\u043d\u0444\u0438\u0433|\u0437\u0430\u0432\u0438\u0441\u0438\u043c)/iu.test(
