@@ -1168,10 +1168,28 @@ function buildMalformedStructuredReviewContractHandoff(
     totalBlockingCount: enrichedFindings.length,
     parserMode: "structured",
   });
+  const hasSpecializedManualHandoff = enrichedFindings.some(
+    (finding) =>
+      finding.source !== "review_gate" && /^manual_review_required:/i.test(finding.text.trim()),
+  );
+
+  if (hasSpecializedManualHandoff) {
+    return {
+      status: "manual_review_required",
+      handoffReason: "malformed_structured_review_contract",
+      metrics,
+      blockingFindings: enrichedFindings,
+      fixesMarkdown: formatFixesMarkdown(enrichedFindings),
+      autoReviewState: toAutoReviewState({
+        strategy: input.strategy,
+        iteration: input.iteration,
+        findings: enrichedFindings,
+      }),
+    };
+  }
 
   return {
-    status: "manual_review_required",
-    handoffReason: "malformed_structured_review_contract",
+    status: "request_changes",
     metrics,
     blockingFindings: enrichedFindings,
     fixesMarkdown: formatFixesMarkdown(enrichedFindings),

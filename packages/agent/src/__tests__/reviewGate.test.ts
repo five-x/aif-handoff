@@ -711,7 +711,7 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     },
   );
 
-  it("manual-handoffs reviewer-generated sidecar contract failure comments", async () => {
+  it("routes reviewer-generated sidecar contract failure comments to rework", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
       reviewComments: [
@@ -741,11 +741,10 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       ].join("\n"),
     });
 
-    expect(result.status).toBe("manual_review_required");
-    if (result.status !== "manual_review_required") {
-      throw new Error("expected manual_review_required");
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
     }
-    expect(result.handoffReason).toBe("malformed_structured_review_contract");
     expect(result.metrics.parserMode).toBe("structured");
     expect(result.blockingFindings).toEqual([
       expect.objectContaining({
