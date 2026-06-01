@@ -221,7 +221,7 @@ export const QWEN_LOCAL_AGENT_TOOLS = [
     function: {
       name: "run_shell",
       description:
-        "Run a narrow structured command inside the project root. This is not a shell string. Supports pwd, ls, and package-manager verification scripts such as npm.cmd run build.",
+        "Run a narrow structured command inside the project root. This is not a shell string. Supports pwd, ls, safe npm dependency hydration such as npm.cmd install, and package-manager verification scripts such as npm.cmd run build.",
       parameters: objectSchema(
         {
           command: {
@@ -917,6 +917,45 @@ function packageManagerScriptName(args) {
   if (verb === "run") return args[1] ?? null;
   return null;
 }
+const NPM_SAFE_INSTALL_VERBS = new Set(["ci", "install"]);
+const NPM_SAFE_INSTALL_FLAGS = new Set([
+  "--ignore-scripts",
+  "--no-audit",
+  "--audit=false",
+  "--no-fund",
+  "--fund=false",
+  "--prefer-offline",
+  "--package-lock-only",
+]);
+function isNpmDependencyHydrationCommand(command, args) {
+  return (command === "npm" || command === "npm.cmd") && NPM_SAFE_INSTALL_VERBS.has(args[0] ?? "");
+}
+function validateNpmDependencyHydrationArgs(command, args) {
+  for (const arg of args.slice(1)) {
+    if (!arg.startsWith("-")) {
+      throw new RuntimeExecutionError(
+        `${command} ${args[0]} does not support package specs; edit package.json/package-lock.json in scope, then run dependency hydration`,
+        undefined,
+        "permission",
+      );
+    }
+    if (!NPM_SAFE_INSTALL_FLAGS.has(arg)) {
+      throw new RuntimeExecutionError(
+        `${command} ${args[0]} flag is not supported for local-agent dependency hydration: ${arg}`,
+        undefined,
+        "permission",
+      );
+    }
+  }
+}
+function normalizeNpmDependencyHydrationArgs(command, args) {
+  if (!isNpmDependencyHydrationCommand(command, args)) return args;
+  const next = [...args];
+  for (const flag of ["--ignore-scripts", "--no-audit", "--no-fund"]) {
+    if (!next.includes(flag)) next.push(flag);
+  }
+  return next;
+}
 function validatePackageManagerShellArgs(command, args) {
   const verb = args[0];
   if (!verb) {
@@ -925,6 +964,10 @@ function validatePackageManagerShellArgs(command, args) {
       undefined,
       "permission",
     );
+  }
+  if (isNpmDependencyHydrationCommand(command, args)) {
+    validateNpmDependencyHydrationArgs(command, args);
+    return;
   }
   if (verb === "test") return;
   if (verb === "run") {
@@ -993,16 +1036,17 @@ function packageManagerEnvExtras(command) {
   };
 }
 function resolveStructuredShellInvocation(command, args) {
+  const normalizedArgs = normalizeNpmDependencyHydrationArgs(command, args);
   if (command === "npm.cmd" && process.platform !== "win32") {
-    return { command: "npm", args };
+    return { command: "npm", args: normalizedArgs };
   }
   if (command === "npm.cmd" && process.platform === "win32") {
     return {
       command: process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", "npm.cmd", ...args],
+      args: ["/d", "/s", "/c", "npm.cmd", ...normalizedArgs],
     };
   }
-  return { command, args };
+  return { command, args: normalizedArgs };
 }
 export function spawnProcess(input) {
   if (input.signal?.aborted) {

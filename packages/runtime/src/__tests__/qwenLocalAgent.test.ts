@@ -4222,15 +4222,40 @@ describe("qwen-local-agent adapter", () => {
     expect(result.output).toContain("none");
     expect(result.output).not.toContain("sk-");
   });
-  it("denies package-manager install commands", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-deny-"));
+  it("allows safe npm dependency hydration without lifecycle scripts", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-safe-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          preinstall: "node -e \"require('fs').writeFileSync('preinstall-ran','1')\"",
+        },
+      }),
+      "utf8",
+    );
     const result = await executeQwenLocalTool(
       "run_shell",
       { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["install"] },
       { projectRoot: root, maxOutputChars: 2_000 },
     );
+    expect(result.ok, result.error ?? result.output).toBe(true);
+    await expect(readFile(path.join(root, "preinstall-ran"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await readFile(path.join(root, "package-lock.json"), "utf8")).toContain(
+      '"lockfileVersion"',
+    );
+  });
+  it("denies npm dependency hydration with package specs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-spec-deny-"));
+    await writeFile(path.join(root, "package.json"), JSON.stringify({}), "utf8");
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["install", "left-pad"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("supports only test or run");
+    expect(result.error).toContain("does not support package specs");
   });
   it("denies package-manager dependency mutation through run scripts", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-script-install-deny-"));
