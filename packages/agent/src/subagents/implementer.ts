@@ -414,15 +414,29 @@ function formatAutoReviewStateForPrompt(
 }
 
 function isBlockedImplementationResult(resultText: string): boolean {
-  const normalized = resultText.toLowerCase();
-  return (
-    normalized.includes("status: blocked") ||
-    normalized.includes("permission system") ||
-    normalized.includes("permission denied") ||
-    normalized.includes("write permission") ||
-    normalized.includes("cannot proceed") ||
-    normalized.includes("blocked —")
-  );
+  const lines = resultText
+    .toLowerCase()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.some((line) => {
+    if (/^(?:status|implementation status|result)\s*:\s*blocked\b/.test(line)) return true;
+    if (/^blocked\s*(?:[:\u2014-])/.test(line)) return true;
+    if (
+      /^(?:cannot|can't|unable to) proceed\b/.test(line) &&
+      /\b(?:permission|permissions|approval|sandbox|access)\b/.test(line)
+    ) {
+      return true;
+    }
+    if (
+      /\b(?:permission denied|write permission|permission system|runtime permissions)\b/.test(line)
+    ) {
+      return !/\b(?:no|not|without|did not|does not|is not|was not)\b.{0,60}\b(?:permission denied|write permission|permission system|runtime permissions)\b/.test(
+        line,
+      );
+    }
+    return false;
+  });
 }
 
 type OptionalImplementationManifestHelpers = {

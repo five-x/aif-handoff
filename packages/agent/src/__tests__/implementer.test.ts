@@ -5853,6 +5853,106 @@ describe("runImplementer rework behavior", () => {
     });
   });
 
+  it("does not treat incidental cannot-proceed text as a permission block when the implementation manifest is valid", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        [
+          "Implementation done.",
+          "I cannot proceed with unrelated cleanup outside the approved task scope.",
+          "",
+          "```aif-implementation-manifest",
+          JSON.stringify({
+            version: 1,
+            taskId: "task-feature-incidental-cannot-proceed",
+            intent: "feature",
+            planManifestHash: null,
+            changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+            diffSummary: { summary: "Updated feature behavior." },
+            verificationEvidence: [
+              {
+                id: "verify-1",
+                command: "npm.cmd test",
+                status: "passed",
+                outputSha256: "a".repeat(64),
+                outputPreview: "tests passed",
+                outputPreviewTruncated: false,
+              },
+            ],
+            acceptanceCriteria: [
+              {
+                id: "ac-1",
+                status: "satisfied",
+                evidenceRefs: ["verify-1"],
+              },
+            ],
+            evidenceRefs: ["verify-1"],
+            planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+            reviewClosure: { status: "pending", evidenceRefs: [] },
+            commitEvidence: { status: "not_required" },
+            knownLimitations: [],
+          }),
+          "```",
+        ].join("\n"),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-feature-incidental-cannot-proceed",
+        projectId: "project-1",
+        title: "Feature manifest",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "Plan:\n- add the feature",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-incidental-cannot-proceed", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-incidental-cannot-proceed"))
+      .get();
+    expect(updatedTask?.implementationLog).toContain("Implementation done.");
+    expect(updatedTask?.implementationLog).toContain("cannot proceed with unrelated cleanup");
+    expect(JSON.parse(updatedTask?.implementationManifestJson ?? "{}")).toMatchObject({
+      taskId: "task-feature-incidental-cannot-proceed",
+      intent: "feature",
+    });
+  });
+
+  it("still blocks explicit implementation permission denials", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        ["Status: BLOCKED", "Cannot proceed without approval access to write task files."].join(
+          "\n",
+        ),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-feature-explicit-permission-block",
+        projectId: "project-1",
+        title: "Feature permission block",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "Plan:\n- add the feature",
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+
+    await expect(
+      runImplementer("task-feature-explicit-permission-block", projectRoot),
+    ).rejects.toThrow("Implementer blocked by permissions");
+  });
+
   it("prompts plan-manifest-backed tasks with the expected hash and stores validating evidence", async () => {
     const db = testDb.current;
     const plan = [
