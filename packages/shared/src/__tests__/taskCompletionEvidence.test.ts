@@ -1029,9 +1029,15 @@ describe("taskCompletionEvidence", () => {
   it("allows development review handoff when a dirty plan artifact is outside the manifest", () => {
     const root = initRepo();
     mkdirSync(join(root, "src"), { recursive: true });
-    mkdirSync(join(root, ".ai-factory"), { recursive: true });
+    mkdirSync(join(root, ".ai-factory", "plans"), { recursive: true });
     writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
     writeFileSync(join(root, ".ai-factory", "PLAN.md"), "- [x] Implement feature\n", "utf8");
+    writeFileSync(join(root, ".ai-factory", "ROADMAP.md"), "# Roadmap\n", "utf8");
+    writeFileSync(
+      join(root, ".ai-factory", "plans", "task.md"),
+      "- [x] Implement feature\n",
+      "utf8",
+    );
 
     const result = evaluateTaskCompletionEvidence({
       projectRoot: root,
@@ -1040,6 +1046,7 @@ describe("taskCompletionEvidence", () => {
         id: "feature-with-dirty-plan",
         title: "Add feature flag",
         taskIntent: "feature",
+        planPath: ".ai-factory/plans/task.md",
         plan: "## Plan\n- [x] Implement feature\n- [x] Run tests",
         agentActivityLog: RISKY_COMPLETION_ACTIVITY,
         implementationManifestJson: implementationManifest({

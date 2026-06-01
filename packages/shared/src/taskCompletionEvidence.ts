@@ -469,6 +469,7 @@ function isPlanArtifact(path: string, task: TaskCompletionEvidenceTask): boolean
   const taskPlanPath = normalizeRelativePath(task.planPath || ".ai-factory/PLAN.md");
   const name = basename(normalized).toLowerCase();
   if (normalized === taskPlanPath) return true;
+  if (normalized.toLowerCase() === ".ai-factory/roadmap.md") return true;
   if (
     normalized.startsWith(".ai-factory/") &&
     (name === "plan.md" || name === "fix_plan.md" || normalized.includes("/plans/"))
