@@ -714,6 +714,16 @@ function buildDeterministicImplementationManifest(input: {
       { taskId: input.task.id, issueCodes: validation.issues.map((issue) => issue.code) },
       "Deterministic implementation manifest fallback failed validation",
     );
+    if (validation.normalizedJson) {
+      logActivity(
+        input.task.id,
+        "Agent",
+        `Saved deterministic implementation manifest fallback with validation issues: ${validation.issues
+          .map((issue) => issue.code)
+          .join(", ")}`,
+      );
+      return validation.normalizedJson;
+    }
     return null;
   }
   logActivity(input.task.id, "Agent", "Saved deterministic implementation manifest fallback");

@@ -424,7 +424,10 @@ function collectChangedFiles(projectRoot: string): {
         ["diff", "--name-only", `${baseBranch}..HEAD`],
       ]
     : [];
-  const diffArgs = [...baseDiffArgs, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]];
+  const diffArgs =
+    baseDiffArgs.length > 0
+      ? baseDiffArgs
+      : [["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]];
   for (const args of diffArgs) {
     const diff = runGit(projectRoot, args);
     if (diff) {

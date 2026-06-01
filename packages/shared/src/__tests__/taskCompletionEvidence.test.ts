@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  collectTaskCompletionChangedFiles,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
 } from "../taskCompletionEvidence.js";
@@ -1184,6 +1185,33 @@ describe("taskCompletionEvidence", () => {
     });
 
     expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
+  });
+
+  it("does not inherit the base branch head commit as current task evidence", () => {
+    const root = initRepoOnBranch("master");
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    writeFileSync(join(root, "scripts", "previous-task.mjs"), "console.log('old task');\n", "utf8");
+    execFileSync("git", ["add", "scripts/previous-task.mjs"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "previous task", "--no-verify"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/new-task"], { cwd: root, stdio: "ignore" });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "current-task.ts"), "export const current = true;\n", "utf8");
+
+    const changed = collectTaskCompletionChangedFiles({
+      projectRoot: root,
+      task: {
+        id: "feature-new-task",
+        title: "Add current task",
+        taskIntent: "feature",
+      },
+    });
+
+    expect(changed.meaningfulChangedFiles).toEqual(["src/current-task.ts"]);
+    expect(changed.meaningfulChangedFiles).not.toContain("scripts/previous-task.mjs");
+    expect(changed.committedFiles).toEqual([]);
   });
 
   it("accepts implementation manifest changed files inside globbed plan scope", () => {

@@ -6133,6 +6133,141 @@ describe("runImplementer rework behavior", () => {
     expect(validation.ok).toBe(true);
   });
 
+  it("stores deterministic fallback manifest even when scope validation must block later", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "commit.gpgsign", "false"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "README.md"), "# test\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    writeFileSync(join(projectRoot, "Dockerfile"), "FROM node:22\n", "utf8");
+
+    const plan = [
+      "```aif-plan-manifest",
+      JSON.stringify({
+        version: 1,
+        taskId: "task-feature-fallback-scope-block",
+        intent: "feature",
+        scope: ["src/feature.ts"],
+        allowedChanges: ["source"],
+        forbiddenChanges: ["audit-report"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "AC1",
+            description: "Feature behavior is implemented.",
+            verification: "npm.cmd test",
+          },
+        ],
+        verificationCommands: ["npm.cmd test"],
+      }),
+      "```",
+      "",
+      "## Plan",
+      "- [x] Implement feature behavior",
+      "- [x] Run tests",
+    ].join("\n");
+    const verifiedAt = new Date(Date.now() + 10_000).toISOString();
+    queryMock.mockReturnValueOnce({
+      async *[Symbol.asyncIterator]() {
+        appendAuditEvidenceEvent({
+          id: "ev-feature-fallback-scope-build",
+          taskId: "task-feature-fallback-scope-block",
+          auditPlanId: "task:task-feature-fallback-scope-block",
+          sourceSnapshotId: "git:test",
+          toolName: "run_shell",
+          evidenceKind: "shell_command",
+          evidenceGrade: "substantive",
+          scopeIds: ["src/feature.ts"],
+          riskHypothesisIds: [],
+          pathHashes: [],
+          pathRangeHashes: [],
+          command: { command: "npm.cmd", args: ["test"], cwd: null },
+          exitCode: 0,
+          outputSha256: "c".repeat(64),
+          outputPreview: "tests passed",
+          outputPreviewTruncated: false,
+          parsedSummary: {
+            outputBytes: "tests passed".length,
+            outputLineCount: 1,
+            previewChars: "tests passed".length,
+            exitCode: 0,
+          },
+          redactionStatus: "clean",
+          createdAt: verifiedAt,
+        });
+        const current = db
+          .select()
+          .from(tasks)
+          .where(eq(tasks.id, "task-feature-fallback-scope-block"))
+          .get();
+        db.update(tasks)
+          .set({
+            agentActivityLog: [
+              current?.agentActivityLog?.trim() ?? "",
+              `[${verifiedAt}] Tool: run_shell npm.cmd test`,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          })
+          .where(eq(tasks.id, "task-feature-fallback-scope-block"))
+          .run();
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "Implementation done without a manifest block.",
+        };
+      },
+    });
+    db.insert(tasks)
+      .values({
+        id: "task-feature-fallback-scope-block",
+        projectId: "project-1",
+        title: "Feature fallback manifest with scope issue",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan,
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-fallback-scope-block", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-fallback-scope-block"))
+      .get();
+    const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
+      ?.implementationManifestJson;
+    expect(manifestJson).toBeTruthy();
+    const validation = validateImplementationManifest({
+      task: updatedTask!,
+      manifestJson,
+      changedFiles: ["Dockerfile", "src/feature.ts"],
+      meaningfulChangedFiles: ["Dockerfile", "src/feature.ts"],
+      dirtyChangedFiles: ["Dockerfile", "src/feature.ts"],
+      phase: "review_handoff",
+    });
+    expect(validation.ok).toBe(false);
+    expect(validation.issues.map((issue) => issue.code)).toContain("implementation_scope_mismatch");
+  });
+
   it("asks fix tasks to include a regression explanation in the implementation manifest", async () => {
     const db = testDb.current;
     db.insert(tasks)
