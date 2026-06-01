@@ -133,10 +133,42 @@ function isPolicyOrSecuritySensitiveAmbiguity(text: string): boolean {
   );
 }
 
+function isConcreteExternalOperatorInputRequest(text: string): boolean {
+  const normalized = text.replace(/^operator_input_required:\s*/i, "");
+  if (
+    !/\b(provide|supply|paste|attach|show|share|choose|select|confirm|decide|approve|grant|configure|set|update)\b|(?:РїСЂРµРґРѕСЃС‚Р°РІ|РїРѕРєР°Р¶|РїСЂРёР»РѕР¶|РїРѕРґС‚РІРµСЂРґ|РІС‹Р±РµСЂ|СѓРєР°Р¶|РЅР°СЃС‚СЂРѕ|РѕРґРѕР±СЂ|подтверд|предостав|покаж|прилож|выбер|укаж|настро|одобр)/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  return /\b(?:account|tenant|workspace|staging|production|environment|env(?:ironment)? variable|runtime|profile|endpoint|base url|config(?:uration)?|setting|access|permission|grant|login|credential location|api key name|provider|budget cap|approval)\b|(?:аккаунт|тенант|воркспейс|стейдж|продакш|окружени|переменн|рантайм|профил|эндпоинт|конфиг|настройк|доступ|разрешени|логин|провайдер|бюджет|лимит|одобрени)/i.test(
+    normalized,
+  );
+}
+
+function isAmbiguousProductScopeOperatorInputFinding(finding: AutoReviewFinding): boolean {
+  const normalized = finding.text.replace(/^operator_input_required:\s*/i, "");
+  if (!isExplicitOperatorInputFinding(finding)) return false;
+  if (isConcreteExternalOperatorInputRequest(normalized)) return false;
+  const asksForScopeDecision =
+    /\b(confirm|clarify|decide|choose|select|which|whether|required|needed)\b|(?:подтверд|уточн|реши|выбр|какие|нужн|требу)/i.test(
+      normalized,
+    );
+  const productScopeSubject =
+    /\b(fields?|properties|optional|proposed|design artifact|requirements?|scope|domain model|interface|schema)\b|(?:пол[ея]|свойств|опциональ|предложенн|дизайн|артефакт|требован|област|домен|модел|интерфейс|схем)/i.test(
+      normalized,
+    );
+  return asksForScopeDecision && productScopeSubject;
+}
+
 function isConcreteOperatorInputFinding(finding: AutoReviewFinding): boolean {
   const text = finding.text.trim();
   if (isRepositoryOrToolEvidenceRequest(text)) return false;
-  if (isExplicitOperatorInputFinding(finding)) return true;
+  if (isAmbiguousProductScopeOperatorInputFinding(finding)) return false;
+  if (isExplicitOperatorInputFinding(finding)) {
+    return isConcreteExternalOperatorInputRequest(text);
+  }
   if (finding.source === "review_gate") return false;
   if (isPolicyOrSecuritySensitiveAmbiguity(text)) return false;
   return (
@@ -148,6 +180,12 @@ function isConcreteOperatorInputFinding(finding: AutoReviewFinding): boolean {
       text,
     )
   );
+}
+
+function filterNonBlockingOperatorInputFindings(
+  findings: AutoReviewFinding[],
+): AutoReviewFinding[] {
+  return findings.filter((finding) => !isAmbiguousProductScopeOperatorInputFinding(finding));
 }
 
 function normalizeOperatorInputFindings(findings: AutoReviewFinding[]): AutoReviewFinding[] {
@@ -741,6 +779,7 @@ function buildStructuredDecision(
     parsed.blockingFindings,
     deterministicFindings,
   );
+  const actionableBlockingFindings = filterNonBlockingOperatorInputFindings(blockingFindings);
   const stillBlockingIds = new Set(
     parsed.previousFindings
       .filter(
@@ -751,17 +790,19 @@ function buildStructuredDecision(
       )
       .map((finding) => finding.id),
   );
-  for (const finding of blockingFindings) {
+  for (const finding of actionableBlockingFindings) {
     if (previousIds.has(finding.id)) stillBlockingIds.add(finding.id);
   }
-  const newBlockingFindings = blockingFindings.filter((finding) => !previousIds.has(finding.id));
+  const newBlockingFindings = actionableBlockingFindings.filter(
+    (finding) => !previousIds.has(finding.id),
+  );
   const metrics = buildMetrics({
     strategy: input.strategy,
     iteration: input.iteration,
     previousBlockingCount: input.previousFindings.length,
     stillBlockingCount: stillBlockingIds.size,
     newBlockingCount: newBlockingFindings.length,
-    totalBlockingCount: blockingFindings.length,
+    totalBlockingCount: actionableBlockingFindings.length,
     parserMode: "structured",
   });
 
@@ -770,10 +811,10 @@ function buildStructuredDecision(
     !parsedPreviousFindingsMatchInput(input, parsed) ||
     !resolvedPreviousFindingsHaveClosureEvidence(parsed)
   ) {
-    return buildMissingPreviousFindingHandoff(input, metrics, blockingFindings);
+    return buildMissingPreviousFindingHandoff(input, metrics, actionableBlockingFindings);
   }
 
-  if (blockingFindings.length === 0) {
+  if (actionableBlockingFindings.length === 0) {
     if (requiresSubstantiveReviewEvidence(input)) {
       return buildSubstantiveEvidenceHandoff(input, metrics);
     }
@@ -787,7 +828,7 @@ function buildStructuredDecision(
   }
 
   const enrichedBlockingFindings = enrichBlockingFindings({
-    findings: blockingFindings,
+    findings: actionableBlockingFindings,
     previousFindings: input.previousFindings,
     iteration: input.iteration,
   });

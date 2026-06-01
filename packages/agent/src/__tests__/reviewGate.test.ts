@@ -187,6 +187,35 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(result.blockingFindings[0]?.text).toContain("source system account id");
   });
 
+  it("does not block operator input for vague optional-field scope questions", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [scope-1] code_review | operator_input_required: confirm which proposed fields from the design artifact are required before adding optional fields to UserProfile, LoanOffer, Application, or Consent",
+        "",
+        "## Advisories",
+        "- code_review | Optional fields from the design artifact can be handled as a follow-up if the product owner wants them.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.blockingFindings).toEqual([]);
+  });
+
   it("keeps repository evidence requests in implementation rework", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
