@@ -79,6 +79,7 @@ const SPECIALIZED_REVIEWER_WORKFLOW_KINDS: Record<SpecializedReviewerRole, strin
 type SpecializedReviewerInput = {
   role: SpecializedReviewerRole;
   prompt: string;
+  passEvidenceFallback?: string | null;
 };
 
 type SpecializedReviewerResult = {
@@ -112,6 +113,48 @@ function formatImplementationManifestForReviewPrompt(task: TaskRow): string {
     rawManifest,
     6_000,
   )}`;
+}
+
+function buildSpecializedReviewerPassEvidenceFallback(task: TaskRow): string | null {
+  const rawManifest = task.implementationManifestJson;
+  if (!rawManifest?.trim()) return null;
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(rawManifest);
+  } catch {
+    return null;
+  }
+  if (!manifest || typeof manifest !== "object") return null;
+  const record = manifest as {
+    changedFiles?: Array<{ path?: unknown; status?: unknown }>;
+    verificationEvidence?: Array<{ command?: unknown; status?: unknown }>;
+  };
+  const changedFiles = Array.isArray(record.changedFiles)
+    ? record.changedFiles
+        .filter((file) => typeof file?.path === "string")
+        .slice(0, 5)
+        .map((file) => {
+          const status = typeof file.status === "string" ? file.status : "changed";
+          return `${file.path} (${status})`;
+        })
+    : [];
+  const passedVerification = Array.isArray(record.verificationEvidence)
+    ? record.verificationEvidence.find(
+        (evidence) =>
+          typeof evidence?.command === "string" &&
+          typeof evidence?.status === "string" &&
+          evidence.status.toLowerCase() === "passed",
+      )
+    : null;
+  const evidenceParts: string[] = [];
+  if (changedFiles.length > 0) {
+    evidenceParts.push(`changedFiles contains ${changedFiles.join(", ")}`);
+  }
+  if (passedVerification && typeof passedVerification.command === "string") {
+    evidenceParts.push(`verificationEvidence contains ${passedVerification.command} status passed`);
+  }
+  if (evidenceParts.length === 0) return null;
+  return `Implementation manifest evidence: ${evidenceParts.join("; ")}.`;
 }
 
 function isAuditReviewTask(task: TaskRow, roadmapArtifact: unknown): boolean {
@@ -230,9 +273,9 @@ or
 - none
 
 ## Advisories
-- <non-blocking advisory with concrete repository evidence inspected>
+- <non-blocking advisory with concrete repository evidence inspected; required for PASS>
 or
-- none
+- none (only when verdict is FAIL)
 
 ## Previous Findings
 - [<id>] resolved | <current-attempt closure evidence>
@@ -246,6 +289,7 @@ or
 Rules:
 - Your first output line must be exactly "## Verdict"; do not add an intro, summary, or preface.
 - PASS is valid only when Blocking Findings is exactly "- none".
+- PASS must include at least one Advisories bullet with concrete inspected file path, command/test output, or implementation manifest evidence.
 - FAIL requires at least one concrete blocking finding.
 - INCONCLUSIVE means automatic review is unsafe and will require manual review.
 - Review is read-only: do not create, edit, delete, move, or commit repository files.
@@ -267,6 +311,7 @@ async function runSpecializedReviewerRole(input: {
   maxTurns?: number;
   repositoryInspectionToolBudget?: number;
   profileMode?: "reviewer" | "security";
+  passEvidenceFallback?: string | null;
 }): Promise<{
   role: SpecializedReviewerRole;
   rawOutput: string;
@@ -304,7 +349,9 @@ async function runSpecializedReviewerRole(input: {
       input.profileMode,
     );
     const parsed =
-      parseSpecializedRoleOutput(rawOutput, input.role) ??
+      parseSpecializedRoleOutput(rawOutput, input.role, [], {
+        passEvidenceFallback: input.passEvidenceFallback,
+      }) ??
       buildSpecializedRoleManualReviewOutput({
         role: input.role,
         reason: "returned INCONCLUSIVE or malformed output.",
@@ -345,6 +392,7 @@ async function runSpecializedReviewerInputs(input: {
       maxTurns: input.maxTurns,
       repositoryInspectionToolBudget: input.repositoryInspectionToolBudget,
       profileMode: reviewerInput.role === "security_data_loss" ? "security" : "reviewer",
+      passEvidenceFallback: reviewerInput.passEvidenceFallback,
     });
 
   if (input.useSubagents) {
@@ -1379,6 +1427,7 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
           role,
         ]),
       }),
+      passEvidenceFallback: buildSpecializedReviewerPassEvidenceFallback(task),
     };
   });
   const runRequiredSpecializedReviewers = async () => {

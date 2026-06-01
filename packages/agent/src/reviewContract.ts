@@ -447,8 +447,9 @@ export function parseSpecializedRoleOutput(
   resultText: string,
   role: SpecializedReviewerRole,
   previousFindingsInput: AutoReviewFinding[] = [],
+  options: { passEvidenceFallback?: string | null } = {},
 ): ParsedSpecializedRoleOutput | null {
-  const result = parseSpecializedRoleOutputResult(resultText, role, previousFindingsInput);
+  const result = parseSpecializedRoleOutputResult(resultText, role, previousFindingsInput, options);
   return result.ok ? result.value : null;
 }
 
@@ -456,6 +457,7 @@ export function parseSpecializedRoleOutputResult(
   resultText: string,
   role: SpecializedReviewerRole,
   previousFindingsInput: AutoReviewFinding[] = [],
+  options: { passEvidenceFallback?: string | null } = {},
 ): StructuredReviewParseResult<ParsedSpecializedRoleOutput> {
   const collected = collectSectionData(resultText);
   const issues = duplicateSectionIssues(collected.duplicateNames);
@@ -494,6 +496,8 @@ export function parseSpecializedRoleOutputResult(
   }
 
   const verdictValue = verdict.items[0]?.trim().toUpperCase();
+  const passEvidenceFallback = normalizeReviewText(options.passEvidenceFallback ?? "");
+  const hasPassEvidenceFallback = hasConcreteSpecializedReviewEvidence(passEvidenceFallback);
   if (verdict.items.length === 1) {
     if (verdictValue !== "PASS" && verdictValue !== "FAIL" && verdictValue !== "INCONCLUSIVE") {
       issues.push(
@@ -537,7 +541,8 @@ export function parseSpecializedRoleOutputResult(
       );
     } else if (
       verdictValue === "PASS" &&
-      !advisories.items.some(hasConcreteSpecializedReviewEvidence)
+      !advisories.items.some(hasConcreteSpecializedReviewEvidence) &&
+      !hasPassEvidenceFallback
     ) {
       issues.push(
         parseIssue({
@@ -561,6 +566,13 @@ export function parseSpecializedRoleOutputResult(
     return parseErrorResult("specialized_role_output", issues);
   }
 
+  const advisoryItems =
+    verdictValue === "PASS" &&
+    hasPassEvidenceFallback &&
+    !advisories.items.some(hasConcreteSpecializedReviewEvidence)
+      ? [...advisories.items, passEvidenceFallback]
+      : advisories.items;
+
   return {
     ok: true,
     value: {
@@ -570,7 +582,7 @@ export function parseSpecializedRoleOutputResult(
         text: normalizeReviewText(item),
         source: role,
       })),
-      advisories: advisories.items.map((item) => ({
+      advisories: advisoryItems.map((item) => ({
         source: role,
         text: normalizeReviewText(item),
       })),
