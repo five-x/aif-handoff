@@ -5,6 +5,7 @@ import {
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
   buildTaskRequirementsContextForPrompt,
+  listTaskComments,
   listRoadmapReportArtifactsForSynthesis,
   setTaskFields,
   type TaskRow,
@@ -115,6 +116,24 @@ function formatImplementationManifestForReviewPrompt(task: TaskRow): string {
   )}`;
 }
 
+function formatRecentHumanCommentsForReviewPrompt(taskId: string): string {
+  const comments = listTaskComments(taskId)
+    .filter((comment) => comment.author === "human")
+    .slice(-5);
+  if (comments.length === 0) return "Recent human/operator comments:\nnone";
+  return [
+    "Recent human/operator comments:",
+    ...comments.map((comment) => {
+      const message = compactReviewerPromptBlock(
+        "HUMAN_COMMENT",
+        redactProviderText(comment.message),
+        1_500,
+      );
+      return `- ${comment.createdAt}: ${message}`;
+    }),
+  ].join("\n");
+}
+
 function buildSpecializedReviewerPassEvidenceFallback(task: TaskRow): string | null {
   const rawManifest = task.implementationManifestJson;
   if (!rawManifest?.trim()) return null;
@@ -221,6 +240,7 @@ function buildSpecializedReviewerPrompt(input: {
   taskIntentContract: string;
   auditSynthesisContext: string;
   auditArtifactReviewScopeBlock: string;
+  operatorCommentsBlock: string;
   strategy: AutoReviewStrategy;
   reviewIteration: number;
   previousFindings: string;
@@ -243,6 +263,8 @@ Implementation Log:
 ${input.task.implementationLog ?? "No implementation log available."}
 
 ${formatImplementationManifestForReviewPrompt(input.task)}
+
+${input.operatorCommentsBlock}
 
 ${input.auditSynthesisContext}
 
@@ -1409,6 +1431,7 @@ export async function runReviewer(taskId: string, projectRoot: string): Promise<
   const scopeConstraint = `IMPORTANT: Your working directory is ${projectRoot}
 All file reads, searches, and analysis must stay within this directory. Do NOT navigate to parent directories or other projects.`;
   const taskIntentContract = formatTaskIntentContractForPrompt(task.taskIntent ?? "general");
+  const operatorCommentsBlock = formatRecentHumanCommentsForReviewPrompt(taskId);
   const specializedReviewerInputs = specializedReviewerRoles.map((role) => {
     const previousFindingState = previousFindings.filter((finding) => finding.source === role);
     return {
@@ -1420,6 +1443,7 @@ All file reads, searches, and analysis must stay within this directory. Do NOT n
         taskIntentContract,
         auditSynthesisContext,
         auditArtifactReviewScopeBlock,
+        operatorCommentsBlock,
         strategy,
         reviewIteration,
         previousFindings: formatPreviousFindingsForPrompt(previousFindingState, role),
@@ -1712,6 +1736,8 @@ ${task.implementationLog ?? "No implementation log available."}
 
 ${formatImplementationManifestForReviewPrompt(task)}
 
+${operatorCommentsBlock}
+
 ${auditSynthesisContext}
 
 ${auditArtifactReviewScopeBlock}
@@ -1746,6 +1772,8 @@ Implementation Log:
 ${task.implementationLog ?? "No implementation log available."}
 
 ${formatImplementationManifestForReviewPrompt(task)}
+
+${operatorCommentsBlock}
 
 Auto-review strategy: ${strategy}
 Review iteration: ${reviewIteration}
