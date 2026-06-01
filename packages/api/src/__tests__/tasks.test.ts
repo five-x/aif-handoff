@@ -5391,6 +5391,41 @@ describe("tasks API", () => {
       expect(persisted?.manualReviewRequired).toBe(true);
     });
 
+    it("should retry malformed review-output handoffs from review", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-malformed-review-output-retry",
+          projectId: "test-project",
+          title: "Malformed review output",
+          status: "blocked_external",
+          blockedFromStatus: "review",
+          blockedReason:
+            "manual_review_required: malformed_review_output_fallback; closure evidence gap for unresolved blockers.",
+          manualReviewRequired: true,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-malformed-review-output-retry/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("review");
+      expect(body.manualReviewRequired).toBe(false);
+      expect(body.blockedReason).toBeNull();
+      const persisted = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, "ev-malformed-review-output-retry"))
+        .get();
+      expect(persisted?.status).toBe("review");
+      expect(persisted?.manualReviewRequired).toBe(false);
+    });
+
     it("should allow retry_from_blocked for exhausted plan quality guard blocks", async () => {
       const db = testDb.current;
       db.insert(tasks)

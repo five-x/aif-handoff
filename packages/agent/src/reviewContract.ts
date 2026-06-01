@@ -248,6 +248,19 @@ function normalizeRequiredListSection(input: {
   return { items, issues: [] };
 }
 
+function normalizeSpecializedPreviousFindingsSection(input: {
+  sections: Map<string, string[]>;
+  previousFindingsInput: AutoReviewFinding[];
+}): { items: string[] | null; issues: StructuredReviewParseIssue[] } {
+  if (!input.sections.has("Previous Findings") && input.previousFindingsInput.length === 0) {
+    return { items: [], issues: [] };
+  }
+  return normalizeRequiredListSection({
+    sections: input.sections,
+    section: "Previous Findings",
+  });
+}
+
 export function normalizeFindingText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -474,9 +487,9 @@ export function parseSpecializedRoleOutputResult(
     sections: collected.sections,
     section: "Advisories",
   });
-  const previous = normalizeRequiredListSection({
+  const previous = normalizeSpecializedPreviousFindingsSection({
     sections: collected.sections,
-    section: "Previous Findings",
+    previousFindingsInput,
   });
   issues.push(...verdict.issues, ...blocking.issues, ...advisories.issues, ...previous.issues);
 
@@ -601,6 +614,46 @@ function hasConcreteSpecializedReviewEvidence(text: string): boolean {
     /\b(?:command|test|tests|lint|build|validator|git|rg|npm(?:\.cmd)?)\b[^.]*\b(?:output|exit code|status|passed|failed|inspected|matched)\b/i,
     /\b(?:manifest|evidenceRefs?|scope coverage|autoReviewState|manualReviewRequired|blocked_external)\b[^.]*\b(?:present|bound|covered|validated|contains|set|true|false|null)\b/i,
   ].some((pattern) => pattern.test(normalized));
+}
+
+const REVIEW_EVIDENCE_PATH_PATTERN =
+  /\b[\w.-]+(?:[\/\\][\w.-]+)+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|py|sh|ps1|css|scss|html)(?::\d+)?\b/g;
+
+function normalizeEvidencePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/:\d+$/, "").toLowerCase();
+}
+
+function extractReviewEvidencePaths(text: string): string[] {
+  const paths = [...text.matchAll(REVIEW_EVIDENCE_PATH_PATTERN)].map((match) =>
+    normalizeEvidencePath(match[0]),
+  );
+  return [...new Set(paths)];
+}
+
+function isRepositoryEvidenceOperatorRequest(text: string): boolean {
+  const normalized = normalizeReviewText(text);
+  if (!/^operator_input_required:/i.test(normalized)) return false;
+  if (extractReviewEvidencePaths(normalized).length === 0) return false;
+  return !/\b(?:severity|claim|required fix|verification)\s*:/i.test(normalized);
+}
+
+function shouldDemoteRepositoryEvidenceRequest(input: {
+  finding: AutoReviewFinding;
+  advisories: AutoReviewAdvisory[];
+}): { demote: boolean; paths: string[] } {
+  if (!isRepositoryEvidenceOperatorRequest(input.finding.text)) {
+    return { demote: false, paths: [] };
+  }
+  const requestedPaths = extractReviewEvidencePaths(input.finding.text);
+  if (requestedPaths.length === 0) return { demote: false, paths: [] };
+
+  const inspectedPaths = new Set(
+    input.advisories
+      .filter((advisory) => advisory.source !== input.finding.source)
+      .flatMap((advisory) => extractReviewEvidencePaths(advisory.text)),
+  );
+  const coveredPaths = requestedPaths.filter((path) => inspectedPaths.has(path));
+  return { demote: coveredPaths.length > 0, paths: coveredPaths };
 }
 
 export function buildSpecializedRoleManualReviewOutput(input: {
@@ -843,6 +896,18 @@ export function buildStructuredReviewComments(input: {
     ...input.securityAudit.blockingFindings,
     ...(input.specializedReviews ?? []).flatMap((review) => review.blockingFindings),
   ]) {
+    const repositoryEvidenceDemotion = shouldDemoteRepositoryEvidenceRequest({
+      finding,
+      advisories,
+    });
+    if (repositoryEvidenceDemotion.demote) {
+      advisories.push({
+        source: finding.source,
+        text: `Demoted repository-evidence operator request because independent review evidence already inspected ${repositoryEvidenceDemotion.paths.join(", ")}.`,
+      });
+      continue;
+    }
+
     const referencedSource = blockingPreviousFindingReference(finding.text);
     if (
       referencedSource &&

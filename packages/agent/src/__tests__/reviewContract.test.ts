@@ -359,22 +359,50 @@ describe("reviewContract", () => {
     );
   });
 
-  it("rejects specialized reviewer output without previous findings section", () => {
-    expect(
-      parseSpecializedRoleOutput(
-        [
-          "## Verdict",
-          "- PASS",
-          "",
-          "## Blocking Findings",
-          "- none",
-          "",
-          "## Advisories",
-          "- packages/agent/src/reviewContract.ts:1 was inspected.",
-        ].join("\n"),
-        "correctness",
-      ),
-    ).toBeNull();
+  it("accepts specialized reviewer output without previous findings section when none were supplied", () => {
+    const parsed = parseSpecializedRoleOutput(
+      [
+        "## Verdict",
+        "- PASS",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- packages/agent/src/reviewContract.ts:1 was inspected.",
+      ].join("\n"),
+      "correctness",
+    );
+
+    expect(parsed?.blockingFindings).toEqual([]);
+    expect(parsed?.previousFindings).toEqual([]);
+  });
+
+  it("rejects specialized reviewer output without previous findings section when previous blockers exist", () => {
+    const result = parseSpecializedRoleOutputResult(
+      [
+        "## Verdict",
+        "- PASS",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- packages/agent/src/reviewContract.ts:1 was inspected.",
+      ].join("\n"),
+      "correctness",
+      [
+        {
+          id: "prev-1",
+          source: "correctness",
+          text: "Previous blocker must be closed.",
+        },
+      ],
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected parse error");
+    expect(result.error.issues.map((issue) => issue.code)).toContain("missing_required_section");
   });
 
   it("rejects canonical review comments without complete unique security coverage", () => {
@@ -782,6 +810,64 @@ describe("reviewContract", () => {
         expect.objectContaining({
           source: "security_data_loss",
           text: expect.stringContaining(".env.example"),
+        }),
+      ]),
+    );
+  });
+
+  it("demotes repository evidence operator requests when independent review evidence covers the file", () => {
+    const reviewComments = buildStructuredReviewComments({
+      strategy: "full_re_review",
+      iteration: 1,
+      codeReview: {
+        previousFindings: [],
+        blockingFindings: [
+          {
+            id: "repo-content-request",
+            source: "code_review",
+            text: "operator_input_required: provide the contents of `src/types/domain.ts` so code review can inspect the changed file.",
+          },
+        ],
+        advisories: [],
+        securityCoverage: completeCodeReviewSecurityCoverage,
+      },
+      securityAudit: {
+        previousFindings: [],
+        blockingFindings: [],
+        advisories: [],
+        securityCoverage: completeSecurityAuditCoverage,
+      },
+      specializedReviews: [
+        {
+          role: "correctness",
+          previousFindings: [],
+          blockingFindings: [],
+          advisories: [
+            {
+              source: "correctness",
+              text: "Inspected `src/types/domain.ts`; domain interfaces compile with `npx tsc --noEmit`.",
+            },
+          ],
+        },
+      ],
+      previousFindingsInput: [],
+      rawCodeReview: "raw code review",
+      rawSecurityAudit: "raw security audit",
+      rawSpecializedReviews: [{ role: "correctness", rawOutput: "raw correctness pass" }],
+    });
+
+    const parsed = parseStructuredReviewComments(reviewComments);
+
+    expect(parsed?.blockingFindings).toEqual([]);
+    expect(parsed?.advisories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "code_review",
+          text: expect.stringContaining("Demoted repository-evidence operator request"),
+        }),
+        expect.objectContaining({
+          source: "correctness",
+          text: expect.stringContaining("src/types/domain.ts"),
         }),
       ]),
     );

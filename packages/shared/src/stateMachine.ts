@@ -56,6 +56,17 @@ function isRetryablePlanQualityBlock(
   return task.blockedFromStatus === "planning" && reason.startsWith("plan quality guard");
 }
 
+function isRetryableMalformedReviewOutputBlock(
+  task: Pick<Task, "blockedReason" | "blockedFromStatus">,
+): boolean {
+  const reason = task.blockedReason?.toLowerCase() ?? "";
+  return (
+    task.blockedFromStatus === "review" &&
+    (reason.includes("malformed_review_output_fallback") ||
+      reason.includes("malformed_structured_review_contract"))
+  );
+}
+
 function isRetryableOperatorInputHold(task: Pick<Task, "blockedReason">): boolean {
   const reason = task.blockedReason?.toLowerCase() ?? "";
   return reason.startsWith("operator_input_required:") || reason.startsWith("operator_cancelled:");
@@ -195,6 +206,7 @@ export function applyHumanTaskEvent(
       if (
         isManualReviewBlockedTask(task) &&
         !isRetryablePlanQualityBlock(task) &&
+        !isRetryableMalformedReviewOutputBlock(task) &&
         !allowOperatorInputRetry
       ) {
         return {

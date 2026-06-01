@@ -265,6 +265,24 @@ describe("task state machine", () => {
     }
   });
 
+  it("allows retry_from_blocked for malformed review-output handoffs", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "review" as const,
+      blockedReason:
+        "manual_review_required: malformed_review_output_fallback; closure evidence gap for unresolved blockers.",
+      manualReviewRequired: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("review");
+      expect(result.patch.blockedReason).toBeNull();
+      expect(result.patch.manualReviewRequired).toBe(false);
+    }
+  });
+
   it("rejects retry_from_blocked for manual-review blocked reasons", () => {
     const blocked = {
       ...makeTask("blocked_external"),
