@@ -186,7 +186,7 @@ const PLAN_MANIFEST_PLACEHOLDER_PATTERN =
 const PLAN_MANIFEST_WEAK_VERIFICATION_PATTERN =
   /^(?:verify|check|review|inspect|test|validate|confirm)(?:\s+(?:manually|the\s+ui|output|results?|it|changes?|behavior|work|works|task|plan|implementation|report|docs?))*\.?$/i;
 const PLAN_MANIFEST_COMMAND_PATTERN =
-  /^(?:npm(?:\.cmd)?|pnpm|yarn|bun|node|npx|tsx|tsc|vitest|jest|playwright|eslint|prettier|turbo|git|python|py|pytest|ruff|go|cargo|dotnet|mvn|gradle|docker|docker-compose|make|cmake|bash|sh|powershell|pwsh|curl|rg)\b|^[\w./\\-]+(?:\.cmd|\.ps1|\.sh|\.py|\.js|\.ts|\.mjs|\.cjs)\b/i;
+  /^(?:npm(?:\.cmd)?|pnpm|yarn|bun|node|npx|tsx|tsc|vitest|jest|playwright|eslint|prettier|turbo|git|python|py|pytest|ruff|go|cargo|dotnet|mvn|gradle|docker|docker-compose|make|cmake|bash|sh|powershell|pwsh|curl|rg)\b|^(?:\.\/)?(?:scripts|tools|bin)\/[\w./\\-]+\.(?:cmd|ps1|sh|py|js|mjs|cjs)\b|^(?:\.\/)?[\w.-]+\.(?:cmd|ps1|sh)\b/i;
 const TASK_SIZE_NORMAL_CHANGED_FILE_GROUP_LIMIT = 2;
 const TASK_SIZE_HARD_CHANGED_FILE_GROUP_LIMIT = 3;
 const TASK_SIZE_NORMAL_MAJOR_SUBSYSTEM_LIMIT = 1;

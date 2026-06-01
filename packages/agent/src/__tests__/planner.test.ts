@@ -783,6 +783,38 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toContain("src/index.*");
   });
 
+  it("uses deterministic implementation fallback when duplicated verification metadata contains prose before the command", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-domain-types-fallback-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-domain-types-fallback",
+        projectId: "project-1",
+        title: "Define domain types and data models",
+        description:
+          "Implement TypeScript interfaces for UserProfile, LoanOffer, Application, Consent.\nVerification: Compiler verification: `npx tsc --noEmit`. Expected no type errors.\nScope: `src/types/domain.ts`\nOriginal roadmap item: Domain types and data models\nFile boundaries: src/types/domain.ts\nAcceptance criteria: Create src/types/domain.ts with UserProfile, LoanOffer, Application, Consent.\nVerification: npx tsc --noEmit\nDependencies: Initialize skeleton",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-domain-types-fallback",
+      })
+      .run();
+
+    await runPlanner("task-domain-types-fallback", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-domain-types-fallback"))
+      .get();
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain("src/types/domain.ts");
+    expect(updatedTask?.plan).toContain("npx tsc --noEmit");
+    expect(updatedTask?.plan).not.toContain("Compiler verification:");
+  });
+
   it("uses deterministic implementation fallback before runtime for legacy broad compose child plans", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-compose-fallback-"));

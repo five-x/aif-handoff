@@ -757,6 +757,41 @@ describe("evaluateTaskPlanQuality", () => {
     );
   });
 
+  it("rejects bare source file paths as verification commands", () => {
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "task-full",
+        title: "Define domain types",
+        description: "Scope: src/types/domain.ts.",
+        taskIntent: "feature",
+        plannerMode: "full",
+        createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+      },
+      plan: fullPlanWithManifest(
+        planManifest({
+          scope: ["src/types/domain.ts"],
+          expectedArtifacts: [{ kind: "source_diff", paths: ["src/types/domain.ts"] }],
+          acceptanceCriteria: [
+            {
+              id: "ac-1",
+              description: "Domain types compile.",
+              verification: "src/types/domain.ts — generated types",
+            },
+          ],
+          verificationCommands: ["src/types/domain.ts — generated types"],
+        }),
+      ),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toEqual(
+      expect.arrayContaining([
+        "plan_manifest_untestable_acceptance_criteria",
+        "plan_manifest_missing_verification_commands",
+      ]),
+    );
+  });
+
   it("rejects allowed changes that contradict task intent policy", () => {
     const result = evaluateTaskPlanQuality({
       task: {

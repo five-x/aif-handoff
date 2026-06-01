@@ -80,9 +80,37 @@ function assertPlannerOutputQuality(task: PlannerTask, planText: string): void {
 }
 
 function extractPlannerMetadataLine(description: string, label: string): string | null {
+  return extractPlannerMetadataLines(description, label)[0] ?? null;
+}
+
+function extractPlannerMetadataLines(description: string, label: string): string[] {
   const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = description.match(new RegExp(`^\\s*${escapedLabel}:\\s*(.+)$`, "im"));
-  return match?.[1]?.trim() || null;
+  return [...description.matchAll(new RegExp(`^\\s*${escapedLabel}:\\s*(.+)$`, "gim"))]
+    .map((match) => match[1]?.trim())
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+const PLANNER_VERIFICATION_COMMAND_PATTERN =
+  /^(?:npm(?:\.cmd)?|pnpm|yarn|bun|node|npx|tsx|tsc|vitest|jest|playwright|eslint|prettier|turbo|git|python|py|pytest|ruff|go|cargo|dotnet|mvn|gradle|docker|docker-compose|make|cmake|bash|sh|powershell|pwsh|curl|rg)\b/i;
+
+function normalizePlannerVerificationCandidate(value: string): string | null {
+  const direct = value.trim().replace(/^`|`$/g, "");
+  if (PLANNER_VERIFICATION_COMMAND_PATTERN.test(direct)) return direct;
+
+  for (const match of value.matchAll(/`([^`]+)`/g)) {
+    const quoted = match[1]?.trim();
+    if (quoted && PLANNER_VERIFICATION_COMMAND_PATTERN.test(quoted)) return quoted;
+  }
+  return null;
+}
+
+function extractPlannerVerificationCommand(description: string): string | null {
+  const candidates = extractPlannerMetadataLines(description, "Verification");
+  for (const candidate of [...candidates].reverse()) {
+    const command = normalizePlannerVerificationCandidate(candidate);
+    if (command) return command;
+  }
+  return candidates.at(-1) ?? null;
 }
 
 function splitPlannerMetadataList(value: string | null): string[] {
@@ -270,7 +298,7 @@ function buildDeterministicImplementationPlan(task: PlannerTask): string | null 
     extractPlannerMetadataLine(description, "File boundaries"),
   );
   const scope = normalizeDeterministicPlanScope(task, fileBoundaries);
-  const verification = extractPlannerMetadataLine(description, "Verification");
+  const verification = extractPlannerVerificationCommand(description);
   const acceptance = sanitizeDeterministicPlanSentence(
     extractPlannerMetadataLine(description, "Acceptance criteria") ??
       `${task.title} satisfies the declared task scope.`,
