@@ -538,6 +538,40 @@ Here is unrelated JSON:
     );
   });
 
+  it("treats npm exec tsc as equivalent to npx tsc for observed verification", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog("npm.cmd exec -- tsc --noEmit -p tsconfig.app.json"),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          verificationEvidence: [
+            {
+              id: "ver-1",
+              command: "npx tsc --noEmit",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "tsc passed",
+              outputPreviewTruncated: false,
+            },
+          ],
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues.map((entry) => entry.code)).not.toContain(
+      "verification_command_not_observed",
+    );
+  });
+
   it("keeps audit evidence lines inside the latest implementation activity section", () => {
     const result = validateImplementationManifest({
       task: {

@@ -6234,6 +6234,160 @@ describe("runImplementer rework behavior", () => {
     expect(validation.ok).toBe(true);
   });
 
+  it("stores actual verification command when deterministic manifest evidence matches an equivalent plan command", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "commit.gpgsign", "false"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(
+      join(projectRoot, "src", "feature.ts"),
+      "export const feature = false;\n",
+      "utf8",
+    );
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+
+    const plan = [
+      "```aif-plan-manifest",
+      JSON.stringify({
+        version: 1,
+        taskId: "task-feature-fallback-equivalent-command",
+        intent: "feature",
+        scope: ["src/feature.ts"],
+        allowedChanges: ["source"],
+        forbiddenChanges: ["audit-report"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "AC1",
+            description: "Feature behavior is implemented.",
+            verification: "npx tsc --noEmit",
+          },
+        ],
+        verificationCommands: ["npx tsc --noEmit"],
+      }),
+      "```",
+      "",
+      "## Plan",
+      "- [ ] Implement feature behavior",
+      "- [ ] Run tests",
+    ].join("\n");
+    const verifiedAt = new Date(Date.now() + 10_000).toISOString();
+    const actualCommand = "npm.cmd exec -- tsc --noEmit -p tsconfig.app.json";
+    queryMock
+      .mockReturnValueOnce({
+        async *[Symbol.asyncIterator]() {
+          appendAuditEvidenceEvent({
+            id: "ev-feature-fallback-tsc",
+            taskId: "task-feature-fallback-equivalent-command",
+            auditPlanId: "task:task-feature-fallback-equivalent-command",
+            sourceSnapshotId: "git:test",
+            toolName: "run_shell",
+            evidenceKind: "shell_command",
+            evidenceGrade: "substantive",
+            scopeIds: ["src/feature.ts"],
+            riskHypothesisIds: [],
+            pathHashes: [],
+            pathRangeHashes: [],
+            command: {
+              command: "npm.cmd",
+              args: ["exec", "--", "tsc", "--noEmit", "-p", "tsconfig.app.json"],
+              cwd: null,
+            },
+            exitCode: 0,
+            outputSha256: "d".repeat(64),
+            outputPreview: "tsc passed",
+            outputPreviewTruncated: false,
+            parsedSummary: {
+              outputBytes: "tsc passed".length,
+              outputLineCount: 1,
+              previewChars: "tsc passed".length,
+              exitCode: 0,
+            },
+            redactionStatus: "clean",
+            createdAt: verifiedAt,
+          });
+          const current = db
+            .select()
+            .from(tasks)
+            .where(eq(tasks.id, "task-feature-fallback-equivalent-command"))
+            .get();
+          db.update(tasks)
+            .set({
+              agentActivityLog: [
+                current?.agentActivityLog?.trim() ?? "",
+                `[${verifiedAt}] Tool: run_shell ${actualCommand}`,
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            })
+            .where(eq(tasks.id, "task-feature-fallback-equivalent-command"))
+            .run();
+          yield {
+            type: "result",
+            subtype: "success",
+            result: "Implementation done without a manifest block.",
+          };
+        },
+      })
+      .mockReturnValueOnce(streamSuccess(plan.replaceAll("- [ ]", "- [x]")));
+    db.insert(tasks)
+      .values({
+        id: "task-feature-fallback-equivalent-command",
+        projectId: "project-1",
+        title: "Feature fallback equivalent command",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan,
+        reworkRequested: false,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-fallback-equivalent-command", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-fallback-equivalent-command"))
+      .get();
+    const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
+      ?.implementationManifestJson;
+    const manifest = JSON.parse(manifestJson ?? "{}");
+    expect(manifest.verificationEvidence).toEqual([
+      {
+        id: "verify-1",
+        command: actualCommand,
+        status: "passed",
+        outputSha256: "d".repeat(64),
+        outputPreview: "tsc passed",
+        outputPreviewTruncated: false,
+      },
+    ]);
+    const validation = validateImplementationManifest({
+      task: updatedTask!,
+      manifestJson,
+      changedFiles: ["src/feature.ts"],
+      meaningfulChangedFiles: ["src/feature.ts"],
+      dirtyChangedFiles: ["src/feature.ts"],
+      phase: "review_handoff",
+    });
+    expect(validation.ok).toBe(true);
+  });
+
   it("repairs extracted implementation manifest when changedFiles drift from actual git changes", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });

@@ -668,7 +668,9 @@ function normalizeCommandText(value: string): string {
     .trim()
     .replace(/\s+/g, " ")
     .toLowerCase()
-    .replace(/\b(npm|npx|pnpm|yarn|bun)\.cmd\b/g, "$1");
+    .replace(/\b(npm|npx|pnpm|yarn|bun)\.cmd\b/g, "$1")
+    .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+--\s+/g, "npx ")
+    .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+/g, "npx ");
 }
 
 function isRepositoryInspectionOnlyVerificationCommand(value: string): boolean {

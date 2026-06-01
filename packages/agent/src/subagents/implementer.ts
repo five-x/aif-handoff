@@ -559,6 +559,8 @@ async function extractNormalizedImplementationManifest(resultText: string): Prom
 function normalizeVerificationCommandText(value: string): string {
   return value
     .replace(/\bnpm\.cmd\b/gi, "npm")
+    .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+--\s+/gi, "npx ")
+    .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+/gi, "npx ")
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
@@ -606,17 +608,23 @@ function findPassedVerificationEvidence(input: {
     .filter((unit) => isEvidenceFromLatestImplementerRun(unit, latestStartMs))
     .reverse();
   const unit =
-    units.find((entry) => {
-      const normalizedCommand = normalizeVerificationCommandText(auditEvidenceCommandText(entry));
-      return requiredCommands.some(
-        (required) =>
-          normalizedCommand === required ||
-          normalizedCommand.endsWith(required) ||
-          required.endsWith(normalizedCommand),
-      );
-    }) ?? units[0];
+    requiredCommands.length > 0
+      ? units.find((entry) => {
+          const normalizedCommand = normalizeVerificationCommandText(
+            auditEvidenceCommandText(entry),
+          );
+          return requiredCommands.some(
+            (required) =>
+              normalizedCommand === required ||
+              normalizedCommand.endsWith(` ${required}`) ||
+              normalizedCommand.startsWith(`${required} `) ||
+              required.startsWith(`${normalizedCommand} `),
+          );
+        })
+      : units[0];
   if (!unit?.outputSha256 || !unit.outputPreview) return null;
-  const command = planManifest.verificationCommands[0] ?? auditEvidenceCommandText(unit);
+  const command = auditEvidenceCommandText(unit);
+  if (!command) return null;
   return {
     id: "verify-1",
     command,
