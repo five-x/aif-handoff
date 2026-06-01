@@ -1555,7 +1555,7 @@ describe("roadmapGeneration", () => {
             {
               title: "Define domain types and data contracts",
               description:
-                "Acceptance criteria: Offer, UserProfile, Consent, and RoutingResult types exist without passport fields.\nVerification: npm.cmd test -- domain-types\nScope: src/types/domain.ts, src/types/offer.ts, src/types/consent.ts, src/types/routing.ts",
+                "Acceptance criteria: Offer, UserProfile, Consent, and RoutingResult types exist without passport fields.\nVerification: npm.cmd test -- domain-types\nScope: src/types/domain.ts, src/types/offer.ts, src/types/consent.ts, src/types/routing.ts\nEvidence requirements: focused test output.\nAllowed changes: Source, tests, docs, and config only as needed for the feature.",
               taskIntent: "feature",
               phase: 1,
               phaseName: "Feature",

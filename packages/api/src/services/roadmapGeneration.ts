@@ -2660,7 +2660,7 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
     .split(/\r?\n/)
     .filter(
       (line) =>
-        !/^\s*(?:original roadmap item|file boundaries|acceptance criteria|verification|dependencies)\s*:/i.test(
+        !/^\s*(?:original roadmap item|task intent|scope|file boundaries|acceptance criteria|verification|dependencies|evidence requirements|allowed changes)\s*:/i.test(
           line,
         ),
     )
