@@ -3329,6 +3329,41 @@ describe("qwen-local-agent adapter", () => {
     expect(result.error).toContain("secret-like path");
     expect(result.error).not.toContain("sk-SECRET");
   });
+  it("allows .env.example template writes without permitting real env files", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-env-template-"));
+    const context = createDefaultQwenToolContext({
+      projectRoot: root,
+      execution: { allowedWritePaths: [".env.example"] },
+      options: { maxOutputChars: 2_000 },
+    });
+
+    const written = await executeQwenLocalTool(
+      "write_file",
+      {
+        path: ".env.example",
+        content: "API_BASE_URL=http://localhost:3009\nAPP_MODE=development\n",
+      },
+      context,
+    );
+    const read = await executeQwenLocalTool("read_file", { path: ".env.example" }, context);
+    const denied = await executeQwenLocalTool(
+      "write_file",
+      { path: ".env.local", content: "API_BASE_URL=http://localhost:3009\n" },
+      context,
+    );
+
+    expect(written.ok).toBe(true);
+    expect(read.ok).toBe(true);
+    expect(read.output).toContain("API_BASE_URL=http://localhost:3009");
+    expect(denied.ok).toBe(false);
+    expect(denied.error).toContain("secret-like path");
+    expect(() =>
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        execution: { allowedWritePaths: [".env.local"] },
+      }),
+    ).toThrow(/secret-like path/);
+  });
   it("reads large files in bounded line windows", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-read-window-"));
     await writeFile(

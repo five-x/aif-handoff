@@ -44,6 +44,12 @@ const SECRET_SEGMENT_PATTERNS = [
   /(?:secret|credential|credentials|token|password|passwd|private[_-]?key)/i,
   /\.(?:pem|key|p12|pfx)$/i,
 ];
+const SAFE_ENV_TEMPLATE_FILENAMES = new Set([
+  ".env.example",
+  ".env.sample",
+  ".env.template",
+  ".env.dist",
+]);
 const SECRET_DIRECTORY_SEGMENTS = new Set([
   ".ssh",
   ".gnupg",
@@ -366,11 +372,12 @@ function pathMatchesAllowedWriteBoundary(normalizedPath, allowedBoundary) {
 export function isSecretLikePath(value) {
   const normalized = normalizePathForPolicy(value);
   const segments = normalized.split("/").filter(Boolean);
-  return segments.some(
-    (segment) =>
-      SECRET_DIRECTORY_SEGMENTS.has(segment) ||
-      SECRET_SEGMENT_PATTERNS.some((pattern) => pattern.test(segment)),
-  );
+  return segments.some((segment, index) => {
+    if (SECRET_DIRECTORY_SEGMENTS.has(segment)) return true;
+    const isFinalEnvTemplate =
+      index === segments.length - 1 && SAFE_ENV_TEMPLATE_FILENAMES.has(segment.toLowerCase());
+    return !isFinalEnvTemplate && SECRET_SEGMENT_PATTERNS.some((pattern) => pattern.test(segment));
+  });
 }
 function assertNoNullByte(value, label) {
   if (value.includes("\0")) {
