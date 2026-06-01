@@ -30,6 +30,7 @@ import {
   projectSupportsTaskWorktrees,
   projectUsesSharedBranchIsolation,
   resolveTaskIntentDefaults,
+  evaluateTaskPlanQuality,
   validateGeneratedAuditCard,
   validateGeneratedTaskIntent,
   classifyAuditDecompositionRequest,
@@ -2608,7 +2609,7 @@ function inferFileBoundaries(task: GeneratedTask): string[] {
   if (/\b(?:doc|docs|readme)\b/.test(text)) return ["docs/**", "README.md"];
   if (/\b(?:test|tests|spec|coverage)\b/.test(text)) return ["tests/**", "**/*.test.*"];
   if (/\b(?:config|env|settings|lint|build|vite|tsconfig|package)\b/.test(text)) {
-    return ["package.json", "tsconfig*.json", ".env.example", "config/**"];
+    return ["package.json", "tsconfig*.json", ".env.example"];
   }
   if (/\b(?:ui|page|screen|component|route|frontend)\b/.test(text)) {
     return ["src/app/**", "src/components/**", "src/routes/**"];
@@ -2929,7 +2930,7 @@ function buildBroadTaskMicrotasks(
         ".env.example",
         "vitest.config.*",
         ".github/workflows/**",
-        "config/**",
+        "config/env.ts",
       ],
       acceptanceCriteria: [
         cyrillicTitle
@@ -2947,11 +2948,10 @@ function buildBroadTaskMicrotasks(
         ? "Реализовать первый пользовательский или API-срез без последующих широких функций."
         : "Implement the first user-visible app slice without broad follow-on features.",
       fileBoundaries: [
-        "src/app/**",
-        "src/components/**",
-        "src/routes/**",
-        "src/services/**",
-        "src/**/*.test.*",
+        "src/App.tsx",
+        "src/components/AppShell.tsx",
+        "src/services/sampleData.ts",
+        "src/App.test.tsx",
       ],
       acceptanceCriteria: [
         cyrillicTitle
@@ -2968,7 +2968,7 @@ function buildBroadTaskMicrotasks(
       summary: cyrillicTitle
         ? "Добавить focused smoke coverage для скелета, конфигурации и первого среза."
         : "Add focused smoke coverage for the scaffold, configuration, and first app slice.",
-      fileBoundaries: ["tests/**", "src/**/*.test.*", "package.json"],
+      fileBoundaries: ["tests/smoke.test.ts"],
       acceptanceCriteria: [
         cyrillicTitle
           ? "Focused smoke check падает до регрессии и проходит для первого среза."
@@ -3016,9 +3016,8 @@ function buildBroadTaskMicrotasks(
         {
           suffix: "env-defaults",
           title: envDefaultsTitle,
-          summary:
-            "Add only non-secret environment defaults and optional typed config placeholders.",
-          fileBoundaries: [".env.example", "config/**"],
+          summary: "Add only non-secret `.env.example` defaults required by the scaffold.",
+          fileBoundaries: [".env.example"],
           acceptanceCriteria: [
             "Environment defaults contain placeholders only and do not expose secrets.",
           ],
@@ -3040,7 +3039,7 @@ function buildBroadTaskMicrotasks(
           suffix: "compose-dev-runtime",
           title: composeDefaultsTitle,
           summary: "Add only local Compose runtime defaults for the scaffold.",
-          fileBoundaries: ["docker-compose*.yml", "compose*.yml"],
+          fileBoundaries: ["docker-compose.yml"],
           acceptanceCriteria: [
             "Compose defaults reference only documented local environment placeholders.",
           ],
@@ -3051,7 +3050,7 @@ function buildBroadTaskMicrotasks(
           suffix: "ci-workflow",
           title: ciWorkflowTitle,
           summary: "Add only a minimal CI workflow skeleton for build and test verification.",
-          fileBoundaries: [".github/workflows/**"],
+          fileBoundaries: [".github/workflows/ci.yml"],
           acceptanceCriteria: ["CI workflow runs the documented build and test commands."],
           verificationCommands: ["npm.cmd test"],
           dependsOn: [composeDefaultsTitle],
@@ -3184,6 +3183,85 @@ function prepareRoadmapSplitProposalChildren(
     });
 }
 
+function inferProposalChangeCategory(path: string): string {
+  const normalized = path.trim().toLowerCase();
+  if (/(^|\/)(?:test|tests|__tests__)(?:\/|$)|\.test\./.test(normalized)) return "tests";
+  if (/(^|\/)docs?(?:\/|$)|\.mdx?$/.test(normalized)) return "docs";
+  if (/(^|\/)src(?:\/|$)|\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(normalized)) return "source";
+  return "config";
+}
+
+function expectedArtifactKindForProposal(categories: string[]): string {
+  if (categories.includes("source")) return "source_diff";
+  if (categories.includes("tests")) return "test_update";
+  if (categories.includes("docs")) return "docs_update";
+  return "config_update";
+}
+
+function evaluateProposalChildTaskSize(
+  proposal: TaskSplitProposal,
+  child: TaskSplitProposedChild,
+  metadata: ReturnType<typeof resolveProposalChildMicrotaskMetadata>,
+): string | null {
+  const taskId = `proposal-${createHash("sha256")
+    .update(`${proposal.roadmapAlias}:${child.title}:${child.sequence}`)
+    .digest("hex")
+    .slice(0, 16)}`;
+  const categories = [...new Set(metadata.fileBoundaries.map(inferProposalChangeCategory))].sort();
+  const verificationCommands = metadata.verificationCommands.filter(isCommandLike);
+  const verification = verificationCommands[0] ?? MICROTASK_DEFAULT_VERIFICATION;
+  const manifest = {
+    version: 1,
+    taskId,
+    intent: metadata.task.taskIntent ?? proposal.taskIntent,
+    scope: metadata.fileBoundaries,
+    allowedChanges: categories,
+    forbiddenChanges: ["report"],
+    expectedArtifacts: [
+      {
+        kind: expectedArtifactKindForProposal(categories),
+        paths: metadata.fileBoundaries,
+      },
+    ],
+    acceptanceCriteria: metadata.acceptanceCriteria.map((description, index) => ({
+      id: `ac-${index + 1}`,
+      description,
+      verification,
+    })),
+    verificationCommands,
+  };
+  const checklist = [
+    ...metadata.fileBoundaries.map(
+      (path) => `- [ ] Update \`${path}\` only for this bounded roadmap child.`,
+    ),
+    ...verificationCommands.map((command) => `- [ ] Run \`${command}\` and record the result.`),
+  ];
+  const plan = [
+    "## Plan",
+    ...checklist,
+    "",
+    "## aif-plan-manifest",
+    "",
+    "```aif-plan-manifest",
+    JSON.stringify(manifest, null, 2),
+    "```",
+  ].join("\n");
+  const result = evaluateTaskPlanQuality({
+    task: {
+      id: taskId,
+      title: child.title,
+      description: child.description,
+      taskIntent: metadata.task.taskIntent ?? proposal.taskIntent,
+      roadmapAlias: proposal.roadmapAlias,
+      plannerMode: "full",
+    },
+    plan,
+    executionContext: { packageJsonText: null },
+  });
+  const splitIssue = result.issues.find((issue) => issue.code === "task_size_split_required");
+  return splitIssue?.message ?? null;
+}
+
 function validateProposalChildrenAreMicrotasks(proposal: TaskSplitProposal): void {
   const invalid = proposal.proposedChildren
     .map((child) => {
@@ -3200,6 +3278,10 @@ function validateProposalChildrenAreMicrotasks(proposal: TaskSplitProposal): voi
       }
       if (isBroadExecutableGeneratedTask(metadata.task)) {
         issues.push("child is still broad and must be split before approval");
+      }
+      const taskSizeSplitIssue = evaluateProposalChildTaskSize(proposal, child, metadata);
+      if (taskSizeSplitIssue) {
+        issues.push(taskSizeSplitIssue);
       }
       return { child, issues };
     })

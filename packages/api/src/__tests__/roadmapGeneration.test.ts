@@ -1533,15 +1533,30 @@ describe("roadmapGeneration", () => {
           verificationCommands: ["npm.cmd test"],
         }),
       );
+      expect(result.proposal.proposedChildren[3]).toEqual(
+        expect.objectContaining({
+          title: "Add env defaults: zai-mi.com",
+          fileBoundaries: [".env.example"],
+          acceptanceCriteria: expect.arrayContaining([
+            "Environment defaults contain placeholders only and do not expose secrets.",
+          ]),
+        }),
+      );
       expect(result.proposal.proposedChildren[4]).toEqual(
         expect.objectContaining({
           title: "Add Docker image defaults: zai-mi.com",
           fileBoundaries: ["Dockerfile", ".dockerignore"],
         }),
       );
+      expect(result.proposal.proposedChildren[6]).toEqual(
+        expect.objectContaining({
+          title: "Add CI workflow skeleton: zai-mi.com",
+          fileBoundaries: [".github/workflows/ci.yml"],
+        }),
+      );
       expect(result.proposal.proposedChildren[7]).toEqual(
         expect.objectContaining({
-          fileBoundaries: expect.arrayContaining(["src/**/*.test.*"]),
+          fileBoundaries: expect.arrayContaining(["src/App.test.tsx"]),
           acceptanceCriteria: expect.arrayContaining([
             "A focused test covers the first workflow against deterministic sample data.",
           ]),
@@ -1763,9 +1778,7 @@ describe("roadmapGeneration", () => {
       expect(result.proposal.proposedChildren[4]?.fileBoundaries).toEqual(
         expect.arrayContaining(["Dockerfile", ".dockerignore"]),
       );
-      expect(result.proposal.proposedChildren[5]?.fileBoundaries).toEqual(
-        expect.arrayContaining(["docker-compose*.yml", "compose*.yml"]),
-      );
+      expect(result.proposal.proposedChildren[5]?.fileBoundaries).toEqual(["docker-compose.yml"]);
       for (const child of result.proposal.proposedChildren) {
         expect(child.title).not.toContain(sourceTitle);
         expect(child.taskIntent).toBe("feature");
