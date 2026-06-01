@@ -349,6 +349,19 @@ function normalizePlanChecklistShape(value: unknown): unknown {
 
 function normalizeReviewClosureShape(value: unknown): unknown {
   if (Array.isArray(value)) return { status: "pending", evidenceRefs: value.filter(usefulString) };
+  if (isObject(value)) {
+    if (
+      value.status === "resolved" ||
+      value.status === "complete" ||
+      value.status === "completed" ||
+      value.status === "success"
+    ) {
+      return { ...value, status: "passed" };
+    }
+    if (value.status === "not_required") {
+      return { ...value, status: "skipped" };
+    }
+  }
   return value;
 }
 

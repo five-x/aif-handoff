@@ -2838,7 +2838,7 @@ function returnImplementationEvidenceToReworkIfPossible(input: {
   const issueCodes = implementationEvidenceIssueCodes(input.result);
   if (issueCodes.length === 0) return false;
 
-  const currentIteration = input.task.reviewIterationCount ?? 0;
+  const currentIteration = input.task.retryCount ?? 0;
   const configuredMaxIterations = boundedReviewIterationLimit(input.task.maxReviewIterations);
   const maxIterations = Math.min(
     configuredMaxIterations,
@@ -2858,9 +2858,9 @@ function returnImplementationEvidenceToReworkIfPossible(input: {
       blockedReason,
       blockedFromStatus: null,
       retryAfter: null,
-      retryCount: input.task.retryCount ?? 0,
+      retryCount: nextIteration,
       reworkRequested: true,
-      reviewIterationCount: nextIteration,
+      reviewIterationCount: input.task.reviewIterationCount ?? 0,
       manualReviewRequired: false,
     },
     { title: input.title, fromStatus: input.fromStatus },
@@ -2874,7 +2874,8 @@ function returnImplementationEvidenceToReworkIfPossible(input: {
       taskId: input.task.id,
       fromStatus: input.fromStatus,
       issueCodes,
-      reviewIterationCount: nextIteration,
+      implementationEvidenceReworkCount: nextIteration,
+      reviewIterationCount: input.task.reviewIterationCount ?? 0,
       maxReviewIterations: maxIterations,
     },
     "Implementation evidence guard returned task to implementer rework",

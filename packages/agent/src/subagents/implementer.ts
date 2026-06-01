@@ -735,8 +735,12 @@ function shouldRepairExtractedImplementationManifest(
 ): boolean {
   if (validation.ok) return false;
   const repairableIssueCodes = new Set([
+    "invalid_implementation_manifest",
     "implementation_changed_files_mismatch",
+    "missing_verification_evidence",
     "plan_checklist_drift",
+    "unsupported_verification_command",
+    "verification_command_not_observed",
   ]);
   return validation.issues.some((issue) => repairableIssueCodes.has(issue.code));
 }

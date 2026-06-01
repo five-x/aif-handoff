@@ -175,6 +175,36 @@ describe("implementation manifest extraction", () => {
     );
   });
 
+  it("normalizes resolved review closure without rejecting the manifest shape", () => {
+    const raw = JSON.stringify({
+      ...validManifest({
+        reviewClosure: { status: "resolved", evidenceRefs: ["ver-1"] },
+      }),
+    });
+
+    const normalized = normalizeImplementationManifestJson(raw);
+    expect(normalized).toBeTruthy();
+    expect(JSON.parse(normalized as string).reviewClosure.status).toBe("passed");
+
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: normalized,
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).not.toContain(
+      "invalid_implementation_manifest",
+    );
+  });
+
   it("normalizes blocked environment verification evidence without rejecting the manifest shape", () => {
     const raw = JSON.stringify({
       ...validManifest({

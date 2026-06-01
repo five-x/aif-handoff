@@ -232,6 +232,7 @@ or
 - none
 
 Rules:
+- Your first output line must be exactly "## Verdict"; do not add an intro, summary, or preface.
 - PASS is valid only when Blocking Findings is exactly "- none".
 - FAIL requires at least one concrete blocking finding.
 - INCONCLUSIVE means automatic review is unsafe and will require manual review.
@@ -1611,6 +1612,7 @@ or
 - dependency_config | <covered|issue_found|not_applicable|not_checked> | <redacted evidence summary>
 
 Rules:
+- Your first output line must be exactly "## Blocking Findings"; do not add an intro, summary, or preface.
 - Blocking Findings must list only issues that should block automatic completion for this review source.
 - Advisories are non-blocking suggestions or follow-ups.
 - Review is read-only: do not create, edit, delete, move, or commit repository files.
@@ -1676,6 +1678,9 @@ ${taskIntentContract}
 
 Task attachments:
 ${formatAttachmentsForPrompt(task.attachments)}
+
+Implementation Log:
+${task.implementationLog ?? "No implementation log available."}
 
 Auto-review strategy: ${strategy}
 Review iteration: ${reviewIteration}

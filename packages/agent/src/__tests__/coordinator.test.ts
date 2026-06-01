@@ -5581,6 +5581,86 @@ describe("coordinator", () => {
     expect(task!.reviewIterationCount).toBe(3);
   });
 
+  it("should not spend review iterations on implementation evidence guard rework", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-evidence-rework-");
+    writeFileSync(join(rootPath, "README.md"), "# changed\n", "utf8");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-evidence-rework",
+        projectId: "test-project",
+        title: "Development task with stale manifest",
+        taskIntent: "feature",
+        status: "implementing",
+        autoMode: true,
+        reviewComments: [
+          "## Auto Review Metadata",
+          "- Strategy: full_re_review",
+          "- Review Iteration: 2",
+          "",
+          "## Previous Findings",
+          "- none",
+          "",
+          "## Blocking Findings",
+          "- none",
+          "",
+          "## Advisories",
+          "- code_review | README.md inspected after implementation.",
+          "",
+          "## Security Coverage",
+          "- secret_leaks | not_applicable | README.md change does not contain secret-bearing configuration.",
+          "- permissions_sandbox | not_applicable | README.md change does not affect permissions.",
+          "- unsafe_shell_network_file | not_applicable | README.md change does not add shell, network, or file operations.",
+          "- dependency_config | not_applicable | README.md change does not affect dependencies.",
+        ].join("\n"),
+        reviewIterationCount: 2,
+        retryCount: 0,
+        maxReviewIterations: 5,
+        agentActivityLog: [
+          "[2026-05-29T10:00:00.000Z] Agent: aif-implement started",
+          "[2026-05-29T10:00:01.000Z] Tool: run_shell npm test",
+          "[2026-05-29T10:00:02.000Z] Agent: aif-implement complete",
+        ].join("\n"),
+        implementationManifestJson: JSON.stringify({
+          version: 1,
+          taskId: "task-dev-evidence-rework",
+          intent: "feature",
+          planManifestHash: null,
+          changedFiles: [],
+          diffSummary: { summary: "Stale manifest.", filesChanged: 0 },
+          verificationEvidence: [
+            {
+              id: "ver-1",
+              command: "npm test",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "tests passed",
+              outputPreviewTruncated: false,
+            },
+          ],
+          acceptanceCriteria: [{ id: "AC-1", status: "satisfied", evidenceRefs: ["ver-1"] }],
+          evidenceRefs: ["ver-1"],
+          planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+          reviewClosure: { status: "pending", evidenceRefs: [] },
+          commitEvidence: { status: "not_committed", evidenceRefs: [] },
+          knownLimitations: [],
+        }),
+      })
+      .run();
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-dev-evidence-rework", rootPath);
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-dev-evidence-rework")).get();
+    expect(task!.status).toBe("implementing");
+    expect(task!.blockedReason).toContain("Implementation evidence guard rework 1/3");
+    expect(task!.blockedReason).toContain("implementation_changed_files_mismatch");
+    expect(task!.retryCount).toBe(1);
+    expect(task!.reviewIterationCount).toBe(2);
+  });
+
   it("should block skipReview audit tasks with generic plan and no evidence delta", async () => {
     const db = testDb.current;
     db.insert(tasks)
