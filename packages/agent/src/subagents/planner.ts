@@ -100,7 +100,7 @@ function splitPlannerMetadataList(value: string | null): string[] {
 function sanitizeDeterministicPlanSentence(value: string): string {
   return value
     .replace(/\bplaceholder[-\s]*only\b/gi, "temporary-only")
-    .replace(/\bplaceholder\b/gi, "temporary stub")
+    .replace(/\bplaceholders?\b/gi, "temporary values")
     .trim();
 }
 
@@ -121,6 +121,7 @@ function isDeterministicPlanConfigPath(path: string): boolean {
   const normalized = path.toLowerCase();
   return (
     normalized === ".gitignore" ||
+    /^\.env(?:\..+)?$/.test(normalized) ||
     /(^|\/)(?:package|package-lock|pnpm-lock|yarn\.lock|bun\.lockb)(?:\.json)?$/.test(normalized) ||
     /(^|\/)(?:tsconfig|vite|vitest|eslint|prettier|turbo|dockerfile|docker-compose)\b/.test(
       normalized,

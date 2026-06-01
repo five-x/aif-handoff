@@ -783,6 +783,36 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toContain("src/index.*");
   });
 
+  it("uses deterministic implementation fallback for .env.example roadmap children", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-env-fallback-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-env-fallback",
+        projectId: "project-1",
+        title: "Add env defaults: project",
+        description:
+          "Add only non-secret .env.example defaults required by the scaffold.\nFile boundaries: .env.example\nAcceptance criteria: Environment defaults contain placeholders only and do not expose secrets.\nVerification: npm.cmd run build\nDependencies: Configure build tooling: project",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-env-fallback",
+      })
+      .run();
+
+    queryMock.mockReturnValue(streamSuccess("Short task placeholder"));
+
+    await runPlanner("task-env-fallback", projectRoot);
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-env-fallback")).get();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain(".env.example");
+    expect(updatedTask?.plan).toContain('"kind": "config_update"');
+    expect(updatedTask?.plan).toContain("temporary values");
+    expect(updatedTask?.plan).not.toContain("placeholders only");
+  });
+
   it("creates a feature branch when plannerMode=full and git.create_branches=true", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-git-"));

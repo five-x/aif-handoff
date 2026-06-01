@@ -486,6 +486,9 @@ function classifyManifestArtifactText(value: string): TaskIntentChangeCategory |
   ) {
     return "fixtures";
   }
+  if (/(?:^|\/)\.env(?:[._-].*)?$/.test(normalized)) {
+    return "config";
+  }
   if (
     /\b(?:docs|documentation|readme|guide|runbook|example)\b/.test(normalized) ||
     normalized.startsWith("docs/") ||

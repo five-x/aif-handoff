@@ -329,6 +329,44 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("task_size_split_required");
   });
 
+  it("classifies .env.example manifest paths as config, not docs", () => {
+    const task = {
+      id: "task-env-example",
+      title: "Add env defaults",
+      description:
+        "File boundaries: .env.example\nAcceptance criteria: Environment defaults contain temporary values only and do not expose secrets.\nVerification: npm.cmd run build",
+      taskIntent: "feature" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+    };
+    const plan = [
+      "## Plan",
+      "- [ ] Update `.env.example` with non-secret defaults.",
+      "- [ ] Run `npm.cmd run build`.",
+      "",
+      planManifest({
+        taskId: "task-env-example",
+        scope: [".env.example"],
+        allowedChanges: ["config"],
+        forbiddenChanges: ["report"],
+        expectedArtifacts: [{ kind: "config_update", paths: [".env.example"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-env-defaults",
+            description: "Environment defaults contain temporary values only and no secrets.",
+            verification: "npm.cmd run build",
+          },
+        ],
+        verificationCommands: ["npm.cmd run build"],
+      }),
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({ task, plan });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("plan_manifest_expected_artifact_violation");
+  });
+
   it("rejects full-mode plans whose manifest omits declared file boundaries", () => {
     const task = {
       id: "task-vite-boundaries",
