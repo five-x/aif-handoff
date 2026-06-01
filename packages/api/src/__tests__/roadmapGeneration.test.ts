@@ -1499,13 +1499,18 @@ describe("roadmapGeneration", () => {
       expect(result.status).toBe("created");
       expect(result.proposal.proposedChildren.map((child) => child.title)).toEqual([
         "Initialize zai-mi.com scaffold",
-        "Configure zai-mi.com development stack",
+        "Configure package scripts: zai-mi.com",
+        "Configure build tooling: zai-mi.com",
+        "Add env defaults: zai-mi.com",
+        "Add Docker image defaults: zai-mi.com",
+        "Add Compose dev runtime: zai-mi.com",
+        "Add CI workflow skeleton: zai-mi.com",
         "Implement zai-mi.com first app slice",
         "Add zai-mi.com smoke verification",
         "Polish footer copy",
       ]);
       expect(result.proposal.proposedChildren.map((child) => child.sequence)).toEqual([
-        1, 2, 3, 4, 5,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
       ]);
       for (const child of result.proposal.proposedChildren) {
         expect(child.fileBoundaries?.length).toBeGreaterThan(0);
@@ -1520,14 +1525,21 @@ describe("roadmapGeneration", () => {
       );
       expect(result.proposal.proposedChildren[1]).toEqual(
         expect.objectContaining({
-          fileBoundaries: expect.arrayContaining(["vitest.config.*"]),
+          title: "Configure package scripts: zai-mi.com",
+          fileBoundaries: expect.arrayContaining(["package.json", "vitest.config.*"]),
           acceptanceCriteria: expect.arrayContaining([
-            "package.json defines executable build and test scripts; the test script can run before feature tests exist.",
+            "package.json defines executable build and test scripts.",
           ]),
-          verificationCommands: ["npm.cmd run build", "npm.cmd test"],
+          verificationCommands: ["npm.cmd test"],
         }),
       );
-      expect(result.proposal.proposedChildren[2]).toEqual(
+      expect(result.proposal.proposedChildren[4]).toEqual(
+        expect.objectContaining({
+          title: "Add Docker image defaults: zai-mi.com",
+          fileBoundaries: ["Dockerfile", ".dockerignore"],
+        }),
+      );
+      expect(result.proposal.proposedChildren[7]).toEqual(
         expect.objectContaining({
           fileBoundaries: expect.arrayContaining(["src/**/*.test.*"]),
           acceptanceCriteria: expect.arrayContaining([
@@ -1536,7 +1548,7 @@ describe("roadmapGeneration", () => {
           verificationCommands: ["npm.cmd test"],
         }),
       );
-      expect(result.proposal.proposedChildren.slice(0, 4)).toEqual(
+      expect(result.proposal.proposedChildren.slice(0, 9)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             splitRationale: expect.stringContaining("split into executable microtasks"),
@@ -1704,9 +1716,9 @@ describe("roadmapGeneration", () => {
         "Добавить smoke-проверку: Настройка инфраструктуры: docker-compose, env и базовая структура",
       ]);
       expect(
-        result.proposal.proposedChildren.every((child) => !/docker-compose|env/i.test(child.title)),
+        result.proposal.proposedChildren.some((child) => /docker|compose|env/i.test(child.title)),
       ).toBe(true);
-      expect(result.proposal.proposedChildren).toHaveLength(4);
+      expect(result.proposal.proposedChildren).toHaveLength(9);
       for (const child of result.proposal.proposedChildren) {
         expect(child.taskIntent).toBe("feature");
         expect(child.tags).toContain("microtask");
@@ -1746,10 +1758,13 @@ describe("roadmapGeneration", () => {
       });
 
       expect(result.status).toBe("created");
-      expect(result.proposal.proposedChildren).toHaveLength(4);
+      expect(result.proposal.proposedChildren).toHaveLength(9);
       expect(result.proposal.proposedChildren[0]?.fileBoundaries).not.toContain("Dockerfile");
-      expect(result.proposal.proposedChildren[1]?.fileBoundaries).toEqual(
-        expect.arrayContaining(["Dockerfile", ".dockerignore", "docker-compose*.yml"]),
+      expect(result.proposal.proposedChildren[4]?.fileBoundaries).toEqual(
+        expect.arrayContaining(["Dockerfile", ".dockerignore"]),
+      );
+      expect(result.proposal.proposedChildren[5]?.fileBoundaries).toEqual(
+        expect.arrayContaining(["docker-compose*.yml", "compose*.yml"]),
       );
       for (const child of result.proposal.proposedChildren) {
         expect(child.title).not.toContain(sourceTitle);
@@ -1768,8 +1783,8 @@ describe("roadmapGeneration", () => {
       expect(approved.status).toBe("approved");
       if (approved.status !== "approved")
         throw new Error(`Unexpected approval status ${approved.status}`);
-      expect(approved.proposal.createdTaskIds).toHaveLength(5);
-      expect(findTasksByRoadmapAlias(projectId, "zai-mi-local-env")).toHaveLength(5);
+      expect(approved.proposal.createdTaskIds).toHaveLength(10);
+      expect(findTasksByRoadmapAlias(projectId, "zai-mi-local-env")).toHaveLength(10);
     });
 
     it("rejects approval for a manually persisted stale broad proposal child", () => {

@@ -2979,7 +2979,93 @@ function buildBroadTaskMicrotasks(
     },
   ];
 
-  return templates.map((template, index) => ({
+  const packageScriptsTitle = `Configure package scripts: ${sourceTitle}`;
+  const buildConfigTitle = `Configure build tooling: ${sourceTitle}`;
+  const envDefaultsTitle = `Add env defaults: ${sourceTitle}`;
+  const dockerDefaultsTitle = `Add Docker image defaults: ${sourceTitle}`;
+  const composeDefaultsTitle = `Add Compose dev runtime: ${sourceTitle}`;
+  const ciWorkflowTitle = `Add CI workflow skeleton: ${sourceTitle}`;
+  const expandedTemplates = templates
+    .flatMap((template) => {
+      if (template.suffix !== "configuration") return [template];
+      return [
+        {
+          suffix: "package-scripts",
+          title: packageScriptsTitle,
+          summary:
+            "Add only package scripts, lockfile updates, and the minimal test runner config needed by the scaffold.",
+          fileBoundaries: ["package.json", "package-lock.json", "vitest.config.*"],
+          acceptanceCriteria: [
+            "package.json defines executable build and test scripts.",
+            "The test command can run before feature tests exist.",
+          ],
+          verificationCommands: ["npm.cmd test"],
+          dependsOn: [scaffoldTitle],
+        },
+        {
+          suffix: "build-config",
+          title: buildConfigTitle,
+          summary: "Add only TypeScript and Vite build configuration for the scaffold.",
+          fileBoundaries: ["tsconfig*.json", "vite.config.*", "package.json"],
+          acceptanceCriteria: [
+            "TypeScript and Vite build configuration is present and scoped to the scaffold.",
+          ],
+          verificationCommands: ["npm.cmd run build"],
+          dependsOn: [packageScriptsTitle],
+        },
+        {
+          suffix: "env-defaults",
+          title: envDefaultsTitle,
+          summary:
+            "Add only non-secret environment defaults and optional typed config placeholders.",
+          fileBoundaries: [".env.example", "config/**"],
+          acceptanceCriteria: [
+            "Environment defaults contain placeholders only and do not expose secrets.",
+          ],
+          verificationCommands: ["npm.cmd run build"],
+          dependsOn: [buildConfigTitle],
+        },
+        {
+          suffix: "docker-image-defaults",
+          title: dockerDefaultsTitle,
+          summary: "Add only Docker image defaults needed to run the scaffold locally.",
+          fileBoundaries: ["Dockerfile", ".dockerignore"],
+          acceptanceCriteria: [
+            "Docker image defaults are present without adding deployment-specific secrets.",
+          ],
+          verificationCommands: ["npm.cmd run build"],
+          dependsOn: [envDefaultsTitle],
+        },
+        {
+          suffix: "compose-dev-runtime",
+          title: composeDefaultsTitle,
+          summary: "Add only local Compose runtime defaults for the scaffold.",
+          fileBoundaries: ["docker-compose*.yml", "compose*.yml"],
+          acceptanceCriteria: [
+            "Compose defaults reference only documented local environment placeholders.",
+          ],
+          verificationCommands: ["npm.cmd run build"],
+          dependsOn: [dockerDefaultsTitle],
+        },
+        {
+          suffix: "ci-workflow",
+          title: ciWorkflowTitle,
+          summary: "Add only a minimal CI workflow skeleton for build and test verification.",
+          fileBoundaries: [".github/workflows/**"],
+          acceptanceCriteria: ["CI workflow runs the documented build and test commands."],
+          verificationCommands: ["npm.cmd test"],
+          dependsOn: [composeDefaultsTitle],
+        },
+      ];
+    })
+    .map((template) => ({
+      ...template,
+      dependsOn: template.dependsOn.map((dependency) =>
+        dependency === configurationTitle ? ciWorkflowTitle : dependency,
+      ),
+    }));
+
+  return expandedTemplates.map((template, index) => ({
     title: template.title,
     description: formatMicrotaskDescription({
       source: task,

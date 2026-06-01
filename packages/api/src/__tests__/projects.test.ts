@@ -653,7 +653,12 @@ describe("projects API", () => {
           status: "pending",
           proposedChildren: [
             expect.objectContaining({ title: "Initialize split child scaffold" }),
-            expect.objectContaining({ title: "Configure split child development stack" }),
+            expect.objectContaining({ title: "Configure package scripts: split child" }),
+            expect.objectContaining({ title: "Configure build tooling: split child" }),
+            expect.objectContaining({ title: "Add env defaults: split child" }),
+            expect.objectContaining({ title: "Add Docker image defaults: split child" }),
+            expect.objectContaining({ title: "Add Compose dev runtime: split child" }),
+            expect.objectContaining({ title: "Add CI workflow skeleton: split child" }),
             expect.objectContaining({ title: "Implement split child first app slice" }),
             expect.objectContaining({ title: "Add split child smoke verification" }),
           ],
@@ -686,7 +691,7 @@ describe("projects API", () => {
       expect(approved.createdTaskIds).toEqual(expect.arrayContaining([approved.containerTaskId]));
 
       const stored = findTasksByRoadmapAlias("roadmap-split-import", "split-v1");
-      expect(stored).toHaveLength(5);
+      expect(stored).toHaveLength(10);
       const parent = findTaskById(approved.containerTaskId)!;
       const childId = approved.createdTaskIds.find(
         (taskId: string) => taskId !== approved.containerTaskId,
@@ -710,7 +715,7 @@ describe("projects API", () => {
         { method: "POST" },
       );
       expect(duplicateApprove.status).toBe(200);
-      expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(5);
+      expect(findTasksByRoadmapAlias("roadmap-split-import", "split-v1")).toHaveLength(10);
     });
 
     it("imports and approves a broad app roadmap child as executable microtasks", async () => {
@@ -752,7 +757,12 @@ describe("projects API", () => {
         importBody.proposal.proposedChildren.map((child: { title: string }) => child.title),
       ).toEqual([
         "Initialize zai-mi.com scaffold",
-        "Configure zai-mi.com development stack",
+        "Configure package scripts: zai-mi.com",
+        "Configure build tooling: zai-mi.com",
+        "Add env defaults: zai-mi.com",
+        "Add Docker image defaults: zai-mi.com",
+        "Add Compose dev runtime: zai-mi.com",
+        "Add CI workflow skeleton: zai-mi.com",
         "Implement zai-mi.com first app slice",
         "Add zai-mi.com smoke verification",
       ]);
@@ -767,12 +777,17 @@ describe("projects API", () => {
       expect(approved.status).toBe("approved");
       expect(approved.containerTaskId).toBeTruthy();
       const created = findTasksByRoadmapAlias("roadmap-broad-microtasks", "zai-mi");
-      expect(created).toHaveLength(5);
+      expect(created).toHaveLength(10);
       expect(
         created.filter((task) => task.hierarchyRole !== "container").map((task) => task.title),
       ).toEqual([
         "Initialize zai-mi.com scaffold",
-        "Configure zai-mi.com development stack",
+        "Configure package scripts: zai-mi.com",
+        "Configure build tooling: zai-mi.com",
+        "Add env defaults: zai-mi.com",
+        "Add Docker image defaults: zai-mi.com",
+        "Add Compose dev runtime: zai-mi.com",
+        "Add CI workflow skeleton: zai-mi.com",
         "Implement zai-mi.com first app slice",
         "Add zai-mi.com smoke verification",
       ]);
@@ -925,7 +940,7 @@ describe("projects API", () => {
       expect(approved.containerTaskId).toBeTruthy();
       expect(approved.createdTaskIds).toEqual(expect.arrayContaining([approved.containerTaskId]));
       const created = findTasksByRoadmapAlias("roadmap-split-canary", "split-approve");
-      expect(created).toHaveLength(5);
+      expect(created).toHaveLength(10);
       const parent = findTaskById(approved.containerTaskId)!;
       const childId = approved.createdTaskIds.find(
         (taskId: string) => taskId !== approved.containerTaskId,
