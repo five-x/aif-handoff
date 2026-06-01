@@ -1109,6 +1109,49 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.issues[0]?.message).toContain("packages/agent/src/subagents/planner.ts");
   });
 
+  it("accepts concrete docker-compose.yml plans for legacy broad compose file boundaries", () => {
+    const plan = [
+      "## Plan",
+      "- [ ] Create or update `docker-compose.yml` with local compose defaults.",
+      "- [ ] Run `npm.cmd run build` and record the result.",
+      "",
+      "## aif-plan-manifest",
+      "",
+      planManifest({
+        taskId: "compose-task",
+        scope: ["docker-compose.yml"],
+        allowedChanges: ["config"],
+        forbiddenChanges: ["report"],
+        expectedArtifacts: [{ kind: "config_update", paths: ["docker-compose.yml"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-compose-defaults",
+            description:
+              "Compose defaults reference only documented local environment placeholders.",
+            verification: "npm.cmd run build",
+          },
+        ],
+        verificationCommands: ["npm.cmd run build"],
+      }),
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "compose-task",
+        title: "Add Compose dev runtime: project",
+        description:
+          "Add only local Compose runtime defaults for the scaffold.\nFile boundaries: docker-compose*.yml, compose*.yml\nAcceptance criteria: Compose defaults reference only documented local environment placeholders.\nVerification: npm.cmd run build",
+        taskIntent: "feature",
+      },
+      plan,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("missing_task_specific_artifact_path");
+    expect(result.categories).not.toContain("plan_manifest_scope_mismatch");
+    expect(result.categories).not.toContain("task_size_split_required");
+  });
+
   it("requires diagnostic report path and diagnostic-only constraints", () => {
     const result = evaluateTaskPlanQuality({
       task: { title: "Audit planner output quality", description: "Discovery task." },

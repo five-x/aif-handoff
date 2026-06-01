@@ -783,6 +783,35 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toContain("src/index.*");
   });
 
+  it("uses deterministic implementation fallback before runtime for legacy broad compose child plans", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-compose-fallback-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-compose-fallback",
+        projectId: "project-1",
+        title: "Add Compose dev runtime: project",
+        description:
+          "Add only local Compose runtime defaults for the scaffold.\nFile boundaries: docker-compose*.yml, compose*.yml\nAcceptance criteria: Compose defaults reference only documented local environment placeholders.\nVerification: npm.cmd run build\nDependencies: Add Docker image defaults: project",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-compose-fallback",
+      })
+      .run();
+
+    await runPlanner("task-compose-fallback", projectRoot);
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-compose-fallback")).get();
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain("docker-compose.yml");
+    expect(updatedTask?.plan).not.toContain("docker-compose*.yml");
+    expect(updatedTask?.plan).not.toContain("compose*.yml");
+    expect(updatedTask?.plan).toContain("npm.cmd run build");
+  });
+
   it("uses deterministic implementation fallback for .env.example roadmap children", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-env-fallback-"));

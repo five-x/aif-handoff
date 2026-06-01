@@ -1466,13 +1466,7 @@ function validatePlanManifest(input: {
     const normalizedScope = manifest.scope.map(normalizePath);
     const nonReportTaskPaths = input.taskPaths.filter((path) => !isAuditReportArtifactPath(path));
     const missingScopePaths = nonReportTaskPaths.filter(
-      (path) =>
-        !normalizedScope.some(
-          (scopePath) =>
-            scopePath === path ||
-            scopePath.startsWith(`${path}/`) ||
-            path.startsWith(`${scopePath}/`),
-        ),
+      (path) => !normalizedScope.some((scopePath) => planPathSatisfiesTaskPath(scopePath, path)),
     );
     if (missingScopePaths.length > 0) {
       addIssue(
@@ -1965,9 +1959,62 @@ function issue(code: TaskPlanQualityIssueCode, message: string): TaskPlanQuality
   return { code, message };
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function wildcardPathPatternMatches(pathPattern: string, candidatePath: string): boolean {
+  if (!pathPattern.includes("*")) return false;
+  const pattern = `^${escapeRegExp(pathPattern).replace(/\\\*/g, "[^/]*")}$`;
+  return new RegExp(pattern, "i").test(candidatePath);
+}
+
+function wildcardPathPatternAppearsInText(pathPattern: string, text: string): boolean {
+  if (!pathPattern.includes("*")) return false;
+  const pattern = escapeRegExp(pathPattern).replace(/\\\*/g, "[^\\s`'\"),;\\]]*");
+  return new RegExp(pattern, "i").test(text);
+}
+
+function isComposeBoundaryAlias(pathPattern: string, candidatePath: string): boolean {
+  const normalizedPattern = normalizePath(pathPattern).toLowerCase();
+  const normalizedCandidate = normalizePath(candidatePath).toLowerCase();
+  return (
+    /^(?:docker-)?compose\*\.ya?ml$/.test(normalizedPattern) &&
+    /^docker-compose\.ya?ml$/.test(normalizedCandidate)
+  );
+}
+
+function composeBoundaryAliasAppearsInText(pathPattern: string, text: string): boolean {
+  const normalizedPattern = normalizePath(pathPattern).toLowerCase();
+  return (
+    /^(?:docker-)?compose\*\.ya?ml$/.test(normalizedPattern) && /docker-compose\.ya?ml/i.test(text)
+  );
+}
+
+function planPathSatisfiesTaskPath(planPath: string, taskPath: string): boolean {
+  const normalizedPlanPath = normalizePath(planPath);
+  const normalizedTaskPath = normalizePath(taskPath);
+  return (
+    normalizedPlanPath === normalizedTaskPath ||
+    normalizedPlanPath.startsWith(`${normalizedTaskPath}/`) ||
+    normalizedTaskPath.startsWith(`${normalizedPlanPath}/`) ||
+    wildcardPathPatternMatches(normalizedTaskPath, normalizedPlanPath) ||
+    isComposeBoundaryAlias(normalizedTaskPath, normalizedPlanPath)
+  );
+}
+
 function hasAnyPlanPath(planPaths: string[], plan: string): boolean {
   const normalizedPlan = normalizePath(plan);
-  return planPaths.some((path) => normalizedPlan.includes(path));
+  const mentionedPaths = extractRepoPaths(plan);
+  return planPaths.some((path) => {
+    const normalizedPath = normalizePath(path);
+    return (
+      normalizedPlan.includes(normalizedPath) ||
+      wildcardPathPatternAppearsInText(normalizedPath, normalizedPlan) ||
+      composeBoundaryAliasAppearsInText(normalizedPath, normalizedPlan) ||
+      mentionedPaths.some((mentionedPath) => planPathSatisfiesTaskPath(mentionedPath, path))
+    );
+  });
 }
 
 function uniqueCategories(issues: TaskPlanQualityIssue[]): TaskPlanQualityIssueCode[] {

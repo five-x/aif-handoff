@@ -117,6 +117,33 @@ function normalizeDeterministicPlanScopePath(value: string): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
+function isComposeDevRuntimeTask(task: PlannerTask): boolean {
+  const text = `${task.title}\n${task.description ?? ""}`;
+  return /\b(?:add\s+compose\s+dev\s+runtime|local\s+compose\s+runtime|compose\s+dev\s+runtime)\b/i.test(
+    text,
+  );
+}
+
+function normalizeDeterministicPlanScope(task: PlannerTask, fileBoundaries: string[]): string[] {
+  const scope = fileBoundaries
+    .map(normalizeDeterministicPlanScopePath)
+    .filter((entry): entry is string => entry !== null)
+    .flatMap((entry) => {
+      if (!isComposeDevRuntimeTask(task)) return [entry];
+      const normalized = entry.toLowerCase();
+      if (
+        normalized === "docker-compose*.yml" ||
+        normalized === "docker-compose*.yaml" ||
+        normalized === "compose*.yml" ||
+        normalized === "compose*.yaml"
+      ) {
+        return ["docker-compose.yml"];
+      }
+      return [entry];
+    });
+  return [...new Set(scope)].sort();
+}
+
 function isDeterministicPlanConfigPath(path: string): boolean {
   const normalized = path.toLowerCase();
   return (
@@ -166,10 +193,8 @@ function buildDeterministicImplementationPlan(task: PlannerTask): string | null 
   const description = task.description ?? "";
   const fileBoundaries = splitPlannerMetadataList(
     extractPlannerMetadataLine(description, "File boundaries"),
-  )
-    .map(normalizeDeterministicPlanScopePath)
-    .filter((entry): entry is string => entry !== null);
-  const scope = [...new Set(fileBoundaries)].sort();
+  );
+  const scope = normalizeDeterministicPlanScope(task, fileBoundaries);
   const verification = extractPlannerMetadataLine(description, "Verification");
   const acceptance = sanitizeDeterministicPlanSentence(
     extractPlannerMetadataLine(description, "Acceptance criteria") ??
@@ -540,6 +565,24 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
       });
       log.info({ taskId }, "Saved deterministic diagnostic planner fallback");
       logActivity(taskId, "Agent", "Saved deterministic diagnostic plan without model planner");
+      return;
+    }
+    const deterministicImplementationPlan = buildDeterministicImplementationPlan(task);
+    if (deterministicImplementationPlan) {
+      persistTaskPlanForTask({
+        taskId,
+        planText: deterministicImplementationPlan,
+        projectRoot: executionRoot,
+        isFix: false,
+        planPath,
+        updatedAt: new Date().toISOString(),
+      });
+      log.info({ taskId }, "Saved deterministic implementation planner fallback");
+      logActivity(
+        taskId,
+        "Agent",
+        "Saved deterministic implementation plan fallback without model planner",
+      );
       return;
     }
   }
