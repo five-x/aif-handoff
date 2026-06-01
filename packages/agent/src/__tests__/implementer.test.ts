@@ -6617,9 +6617,13 @@ describe("runImplementer rework behavior", () => {
         forbiddenChanges: ["audit-report"],
         expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
         acceptanceCriteria: [
-          { id: "AC1", description: "Feature behavior is implemented.", verification: "npm test" },
+          {
+            id: "AC1",
+            description: "Feature behavior is implemented.",
+            verification: "npm test -- feature.test.ts",
+          },
         ],
-        verificationCommands: ["npm test"],
+        verificationCommands: ["npm test -- feature.test.ts"],
       }),
       "```",
       "",
@@ -6804,7 +6808,7 @@ describe("runImplementer rework behavior", () => {
           riskHypothesisIds: [],
           pathHashes: [],
           pathRangeHashes: [],
-          command: { command: "npm", args: ["test"], cwd: null },
+          command: { command: "npm.cmd", args: ["--", "feature.test.ts", "test"], cwd: null },
           exitCode: 0,
           outputSha256: "f".repeat(64),
           outputPreview: "fresh 18 tests passed",
@@ -6827,7 +6831,7 @@ describe("runImplementer rework behavior", () => {
           .set({
             agentActivityLog: [
               current?.agentActivityLog?.trim() ?? "",
-              `[${verifiedAt}] Tool: run_shell npm test`,
+              `[${verifiedAt}] Tool: run_shell npm.cmd -- feature.test.ts test`,
             ]
               .filter(Boolean)
               .join("\n"),
@@ -6901,7 +6905,7 @@ describe("runImplementer rework behavior", () => {
     expect(manifest.diffSummary.summary).not.toContain("LoanOffer");
     expect(manifest.verificationEvidence).toEqual([
       expect.objectContaining({
-        command: "npm test",
+        command: "npm.cmd -- feature.test.ts test",
         outputSha256: "f".repeat(64),
         outputPreview: "fresh 18 tests passed",
       }),

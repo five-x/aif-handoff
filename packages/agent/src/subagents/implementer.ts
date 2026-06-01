@@ -557,13 +557,36 @@ async function extractNormalizedImplementationManifest(resultText: string): Prom
 }
 
 function normalizeVerificationCommandText(value: string): string {
-  return value
+  const normalized = value
     .replace(/\bnpm\.cmd\b/gi, "npm")
     .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+--\s+/gi, "npx ")
     .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+/gi, "npx ")
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+  return normalizeNpmTestCommandText(normalized);
+}
+
+function normalizeNpmTestCommandText(value: string): string {
+  const tokens = value.split(" ").filter(Boolean);
+  if (tokens[0] !== "npm") return value;
+
+  let args: string[] | null = null;
+  if (tokens[1] === "test") {
+    args = tokens.slice(2);
+  } else if (tokens[1] === "run" && tokens[2] === "test") {
+    args = tokens.slice(3);
+  } else {
+    const testIndex = tokens.indexOf("test");
+    if (testIndex < 0 || !tokens.includes("--")) return value;
+    args = [...tokens.slice(1, testIndex), ...tokens.slice(testIndex + 1)];
+  }
+
+  const cleanedArgs = args.filter((arg) => arg !== "--");
+  if (cleanedArgs.length === 0) return "npm test";
+  const positionalArgs = cleanedArgs.filter((arg) => !arg.startsWith("-"));
+  const optionArgs = cleanedArgs.filter((arg) => arg.startsWith("-"));
+  return ["npm", "test", "--", ...positionalArgs, ...optionArgs].join(" ");
 }
 
 function auditEvidenceCommandText(unit: AuditEvidenceUnit): string {
