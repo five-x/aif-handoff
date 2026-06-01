@@ -2583,7 +2583,11 @@ function splitMetadataList(values: string[], options: { splitCommas?: boolean } 
 
 function normalizeMetadataValue(value: string): string {
   let cleaned = value.trim().replace(/\*\*/g, "").replace(/`/g, "").trim();
-  while (cleaned.startsWith("[") && cleaned.endsWith("]")) {
+  while (
+    (cleaned.startsWith("[") && cleaned.endsWith("]")) ||
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
     cleaned = cleaned.slice(1, -1).trim();
   }
   return cleaned.replace(/\s*\.$/, "").trim();
@@ -2656,11 +2660,30 @@ function extractVerificationCommands(values: string[]): string[] {
       directCommands.forEach(addCommand);
       continue;
     }
-
-    splitMetadataList([value], { splitCommas: false }).forEach(addCommand);
   }
 
-  return commands;
+  if (commands.length > 0) return commands;
+
+  const normalizedText = values.join("\n").toLowerCase();
+  if (/\b(?:lint|eslint|prettier)\b|(?:\u043b\u0438\u043d\u0442)/iu.test(normalizedText)) {
+    return ["npm run lint"];
+  }
+  if (
+    /\b(?:tsc|typescript|compile|compilation)\b|(?:\u0442\u0438\u043f|\u043a\u043e\u043c\u043f\u0438\u043b)/iu.test(
+      normalizedText,
+    )
+  ) {
+    return ["tsc --noEmit"];
+  }
+  if (
+    /\b(?:test|tests|unit|jest|vitest|rtl|puppeteer|playwright|e2e)\b|(?:\u0442\u0435\u0441\u0442|\u043f\u0440\u043e\u0432\u0435\u0440)/iu.test(
+      normalizedText,
+    )
+  ) {
+    return ["npm test"];
+  }
+
+  return splitMetadataList(values, { splitCommas: false });
 }
 
 function inferVerificationCommands(task: GeneratedTask): string[] {

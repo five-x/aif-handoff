@@ -1626,6 +1626,44 @@ describe("roadmapGeneration", () => {
       expect(findTasksByRoadmapAlias(projectId, "ru-seed-data")).toHaveLength(0);
     });
 
+    it("normalizes prose verification metadata to executable commands", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+
+      const result = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent: "# Roadmap\n- [ ] Rank offers",
+        generation: {
+          alias: "prose-verification",
+          taskIntent: "feature",
+          tasks: [
+            {
+              title: "Rank offers",
+              description:
+                'Acceptance criteria: Ranking returns stable results, with explanations.\nVerification: Unit tests check sorting and explanation text.\nDependencies: "Offer catalog"\nScope: src/services/ranking.ts, tests/ranking.test.ts.',
+              taskIntent: "feature",
+              phase: 1,
+              phaseName: "Feature",
+              sequence: 1,
+            },
+          ],
+        },
+      });
+
+      expect(result.status).toBe("created");
+      expect(result.proposal.proposedChildren).toHaveLength(1);
+      expect(result.proposal.proposedChildren[0]).toEqual(
+        expect.objectContaining({
+          verificationCommands: ["npm test"],
+          dependsOn: ["Offer catalog"],
+          acceptanceCriteria: ["Ranking returns stable results, with explanations"],
+          fileBoundaries: ["src/services/ranking.ts", "tests/ranking.test.ts"],
+        }),
+      );
+      expect(findTasksByRoadmapAlias(projectId, "prose-verification")).toHaveLength(0);
+    });
+
     it("decomposes Russian broad feature children into proposal microtasks before persistence", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 
