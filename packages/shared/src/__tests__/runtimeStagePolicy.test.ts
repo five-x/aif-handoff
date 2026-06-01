@@ -53,7 +53,7 @@ describe("runtime stage policy", () => {
 
     expect(decision.allowed).toBe(false);
     expect(decision.reason).toBe("qwen_implementation_not_enabled");
-    expect(decision.caps.maxToolTurns).toBe(12);
+    expect(decision.caps.maxToolTurns).toBe(20);
     expect(decision.caps.retryCount).toBe(0);
   });
 
@@ -139,12 +139,12 @@ describe("runtime stage policy", () => {
       "implementer",
     );
 
-    expect(caps.maxToolTurns).toBe(12);
+    expect(caps.maxToolTurns).toBe(20);
     expect(caps.wallClockMs).toBe(900_000);
     expect(caps.repeatedToolCallLimit).toBe(3);
     expect(caps.contextTokens).toBe(24_000);
     expect(caps.maxOutputTokens).toBe(4_000);
-    expect(caps.repositoryInspectionToolBudget).toBe(12);
+    expect(caps.repositoryInspectionToolBudget).toBe(16);
     expect(caps.retryCount).toBe(0);
   });
 
@@ -170,7 +170,7 @@ describe("runtime stage policy", () => {
     );
 
     expect(caps).toEqual({
-      maxToolTurns: 12,
+      maxToolTurns: 20,
       wallClockMs: 900_000,
       repeatedToolCallLimit: 3,
       contextTokens: 16_000,
