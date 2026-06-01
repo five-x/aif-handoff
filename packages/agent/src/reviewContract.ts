@@ -767,6 +767,27 @@ function mergePreviousFindings(input: {
   return [...byId.values()];
 }
 
+function blockingPreviousFindingReference(text: string): AutoReviewFindingSource | null {
+  const match = normalizeFindingText(text).match(
+    new RegExp(
+      `^\\[[^\\]]+\\]\\s+${PREVIOUS_FINDING_STATUS_PATTERN}\\s+\\|\\s+${AUTO_REVIEW_FINDING_SOURCE_PATTERN}\\s+\\|\\s+`,
+    ),
+  );
+  return (match?.[2] as AutoReviewFindingSource | undefined) ?? null;
+}
+
+function specializedReviewPassed(review: ParsedSpecializedRoleOutput): boolean {
+  return (
+    review.blockingFindings.length === 0 &&
+    review.previousFindings.every(
+      (finding) =>
+        finding.status !== "still_blocking" &&
+        finding.status !== "new_blocker" &&
+        finding.status !== "manual_review_required",
+    )
+  );
+}
+
 export function buildStructuredReviewComments(input: {
   strategy: AutoReviewStrategy;
   iteration: number;
@@ -814,11 +835,26 @@ export function buildStructuredReviewComments(input: {
     });
   }
 
+  const passedSpecializedSources = new Set<AutoReviewFindingSource>(
+    (input.specializedReviews ?? []).filter(specializedReviewPassed).map((review) => review.role),
+  );
   for (const finding of [
     ...input.codeReview.blockingFindings,
     ...input.securityAudit.blockingFindings,
     ...(input.specializedReviews ?? []).flatMap((review) => review.blockingFindings),
   ]) {
+    const referencedSource = blockingPreviousFindingReference(finding.text);
+    if (
+      referencedSource &&
+      referencedSource !== finding.source &&
+      passedSpecializedSources.has(referencedSource)
+    ) {
+      advisories.push({
+        source: finding.source,
+        text: `Ignored stale cross-source previous-finding blocker for ${referencedSource}; that specialized reviewer passed with concrete evidence in this iteration.`,
+      });
+      continue;
+    }
     const blockingFinding: AutoReviewFinding = {
       ...finding,
       text: normalizeReviewText(finding.text),

@@ -726,6 +726,67 @@ describe("reviewContract", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("demotes stale cross-source specialized previous blockers when the specialized reviewer passed", () => {
+    const reviewComments = buildStructuredReviewComments({
+      strategy: "full_re_review",
+      iteration: 3,
+      codeReview: {
+        previousFindings: [],
+        blockingFindings: [],
+        advisories: [],
+        securityCoverage: completeCodeReviewSecurityCoverage,
+      },
+      securityAudit: {
+        previousFindings: [],
+        blockingFindings: [
+          {
+            id: createAutoReviewFindingId(
+              "security_audit",
+              "[old-specialized] still_blocking | security_data_loss | Previous round was inconclusive.",
+            ),
+            source: "security_audit",
+            text: "[old-specialized] still_blocking | security_data_loss | Previous round was inconclusive.",
+          },
+        ],
+        advisories: [],
+        securityCoverage: completeSecurityAuditCoverage,
+      },
+      specializedReviews: [
+        {
+          role: "security_data_loss",
+          previousFindings: [],
+          blockingFindings: [],
+          advisories: [
+            {
+              source: "security_data_loss",
+              text: "Inspected `.env.example`; only safe template values are present.",
+            },
+          ],
+        },
+      ],
+      previousFindingsInput: [],
+      rawCodeReview: "structured code review",
+      rawSecurityAudit: "structured security audit",
+      rawSpecializedReviews: [{ role: "security_data_loss", rawOutput: "raw security pass" }],
+    });
+
+    const parsed = parseStructuredReviewComments(reviewComments);
+
+    expect(parsed?.blockingFindings).toEqual([]);
+    expect(parsed?.advisories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "security_audit",
+          text: expect.stringContaining("Ignored stale cross-source previous-finding blocker"),
+        }),
+        expect.objectContaining({
+          source: "security_data_loss",
+          text: expect.stringContaining(".env.example"),
+        }),
+      ]),
+    );
+  });
+
   it("round-trips expanded previous statuses and redacts secret-like review text", () => {
     const manualId = "manual-1";
     const newBlockerId = "new-1";
