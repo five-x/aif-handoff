@@ -284,6 +284,28 @@ describe("reviewContract", () => {
     expect(parseSpecializedRoleOutput(genericAdvisory, "regression_api_contract")).toBeNull();
   });
 
+  it("accepts specialized reviewer pass with env template file evidence", () => {
+    const parsed = parseSpecializedRoleOutput(
+      [
+        "## Verdict",
+        "- PASS",
+        "",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- Inspected `.env.example`; it contains only non-secret defaults and temporary values.",
+        "",
+        "## Previous Findings",
+        "- none",
+      ].join("\n"),
+      "regression_api_contract",
+    );
+
+    expect(parsed?.blockingFindings).toEqual([]);
+    expect(parsed?.advisories[0]?.text).toContain(".env.example");
+  });
+
   it("returns typed parse errors for specialized PASS without concrete evidence", () => {
     const result = parseSpecializedRoleOutputResult(
       [

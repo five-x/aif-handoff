@@ -583,6 +583,7 @@ function hasConcreteSpecializedReviewEvidence(text: string): boolean {
   const normalized = normalizeFindingText(text);
   if (normalized.length < 16) return false;
   return [
+    /(?:^|[\s`'"\[(])(?:\.env(?:\.[\w-]+)?|\.gitignore)(?=$|[\s`'"\]),.;:])/i,
     /\b[\w./\\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|py|sh|ps1|css|scss|html)(?::\d+)?\b/i,
     /`[^`]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|py|sh|ps1|css|scss|html)(?::\d+)?`/i,
     /\b(?:command|test|tests|lint|build|validator|git|rg|npm(?:\.cmd)?)\b[^.]*\b(?:output|exit code|status|passed|failed|inspected|matched)\b/i,

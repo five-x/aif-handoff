@@ -625,6 +625,66 @@ function readHeadCommitSha(projectRoot: string): string | null {
   }
 }
 
+type ManifestChangedFileStatus = NonNullable<
+  ImplementationManifest["changedFiles"][number]["status"]
+>;
+
+function normalizeGitStatusPath(path: string): string {
+  return path
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "")
+    .trim();
+}
+
+function manifestStatusFromPorcelainCode(code: string): ManifestChangedFileStatus {
+  if (code === "??") return "added";
+  if (code.includes("R")) return "renamed";
+  if (code.includes("D") && !code.includes("A")) return "deleted";
+  if (code.includes("A")) return "added";
+  if (code.trim().length > 0) return "modified";
+  return "unknown";
+}
+
+function readDirtyChangedFileStatusMap(
+  projectRoot: string,
+): Map<string, ManifestChangedFileStatus> {
+  const statusMap = new Map<string, ManifestChangedFileStatus>();
+  let output = "";
+  try {
+    output = execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return statusMap;
+  }
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line) continue;
+    const code = line.slice(0, 2);
+    const rawPath = line.slice(2).trimStart();
+    const renameIndex = rawPath.indexOf(" -> ");
+    const path = normalizeGitStatusPath(
+      renameIndex >= 0 ? rawPath.slice(renameIndex + 4) : rawPath,
+    );
+    if (!path) continue;
+    statusMap.set(path, manifestStatusFromPorcelainCode(code));
+  }
+  return statusMap;
+}
+
+function buildChangedFileManifestEntries(
+  projectRoot: string,
+  paths: string[],
+): ImplementationManifest["changedFiles"] {
+  const dirtyStatusMap = readDirtyChangedFileStatusMap(projectRoot);
+  return paths.map((path) => ({
+    path,
+    status: dirtyStatusMap.get(normalizeGitStatusPath(path)) ?? "modified",
+  }));
+}
+
 function developmentIntentForTask(
   task: Pick<TaskRow, "taskIntent" | "isFix">,
 ): DevelopmentImplementationIntent | null {
@@ -673,7 +733,10 @@ function buildDeterministicImplementationManifest(input: {
     taskId: input.task.id,
     intent,
     planManifestHash: hashAifPlanManifest(input.planText),
-    changedFiles: changed.meaningfulChangedFiles.map((path) => ({ path, status: "unknown" })),
+    changedFiles: buildChangedFileManifestEntries(
+      input.projectRoot,
+      changed.meaningfulChangedFiles,
+    ),
     diffSummary: {
       summary: `Changed ${changed.meaningfulChangedFiles.length} file(s): ${changed.meaningfulChangedFiles
         .slice(0, 8)

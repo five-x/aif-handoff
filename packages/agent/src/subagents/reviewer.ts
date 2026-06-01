@@ -104,6 +104,16 @@ function compactReviewerPromptBlock(label: string, value: string, maxChars: numb
   return `${trimmed.slice(0, maxChars).trimEnd()} [... ${label} truncated ...]`;
 }
 
+function formatImplementationManifestForReviewPrompt(task: TaskRow): string {
+  const rawManifest = task.implementationManifestJson;
+  if (!rawManifest?.trim()) return "Implementation manifest:\nnone";
+  return `Implementation manifest:\n${compactReviewerPromptBlock(
+    "IMPLEMENTATION_MANIFEST",
+    rawManifest,
+    6_000,
+  )}`;
+}
+
 function isAuditReviewTask(task: TaskRow, roadmapArtifact: unknown): boolean {
   return (
     task.taskIntent === "audit" ||
@@ -188,6 +198,8 @@ ${formatAttachmentsForPrompt(input.task.attachments)}
 
 Implementation Log:
 ${input.task.implementationLog ?? "No implementation log available."}
+
+${formatImplementationManifestForReviewPrompt(input.task)}
 
 ${input.auditSynthesisContext}
 
@@ -1649,6 +1661,8 @@ ${formatAttachmentsForPrompt(task.attachments)}
 Implementation Log:
 ${task.implementationLog ?? "No implementation log available."}
 
+${formatImplementationManifestForReviewPrompt(task)}
+
 ${auditSynthesisContext}
 
 ${auditArtifactReviewScopeBlock}
@@ -1681,6 +1695,8 @@ ${formatAttachmentsForPrompt(task.attachments)}
 
 Implementation Log:
 ${task.implementationLog ?? "No implementation log available."}
+
+${formatImplementationManifestForReviewPrompt(task)}
 
 Auto-review strategy: ${strategy}
 Review iteration: ${reviewIteration}

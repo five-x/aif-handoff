@@ -6105,7 +6105,7 @@ describe("runImplementer rework behavior", () => {
       taskId: "task-feature-fallback-manifest",
       intent: "feature",
       planManifestHash: hashAifPlanManifest(plan),
-      changedFiles: [{ path: "src/feature.ts", status: "unknown" }],
+      changedFiles: [{ path: "src/feature.ts", status: "modified" }],
       verificationEvidence: [
         {
           id: "verify-1",
@@ -6284,7 +6284,7 @@ describe("runImplementer rework behavior", () => {
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
     const manifest = JSON.parse(manifestJson ?? "{}");
-    expect(manifest.changedFiles).toEqual([{ path: "src/feature.ts", status: "unknown" }]);
+    expect(manifest.changedFiles).toEqual([{ path: "src/feature.ts", status: "modified" }]);
     expect(manifest.diffSummary.filesChanged).toBe(1);
     expect(updatedTask?.agentActivityLog).toContain(
       "Replaced invalid extracted implementation manifest with deterministic fallback",
@@ -6422,6 +6422,11 @@ describe("runImplementer rework behavior", () => {
       dirtyChangedFiles: ["Dockerfile", "src/feature.ts"],
       phase: "review_handoff",
     });
+    const manifest = JSON.parse(manifestJson ?? "{}");
+    expect(manifest.changedFiles).toEqual([
+      { path: "Dockerfile", status: "added" },
+      { path: "src/feature.ts", status: "added" },
+    ]);
     expect(validation.ok).toBe(false);
     expect(validation.issues.map((issue) => issue.code)).toContain("implementation_scope_mismatch");
   });
