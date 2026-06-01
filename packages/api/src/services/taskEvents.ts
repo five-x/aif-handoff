@@ -79,6 +79,37 @@ function isOperatorCancelledTask(task: Pick<TaskRow, "status" | "blockedReason">
   );
 }
 
+function hasNonContractMalformedReviewBlocker(
+  task: Pick<TaskRow, "blockedReason" | "reviewComments">,
+): boolean {
+  const reason = task.blockedReason?.toLowerCase() ?? "";
+  if (
+    !reason.includes("malformed_review_output_fallback") &&
+    !reason.includes("malformed_structured_review_contract")
+  ) {
+    return false;
+  }
+  const reviewComments = task.reviewComments ?? "";
+  const blockingSection =
+    /## Blocking Findings\b([\s\S]*?)(?:\n## |\s*$)/i.exec(reviewComments)?.[1] ?? "";
+  return blockingSection
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .some((line) => {
+      const normalized = line.toLowerCase();
+      if (normalized === "- none") return false;
+      if (!/^-\s+\[[^\]]+\]\s+[a-z][\w-]*\s+\|/i.test(line)) return false;
+      if (normalized.includes("review_gate")) return false;
+      if (normalized.includes("structured-review-contract")) return false;
+      if (normalized.includes("structured review contract")) return false;
+      if (normalized.includes("reviewer returned inconclusive or malformed output")) {
+        return false;
+      }
+      return true;
+    });
+}
+
 function boundedReviewIterationLimit(value: number | null | undefined): number {
   return Math.min(value ?? getEnv().AGENT_MAX_REVIEW_ITERATIONS, 10);
 }
@@ -760,6 +791,8 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     task.blockedFromStatus === "review" &&
     (task.blockedReason?.toLowerCase().includes("malformed_review_output_fallback") === true ||
       task.blockedReason?.toLowerCase().includes("malformed_structured_review_contract") === true);
+  const malformedReviewProductReworkRetry =
+    malformedReviewOutputRetry && hasNonContractMalformedReviewBlocker(task);
   const malformedReviewReworkRetry =
     event === "retry_from_blocked" &&
     task.blockedFromStatus === "implementing" &&
@@ -975,7 +1008,16 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
   setTaskFields(task.id, {
     ...transition.patch,
     ...(operatorInputRetry ? { paused: false } : {}),
-    ...(malformedReviewOutputRetry ? { reviewComments: null } : {}),
+    ...(malformedReviewOutputRetry && !malformedReviewProductReworkRetry
+      ? { reviewComments: null }
+      : {}),
+    ...(malformedReviewProductReworkRetry
+      ? {
+          status: "implementing" as const,
+          reworkRequested: true,
+          reviewComments: task.reviewComments,
+        }
+      : {}),
     ...(malformedReviewReworkRetry
       ? { reviewComments: null, autoReviewState: null, reworkRequested: false }
       : {}),
@@ -987,6 +1029,12 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     appendTaskActivityLog(
       task.id,
       `[${nowIso}] Task cancelled by operator from ${task.status}; automation paused.`,
+    );
+  }
+  if (malformedReviewProductReworkRetry) {
+    appendTaskActivityLog(
+      task.id,
+      `[${nowIso}] Retrying malformed review handoff through implementing because review comments contain non-contract blockers.`,
     );
   }
 

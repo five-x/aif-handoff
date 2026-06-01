@@ -5429,6 +5429,60 @@ describe("tasks API", () => {
       expect(persisted?.reviewComments).toBeNull();
     });
 
+    it("should route malformed review-output retries with product blockers through rework", async () => {
+      const db = testDb.current;
+      const reviewComments = [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Blocking Findings",
+        "- [structured-review-contract] review_gate | Structured review contract not satisfied: missing security coverage rows.",
+        "- [domain-contract] code_review | Conflict with existing domain types in `src/data/offers.ts`; import `LoanOffer` from `src/types/domain.ts`.",
+        "",
+        "## Advisories",
+        "- none",
+      ].join("\n");
+      db.insert(tasks)
+        .values({
+          id: "ev-malformed-review-product-rework",
+          projectId: "test-project",
+          title: "Malformed review output with product blocker",
+          status: "blocked_external",
+          blockedFromStatus: "review",
+          blockedReason:
+            "manual_review_required: malformed_review_output_fallback; closure evidence gap for unresolved blockers.",
+          manualReviewRequired: true,
+          reviewComments,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-malformed-review-product-rework/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+      expect(body.reworkRequested).toBe(true);
+      expect(body.manualReviewRequired).toBe(false);
+      expect(body.blockedReason).toBeNull();
+      expect(body.reviewComments).toContain("domain-contract");
+      const persisted = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, "ev-malformed-review-product-rework"))
+        .get();
+      expect(persisted?.status).toBe("implementing");
+      expect(persisted?.reworkRequested).toBe(true);
+      expect(persisted?.reviewComments).toContain("domain-contract");
+      expect(persisted?.agentActivityLog).toContain(
+        "Retrying malformed review handoff through implementing because review comments contain non-contract blockers.",
+      );
+    });
+
     it("should clear stale malformed review rework when retrying implementer loop blocks", async () => {
       const db = testDb.current;
       db.insert(tasks)
