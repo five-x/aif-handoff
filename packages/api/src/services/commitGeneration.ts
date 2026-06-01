@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   assertCurrentBranch,
   getProjectConfig,
@@ -10,15 +11,8 @@ import {
   type TaskIntent,
 } from "@aif/shared";
 import { findProjectById, findTaskById } from "@aif/data";
-import { UsageSource } from "@aif/runtime";
-import { runApiRuntimeOneShot } from "./runtime.js";
 
 const log = logger("commit-generation");
-
-const PROJECT_SCOPE_APPEND =
-  "Project scope rule: work strictly inside the current working directory (project root). " +
-  "Do not inspect or modify files in the orchestrator monorepo or in parent/sibling directories " +
-  "unless the user explicitly asks for that path. Avoid broad discovery outside the current project root.";
 
 export interface RunCommitQueryResult {
   ok: boolean;
@@ -143,9 +137,104 @@ export function buildCommitPromptForTask(
   return buildReportOnlyCommitPrompt(shouldPush, reportArtifactPath);
 }
 
+function runGit(projectRoot: string, args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: projectRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function gitHasStagedChanges(projectRoot: string): boolean {
+  try {
+    runGit(projectRoot, ["diff", "--cached", "--quiet"]);
+    return false;
+  } catch (error) {
+    const status = typeof error === "object" && error && "status" in error ? error.status : null;
+    if (status === 1) return true;
+    throw error;
+  }
+}
+
+function gitHasRemote(projectRoot: string): boolean {
+  return runGit(projectRoot, ["remote"]).trim().length > 0;
+}
+
+function commitTypeForTask(task: CommitPromptTask | null): string {
+  if (!task) return "chore";
+  const intent = inferTaskIntent({
+    taskIntent: task.taskIntent,
+    title: task.title,
+    description: task.description,
+    roadmapAlias: task.roadmapAlias,
+    tags: task.tags,
+  });
+  switch (intent) {
+    case "fix":
+      return "fix";
+    case "audit":
+    case "spike":
+      return "docs";
+    case "tests":
+      return "test";
+    case "feature":
+      return "feat";
+    default:
+      return "chore";
+  }
+}
+
+function commitSubjectForTask(task: CommitPromptTask | null): string {
+  const type = commitTypeForTask(task);
+  const rawTitle = task?.title?.trim() || "update project";
+  const normalizedTitle = rawTitle
+    .replace(/[`"'“”‘’]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+  const subject = `${type}: ${normalizedTitle || "update project"}`;
+  return subject.length <= 72 ? subject : subject.slice(0, 69).trimEnd();
+}
+
+function stageCommitContent(input: { projectRoot: string; task: CommitPromptTask | null }): {
+  blocked?: string;
+} {
+  const { projectRoot, task } = input;
+  if (!task || !isRiskyTask(task)) {
+    runGit(projectRoot, ["add", "-A"]);
+    return {};
+  }
+
+  const taskIntent = inferTaskIntent({
+    taskIntent: task.taskIntent,
+    title: task.title,
+    description: task.description,
+    roadmapAlias: task.roadmapAlias,
+    tags: task.tags,
+  });
+  if (taskIntent === "spike") {
+    runGit(projectRoot, ["add", "-A"]);
+    return {};
+  }
+
+  const reportArtifactPath = task.description
+    ? parseExpectedAuditReportArtifactPath(task.description)
+    : null;
+  if (!reportArtifactPath) {
+    return {
+      blocked:
+        "Commit blocked: risky audit/review/discovery task is missing a declared report artifact path.",
+    };
+  }
+
+  runGit(projectRoot, ["restore", "--staged", "."]);
+  runGit(projectRoot, ["add", "--", reportArtifactPath]);
+  return {};
+}
+
 /**
- * Fire-and-forget entry point: run the commit workflow via the shared runtime
- * in the project root. Returns a structured result so the caller can broadcast
+ * Fire-and-forget entry point: perform the commit workflow deterministically in
+ * the project root. Returns a structured result so the caller can broadcast
  * success/failure over WS. Never throws.
  */
 export async function runCommitQuery(input: RunCommitQueryInput): Promise<RunCommitQueryResult> {
@@ -190,7 +279,6 @@ export async function runCommitQuery(input: RunCommitQueryInput): Promise<RunCom
 
   const { git } = getProjectConfig(executionRoot);
   const shouldPush = git.enabled && !git.skip_push_after_commit;
-  const prompt = buildCommitPromptForTask(shouldPush, task ?? null);
 
   log.info(
     {
@@ -200,27 +288,26 @@ export async function runCommitQuery(input: RunCommitQueryInput): Promise<RunCom
       sourceProjectRoot: project.rootPath,
       skipPushAfterCommit: git.skip_push_after_commit,
       shouldPush,
-      promptLength: prompt.length,
     },
-    "Starting commit runtime run",
+    "Starting deterministic commit flow",
   );
 
   try {
-    const { result } = await runApiRuntimeOneShot({
-      projectId,
-      projectRoot: executionRoot,
-      taskId,
-      prompt,
-      workflowKind: "commit",
-      fallbackSlashCommand: "/aif-commit",
-      systemPromptAppend: PROJECT_SCOPE_APPEND,
-      usageContext: { source: UsageSource.COMMIT },
-    });
+    const stageResult = stageCommitContent({ projectRoot: executionRoot, task: task ?? null });
+    if (stageResult.blocked) {
+      log.warn({ projectId, taskId, reason: stageResult.blocked }, "Commit flow blocked");
+      return { ok: false, error: stageResult.blocked };
+    }
 
-    // Post-run drift check: the commit subagent runs git directly, so a
-    // mid-run `git checkout` (rogue skill, bad fallback) would land the
-    // commit on the wrong branch. Surface the drift instead of silently
-    // returning ok.
+    if (!gitHasStagedChanges(executionRoot)) {
+      log.info({ projectId, taskId }, "Commit flow found no staged changes");
+      return { ok: true };
+    }
+
+    const subject = commitSubjectForTask(task ?? null);
+    const body = taskId ? `AIF task: ${taskId}` : "AIF project commit";
+    runGit(executionRoot, ["commit", "-m", subject, "-m", body]);
+
     if (task?.branchName && !task.isFix) {
       try {
         assertCurrentBranch(executionRoot, task.branchName);
@@ -238,19 +325,25 @@ export async function runCommitQuery(input: RunCommitQueryInput): Promise<RunCom
       }
     }
 
+    const pushed = shouldPush && gitHasRemote(executionRoot);
+    if (pushed) {
+      runGit(executionRoot, ["push"]);
+    }
+
     log.info(
       {
         projectId,
         taskId,
         shouldPush,
-        outputPreview: result.outputText?.slice(0, 200) ?? "",
+        pushed,
+        subject,
       },
-      "Commit runtime run completed successfully",
+      "Deterministic commit flow completed successfully",
     );
     return { ok: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log.error({ err, projectId, taskId }, "Commit runtime error");
+    log.error({ err, projectId, taskId }, "Deterministic commit flow error");
     return { ok: false, error: message };
   }
 }

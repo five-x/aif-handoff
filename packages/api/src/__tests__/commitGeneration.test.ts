@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockRunApiRuntimeOneShot = vi.fn();
+const mockExecFileSync = vi.fn();
 const mockFindProjectById = vi.fn();
 const mockFindTaskById = vi.fn();
 const mockGetProjectConfig = vi.fn();
 const mockRestorePersistedBranch = vi.fn();
 const mockAssertCurrentBranch = vi.fn();
 
-vi.mock("../services/runtime.js", () => ({
-  runApiRuntimeOneShot: (...args: unknown[]) => mockRunApiRuntimeOneShot(...args),
+vi.mock("node:child_process", () => ({
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 
 vi.mock("@aif/data", () => ({
@@ -118,7 +118,7 @@ describe("buildCommitPrompt", () => {
 
 describe("runCommitQuery", () => {
   beforeEach(() => {
-    mockRunApiRuntimeOneShot.mockReset();
+    mockExecFileSync.mockReset();
     mockFindProjectById.mockReset();
     mockFindTaskById.mockReset();
     mockGetProjectConfig.mockReset();
@@ -128,26 +128,39 @@ describe("runCommitQuery", () => {
     mockFindTaskById.mockReturnValue(null);
   });
 
+  function mockSuccessfulGit(options: { stagedChanges?: boolean; remote?: string } = {}) {
+    const stagedChanges = options.stagedChanges ?? true;
+    const remote = options.remote ?? "";
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      const key = args.join(" ");
+      if (key === "diff --cached --quiet" && stagedChanges) {
+        const error = new Error("has staged changes") as Error & { status: number };
+        error.status = 1;
+        throw error;
+      }
+      if (key === "remote") return remote;
+      return "";
+    });
+  }
+
   it("returns ok:false when project not found", async () => {
     mockFindProjectById.mockReturnValue(undefined);
     const res = await runCommitQuery({ projectId: "missing" });
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/Project not found/);
-    expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 
-  it("sends push-enabled prompt when skip_push_after_commit=false", async () => {
+  it("creates exactly one deterministic commit and skips push when no remote exists", async () => {
     mockGetProjectConfig.mockReturnValue(gitConfig(false));
-    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "ok" }, context: {} });
+    mockSuccessfulGit();
     const res = await runCommitQuery({ projectId: "p1", taskId: "t1" });
     expect(res.ok).toBe(true);
-    expect(mockRunApiRuntimeOneShot).toHaveBeenCalledTimes(1);
-    const callArg = mockRunApiRuntimeOneShot.mock.calls[0][0];
-    expect(callArg.workflowKind).toBe("commit");
-    expect(callArg.fallbackSlashCommand).toBe("/aif-commit");
-    expect(callArg.prompt).toContain("git add -A");
-    expect(callArg.prompt).toContain("git push");
-    expect(callArg.prompt).not.toMatch(/Do NOT push/i);
+    const gitArgs = mockExecFileSync.mock.calls.map((call) => call[1]);
+    expect(gitArgs).toContainEqual(["add", "-A"]);
+    expect(gitArgs).toContainEqual(["commit", "-m", "chore: update project", "-m", "AIF task: t1"]);
+    expect(gitArgs.filter((args) => args[0] === "commit")).toHaveLength(1);
+    expect(gitArgs.some((args) => args[0] === "push")).toBe(false);
   });
 
   it("restores persisted task branch via restorePersistedBranch before commit runtime starts", async () => {
@@ -158,7 +171,7 @@ describe("runCommitQuery", () => {
       branchName: "feature/task-title-t1",
       isFix: false,
     });
-    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "ok" }, context: {} });
+    mockSuccessfulGit();
 
     const res = await runCommitQuery({ projectId: "p1", taskId: "t1" });
 
@@ -169,7 +182,7 @@ describe("runCommitQuery", () => {
       persistedBranchName: "feature/task-title-t1",
     });
     expect(mockRestorePersistedBranch.mock.invocationCallOrder[0]).toBeLessThan(
-      mockRunApiRuntimeOneShot.mock.invocationCallOrder[0],
+      mockExecFileSync.mock.invocationCallOrder[0],
     );
   });
 
@@ -189,20 +202,31 @@ describe("runCommitQuery", () => {
 
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/config drift/);
-    expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 
-  it("sends no-push prompt when skip_push_after_commit=true", async () => {
+  it("does not push when skip_push_after_commit=true", async () => {
     mockGetProjectConfig.mockReturnValue(gitConfig(true));
-    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "ok" }, context: {} });
+    mockSuccessfulGit({ remote: "origin\n" });
     const res = await runCommitQuery({ projectId: "p1" });
     expect(res.ok).toBe(true);
-    const callArg = mockRunApiRuntimeOneShot.mock.calls[0][0];
-    expect(callArg.prompt).toMatch(/Do NOT push/i);
-    expect(callArg.prompt).not.toMatch(/\brun `git push`/);
+    const gitArgs = mockExecFileSync.mock.calls.map((call) => call[1]);
+    expect(gitArgs.some((args) => args[0] === "push")).toBe(false);
+    expect(gitArgs.some((args) => args[0] === "remote")).toBe(false);
   });
 
-  it("uses report-only staging in runtime prompt for risky report tasks", async () => {
+  it("pushes after committing when push is enabled and a remote exists", async () => {
+    mockGetProjectConfig.mockReturnValue(gitConfig(false));
+    mockSuccessfulGit({ remote: "origin\n" });
+
+    const res = await runCommitQuery({ projectId: "p1" });
+
+    expect(res.ok).toBe(true);
+    const gitArgs = mockExecFileSync.mock.calls.map((call) => call[1]);
+    expect(gitArgs).toContainEqual(["push"]);
+  });
+
+  it("uses report-only staging for risky report tasks", async () => {
     mockGetProjectConfig.mockReturnValue(gitConfig(true));
     mockFindTaskById.mockReturnValue({
       id: "t-audit",
@@ -212,18 +236,18 @@ describe("runCommitQuery", () => {
       branchName: null,
       isFix: false,
     });
-    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "ok" }, context: {} });
+    mockSuccessfulGit();
 
     const res = await runCommitQuery({ projectId: "p1", taskId: "t-audit" });
 
     expect(res.ok).toBe(true);
-    const callArg = mockRunApiRuntimeOneShot.mock.calls[0][0];
-    expect(callArg.prompt).toContain("git add -- audit/runtime-quality.md");
-    expect(callArg.prompt).toContain("Leave unrelated changed files dirty and unstaged");
-    expect(callArg.prompt).toContain("Do NOT run `git add -A`");
+    const gitArgs = mockExecFileSync.mock.calls.map((call) => call[1]);
+    expect(gitArgs).toContainEqual(["restore", "--staged", "."]);
+    expect(gitArgs).toContainEqual(["add", "--", "audit/runtime-quality.md"]);
+    expect(gitArgs).not.toContainEqual(["add", "-A"]);
   });
 
-  it("blocks broad staging in runtime prompt for risky tasks missing a report artifact", async () => {
+  it("blocks risky tasks missing a report artifact before staging", async () => {
     mockGetProjectConfig.mockReturnValue(gitConfig(true));
     mockFindTaskById.mockReturnValue({
       id: "t-audit-missing-report",
@@ -233,26 +257,26 @@ describe("runCommitQuery", () => {
       branchName: null,
       isFix: false,
     });
-    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "blocked" }, context: {} });
 
     const res = await runCommitQuery({ projectId: "p1", taskId: "t-audit-missing-report" });
 
-    expect(res.ok).toBe(true);
-    const callArg = mockRunApiRuntimeOneShot.mock.calls[0][0];
-    expect(callArg.prompt).toContain("Do not stage or commit anything");
-    expect(callArg.prompt).not.toContain("Stage ALL changes");
-    expect(callArg.prompt).toContain("Do NOT run `git add -A`");
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("missing a declared report artifact");
+    expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 
-  it("returns ok:false with error message when runtime throws", async () => {
+  it("returns ok:false with error message when a git command throws", async () => {
     mockGetProjectConfig.mockReturnValue(gitConfig(false));
-    mockRunApiRuntimeOneShot.mockRejectedValue(new Error("boom"));
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.join(" ") === "add -A") throw new Error("git add boom");
+      return "";
+    });
     const res = await runCommitQuery({ projectId: "p1" });
     expect(res.ok).toBe(false);
-    expect(res.error).toBe("boom");
+    expect(res.error).toBe("git add boom");
   });
 
-  it("returns ok:false when subagent switched HEAD to a different branch (post-run drift)", async () => {
+  it("returns ok:false when HEAD drifts to a different branch after commit", async () => {
     mockGetProjectConfig.mockReturnValue(gitConfig(false));
     mockFindTaskById.mockReturnValue({
       id: "t1",
@@ -260,7 +284,7 @@ describe("runCommitQuery", () => {
       branchName: "feature/task-title-t1",
       isFix: false,
     });
-    mockRunApiRuntimeOneShot.mockResolvedValue({ result: { outputText: "ok" }, context: {} });
+    mockSuccessfulGit();
     mockAssertCurrentBranch.mockImplementation(() => {
       throw new Error(
         "Branch drift detected: expected HEAD=feature/task-title-t1, actual HEAD=main.",
@@ -273,7 +297,7 @@ describe("runCommitQuery", () => {
     expect(res.error).toMatch(/Branch drift detected/);
     expect(mockAssertCurrentBranch).toHaveBeenCalledWith("/tmp/p1", "feature/task-title-t1");
     expect(mockAssertCurrentBranch.mock.invocationCallOrder[0]).toBeGreaterThan(
-      mockRunApiRuntimeOneShot.mock.invocationCallOrder[0],
+      mockExecFileSync.mock.invocationCallOrder[0],
     );
   });
 });

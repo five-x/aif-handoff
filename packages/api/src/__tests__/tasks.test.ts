@@ -4667,9 +4667,13 @@ describe("tasks API", () => {
       expect(existsSync(planFilePath)).toBe(true);
     });
 
-    it("should fire /aif-commit query when commitOnApprove=true", async () => {
+    it("should run deterministic commit flow when commitOnApprove=true", async () => {
       const db = testDb.current;
-      insertTestProject(db);
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-commit-approve-"));
+      mkdirSync(rootPath, { recursive: true });
+      initGitProject(rootPath);
+      writeFileSync(join(rootPath, "feature.txt"), "feature\n", "utf8");
+      insertTestProject(db, rootPath);
       db.insert(tasks)
         .values({
           id: "ev-commit-1",
@@ -4693,7 +4697,6 @@ describe("tasks API", () => {
       expect(body.status).toBe("verified");
       await vi.waitFor(
         () => {
-          expect(mockRunApiRuntimeOneShot).toHaveBeenCalled();
           const types = vi
             .mocked(mockBroadcast)
             .mock.calls.map((c) => (c[0] as { type: string }).type);
@@ -4703,11 +4706,12 @@ describe("tasks API", () => {
         { timeout: 5_000 },
       );
 
-      const callArgs =
-        mockRunApiRuntimeOneShot.mock.calls[mockRunApiRuntimeOneShot.mock.calls.length - 1][0];
-      expect(callArgs.workflowKind).toBe("commit");
-      expect(callArgs.fallbackSlashCommand).toBe("/aif-commit");
-      expect(callArgs.prompt).toContain("git add -A");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
+      const latestCommit = execFileSync("git", ["log", "-1", "--pretty=%s"], {
+        cwd: rootPath,
+        encoding: "utf8",
+      }).trim();
+      expect(latestCommit).toBe("chore: Done commit task");
     });
 
     it("should block commitOnApprove when project config has deterministic errors", async () => {
@@ -4798,9 +4802,10 @@ describe("tasks API", () => {
       expect(task?.status).toBe("done");
     });
 
-    it("should broadcast task:commit_failed when runtime throws", async () => {
+    it("should broadcast task:commit_failed when deterministic git commit fails", async () => {
       const db = testDb.current;
-      insertTestProject(db);
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-commit-fail-"));
+      insertTestProject(db, rootPath);
       db.insert(tasks)
         .values({
           id: "ev-commit-fail",
@@ -4811,7 +4816,6 @@ describe("tasks API", () => {
         .run();
 
       mockRunApiRuntimeOneShot.mockClear();
-      mockRunApiRuntimeOneShot.mockRejectedValueOnce(new Error("runtime boom"));
       vi.mocked(mockBroadcast).mockClear();
 
       const res = await app.request("/tasks/ev-commit-fail/events", {
@@ -4835,10 +4839,11 @@ describe("tasks API", () => {
       >;
       const failed = calls.find((c) => c[0].type === "task:commit_failed");
       expect(failed).toBeDefined();
-      expect((failed![0].payload as { error?: string }).error).toBe("runtime boom");
+      expect((failed![0].payload as { error?: string }).error).toContain("git add -A");
+      expect(mockRunApiRuntimeOneShot).not.toHaveBeenCalled();
     });
 
-    it("should not fire /aif-commit query when commitOnApprove is not set", async () => {
+    it("should not start commit flow when commitOnApprove is not set", async () => {
       const db = testDb.current;
       insertTestProject(db);
       db.insert(tasks)
