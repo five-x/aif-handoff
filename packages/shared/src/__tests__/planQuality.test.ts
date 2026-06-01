@@ -1254,6 +1254,49 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("task_size_split_required");
   });
 
+  it("accepts concrete smoke test plans for legacy broad smoke boundaries", () => {
+    const plan = [
+      "## Plan",
+      "- [ ] Add the focused smoke coverage in `src/app/App.test.tsx`.",
+      "- [ ] Run `npm.cmd test` and record the result.",
+      "",
+      "## aif-plan-manifest",
+      "",
+      planManifest({
+        taskId: "smoke-task",
+        scope: ["src/app/App.test.tsx"],
+        allowedChanges: ["tests"],
+        forbiddenChanges: ["report"],
+        expectedArtifacts: [{ kind: "test_delta", paths: ["src/app/App.test.tsx"] }],
+        acceptanceCriteria: [
+          {
+            id: "ac-smoke-check",
+            description:
+              "Focused smoke check fails before regression and passes for the first slice.",
+            verification: "npm.cmd test",
+          },
+        ],
+        verificationCommands: ["npm.cmd test"],
+      }),
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "smoke-task",
+        title: "Add smoke-check: project",
+        description:
+          "Add focused smoke coverage for the scaffold, configuration, and first slice.\nFile boundaries: tests/**, src/**/*.test.*, package.json\nAcceptance criteria: Focused smoke check fails before regression and passes for the first slice.\nVerification: npm.cmd test",
+        taskIntent: "feature",
+      },
+      plan,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("missing_task_specific_artifact_path");
+    expect(result.categories).not.toContain("plan_manifest_scope_mismatch");
+    expect(result.categories).not.toContain("task_size_split_required");
+  });
+
   it("requires diagnostic report path and diagnostic-only constraints", () => {
     const result = evaluateTaskPlanQuality({
       task: { title: "Audit planner output quality", description: "Discovery task." },

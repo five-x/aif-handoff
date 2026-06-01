@@ -877,6 +877,35 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toContain("npm.cmd test");
   });
 
+  it("uses deterministic implementation fallback before runtime for legacy broad smoke check plans", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-smoke-fallback-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-smoke-fallback",
+        projectId: "project-1",
+        title: "Add smoke-check: project",
+        description:
+          "Add focused smoke coverage for the scaffold, configuration, and first slice.\nFile boundaries: tests/**, src/**/*.test.*, package.json\nAcceptance criteria: Focused smoke check fails before regression and passes for the first slice.\nVerification: npm.cmd test\nDependencies: Implement project first app slice",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-smoke-fallback",
+      })
+      .run();
+
+    await runPlanner("task-smoke-fallback", projectRoot);
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-smoke-fallback")).get();
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain("src/app/App.test.tsx");
+    expect(updatedTask?.plan).not.toContain("tests/**");
+    expect(updatedTask?.plan).not.toContain("package.json");
+    expect(updatedTask?.plan).toContain("npm.cmd test");
+  });
+
   it("uses deterministic implementation fallback for .env.example roadmap children", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-env-fallback-"));

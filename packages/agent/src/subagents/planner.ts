@@ -138,6 +138,11 @@ function isFirstAppSliceTask(task: PlannerTask): boolean {
   );
 }
 
+function isSmokeCheckTask(task: PlannerTask): boolean {
+  const text = `${task.title}\n${task.description ?? ""}`;
+  return /\b(?:smoke[-\s]?(?:check|coverage|test)|focused\s+smoke\s+coverage)\b/i.test(text);
+}
+
 function normalizeFirstAppSliceScopePath(path: string): string | null {
   const normalized = path.toLowerCase();
   if (normalized === "src/app" || normalized === "src/app/**") return "src/app/App.tsx";
@@ -151,6 +156,15 @@ function normalizeFirstAppSliceScopePath(path: string): string | null {
     return "src/services/sampleData.ts";
   }
   if (normalized === "src" || normalized === "src/**/*.test.*") return "src/app/App.test.tsx";
+  return null;
+}
+
+function normalizeSmokeCheckScopePath(path: string): string | null {
+  const normalized = path.toLowerCase();
+  if (normalized === "src/**/*.test.*" || normalized === "tests" || normalized === "tests/**") {
+    return "src/app/App.test.tsx";
+  }
+  if (normalized === "package.json") return null;
   return null;
 }
 
@@ -169,6 +183,9 @@ function normalizeDeterministicPlanScope(task: PlannerTask, fileBoundaries: stri
         ? normalizeFirstAppSliceScopePath(raw)
         : null;
       if (firstAppSlicePath) return [firstAppSlicePath];
+      const smokeCheckPath = isSmokeCheckTask(task) ? normalizeSmokeCheckScopePath(raw) : null;
+      if (smokeCheckPath) return [smokeCheckPath];
+      if (isSmokeCheckTask(task) && raw.toLowerCase() === "package.json") return [];
       const normalizedEntry = normalizeDeterministicPlanScopePath(entry);
       return normalizedEntry ? [normalizedEntry] : [];
     })

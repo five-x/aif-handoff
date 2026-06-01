@@ -1466,7 +1466,13 @@ function validatePlanManifest(input: {
     const normalizedScope = manifest.scope.map(normalizePath);
     const nonReportTaskPaths = input.taskPaths.filter((path) => !isAuditReportArtifactPath(path));
     const missingScopePaths = nonReportTaskPaths.filter(
-      (path) => !normalizedScope.some((scopePath) => planPathSatisfiesTaskPath(scopePath, path)),
+      (path) =>
+        !normalizedScope.some((scopePath) => planPathSatisfiesTaskPath(scopePath, path)) &&
+        !legacySmokeBoundaryCoveredByConcreteTest({
+          task: input.task,
+          manifest,
+          taskPath: path,
+        }),
     );
     if (missingScopePaths.length > 0) {
       addIssue(
@@ -1988,6 +1994,38 @@ function composeBoundaryAliasAppearsInText(pathPattern: string, text: string): b
   const normalizedPattern = normalizePath(pathPattern).toLowerCase();
   return (
     /^(?:docker-)?compose\*\.ya?ml$/.test(normalizedPattern) && /docker-compose\.ya?ml/i.test(text)
+  );
+}
+
+function isLegacySmokeCheckTask(task: TaskPlanQualityTask): boolean {
+  return /\b(?:smoke[-\s]?(?:check|coverage|test)|focused\s+smoke\s+coverage)\b/i.test(
+    combinedTaskText(task),
+  );
+}
+
+function manifestHasConcreteTestScope(manifest: Partial<AifPlanManifest>): boolean {
+  return collectManifestBoundaryPaths(manifest).normalized.some(
+    (path) => classifyManifestArtifactText(path) === "tests" && !isTaskSizeBroadBoundaryPath(path),
+  );
+}
+
+function legacySmokeBoundaryCoveredByConcreteTest(input: {
+  task: TaskPlanQualityTask;
+  manifest: Partial<AifPlanManifest>;
+  taskPath: string;
+}): boolean {
+  if (!isLegacySmokeCheckTask(input.task)) return false;
+  if (!manifestHasConcreteTestScope(input.manifest)) return false;
+
+  const normalizedTaskPath = normalizeTaskSizeBoundaryPath(input.taskPath);
+  return (
+    normalizedTaskPath === "package.json" ||
+    normalizedTaskPath === "test" ||
+    normalizedTaskPath === "test/**" ||
+    normalizedTaskPath === "tests" ||
+    normalizedTaskPath === "tests/**" ||
+    normalizedTaskPath === "__tests__" ||
+    normalizedTaskPath === "__tests__/**"
   );
 }
 
