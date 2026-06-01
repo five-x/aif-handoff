@@ -4286,6 +4286,46 @@ describe("qwen-local-agent adapter", () => {
     expect(mutatingBuildScript.ok).toBe(false);
     expect(mutatingBuildScript.error).toContain("mutates dependencies");
   });
+  it("denies long-running package-manager dev server scripts", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-dev-server-deny-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          dev: "vite --host 0.0.0.0",
+          build: "vite --host 0.0.0.0",
+          test: "vitest",
+        },
+      }),
+      "utf8",
+    );
+
+    const devScript = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["run", "dev"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+    const longRunningBuildScript = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["run", "build"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+    const watchTest = await executeQwenLocalTool(
+      "run_shell",
+      {
+        command: process.platform === "win32" ? "npm.cmd" : "npm",
+        args: ["test", "--", "--watch"],
+      },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+
+    expect(devScript.ok).toBe(false);
+    expect(devScript.error).toContain("long-running dev/watch/server scripts");
+    expect(longRunningBuildScript.ok).toBe(false);
+    expect(longRunningBuildScript.error).toContain("long-running dev/watch/server process");
+    expect(watchTest.ok).toBe(false);
+    expect(watchTest.error).toContain("long-running dev/watch/server process");
+  });
   it("does not execute git hooks during git_commit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-git-hooks-"));
     await expectSpawnOk(root, ["init", "--initial-branch=main"]);

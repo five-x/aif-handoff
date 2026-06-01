@@ -909,8 +909,19 @@ const DISALLOWED_PACKAGE_MANAGER_SCRIPT_NAMES = new Set([
   "update",
   "upgrade",
 ]);
+const LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_NAMES = new Set([
+  "dev",
+  "preview",
+  "serve",
+  "start",
+  "watch",
+]);
 const DEPENDENCY_MUTATION_SCRIPT_PATTERN =
   /\b(?:npm(?:\.cmd)?|pnpm|yarn|bun)\s+(?:add|audit|ci|i|install|pack|publish|rebuild|remove|uninstall|update|upgrade)\b|\bnpx\b/i;
+const LONG_RUNNING_PACKAGE_MANAGER_ARG_PATTERN =
+  /^(?:--watch(?:all)?|-w|--host|--serve|--open|--inspect(?:-brk)?|--listen)$/i;
+const LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_PATTERN =
+  /(?:^|[;&|]\s*)(?:vite|next\s+dev|nuxt\s+dev|astro\s+dev|webpack\s+serve|vite\s+preview|nodemon|storybook\s+dev)\b(?![^\n]*\bbuild\b)|\b(?:--watch|--watchall|-w|--host|--serve|vite\s+preview|webpack\s+serve)\b/i;
 function packageManagerScriptName(args) {
   const verb = args[0];
   if (verb === "test") return "test";
@@ -969,6 +980,7 @@ function validatePackageManagerShellArgs(command, args) {
     validateNpmDependencyHydrationArgs(command, args);
     return;
   }
+  assertNoLongRunningPackageManagerArgs(command, args);
   if (verb === "test") return;
   if (verb === "run") {
     if (!args[1] || args[1].startsWith("-")) {
@@ -978,7 +990,15 @@ function validatePackageManagerShellArgs(command, args) {
         "permission",
       );
     }
-    if (DISALLOWED_PACKAGE_MANAGER_SCRIPT_NAMES.has(args[1].toLowerCase())) {
+    const scriptName = args[1].toLowerCase();
+    if (LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_NAMES.has(scriptName)) {
+      throw new RuntimeExecutionError(
+        `${command} run ${args[1]} is not supported; long-running dev/watch/server scripts require an explicit operator workflow`,
+        undefined,
+        "permission",
+      );
+    }
+    if (DISALLOWED_PACKAGE_MANAGER_SCRIPT_NAMES.has(scriptName)) {
       throw new RuntimeExecutionError(
         `${command} run ${args[1]} is not supported; dependency-management scripts require an explicit operator workflow`,
         undefined,
@@ -989,6 +1009,15 @@ function validatePackageManagerShellArgs(command, args) {
   }
   throw new RuntimeExecutionError(
     `${command} supports only test or run <script>`,
+    undefined,
+    "permission",
+  );
+}
+function assertNoLongRunningPackageManagerArgs(command, args) {
+  const deniedArg = args.find((arg) => LONG_RUNNING_PACKAGE_MANAGER_ARG_PATTERN.test(arg));
+  if (!deniedArg) return;
+  throw new RuntimeExecutionError(
+    `${command} ${args.join(" ")} is not supported because ${deniedArg} can start a long-running dev/watch/server process; run bounded build/test/lint verification instead`,
     undefined,
     "permission",
   );
@@ -1018,6 +1047,13 @@ async function validatePackageManagerProjectScript(command, args, cwd) {
   if (DEPENDENCY_MUTATION_SCRIPT_PATTERN.test(script)) {
     throw new RuntimeExecutionError(
       `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} mutates dependencies or executes package-manager install/update commands`,
+      undefined,
+      "permission",
+    );
+  }
+  if (LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_PATTERN.test(script)) {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} starts a long-running dev/watch/server process; run bounded build/test/lint verification instead`,
       undefined,
       "permission",
     );
