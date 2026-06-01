@@ -67,6 +67,11 @@ function isRetryableMalformedReviewOutputBlock(
   );
 }
 
+function isRetryableSequentialBranchDependencyBlock(task: Pick<Task, "blockedReason">): boolean {
+  const reason = task.blockedReason?.toLowerCase() ?? "";
+  return reason.startsWith("sequential_branch_dependency_blocked:");
+}
+
 function isRetryableOperatorInputHold(task: Pick<Task, "blockedReason">): boolean {
   const reason = task.blockedReason?.toLowerCase() ?? "";
   return reason.startsWith("operator_input_required:") || reason.startsWith("operator_cancelled:");
@@ -207,6 +212,7 @@ export function applyHumanTaskEvent(
         isManualReviewBlockedTask(task) &&
         !isRetryablePlanQualityBlock(task) &&
         !isRetryableMalformedReviewOutputBlock(task) &&
+        !isRetryableSequentialBranchDependencyBlock(task) &&
         !allowOperatorInputRetry
       ) {
         return {

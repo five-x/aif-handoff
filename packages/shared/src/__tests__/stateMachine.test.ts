@@ -283,6 +283,25 @@ describe("task state machine", () => {
     }
   });
 
+  it("allows retry_from_blocked for resolved sequential branch dependency blocks", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "backlog" as const,
+      blockedReason:
+        "sequential_branch_dependency_blocked: prior task task-a completed on branch feature/task-a, but that branch is not merged into base master; merge or reconcile it before starting task-b.",
+      manualReviewRequired: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("backlog");
+      expect(result.patch.blockedReason).toBeNull();
+      expect(result.patch.blockedFromStatus).toBeNull();
+      expect(result.patch.manualReviewRequired).toBe(false);
+    }
+  });
+
   it("rejects retry_from_blocked for manual-review blocked reasons", () => {
     const blocked = {
       ...makeTask("blocked_external"),
