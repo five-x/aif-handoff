@@ -56,6 +56,34 @@ describe("implementation manifest extraction", () => {
     );
   });
 
+  it("extracts one immediately labeled bare JSON manifest when the fence is omitted", () => {
+    const text = `Done.
+
+aif-implementation-manifest
+{
+  "version": 1,
+  "taskId": "task-1",
+  "intent": "feature",
+  "diffSummary": { "summary": "No changes required." }
+}`;
+
+    expect(extractImplementationManifestBlock(text)).toBe(`{
+  "version": 1,
+  "taskId": "task-1",
+  "intent": "feature",
+  "diffSummary": { "summary": "No changes required." }
+}`);
+  });
+
+  it("does not extract arbitrary later JSON after a manifest label with prose in between", () => {
+    const text = `The aif-implementation-manifest should be returned later.
+
+Here is unrelated JSON:
+{"version":1,"taskId":"task-1","intent":"feature"}`;
+
+    expect(extractImplementationManifestBlock(text)).toBeNull();
+  });
+
   it("normalizes common model-shaped manifests without trusting weak evidence", () => {
     const raw = JSON.stringify({
       version: 1,

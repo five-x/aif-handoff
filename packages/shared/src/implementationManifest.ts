@@ -211,6 +211,61 @@ function parseJsonObject(raw: string): Record<string, unknown> | null {
   }
 }
 
+function extractBalancedJsonObject(text: string, startIndex: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+      } else if (char === "\\") {
+        escaping = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(startIndex, index + 1);
+      if (depth < 0) return null;
+    }
+  }
+
+  return null;
+}
+
+function extractLabeledBareImplementationManifest(text: string): string | null {
+  const labels = [...text.matchAll(/\baif-implementation-manifest\b/gi)];
+  if (labels.length !== 1) return null;
+
+  const label = labels[0];
+  const labelEnd = (label.index ?? 0) + label[0].length;
+  const objectStart = text.indexOf("{", labelEnd);
+  if (objectStart < 0) return null;
+
+  const separator = text.slice(labelEnd, objectStart);
+  if (!/^[\s:*\-#>]*$/.test(separator)) return null;
+
+  const rawJson = extractBalancedJsonObject(text, objectStart);
+  if (!rawJson || !parseJsonObject(rawJson)) return null;
+  return rawJson.trim();
+}
+
 function parseChangedFile(value: unknown): ImplementationManifestChangedFile | null {
   if (typeof value === "string" && value.trim()) {
     return { path: normalizePath(value), status: "unknown" };
@@ -250,8 +305,10 @@ export function extractImplementationManifestBlock(text: string | null | undefin
     const nearbyPrefix = text.slice(Math.max(0, index - 240), index);
     return /\baif-implementation-manifest\b/i.test(nearbyPrefix);
   });
-  if (jsonMatches.length !== 1) return null;
-  return jsonMatches[0]?.[1]?.trim() ?? null;
+  if (jsonMatches.length > 1) return null;
+  if (jsonMatches.length === 1) return jsonMatches[0]?.[1]?.trim() ?? null;
+
+  return extractLabeledBareImplementationManifest(text);
 }
 
 export function normalizeImplementationManifestJson(rawJson: string): string | null {
