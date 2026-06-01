@@ -147,10 +147,22 @@ function isConcreteExternalOperatorInputRequest(text: string): boolean {
   );
 }
 
+function hasConcreteProductContractMismatch(text: string): boolean {
+  return (
+    /\b(?:mismatch|conflict|contradict|does not match|not match|incompatible|range|format|type|contract|schema|interface|expected|actual)\b/i.test(
+      text,
+    ) ||
+    /(?:\d+(?:[.,]\d+)?\s*(?:%|\u2013|-|to)\s*\d|\u00ab[^\u00bb]*\d[^\u00bb]*\u00bb.*\u00ab[^\u00bb]*\d[^\u00bb]*\u00bb)/i.test(
+      text,
+    )
+  );
+}
+
 function isAmbiguousProductScopeOperatorInputFinding(finding: AutoReviewFinding): boolean {
   const normalized = finding.text.replace(/^operator_input_required:\s*/i, "");
   if (!isExplicitOperatorInputFinding(finding)) return false;
   if (isConcreteExternalOperatorInputRequest(normalized)) return false;
+  if (hasConcreteProductContractMismatch(normalized)) return false;
   const asksForScopeDecision =
     /\b(confirm|clarify|decide|choose|select|which|whether|required|needed)\b|(?:подтверд|уточн|реши|выбр|какие|нужн|требу)/i.test(
       normalized,
