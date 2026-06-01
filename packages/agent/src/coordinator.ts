@@ -2497,8 +2497,22 @@ function buildOperatorInputAutoReviewBlockedReason(autoReviewState: AutoReviewSt
   return `operator_input_required: ${safeFinding}`;
 }
 
+function sanitizeAutoReviewValueForPersistence(value: unknown): unknown {
+  if (typeof value === "string") return redactProviderText(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeAutoReviewValueForPersistence(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        sanitizeAutoReviewValueForPersistence(child),
+      ]),
+    );
+  }
+  return value;
+}
+
 function sanitizeAutoReviewStateForPersistence(state: AutoReviewState): AutoReviewState {
-  return JSON.parse(redactProviderText(JSON.stringify(state))) as AutoReviewState;
+  return sanitizeAutoReviewValueForPersistence(state) as AutoReviewState;
 }
 
 function terminalizeRoadmapSourceReportAsInconclusive(input: {

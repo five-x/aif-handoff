@@ -2136,6 +2136,7 @@ describe("coordinator", () => {
 
   it("should block review with sanitized operator input hold", async () => {
     const db = testDb.current;
+    const longClosureEvidence = `review output included access_token=oauth-token ${"partial repository state ".repeat(30)}`;
     db.insert(tasks)
       .values({
         id: "task-review-operator-input",
@@ -2167,7 +2168,7 @@ describe("coordinator", () => {
             id: "op-input",
             source: "code_review",
             text: "operator_input_required: provide source account id access_token=oauth-token",
-            closureEvidence: "review output included access_token=oauth-token",
+            closureEvidence: longClosureEvidence,
           },
         ],
       },
