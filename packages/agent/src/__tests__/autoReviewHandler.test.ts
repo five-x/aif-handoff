@@ -193,6 +193,62 @@ describe("handleAutoReviewGate", () => {
     );
   });
 
+  it("returns review_retry_requested for review-gate-only structured contract failures", async () => {
+    mockFindTaskById.mockReturnValue({
+      id: "task-1",
+      autoMode: true,
+      reviewComments: "structured contract failed",
+      reviewIterationCount: 1,
+      maxReviewIterations: 4,
+      autoReviewState: null,
+    });
+    vi.mocked(evaluateReviewCommentsForAutoMode).mockResolvedValue({
+      status: "request_changes",
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 2,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      blockingFindings: [
+        {
+          id: "structured-review-contract",
+          source: "review_gate",
+          text: "Structured review contract not satisfied: missing security coverage rows.",
+        },
+      ],
+      fixesMarkdown:
+        "- [structured-review-contract] review_gate | Structured review contract not satisfied: missing security coverage rows.",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 2,
+        findings: [
+          {
+            id: "structured-review-contract",
+            source: "review_gate",
+            text: "Structured review contract not satisfied: missing security coverage rows.",
+          },
+        ],
+      },
+    });
+
+    const result = await handleAutoReviewGate(baseInput);
+
+    expect(result).toEqual({
+      status: "review_retry_requested",
+      currentIteration: 2,
+      metrics: expect.objectContaining({ newBlockingCount: 1 }),
+      autoReviewState: expect.objectContaining({
+        iteration: 2,
+        findings: [expect.objectContaining({ id: "structured-review-contract" })],
+      }),
+    });
+    expect(mockCreateTaskComment.mock.calls[0][0].message).toContain("Outcome: request_changes");
+  });
+
   it("adds a rework snapshot for roadmap audit artifacts", async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "aif-auto-review-snapshot-"));
     mkdirSync(join(projectRoot, "audit"), { recursive: true });

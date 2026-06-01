@@ -43,6 +43,12 @@ export type ReviewGateOutcome =
       autoReviewState: AutoReviewState;
     }
   | {
+      status: "review_retry_requested";
+      currentIteration: number;
+      metrics: ReviewGateMetrics;
+      autoReviewState: AutoReviewState;
+    }
+  | {
       status: "manual_review_required";
       currentIteration: number;
       metrics: ReviewGateMetrics;
@@ -148,7 +154,12 @@ function buildSummaryComment(input: {
 }
 
 function buildActivityMessage(input: {
-  outcome: "accepted" | "rework_requested" | "manual_review_required" | "operator_input_required";
+  outcome:
+    | "accepted"
+    | "rework_requested"
+    | "review_retry_requested"
+    | "manual_review_required"
+    | "operator_input_required";
   metrics: ReviewGateMetrics;
   currentIteration: number;
   maxIterations: number;
@@ -258,6 +269,20 @@ function stalledFindings(
       typeof finding.streak === "number" &&
       Number.isInteger(finding.streak) &&
       finding.streak >= threshold,
+  );
+}
+
+function isReviewStageRetryFinding(finding: AutoReviewState["findings"][number]): boolean {
+  return (
+    finding.source === "review_gate" &&
+    /\bStructured review (?:contract not satisfied|parse error)\b/i.test(finding.text)
+  );
+}
+
+function shouldRetryReviewStage(autoReviewState: AutoReviewState): boolean {
+  return (
+    autoReviewState.findings.length > 0 &&
+    autoReviewState.findings.every((finding) => isReviewStageRetryFinding(finding))
   );
 }
 
@@ -491,6 +516,49 @@ export async function handleAutoReviewGate(
       iteration: currentIteration,
       autoReviewState: reviewGate.autoReviewState,
     });
+    if (shouldRetryReviewStage(reviewGate.autoReviewState)) {
+      createTaskComment({
+        taskId: input.taskId,
+        author: "agent",
+        message: buildSummaryComment({
+          outcome: "request_changes",
+          metrics: reviewGate.metrics,
+          currentIteration,
+          maxIterations,
+          fixesMarkdown: reviewGate.fixesMarkdown,
+        }),
+        attachments: [],
+      });
+
+      log.info(
+        {
+          taskId: input.taskId,
+          currentIteration,
+          maxIterations,
+          metrics: reviewGate.metrics,
+        },
+        "Auto review requested reviewer-stage retry",
+      );
+
+      logActivity(
+        input.taskId,
+        "Agent",
+        buildActivityMessage({
+          outcome: "review_retry_requested",
+          metrics: reviewGate.metrics,
+          currentIteration,
+          maxIterations,
+        }),
+      );
+
+      return {
+        status: "review_retry_requested",
+        currentIteration,
+        metrics: reviewGate.metrics,
+        autoReviewState,
+      };
+    }
+
     createTaskComment({
       taskId: input.taskId,
       author: "agent",

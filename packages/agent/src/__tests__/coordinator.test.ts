@@ -2134,6 +2134,54 @@ describe("coordinator", () => {
     expect(task!.reworkRequested).toBe(true);
   });
 
+  it("should retry reviewer stage for review-only structured contract failures", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-review-contract-retry",
+        projectId: "test-project",
+        title: "Review contract retry",
+        status: "review",
+        autoMode: true,
+        reviewComments: "## Auto Review Metadata\n- Contract Failure: structured_review_sidecar",
+      })
+      .run();
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "review_retry_requested",
+      currentIteration: 1,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 1,
+        findings: [
+          {
+            id: "structured-review-contract",
+            source: "review_gate",
+            text: "Structured review contract not satisfied.",
+          },
+        ],
+      },
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-review-contract-retry")).get();
+    expect(task!.status).toBe("review");
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.reviewIterationCount).toBe(1);
+    expect(task!.autoReviewStateJson).toContain("structured-review-contract");
+  });
+
   it("should block review with sanitized operator input hold", async () => {
     const db = testDb.current;
     const longClosureEvidence = `review output included access_token=oauth-token ${"partial repository state ".repeat(30)}`;

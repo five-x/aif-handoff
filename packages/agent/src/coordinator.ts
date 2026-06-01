@@ -3792,6 +3792,35 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         return true;
       }
 
+      if (outcome?.status === "review_retry_requested") {
+        clearTaskRuntimeLimitSnapshot(task.id);
+        updateTaskStatus(
+          task.id,
+          "review",
+          {
+            blockedReason: null,
+            blockedFromStatus: null,
+            retryAfter: null,
+            retryCount: 0,
+            reworkRequested: false,
+            reviewIterationCount: outcome.currentIteration,
+            manualReviewRequired: false,
+            autoReviewState: outcome.autoReviewState,
+          },
+          { title: taskTitle, fromStatus: stage.inProgress },
+        );
+        log.info(
+          {
+            taskId: task.id,
+            from: stage.inProgress,
+            to: "review",
+            reviewIteration: outcome.currentIteration,
+          },
+          "Auto review gate requested reviewer-stage retry",
+        );
+        return true;
+      }
+
       if (outcome?.status === "accepted") {
         latestTask = findTaskById(task.id) ?? latestTask;
         if (
