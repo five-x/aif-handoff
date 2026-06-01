@@ -5403,6 +5403,7 @@ describe("tasks API", () => {
           blockedReason:
             "manual_review_required: malformed_review_output_fallback; closure evidence gap for unresolved blockers.",
           manualReviewRequired: true,
+          reviewComments: "## Blocking Findings\n- stale malformed reviewer blocker",
         })
         .run();
 
@@ -5417,6 +5418,7 @@ describe("tasks API", () => {
       expect(body.status).toBe("review");
       expect(body.manualReviewRequired).toBe(false);
       expect(body.blockedReason).toBeNull();
+      expect(body.reviewComments).toBeNull();
       const persisted = db
         .select()
         .from(tasks)
@@ -5424,6 +5426,7 @@ describe("tasks API", () => {
         .get();
       expect(persisted?.status).toBe("review");
       expect(persisted?.manualReviewRequired).toBe(false);
+      expect(persisted?.reviewComments).toBeNull();
     });
 
     it("should allow retry_from_blocked for exhausted plan quality guard blocks", async () => {

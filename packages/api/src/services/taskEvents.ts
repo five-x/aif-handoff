@@ -754,6 +754,11 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
   }
   const { event } = input;
   const operatorInputRetry = event === "retry_from_blocked" && isOperatorInputHold(task);
+  const malformedReviewOutputRetry =
+    event === "retry_from_blocked" &&
+    task.blockedFromStatus === "review" &&
+    (task.blockedReason?.toLowerCase().includes("malformed_review_output_fallback") === true ||
+      task.blockedReason?.toLowerCase().includes("malformed_structured_review_contract") === true);
   if (event !== "cancel_task" && isOperatorCancelledTask(task) && !operatorInputRetry) {
     return {
       ok: false,
@@ -962,6 +967,7 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
   setTaskFields(task.id, {
     ...transition.patch,
     ...(operatorInputRetry ? { paused: false } : {}),
+    ...(malformedReviewOutputRetry ? { reviewComments: null } : {}),
     lastHeartbeatAt: nowIso,
     updatedAt: nowIso,
   });
