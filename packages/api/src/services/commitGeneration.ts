@@ -61,6 +61,7 @@ type CommitPromptTask = {
   id: string;
   title: string;
   description?: string | null;
+  planPath?: string | null;
   taskIntent?: TaskIntent | null;
   tags?: string[] | string | null;
   roadmapAlias?: string | null;
@@ -160,6 +161,43 @@ function gitHasRemote(projectRoot: string): boolean {
   return runGit(projectRoot, ["remote"]).trim().length > 0;
 }
 
+function listStagedFiles(projectRoot: string): string[] {
+  const output = runGit(projectRoot, ["diff", "--cached", "--name-only", "-z"]);
+  return output
+    .split("\0")
+    .map((path) => path.trim())
+    .filter(Boolean);
+}
+
+function normalizeRepoPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\/+/, "");
+}
+
+function isInternalAifCommitExcludedPath(path: string, task: CommitPromptTask | null): boolean {
+  const normalized = normalizeRepoPath(path);
+  const taskPlanPath = normalizeRepoPath(task?.planPath ?? ".ai-factory/PLAN.md");
+  const name = normalized.split("/").at(-1)?.toLowerCase() ?? "";
+  if (normalized === taskPlanPath) return true;
+  if (
+    normalized.startsWith(".ai-factory/") &&
+    (name === "plan.md" || name === "fix_plan.md" || normalized.includes("/plans/"))
+  ) {
+    return true;
+  }
+  if (/^docs\/rdpi\/.+\/(?:research|design|plan|result)\.md$/i.test(normalized)) return true;
+  if (normalized.startsWith("docs/intake/")) return true;
+  if (normalized === "docs/work_status.json" || normalized === "docs/work_index.md") return true;
+  return false;
+}
+
+function unstageInternalAifArtifacts(projectRoot: string, task: CommitPromptTask | null): void {
+  const excluded = listStagedFiles(projectRoot).filter((path) =>
+    isInternalAifCommitExcludedPath(path, task),
+  );
+  if (excluded.length === 0) return;
+  runGit(projectRoot, ["restore", "--staged", "--", ...excluded]);
+}
+
 function commitTypeForTask(task: CommitPromptTask | null): string {
   if (!task) return "chore";
   const intent = inferTaskIntent({
@@ -202,6 +240,7 @@ function stageCommitContent(input: { projectRoot: string; task: CommitPromptTask
   const { projectRoot, task } = input;
   if (!task || !isRiskyTask(task)) {
     runGit(projectRoot, ["add", "-A"]);
+    unstageInternalAifArtifacts(projectRoot, task);
     return {};
   }
 
@@ -214,6 +253,7 @@ function stageCommitContent(input: { projectRoot: string; task: CommitPromptTask
   });
   if (taskIntent === "spike") {
     runGit(projectRoot, ["add", "-A"]);
+    unstageInternalAifArtifacts(projectRoot, task);
     return {};
   }
 

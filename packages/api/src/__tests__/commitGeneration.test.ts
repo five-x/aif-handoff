@@ -133,6 +133,7 @@ describe("runCommitQuery", () => {
     const remote = options.remote ?? "";
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
       const key = args.join(" ");
+      if (key === "diff --cached --name-only -z") return "src/index.ts\0";
       if (key === "diff --cached --quiet" && stagedChanges) {
         const error = new Error("has staged changes") as Error & { status: number };
         error.status = 1;
@@ -224,6 +225,83 @@ describe("runCommitQuery", () => {
     expect(res.ok).toBe(true);
     const gitArgs = mockExecFileSync.mock.calls.map((call) => call[1]);
     expect(gitArgs).toContainEqual(["push"]);
+  });
+
+  it("does not create a commit when only internal AIF plan artifacts are staged", async () => {
+    mockGetProjectConfig.mockReturnValue(gitConfig(true));
+    mockFindTaskById.mockReturnValue({
+      id: "t-plan-only",
+      title: "Plan-only cleanup",
+      planPath: ".ai-factory/plans/task.md",
+      taskIntent: "feature",
+      branchName: null,
+      isFix: false,
+    });
+    let stagedFiles = [".ai-factory/plans/task.md"];
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      const key = args.join(" ");
+      if (key === "diff --cached --name-only -z") return `${stagedFiles.join("\0")}\0`;
+      if (args[0] === "restore" && args[1] === "--staged") {
+        const excluded = new Set(args.slice(3));
+        stagedFiles = stagedFiles.filter((path) => !excluded.has(path));
+        return "";
+      }
+      if (key === "diff --cached --quiet" && stagedFiles.length > 0) {
+        const error = new Error("has staged changes") as Error & { status: number };
+        error.status = 1;
+        throw error;
+      }
+      return "";
+    });
+
+    const res = await runCommitQuery({ projectId: "p1", taskId: "t-plan-only" });
+
+    expect(res.ok).toBe(true);
+    const gitArgs = mockExecFileSync.mock.calls.map((call) => call[1]);
+    expect(gitArgs).toContainEqual(["add", "-A"]);
+    expect(gitArgs).toContainEqual(["restore", "--staged", "--", ".ai-factory/plans/task.md"]);
+    expect(gitArgs.some((args) => args[0] === "commit")).toBe(false);
+  });
+
+  it("commits product changes while excluding internal AIF plan artifacts", async () => {
+    mockGetProjectConfig.mockReturnValue(gitConfig(true));
+    mockFindTaskById.mockReturnValue({
+      id: "t-product",
+      title: "Add source file",
+      planPath: ".ai-factory/plans/task.md",
+      taskIntent: "feature",
+      branchName: null,
+      isFix: false,
+    });
+    let stagedFiles = [".ai-factory/plans/task.md", "src/index.ts"];
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      const key = args.join(" ");
+      if (key === "diff --cached --name-only -z") return `${stagedFiles.join("\0")}\0`;
+      if (args[0] === "restore" && args[1] === "--staged") {
+        const excluded = new Set(args.slice(3));
+        stagedFiles = stagedFiles.filter((path) => !excluded.has(path));
+        return "";
+      }
+      if (key === "diff --cached --quiet" && stagedFiles.length > 0) {
+        const error = new Error("has staged changes") as Error & { status: number };
+        error.status = 1;
+        throw error;
+      }
+      return "";
+    });
+
+    const res = await runCommitQuery({ projectId: "p1", taskId: "t-product" });
+
+    expect(res.ok).toBe(true);
+    const gitArgs = mockExecFileSync.mock.calls.map((call) => call[1]);
+    expect(gitArgs).toContainEqual(["restore", "--staged", "--", ".ai-factory/plans/task.md"]);
+    expect(gitArgs).toContainEqual([
+      "commit",
+      "-m",
+      "feat: Add source file",
+      "-m",
+      "AIF task: t-product",
+    ]);
   });
 
   it("uses report-only staging for risky report tasks", async () => {
