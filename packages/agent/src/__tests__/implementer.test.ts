@@ -6743,6 +6743,175 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
+  it("rebuilds formally valid extracted manifests on rework to avoid stale review evidence", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "commit.gpgsign", "false"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = false;\n");
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/rework-manifest"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n");
+
+    const plan = [
+      "```aif-plan-manifest",
+      JSON.stringify({
+        version: 1,
+        taskId: "task-feature-rework-manifest",
+        intent: "feature",
+        scope: ["src/feature.ts"],
+        allowedChanges: ["source"],
+        forbiddenChanges: ["audit-report"],
+        expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+        acceptanceCriteria: [
+          { id: "AC1", description: "Feature behavior is implemented.", verification: "npm test" },
+        ],
+        verificationCommands: ["npm test"],
+      }),
+      "```",
+      "",
+      "## Plan",
+      "- [x] Implement feature behavior",
+      "- [x] Run tests",
+    ].join("\n");
+    const verifiedAt = new Date(Date.now() + 10_000).toISOString();
+    queryMock.mockReturnValueOnce({
+      async *[Symbol.asyncIterator]() {
+        appendAuditEvidenceEvent({
+          id: "ev-feature-rework-test",
+          taskId: "task-feature-rework-manifest",
+          auditPlanId: "task:task-feature-rework-manifest",
+          sourceSnapshotId: "git:test",
+          toolName: "run_shell",
+          evidenceKind: "shell_command",
+          evidenceGrade: "substantive",
+          scopeIds: ["src/feature.ts"],
+          riskHypothesisIds: [],
+          pathHashes: [],
+          pathRangeHashes: [],
+          command: { command: "npm", args: ["test"], cwd: null },
+          exitCode: 0,
+          outputSha256: "f".repeat(64),
+          outputPreview: "fresh 18 tests passed",
+          outputPreviewTruncated: false,
+          parsedSummary: {
+            outputBytes: "fresh 18 tests passed".length,
+            outputLineCount: 1,
+            previewChars: "fresh 18 tests passed".length,
+            exitCode: 0,
+          },
+          redactionStatus: "clean",
+          createdAt: verifiedAt,
+        });
+        const current = db
+          .select()
+          .from(tasks)
+          .where(eq(tasks.id, "task-feature-rework-manifest"))
+          .get();
+        db.update(tasks)
+          .set({
+            agentActivityLog: [
+              current?.agentActivityLog?.trim() ?? "",
+              `[${verifiedAt}] Tool: run_shell npm test`,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          })
+          .where(eq(tasks.id, "task-feature-rework-manifest"))
+          .run();
+        yield {
+          type: "result",
+          subtype: "success",
+          result: [
+            "Implementation done with a stale but structurally valid manifest.",
+            "",
+            "```aif-implementation-manifest",
+            JSON.stringify({
+              version: 1,
+              taskId: "task-feature-rework-manifest",
+              intent: "feature",
+              planManifestHash: hashAifPlanManifest(plan),
+              changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+              diffSummary: {
+                summary: "Stale initial implementation summary: local LoanOffer conflict remains.",
+                filesChanged: 1,
+              },
+              verificationEvidence: [
+                {
+                  id: "verify-1",
+                  command: "npm test",
+                  status: "passed",
+                  outputSha256: "1".repeat(64),
+                  outputPreview: "old 9 tests passed",
+                  outputPreviewTruncated: false,
+                },
+              ],
+              acceptanceCriteria: [{ id: "AC1", status: "satisfied", evidenceRefs: ["verify-1"] }],
+              evidenceRefs: ["verify-1"],
+              planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+              reviewClosure: { status: "pending", evidenceRefs: [] },
+              commitEvidence: { status: "not_committed", evidenceRefs: [] },
+              knownLimitations: [],
+            }),
+            "```",
+          ].join("\n"),
+        };
+      },
+    });
+    db.insert(tasks)
+      .values({
+        id: "task-feature-rework-manifest",
+        projectId: "project-1",
+        title: "Feature rework manifest",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan,
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-rework-manifest", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-rework-manifest"))
+      .get();
+    const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
+      ?.implementationManifestJson;
+    const manifest = JSON.parse(manifestJson ?? "{}");
+    expect(manifest.changedFiles).toEqual([{ path: "src/feature.ts", status: "modified" }]);
+    expect(manifest.diffSummary.summary).not.toContain("LoanOffer");
+    expect(manifest.verificationEvidence).toEqual([
+      expect.objectContaining({
+        command: "npm test",
+        outputSha256: "f".repeat(64),
+        outputPreview: "fresh 18 tests passed",
+      }),
+    ]);
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.agentActivityLog).toContain(
+      "Rebuilt rework implementation manifest from current-attempt deterministic evidence",
+    );
+  });
+
   it("stores deterministic fallback manifest even when scope validation must block later", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });

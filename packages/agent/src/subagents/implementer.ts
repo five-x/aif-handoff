@@ -6161,6 +6161,21 @@ Writer rules:
       planText: syncedPlan,
     });
   }
+  if (task.reworkRequested && shouldRequestImplementationManifest(task)) {
+    const deterministicReworkManifestJson = buildDeterministicImplementationManifest({
+      task,
+      projectRoot,
+      planText: syncedPlan,
+    });
+    if (deterministicReworkManifestJson) {
+      implementationManifestJson = deterministicReworkManifestJson;
+      logActivity(
+        taskId,
+        "Agent",
+        "Rebuilt rework implementation manifest from current-attempt deterministic evidence",
+      );
+    }
+  }
   if (implementationTextBlocked) {
     if (!implementationManifestJson) {
       throw new Error("Implementer blocked by permissions");
