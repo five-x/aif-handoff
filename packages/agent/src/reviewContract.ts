@@ -712,30 +712,37 @@ const PREVIOUS_FINDING_STATUS_PRIORITY: Record<AutoReviewPreviousFindingStatus, 
   manual_review_required: 5,
 };
 
-function mergePreviousFindings(
-  previousFindings: AutoReviewPreviousFinding[],
-): AutoReviewPreviousFinding[] {
+function mergePreviousFindings(input: {
+  previousFindings: AutoReviewPreviousFinding[];
+  previousFindingsInput?: AutoReviewFinding[];
+}): AutoReviewPreviousFinding[] {
   const byId = new Map<string, AutoReviewPreviousFinding>();
+  const expectedSources = input.previousFindingsInput
+    ? new Map(input.previousFindingsInput.map((finding) => [finding.id, finding.source]))
+    : null;
 
-  for (const finding of previousFindings) {
+  for (const finding of input.previousFindings) {
+    const expectedSource = expectedSources?.get(finding.id);
+    if (expectedSources && !expectedSource) continue;
+    const normalizedFinding = expectedSource ? { ...finding, source: expectedSource } : finding;
     const existing = byId.get(finding.id);
     if (!existing) {
-      byId.set(finding.id, finding);
+      byId.set(finding.id, normalizedFinding);
       continue;
     }
 
     const existingPriority = PREVIOUS_FINDING_STATUS_PRIORITY[existing.status] ?? 0;
-    const candidatePriority = PREVIOUS_FINDING_STATUS_PRIORITY[finding.status] ?? 0;
-    const selected = candidatePriority > existingPriority ? finding : existing;
-    const source = existing.source === finding.source ? selected.source : existing.source;
+    const candidatePriority = PREVIOUS_FINDING_STATUS_PRIORITY[normalizedFinding.status] ?? 0;
+    const selected = candidatePriority > existingPriority ? normalizedFinding : existing;
+    const source = existing.source === normalizedFinding.source ? selected.source : existing.source;
     const note =
-      existing.note === finding.note
+      existing.note === normalizedFinding.note
         ? selected.note
         : normalizeReviewText(
-            `${selected.note} Conflicting reviewer status for [${finding.id}] was consolidated from ${existing.source}:${existing.status} and ${finding.source}:${finding.status}.`,
+            `${selected.note} Conflicting reviewer status for [${normalizedFinding.id}] was consolidated from ${existing.source}:${existing.status} and ${normalizedFinding.source}:${normalizedFinding.status}.`,
           );
 
-    byId.set(finding.id, {
+    byId.set(normalizedFinding.id, {
       ...selected,
       source,
       note,
@@ -753,15 +760,19 @@ export function buildStructuredReviewComments(input: {
   codeReview: ParsedStructuredSidecarOutput;
   securityAudit: ParsedStructuredSidecarOutput;
   specializedReviews?: ParsedSpecializedRoleOutput[];
+  previousFindingsInput?: AutoReviewFinding[];
   rawCodeReview: string;
   rawSecurityAudit: string;
   rawSpecializedReviews?: Array<{ role: SpecializedReviewerRole; rawOutput: string }>;
 }): string {
-  const previousFindings = mergePreviousFindings([
-    ...input.codeReview.previousFindings,
-    ...input.securityAudit.previousFindings,
-    ...(input.specializedReviews ?? []).flatMap((review) => review.previousFindings),
-  ]);
+  const previousFindings = mergePreviousFindings({
+    previousFindings: [
+      ...input.codeReview.previousFindings,
+      ...input.securityAudit.previousFindings,
+      ...(input.specializedReviews ?? []).flatMap((review) => review.previousFindings),
+    ],
+    previousFindingsInput: input.previousFindingsInput,
+  });
   const advisories = [
     ...input.codeReview.advisories,
     ...input.securityAudit.advisories,

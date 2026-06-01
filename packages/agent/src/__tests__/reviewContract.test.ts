@@ -641,6 +641,41 @@ describe("reviewContract", () => {
     ]);
   });
 
+  it("drops sidecar-invented previous findings when the task has no previous findings", () => {
+    const reviewComments = buildStructuredReviewComments({
+      strategy: "full_re_review",
+      iteration: 1,
+      codeReview: {
+        previousFindings: [
+          {
+            id: "invented-previous",
+            source: "code_review",
+            status: "still_blocking",
+            note: "Model copied an old blocker id from implementation log.",
+            text: "Model copied an old blocker id from implementation log.",
+          },
+        ],
+        blockingFindings: [],
+        advisories: [],
+        securityCoverage: completeCodeReviewSecurityCoverage,
+      },
+      securityAudit: {
+        previousFindings: [],
+        blockingFindings: [],
+        advisories: [],
+        securityCoverage: completeSecurityAuditCoverage,
+      },
+      previousFindingsInput: [],
+      rawCodeReview: "structured code review",
+      rawSecurityAudit: "structured security audit",
+    });
+
+    expect(reviewComments).toContain("## Previous Findings\n- none");
+    expect(reviewComments).not.toContain("invented-previous");
+    const result = parseStructuredReviewCommentsResult(reviewComments, []);
+    expect(result.ok).toBe(true);
+  });
+
   it("round-trips expanded previous statuses and redacts secret-like review text", () => {
     const manualId = "manual-1";
     const newBlockerId = "new-1";

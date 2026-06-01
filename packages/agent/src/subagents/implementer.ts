@@ -730,6 +730,64 @@ function buildDeterministicImplementationManifest(input: {
   return validation.normalizedJson ?? manifestJson;
 }
 
+function shouldRepairExtractedImplementationManifest(
+  validation: ReturnType<typeof validateImplementationManifest>,
+): boolean {
+  if (validation.ok) return false;
+  const repairableIssueCodes = new Set([
+    "implementation_changed_files_mismatch",
+    "plan_checklist_drift",
+  ]);
+  return validation.issues.some((issue) => repairableIssueCodes.has(issue.code));
+}
+
+function repairExtractedImplementationManifest(input: {
+  manifestJson: string;
+  task: TaskRow;
+  projectRoot: string;
+  planText: string | null | undefined;
+}): string {
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const changed = collectTaskCompletionChangedFiles({
+    task: { ...input.task, plan: input.planText ?? input.task.plan },
+    projectRoot: input.projectRoot,
+  });
+  const validation = validateImplementationManifest({
+    task: { ...latestTask, plan: input.planText ?? input.task.plan },
+    manifestJson: input.manifestJson,
+    changedFiles: changed.changedFiles,
+    meaningfulChangedFiles: changed.meaningfulChangedFiles,
+    dirtyChangedFiles: changed.meaningfulDirtyChangedFiles,
+    phase: "review_handoff",
+  });
+  if (!shouldRepairExtractedImplementationManifest(validation)) {
+    return input.manifestJson;
+  }
+
+  const repairedManifest = buildDeterministicImplementationManifest({
+    task: input.task,
+    projectRoot: input.projectRoot,
+    planText: input.planText,
+  });
+  if (!repairedManifest) return input.manifestJson;
+
+  log.warn(
+    {
+      taskId: input.task.id,
+      issueCodes: validation.issues.map((issue) => issue.code),
+    },
+    "Replacing invalid extracted implementation manifest with deterministic fallback",
+  );
+  logActivity(
+    input.task.id,
+    "Agent",
+    `Replaced invalid extracted implementation manifest with deterministic fallback: ${validation.issues
+      .map((issue) => issue.code)
+      .join(", ")}`,
+  );
+  return repairedManifest;
+}
+
 function taskSupportsImplementationManifestField(task: TaskRow): boolean {
   return Object.prototype.hasOwnProperty.call(task, "implementationManifestJson");
 }
@@ -5909,6 +5967,14 @@ Writer rules:
       ? `${finalResultText}\n\n${finalResultNotes.join("\n")}`
       : finalResultText;
   let implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
+  if (implementationManifestJson && shouldRequestImplementationManifest(task)) {
+    implementationManifestJson = repairExtractedImplementationManifest({
+      manifestJson: implementationManifestJson,
+      task,
+      projectRoot,
+      planText: syncedPlan,
+    });
+  }
   if (!implementationManifestJson && shouldRequestImplementationManifest(task)) {
     implementationManifestJson = buildDeterministicImplementationManifest({
       task,

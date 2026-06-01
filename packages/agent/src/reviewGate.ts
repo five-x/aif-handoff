@@ -110,11 +110,20 @@ function isExplicitOperatorInputFinding(finding: AutoReviewFinding): boolean {
 
 function isRepositoryOrToolEvidenceRequest(text: string): boolean {
   const normalized = text.replace(/^operator_input_required:\s*/i, "");
-  if (!/\b(provide|supply|paste|attach|show|share|confirm)\b/i.test(normalized)) {
+  if (
+    !/\b(provide|supply|paste|attach|show|share|confirm)\b|(?:предостав|покаж|прилож|подтверд|вывед|пришл|укаж)/i.test(
+      normalized,
+    )
+  ) {
     return false;
   }
-  return /\b(cat|read_file|git status|git diff|git show|ls|grep|rg|file contents?|command output|test output|current state|package(?:-lock)?\.json|vitest\.config|vite\.config|tsconfig|npm(?:\.cmd)?\s+(?:test|run test|run|install))\b/i.test(
-    normalized,
+  return (
+    /\b(cat|read_file|git status|git diff|git show|ls|grep|rg|file contents?|command output|test output|current state|package(?:-lock)?\.json|vitest\.config|vite\.config|tsconfig|npm(?:\.cmd)?\s+(?:test|run test|run|install))\b/i.test(
+      normalized,
+    ) ||
+    /(?:вывод\s+команд|лог|содержим|файл|сканирован|провер|секрет|зависимост|конфиг|манифест|измен[её]н)/i.test(
+      normalized,
+    )
   );
 }
 

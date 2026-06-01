@@ -1888,6 +1888,7 @@ ${reviewOutputContract}`;
             codeReview: parsedReview,
             securityAudit: parsedSecurity,
             specializedReviews: specializedRoleResults.map((result) => result.parsed),
+            previousFindingsInput: previousFindings,
             rawCodeReview: reviewResult,
             rawSecurityAudit: securityResult,
             rawSpecializedReviews: specializedRoleResults.map((result) => ({
