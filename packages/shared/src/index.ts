@@ -627,11 +627,13 @@ export {
 
 // Task completion evidence guard (Node-only)
 export {
+  collectTaskCompletionChangedFiles,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
   hasSubstantiveReportEvidence,
   isRiskyTask,
   type AuditTrustMode,
+  type TaskCompletionChangedFiles,
   type TaskCompletionEvidenceInput,
   type TaskCompletionEvidenceIssue,
   type TaskCompletionEvidenceResult,

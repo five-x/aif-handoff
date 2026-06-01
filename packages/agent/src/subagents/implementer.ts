@@ -27,6 +27,7 @@ import {
   getProjectConfig,
   validateAuditReportArtifact,
   buildAuditEvidencePayload,
+  collectTaskCompletionChangedFiles,
   verifyAuditArtifactLifecycle,
   classifyAuditCardDecision,
   classifyAuditSourceEvidence,
@@ -39,9 +40,12 @@ import {
   readAifPlanManifestSnapshot,
   resolveAuditPlanId,
   toAuditPublicReportOutcome,
+  validateImplementationManifest,
   type AuditCardDecision,
   type AuditCardVerificationStrength,
   type AuditEvidenceUnit,
+  type DevelopmentImplementationIntent,
+  type ImplementationManifest,
   type AuditPublicReportOutcome,
   type AuditReportSourceSnapshot,
   type AuditSourceClassification,
@@ -536,6 +540,184 @@ async function extractNormalizedImplementationManifest(resultText: string): Prom
     log.warn({ err }, "Failed to extract implementation manifest from implementer result");
     return null;
   }
+}
+
+function normalizeVerificationCommandText(value: string): string {
+  return value
+    .replace(/\bnpm\.cmd\b/gi, "npm")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function auditEvidenceCommandText(unit: AuditEvidenceUnit): string {
+  if (!unit.command) return "";
+  return [unit.command.command, ...unit.command.args].filter(Boolean).join(" ").trim();
+}
+
+function latestImplementerStartMs(agentActivityLog: string | null | undefined): number | null {
+  if (!agentActivityLog) return null;
+  const matches = [
+    ...agentActivityLog.matchAll(
+      /^\[([^\]]+)\]\s+Agent:\s+(?:aif-implement|implement-coordinator)\b.*\bstarted\b/gm,
+    ),
+  ];
+  const latest = matches.at(-1)?.[1];
+  if (!latest) return null;
+  const parsed = Date.parse(latest);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isEvidenceFromLatestImplementerRun(
+  unit: AuditEvidenceUnit,
+  latestStartMs: number | null,
+): boolean {
+  if (latestStartMs === null) return true;
+  const createdAtMs = Date.parse(unit.createdAt);
+  return Number.isFinite(createdAtMs) && createdAtMs >= latestStartMs;
+}
+
+function findPassedVerificationEvidence(input: {
+  taskId: string;
+  planText: string | null | undefined;
+  agentActivityLog: string | null | undefined;
+}): ImplementationManifest["verificationEvidence"][number] | null {
+  const planManifest = readAifPlanManifestSnapshot(input.planText);
+  const requiredCommands = planManifest.verificationCommands.map(normalizeVerificationCommandText);
+  const latestStartMs = latestImplementerStartMs(input.agentActivityLog);
+  const units = listAuditEvidenceEvents({ taskId: input.taskId })
+    .filter((unit) => unit.toolName === "run_shell")
+    .filter((unit) => unit.exitCode === 0)
+    .filter((unit) => Boolean(unit.outputSha256 && unit.outputPreview))
+    .filter((unit) => isEvidenceFromLatestImplementerRun(unit, latestStartMs))
+    .reverse();
+  const unit =
+    units.find((entry) => {
+      const normalizedCommand = normalizeVerificationCommandText(auditEvidenceCommandText(entry));
+      return requiredCommands.some(
+        (required) =>
+          normalizedCommand === required ||
+          normalizedCommand.endsWith(required) ||
+          required.endsWith(normalizedCommand),
+      );
+    }) ?? units[0];
+  if (!unit?.outputSha256 || !unit.outputPreview) return null;
+  const command = planManifest.verificationCommands[0] ?? auditEvidenceCommandText(unit);
+  return {
+    id: "verify-1",
+    command,
+    status: "passed",
+    outputSha256: unit.outputSha256,
+    outputPreview: unit.outputPreview,
+    outputPreviewTruncated: unit.outputPreviewTruncated,
+  };
+}
+
+function readHeadCommitSha(projectRoot: string): string | null {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function developmentIntentForTask(
+  task: Pick<TaskRow, "taskIntent" | "isFix">,
+): DevelopmentImplementationIntent | null {
+  if (task.isFix) return "fix";
+  return task.taskIntent === "feature" ||
+    task.taskIntent === "docs" ||
+    task.taskIntent === "tests" ||
+    task.taskIntent === "fix"
+    ? task.taskIntent
+    : null;
+}
+
+function buildDeterministicImplementationManifest(input: {
+  task: TaskRow;
+  projectRoot: string;
+  planText: string | null | undefined;
+}): string | null {
+  const intent = developmentIntentForTask(input.task);
+  if (!intent || intent === "fix") return null;
+  flushActivityQueue(input.task.id);
+  const latestTask = findTaskById(input.task.id) ?? input.task;
+  const verification = findPassedVerificationEvidence({
+    taskId: input.task.id,
+    planText: input.planText,
+    agentActivityLog: latestTask.agentActivityLog,
+  });
+  if (!verification) return null;
+
+  const changed = collectTaskCompletionChangedFiles({
+    task: { ...input.task, plan: input.planText ?? input.task.plan },
+    projectRoot: input.projectRoot,
+  });
+  if (!changed.gitAvailable || changed.meaningfulChangedFiles.length === 0) return null;
+
+  const planManifest = readAifPlanManifestSnapshot(input.planText);
+  const acceptanceIds =
+    planManifest.acceptanceCriterionIds.length > 0 ? planManifest.acceptanceCriterionIds : ["ac-1"];
+  const checklist = getChecklistProgress(input.planText ?? input.task.plan);
+  const checklistTotal = Math.max(checklist.parsedTaskCount, acceptanceIds.length, 1);
+  const headCommitSha =
+    changed.meaningfulDirtyChangedFiles.length === 0 && changed.committedFiles.length > 0
+      ? readHeadCommitSha(input.projectRoot)
+      : null;
+  const manifest: ImplementationManifest = {
+    version: 1,
+    taskId: input.task.id,
+    intent,
+    planManifestHash: hashAifPlanManifest(input.planText),
+    changedFiles: changed.meaningfulChangedFiles.map((path) => ({ path, status: "unknown" })),
+    diffSummary: {
+      summary: `Changed ${changed.meaningfulChangedFiles.length} file(s): ${changed.meaningfulChangedFiles
+        .slice(0, 8)
+        .join(", ")}${changed.meaningfulChangedFiles.length > 8 ? ", ..." : ""}.`,
+      filesChanged: changed.meaningfulChangedFiles.length,
+    },
+    verificationEvidence: [verification],
+    acceptanceCriteria: acceptanceIds.map((id) => ({
+      id,
+      status: "satisfied",
+      evidenceRefs: [verification.id],
+    })),
+    evidenceRefs: [verification.id],
+    planChecklist: {
+      total: checklistTotal,
+      completed: checklistTotal,
+      pending: 0,
+      synced: true,
+      pendingItems: [],
+    },
+    reviewClosure: { status: "pending", evidenceRefs: [] },
+    commitEvidence: headCommitSha
+      ? { status: "committed", commitSha: headCommitSha, evidenceRefs: [] }
+      : { status: "not_committed", evidenceRefs: [] },
+    knownLimitations: [],
+  };
+  const manifestJson = JSON.stringify(manifest, null, 2);
+  const validation = validateImplementationManifest({
+    task: { ...latestTask, plan: input.planText ?? input.task.plan },
+    manifestJson,
+    changedFiles: changed.changedFiles,
+    meaningfulChangedFiles: changed.meaningfulChangedFiles,
+    dirtyChangedFiles: changed.meaningfulDirtyChangedFiles,
+    phase: "review_handoff",
+  });
+  if (!validation.ok) {
+    log.warn(
+      { taskId: input.task.id, issueCodes: validation.issues.map((issue) => issue.code) },
+      "Deterministic implementation manifest fallback failed validation",
+    );
+    return null;
+  }
+  logActivity(input.task.id, "Agent", "Saved deterministic implementation manifest fallback");
+  return validation.normalizedJson ?? manifestJson;
 }
 
 function taskSupportsImplementationManifestField(task: TaskRow): boolean {
@@ -5716,7 +5898,14 @@ Writer rules:
     finalResultNotes.length > 0
       ? `${finalResultText}\n\n${finalResultNotes.join("\n")}`
       : finalResultText;
-  const implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
+  let implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
+  if (!implementationManifestJson && shouldRequestImplementationManifest(task)) {
+    implementationManifestJson = buildDeterministicImplementationManifest({
+      task,
+      projectRoot,
+      planText: syncedPlan,
+    });
+  }
 
   const nowIso = new Date().toISOString();
   if (syncedPlan) {

@@ -132,6 +132,15 @@ export interface TaskCompletionEvidenceResult {
   };
 }
 
+export interface TaskCompletionChangedFiles {
+  gitAvailable: boolean;
+  changedFiles: string[];
+  dirtyChangedFiles: string[];
+  committedFiles: string[];
+  meaningfulChangedFiles: string[];
+  meaningfulDirtyChangedFiles: string[];
+}
+
 export type TaskCompletionEvidencePhase = "pre_implementation" | "review_handoff" | "completion";
 
 export interface TaskCompletionEvidenceInput {
@@ -1464,6 +1473,33 @@ function taskExplicitlyRequiresImplementationManifest(task: TaskCompletionEviden
   return isDevelopmentImplementationIntent(taskIntent);
 }
 
+export function collectTaskCompletionChangedFiles(input: {
+  task: TaskCompletionEvidenceTask;
+  projectRoot: string;
+}): TaskCompletionChangedFiles {
+  const gitEvidence = collectChangedFiles(input.projectRoot);
+  const meaningfulChangedFiles = gitEvidence.files.filter(
+    (file) =>
+      !isPlanArtifact(file, input.task) &&
+      !isMetadataOnlyPath(file) &&
+      !isGeneratedDependencyArtifactPath(file),
+  );
+  const meaningfulDirtyChangedFiles = gitEvidence.dirtyFiles.filter(
+    (file) =>
+      !isPlanArtifact(file, input.task) &&
+      !isMetadataOnlyPath(file) &&
+      !isGeneratedDependencyArtifactPath(file),
+  );
+  return {
+    gitAvailable: gitEvidence.gitAvailable,
+    changedFiles: gitEvidence.files,
+    dirtyChangedFiles: gitEvidence.dirtyFiles,
+    committedFiles: gitEvidence.committedFiles,
+    meaningfulChangedFiles,
+    meaningfulDirtyChangedFiles,
+  };
+}
+
 function readProjectPackageJsonText(projectRoot: string): string | null {
   const packageJsonPath = resolve(projectRoot, "package.json");
   if (!existsSync(packageJsonPath)) return null;
@@ -1497,19 +1533,15 @@ export function evaluateTaskCompletionEvidence(
       : null;
   const includeAllPreImplementationPlanIssues =
     task.plannerMode === "full" || /```aif-plan-manifest\b/i.test(task.plan ?? "");
-  const gitEvidence = collectChangedFiles(projectRoot);
-  const meaningfulChangedFiles = gitEvidence.files.filter(
-    (file) =>
-      !isPlanArtifact(file, task) &&
-      !isMetadataOnlyPath(file) &&
-      !isGeneratedDependencyArtifactPath(file),
-  );
-  const meaningfulDirtyChangedFiles = gitEvidence.dirtyFiles.filter(
-    (file) =>
-      !isPlanArtifact(file, task) &&
-      !isMetadataOnlyPath(file) &&
-      !isGeneratedDependencyArtifactPath(file),
-  );
+  const changedFileEvidence = collectTaskCompletionChangedFiles({ task, projectRoot });
+  const gitEvidence = {
+    gitAvailable: changedFileEvidence.gitAvailable,
+    files: changedFileEvidence.changedFiles,
+    dirtyFiles: changedFileEvidence.dirtyChangedFiles,
+    committedFiles: changedFileEvidence.committedFiles,
+  };
+  const meaningfulChangedFiles = changedFileEvidence.meaningfulChangedFiles;
+  const meaningfulDirtyChangedFiles = changedFileEvidence.meaningfulDirtyChangedFiles;
   const intentPolicyResult =
     phase !== "pre_implementation"
       ? validateTaskIntentChangedFiles({
