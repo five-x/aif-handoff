@@ -2568,15 +2568,25 @@ function extractMetadataLines(description: string, label: string): string[] {
     .filter((line): line is string => Boolean(line));
 }
 
-function splitMetadataList(values: string[]): string[] {
+function splitMetadataList(values: string[], options: { splitCommas?: boolean } = {}): string[] {
+  const splitCommas = options.splitCommas ?? true;
+  const separator = splitCommas ? /[,;]|\s+\|\s+/ : /[;]|\s+\|\s+/;
   const result: string[] = [];
   for (const value of values) {
-    for (const part of value.split(/[,;]|\s+\|\s+/)) {
-      const cleaned = part.trim();
+    for (const part of value.split(separator)) {
+      const cleaned = normalizeMetadataValue(part);
       if (cleaned && !result.includes(cleaned)) result.push(cleaned);
     }
   }
   return result;
+}
+
+function normalizeMetadataValue(value: string): string {
+  let cleaned = value.trim().replace(/\*\*/g, "").replace(/`/g, "").trim();
+  while (cleaned.startsWith("[") && cleaned.endsWith("]")) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned.replace(/\s*\.$/, "").trim();
 }
 
 function extractFileBoundaryMetadataValues(description: string): string[] {
@@ -2606,16 +2616,55 @@ function inferFileBoundaries(task: GeneratedTask): string[] {
 }
 
 function inferAcceptanceCriteria(task: GeneratedTask): string[] {
-  const explicit = splitMetadataList([
-    ...extractMetadataLines(task.description, "Acceptance criteria"),
-    ...extractMetadataLines(task.description, "Acceptance"),
-  ]);
+  const explicit = splitMetadataList(
+    [
+      ...extractMetadataLines(task.description, "Acceptance criteria"),
+      ...extractMetadataLines(task.description, "Acceptance"),
+    ],
+    { splitCommas: false },
+  );
   if (explicit.length > 0) return explicit.slice(0, 5);
   return [`${task.title} is implemented within the declared file boundaries.`];
 }
 
+function isCommandLike(value: string): boolean {
+  return /^(?:npm(?:\.cmd)?|pnpm|yarn|npx|node|vitest|jest|tsx|tsc|curl)\b/i.test(value.trim());
+}
+
+function extractVerificationCommands(values: string[]): string[] {
+  const commands: string[] = [];
+  const addCommand = (value: string): void => {
+    const cleaned = normalizeMetadataValue(value)
+      .replace(/\s*\(.*?\)\s*$/, "")
+      .trim();
+    if (cleaned && !commands.includes(cleaned)) commands.push(cleaned);
+  };
+
+  for (const value of values) {
+    const backtickCommands = [...value.matchAll(/`([^`]+)`/g)]
+      .map((match) => match[1]?.trim() ?? "")
+      .filter(isCommandLike);
+    if (backtickCommands.length > 0) {
+      backtickCommands.forEach(addCommand);
+      continue;
+    }
+
+    const directCommands = value.match(
+      /\b(?:npm(?:\.cmd)?|pnpm|yarn|npx|node|vitest|jest|tsx|tsc|curl)\b[^\n.;)]*/gi,
+    );
+    if (directCommands && directCommands.length > 0) {
+      directCommands.forEach(addCommand);
+      continue;
+    }
+
+    splitMetadataList([value], { splitCommas: false }).forEach(addCommand);
+  }
+
+  return commands;
+}
+
 function inferVerificationCommands(task: GeneratedTask): string[] {
-  const explicit = splitMetadataList([
+  const explicit = extractVerificationCommands([
     ...extractMetadataLines(task.description, "Verification"),
     ...extractMetadataLines(task.description, "Command"),
     ...extractMetadataLines(task.description, "Regression"),

@@ -1596,7 +1596,7 @@ describe("roadmapGeneration", () => {
             {
               title: seedTitle,
               description:
-                "Acceptance criteria: Offer catalog returns deterministic sample offers.\nVerification: npm.cmd test -- offerCatalog\nScope: src/data/offers.json, src/services/offerCatalog.ts\nAllowed changes: Source, tests, docs, and config only as needed for the feature.",
+                "Acceptance criteria: Offer catalog returns deterministic sample offers, without prohibited wording.\nVerification: Unit test imports catalog and checks required fields. Run `npm.cmd test -- offerCatalog`.\nDependencies: **\u041e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u0435 \u0442\u0438\u043f\u043e\u0432**\nScope: src/data/offers.json, src/services/offerCatalog.ts.\nAllowed changes: Source, tests, docs, and config only as needed for the feature.",
               taskIntent: "feature",
               phase: 1,
               phaseName: "Feature",
@@ -1613,6 +1613,12 @@ describe("roadmapGeneration", () => {
           title: seedTitle,
           verificationCommands: ["npm.cmd test -- offerCatalog"],
           fileBoundaries: ["src/data/offers.json", "src/services/offerCatalog.ts"],
+          acceptanceCriteria: [
+            "Offer catalog returns deterministic sample offers, without prohibited wording",
+          ],
+          dependsOn: [
+            "\u041e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u0435 \u0442\u0438\u043f\u043e\u0432",
+          ],
           splitRationale: "Roadmap item is already narrow enough for one executable microtask.",
         }),
       );
