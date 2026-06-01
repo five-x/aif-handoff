@@ -266,13 +266,20 @@ function mergeStrictCaps(
   return merged;
 }
 
+function mergeCanaryApprovedCaps(
+  defaults: RuntimeStageCaps,
+  canaryCaps: RuntimeStageCaps,
+): RuntimeStageCaps {
+  return { ...defaults, ...canaryCaps };
+}
+
 function getQwenStageDefaultCaps(
   options: Record<string, unknown>,
   stage: RuntimeStage,
 ): RuntimeStageCaps {
   const defaults = QWEN_DEFAULT_STAGE_CAPS[stage] ?? {};
   const canaryCaps = readCanaryApprovedCaps(options, stage);
-  return mergeStrictCaps(defaults, canaryCaps);
+  return mergeCanaryApprovedCaps(defaults, canaryCaps);
 }
 
 function readStageCapability(
