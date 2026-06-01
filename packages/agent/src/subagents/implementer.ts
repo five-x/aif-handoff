@@ -5934,9 +5934,7 @@ Writer rules:
 
   let finalResultText = resultText;
 
-  if (isBlockedImplementationResult(resultText)) {
-    throw new Error("Implementer blocked by permissions");
-  }
+  const implementationTextBlocked = isBlockedImplementationResult(resultText);
 
   if (expectedAuditReportArtifactPath && !task.reworkRequested) {
     const postRunAuditReportValidation = validateAuditReportArtifactWithTaskContext({
@@ -6062,6 +6060,16 @@ Writer rules:
       projectRoot,
       planText: syncedPlan,
     });
+  }
+  if (implementationTextBlocked) {
+    if (!implementationManifestJson) {
+      throw new Error("Implementer blocked by permissions");
+    }
+    logActivity(
+      taskId,
+      "Agent",
+      "Structured implementation evidence available despite textual block marker; completion evidence guard will decide final state",
+    );
   }
 
   const nowIso = new Date().toISOString();

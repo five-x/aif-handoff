@@ -5853,11 +5853,12 @@ describe("runImplementer rework behavior", () => {
     });
   });
 
-  it("does not treat incidental cannot-proceed text as a permission block when the implementation manifest is valid", async () => {
+  it("prefers structured implementation evidence over textual blocked markers", async () => {
     const db = testDb.current;
     queryMock.mockReturnValueOnce(
       streamSuccess(
         [
+          "Status: BLOCKED",
           "Implementation done.",
           "I cannot proceed with unrelated cleanup outside the approved task scope.",
           "",
