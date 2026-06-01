@@ -3639,10 +3639,9 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       const outcome = await handleAutoReviewGate({
         taskId: task.id,
         projectRoot: reviewExecutionRoot,
-        force: taskRequiresSpecializedReviewerFanout(
-          latestTask,
-          findRoadmapBatchArtifactByTaskId(latestTask.id),
-        ),
+        // The agent reviewer stage must be fail-closed even for manually started
+        // tasks; otherwise structured review failures can be treated as success.
+        force: true,
       });
 
       if (outcome?.status === "manual_review_required") {

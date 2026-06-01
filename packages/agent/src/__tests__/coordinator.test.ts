@@ -774,7 +774,7 @@ describe("coordinator", () => {
     expect(handleAutoReviewGate).toHaveBeenCalledWith({
       taskId: "task-worktree",
       projectRoot: "/tmp/test-worktree",
-      force: false,
+      force: true,
     });
   });
 
@@ -2081,7 +2081,7 @@ describe("coordinator", () => {
     expect(handleAutoReviewGate).toHaveBeenCalledWith({
       taskId: "task-review-refreshed-worktree",
       projectRoot: refreshedRoot,
-      force: false,
+      force: true,
     });
     const task = db
       .select()
@@ -2190,7 +2190,7 @@ describe("coordinator", () => {
     expect(task!.agentActivityLog).not.toContain("oauth-token");
   });
 
-  it("should skip auto review gate when autoMode=false", async () => {
+  it("should fail-close review gate even when autoMode=false", async () => {
     const db = testDb.current;
     db.insert(tasks)
       .values({
@@ -2204,18 +2204,48 @@ describe("coordinator", () => {
       })
       .run();
 
-    // handleAutoReviewGate returns null for non-autoMode tasks
-    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce(null);
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
+      status: "manual_review_required",
+      currentIteration: 1,
+      metrics: {
+        strategy: "full_re_review",
+        iteration: 1,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
+        totalBlockingCount: 1,
+        parserMode: "structured",
+      },
+      handoffReason: "malformed_structured_review_contract",
+      autoReviewState: {
+        strategy: "full_re_review",
+        iteration: 1,
+        findings: [
+          {
+            id: "structured-review-contract",
+            source: "review_gate",
+            text: "Structured review contract not satisfied.",
+          },
+        ],
+      },
+    });
 
     await pollAndProcess();
 
     const task = db.select().from(tasks).where(eq(tasks.id, "task-review-manual")).get();
-    expect(task!.status).toBe("done");
+    expect(handleAutoReviewGate).toHaveBeenCalledWith({
+      taskId: "task-review-manual",
+      projectRoot: "/tmp/test",
+      force: true,
+    });
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("review");
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.blockedReason).toContain("manual_review_required");
   });
 
-  it("should force auto review gate for specialized fan-out even when autoMode=false", async () => {
+  it("should force auto review gate for manual review tasks even when autoMode=false", async () => {
     const db = testDb.current;
-    vi.mocked(taskRequiresSpecializedReviewerFanout).mockReturnValueOnce(true);
     vi.mocked(handleAutoReviewGate).mockResolvedValueOnce({
       status: "manual_review_required",
       currentIteration: 1,
@@ -2292,7 +2322,7 @@ describe("coordinator", () => {
     expect(handleAutoReviewGate).toHaveBeenCalledWith({
       taskId: "task-review-auto-log",
       projectRoot: "/tmp/test",
-      force: false,
+      force: true,
     });
   });
 
