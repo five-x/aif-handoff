@@ -5429,6 +5429,58 @@ describe("tasks API", () => {
       expect(persisted?.reviewComments).toBeNull();
     });
 
+    it("should clear stale malformed review rework when retrying implementer loop blocks", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-malformed-review-rework-retry",
+          projectId: "test-project",
+          title: "Malformed review rework loop",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason:
+            "Unexpected implementer stage failure. Operator action required before retry.",
+          implementationLog:
+            "Stopped after a repeated run_shell tool-call loop. Partial repository changes may exist; coordinator evidence checks must decide whether rework is required.",
+          manualReviewRequired: false,
+          reworkRequested: true,
+          reviewComments:
+            "## Blocking Findings\n- [da760947c2a9] code_review | [62ad42446d2a] manual_review_required | correctness reviewer returned INCONCLUSIVE or malformed output.",
+          autoReviewStateJson: JSON.stringify({
+            findings: [
+              {
+                id: "da760947c2a9",
+                source: "code_review",
+                text: "[62ad42446d2a] manual_review_required | correctness reviewer returned INCONCLUSIVE or malformed output.",
+              },
+            ],
+          }),
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-malformed-review-rework-retry/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("implementing");
+      expect(body.reworkRequested).toBe(false);
+      expect(body.reviewComments).toBeNull();
+      expect(body.autoReviewState).toBeNull();
+      const persisted = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, "ev-malformed-review-rework-retry"))
+        .get();
+      expect(persisted?.status).toBe("implementing");
+      expect(persisted?.reworkRequested).toBe(false);
+      expect(persisted?.reviewComments).toBeNull();
+      expect(persisted?.autoReviewStateJson).toBeNull();
+    });
+
     it("should allow retry_from_blocked for exhausted plan quality guard blocks", async () => {
       const db = testDb.current;
       db.insert(tasks)

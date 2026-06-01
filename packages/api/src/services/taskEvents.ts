@@ -753,12 +753,20 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     return { ok: false, status: 404, error: "Task not found" };
   }
   const { event } = input;
+  const reviewCommentsLower = task.reviewComments?.toLowerCase() ?? "";
   const operatorInputRetry = event === "retry_from_blocked" && isOperatorInputHold(task);
   const malformedReviewOutputRetry =
     event === "retry_from_blocked" &&
     task.blockedFromStatus === "review" &&
     (task.blockedReason?.toLowerCase().includes("malformed_review_output_fallback") === true ||
       task.blockedReason?.toLowerCase().includes("malformed_structured_review_contract") === true);
+  const malformedReviewReworkRetry =
+    event === "retry_from_blocked" &&
+    task.blockedFromStatus === "implementing" &&
+    task.reworkRequested === true &&
+    task.implementationLog?.includes("Stopped after a repeated") === true &&
+    reviewCommentsLower.includes("manual_review_required |") &&
+    reviewCommentsLower.includes("reviewer returned inconclusive or malformed output");
   if (event !== "cancel_task" && isOperatorCancelledTask(task) && !operatorInputRetry) {
     return {
       ok: false,
@@ -968,6 +976,9 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     ...transition.patch,
     ...(operatorInputRetry ? { paused: false } : {}),
     ...(malformedReviewOutputRetry ? { reviewComments: null } : {}),
+    ...(malformedReviewReworkRetry
+      ? { reviewComments: null, autoReviewState: null, reworkRequested: false }
+      : {}),
     lastHeartbeatAt: nowIso,
     updatedAt: nowIso,
   });
