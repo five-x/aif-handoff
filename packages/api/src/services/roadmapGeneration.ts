@@ -1622,9 +1622,13 @@ export async function generateRoadmapFile(
   const projectCfg = getProjectConfig(project.rootPath);
   const descriptionPath = join(project.rootPath, projectCfg.paths.description);
   const architecturePath = join(project.rootPath, projectCfg.paths.architecture);
+  const roadmapPath = join(project.rootPath, projectCfg.paths.roadmap);
 
   const description = existsSync(descriptionPath) ? readFileSync(descriptionPath, "utf8") : null;
   const architecture = existsSync(architecturePath) ? readFileSync(architecturePath, "utf8") : null;
+  const existingRoadmapBeforeGeneration = existsSync(roadmapPath)
+    ? readFileSync(roadmapPath, "utf8").trim()
+    : null;
   const roadmapHooks = roadmapWorkflowPacks.get(intent).hooks;
   const generationContext: RoadmapGenerationPromptContext = {
     description,
@@ -1680,8 +1684,6 @@ export async function generateRoadmapFile(
 
   // Write ROADMAP.md — agent may have already written the file via tools (CLI mode),
   // so check the file first before falling back to outputText.
-  const cfg = getProjectConfig(project.rootPath);
-  const roadmapPath = join(project.rootPath, cfg.paths.roadmap);
   mkdirSync(dirname(roadmapPath), { recursive: true });
 
   let content: string;
@@ -1701,8 +1703,13 @@ export async function generateRoadmapFile(
 
   if (existsSync(roadmapPath)) {
     const fileContent = readFileSync(roadmapPath, "utf8").trim();
+    const fileChangedDuringGeneration = fileContent !== existingRoadmapBeforeGeneration;
     // Verify agent wrote a real roadmap, not just a stub
-    if (fileContent.length > 100 && (fileContent.includes("- [") || fileContent.includes("##"))) {
+    if (
+      fileChangedDuringGeneration &&
+      fileContent.length > 100 &&
+      (fileContent.includes("- [") || fileContent.includes("##"))
+    ) {
       content = normalizeRoadmapContent({ content: fileContent, source: "file" });
       if (content !== fileContent) writeFileSync(roadmapPath, content, "utf8");
       log.info({ projectId, roadmapPath, source: "file" }, "Using roadmap file written by agent");

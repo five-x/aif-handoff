@@ -14,7 +14,7 @@ import {
 import { eq } from "drizzle-orm";
 import { createTestDb } from "@aif/shared/server";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -296,6 +296,35 @@ describe("roadmapGeneration", () => {
       const callArgs = mockRunApiRuntimeOneShot.mock.calls[0][0];
       expect(callArgs.profileMode).toBe("plan");
       expect(callArgs.prompt).toContain("ROADMAP.md");
+    });
+
+    it("does not reuse a stale existing ROADMAP.md when runtime returns fresh content", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# My App\nA todo app");
+      const roadmapPath = join(tmpDir, ".ai-factory", "ROADMAP.md");
+      writeFileSync(
+        roadmapPath,
+        "# Stale Roadmap\n\n## Old Milestones\n\n- [ ] **Old setup** - stale content that should not be reused by generation.\n",
+      );
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText:
+            "# Fresh Roadmap\n\n> A todo app\n\n## Milestones\n\n- [ ] **Fresh setup** - initialize current project\n",
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          },
+        },
+        context: {},
+      });
+
+      const result = await generateRoadmapFile({ projectId });
+
+      expect(result.content).toContain("Fresh setup");
+      expect(result.content).not.toContain("Old setup");
+      expect(readFileSync(roadmapPath, "utf8")).toContain("Fresh setup");
     });
 
     it("should accept vision without DESCRIPTION.md", async () => {
