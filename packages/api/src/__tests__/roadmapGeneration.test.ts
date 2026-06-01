@@ -1443,6 +1443,24 @@ describe("roadmapGeneration", () => {
         expect(child.acceptanceCriteria?.length).toBeGreaterThan(0);
         expect(child.verificationCommands?.length).toBeGreaterThan(0);
       }
+      expect(result.proposal.proposedChildren[1]).toEqual(
+        expect.objectContaining({
+          fileBoundaries: expect.arrayContaining(["vitest.config.*"]),
+          acceptanceCriteria: expect.arrayContaining([
+            "package.json defines executable build and test scripts; the test script can run before feature tests exist.",
+          ]),
+          verificationCommands: ["npm.cmd run build", "npm.cmd test"],
+        }),
+      );
+      expect(result.proposal.proposedChildren[2]).toEqual(
+        expect.objectContaining({
+          fileBoundaries: expect.arrayContaining(["src/**/*.test.*"]),
+          acceptanceCriteria: expect.arrayContaining([
+            "A focused test covers the first workflow against deterministic sample data.",
+          ]),
+          verificationCommands: ["npm.cmd test"],
+        }),
+      );
       expect(result.proposal.proposedChildren.slice(0, 4)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({

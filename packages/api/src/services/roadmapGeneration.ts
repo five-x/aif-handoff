@@ -2639,6 +2639,7 @@ function buildBroadTaskMicrotasks(
         "docker-compose*.yml",
         "compose*.yml",
         ".env.example",
+        "vitest.config.*",
         ".github/workflows/**",
         "config/**",
       ],
@@ -2646,8 +2647,9 @@ function buildBroadTaskMicrotasks(
         cyrillicTitle
           ? "Нужные scripts и configuration files присутствуют и документированы по именам."
           : "Required scripts and configuration files are present and documented by names.",
+        "package.json defines executable build and test scripts; the test script can run before feature tests exist.",
       ],
-      verificationCommands: ["npm.cmd run build"],
+      verificationCommands: ["npm.cmd run build", "npm.cmd test"],
       dependsOn: [scaffoldTitle],
     },
     {
@@ -2656,11 +2658,18 @@ function buildBroadTaskMicrotasks(
       summary: cyrillicTitle
         ? "Реализовать первый пользовательский или API-срез без последующих широких функций."
         : "Implement the first user-visible app slice without broad follow-on features.",
-      fileBoundaries: ["src/app/**", "src/components/**", "src/routes/**", "src/services/**"],
+      fileBoundaries: [
+        "src/app/**",
+        "src/components/**",
+        "src/routes/**",
+        "src/services/**",
+        "src/**/*.test.*",
+      ],
       acceptanceCriteria: [
         cyrillicTitle
           ? "Первый видимый workflow рендерится или выполняется на deterministic sample data."
           : "The first visible workflow renders or executes with deterministic sample data.",
+        "A focused test covers the first workflow against deterministic sample data.",
       ],
       verificationCommands: ["npm.cmd test"],
       dependsOn: [configurationTitle],
