@@ -2895,7 +2895,9 @@ function buildBroadTaskMicrotasks(
       fileBoundaries: [
         "package.json",
         "package-lock.json",
+        "index.html",
         "tsconfig*.json",
+        "vite.config.*",
         ".gitignore",
         "src/app/**",
         "src/main.*",

@@ -1512,6 +1512,12 @@ describe("roadmapGeneration", () => {
         expect(child.acceptanceCriteria?.length).toBeGreaterThan(0);
         expect(child.verificationCommands?.length).toBeGreaterThan(0);
       }
+      expect(result.proposal.proposedChildren[0]).toEqual(
+        expect.objectContaining({
+          fileBoundaries: expect.arrayContaining(["index.html", "vite.config.*", "src/main.*"]),
+          verificationCommands: ["npm.cmd run build"],
+        }),
+      );
       expect(result.proposal.proposedChildren[1]).toEqual(
         expect.objectContaining({
           fileBoundaries: expect.arrayContaining(["vitest.config.*"]),

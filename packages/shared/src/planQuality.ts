@@ -493,6 +493,9 @@ function classifyManifestArtifactText(value: string): TaskIntentChangeCategory |
   ) {
     return "docs";
   }
+  if (normalized === "index.html" || normalized.endsWith(".html")) {
+    return "source";
+  }
   if (
     /(?:^|\/)src(?:\/|$)/.test(normalized) ||
     /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|cs|c|cpp|h|hpp)$/.test(normalized)
@@ -999,6 +1002,16 @@ function normalizedTaskSizeCommand(command: string): string {
   return command.trim().replaceAll("\\", "/").replace(/\s+/g, " ").toLowerCase();
 }
 
+function isRunnableWebScaffoldBuildCommand(command: string): boolean {
+  const normalized = normalizedTaskSizeCommand(command);
+  return (
+    /^npm(?:\.cmd)? run build\b/.test(normalized) ||
+    /^pnpm (?:run )?build\b/.test(normalized) ||
+    /^yarn (?:run )?build\b/.test(normalized) ||
+    /^bun (?:run )?build\b/.test(normalized)
+  );
+}
+
 function findTaskSizeSetupRuntimeCommand(commands: string[]): string | null {
   for (const command of commands.map(normalizedTaskSizeCommand)) {
     const match = TASK_SIZE_SETUP_RUNTIME_COMMAND_PATTERNS.find((entry) =>
@@ -1026,6 +1039,47 @@ function isTaskSizeTextBoundaryCandidate(path: string): boolean {
   const normalized = normalizeTaskSizeBoundaryPath(path);
   if (!normalized) return false;
   return normalized.includes("/") || rootConfigGroupForPath(normalized) !== null;
+}
+
+function isRunnableWebScaffoldBoundaryPath(path: string): boolean {
+  const normalized = normalizeTaskSizeBoundaryPath(path);
+  if (!normalized) return false;
+  if ([".gitignore", "index.html", "package.json", "package-lock.json"].includes(normalized)) {
+    return true;
+  }
+  if (/^tsconfig(?:\*|\.[\w.-]+)?\.json$/.test(normalized)) return true;
+  if (/^vite\.config\.(?:\*|ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(normalized)) return true;
+  if (normalized === "src/app" || normalized === "src/app/*" || normalized === "src/app/**") {
+    return true;
+  }
+  if (normalized === "src/main.*" || /^src\/main\.[a-z0-9]+$/.test(normalized)) return true;
+  if (normalized === "src/index.*" || /^src\/index\.[a-z0-9]+$/.test(normalized)) return true;
+  return false;
+}
+
+function isRunnableWebScaffoldBoundary(input: {
+  paths: string[];
+  verificationCommands: string[];
+}): boolean {
+  const paths = [...new Set(input.paths.map(normalizeTaskSizeBoundaryPath).filter(Boolean))];
+  if (paths.length === 0 || paths.some((path) => !isRunnableWebScaffoldBoundaryPath(path))) {
+    return false;
+  }
+
+  const hasPackage = paths.includes("package.json");
+  const hasIndex = paths.includes("index.html");
+  const hasViteConfig = paths.some((path) =>
+    /^vite\.config\.(?:\*|ts|js|mjs|cjs|mts|cts)$/.test(path),
+  );
+  const hasSrcEntrypoint = paths.some(
+    (path) =>
+      path === "src/main.*" ||
+      path === "src/index.*" ||
+      /^src\/(?:main|index)\.[a-z0-9]+$/.test(path),
+  );
+  const hasBuildVerification = input.verificationCommands.some(isRunnableWebScaffoldBuildCommand);
+
+  return hasPackage && hasIndex && hasViteConfig && hasSrcEntrypoint && hasBuildVerification;
 }
 
 function evaluateTaskSizeSplitIssue(input: {
@@ -1074,6 +1128,14 @@ function evaluateTaskSizeSplitIssue(input: {
     majorSubsystems.length > TASK_SIZE_HARD_MAJOR_SUBSYSTEM_LIMIT;
 
   if (!reject) return null;
+  if (
+    isRunnableWebScaffoldBoundary({
+      paths: boundaryPaths.normalized,
+      verificationCommands,
+    })
+  ) {
+    return null;
+  }
 
   const dimensions: string[] = [];
   if (fileBoundaries) {

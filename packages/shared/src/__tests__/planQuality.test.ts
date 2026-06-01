@@ -279,6 +279,49 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("plan_manifest_expected_artifact_violation");
   });
 
+  it("accepts a narrow runnable Vite scaffold with index.html and explicit build evidence", () => {
+    const task = {
+      id: "task-vite-scaffold",
+      title: "Initialize runnable Vite scaffold",
+      description:
+        "Scope: package.json, index.html, vite.config.*, src/app/**, src/main.*, src/index.*.",
+      taskIntent: "feature" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+    };
+    const plan = [
+      "## Plan",
+      "",
+      planManifest({
+        taskId: "task-vite-scaffold",
+        scope: ["package.json", "index.html", "vite.config.*", "src/app/**", "src/main.*"],
+        allowedChanges: ["source", "config"],
+        forbiddenChanges: ["report", "metadata"],
+        expectedArtifacts: [
+          { kind: "source_diff", paths: ["index.html", "src/app/**", "src/main.*"] },
+          { kind: "config_update", paths: ["package.json", "vite.config.*"] },
+        ],
+        acceptanceCriteria: [
+          {
+            id: "ac-vite-build",
+            description: "The Vite entrypoint and root HTML shell build successfully.",
+            verification: "npm.cmd run build",
+          },
+        ],
+        verificationCommands: ["npm.cmd run build"],
+      }),
+      "",
+      "- [ ] Create package.json, index.html, vite.config.*, and the src entrypoint.",
+      "- [ ] Run npm.cmd run build.",
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({ task, plan });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("plan_manifest_expected_artifact_violation");
+    expect(result.categories).not.toContain("task_size_split_required");
+  });
+
   it("does not require a missing manifest for pre-rollout full-mode plans", () => {
     const result = evaluateTaskPlanQuality({
       task: {

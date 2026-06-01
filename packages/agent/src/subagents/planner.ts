@@ -112,7 +112,6 @@ function normalizeDeterministicPlanScopePath(value: string): string | null {
     .replace(/^\.\/+/, "")
     .replace(/\/\*\*.*$/, "")
     .replace(/\/\*.*$/, "")
-    .replace(/\.\*$/, ".ts")
     .replace(/[),.;\]]+$/g, "")
     .replace(/\/+$/g, "");
   return normalized.length > 0 ? normalized : null;
