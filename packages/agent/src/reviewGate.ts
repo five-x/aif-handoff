@@ -108,6 +108,16 @@ function isExplicitOperatorInputFinding(finding: AutoReviewFinding): boolean {
   return /^operator_input_required:/i.test(finding.text.trim());
 }
 
+function isRepositoryOrToolEvidenceRequest(text: string): boolean {
+  const normalized = text.replace(/^operator_input_required:\s*/i, "");
+  if (!/\b(provide|supply|paste|attach|show|share|confirm)\b/i.test(normalized)) {
+    return false;
+  }
+  return /\b(cat|read_file|git status|git diff|git show|ls|grep|rg|file contents?|command output|test output|current state|package(?:-lock)?\.json|vitest\.config|vite\.config|tsconfig|npm(?:\.cmd)?\s+(?:test|run test|run|install))\b/i.test(
+    normalized,
+  );
+}
+
 function isPolicyOrSecuritySensitiveAmbiguity(text: string): boolean {
   return /\b(policy|security|secret|token|credential|private key|bearer|cookie|malformed|unsafe to auto-close|ambiguous evidence|human judgment|manual review)\b/i.test(
     text,
@@ -116,6 +126,7 @@ function isPolicyOrSecuritySensitiveAmbiguity(text: string): boolean {
 
 function isConcreteOperatorInputFinding(finding: AutoReviewFinding): boolean {
   const text = finding.text.trim();
+  if (isRepositoryOrToolEvidenceRequest(text)) return false;
   if (isExplicitOperatorInputFinding(finding)) return true;
   if (finding.source === "review_gate") return false;
   if (isPolicyOrSecuritySensitiveAmbiguity(text)) return false;

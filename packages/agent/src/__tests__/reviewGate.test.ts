@@ -187,6 +187,39 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(result.blockingFindings[0]?.text).toContain("source system account id");
   });
 
+  it("keeps repository evidence requests in implementation rework", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [repo-1] code_review | operator_input_required: provide the output of cat package.json and cat vitest.config.ts to confirm the current repository state",
+        "",
+        "## Advisories",
+        "- code_review | none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    if (result.status !== "request_changes") {
+      throw new Error("expected request_changes");
+    }
+    expect(result.blockingFindings[0]?.id).toBe("repo-1");
+    expect(result.fixesMarkdown).toContain("cat package.json");
+  });
+
   it("keeps mixed operator input and code blockers in request changes", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
