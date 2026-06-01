@@ -1194,6 +1194,66 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("task_size_split_required");
   });
 
+  it("accepts concrete first app slice plans for legacy broad source boundaries", () => {
+    const scope = [
+      "src/app/App.tsx",
+      "src/components/AppShell.tsx",
+      "src/routes/HomeRoute.tsx",
+      "src/services/sampleData.ts",
+      "src/app/App.test.tsx",
+    ];
+    const plan = [
+      "## Plan",
+      "- [ ] Implement the first app slice in `src/app/App.tsx` and `src/components/AppShell.tsx`.",
+      "- [ ] Add deterministic data in `src/services/sampleData.ts` and route wiring in `src/routes/HomeRoute.tsx`.",
+      "- [ ] Cover the workflow with `src/app/App.test.tsx` and run `npm.cmd test`.",
+      "",
+      "## aif-plan-manifest",
+      "",
+      planManifest({
+        taskId: "first-slice-task",
+        scope,
+        allowedChanges: ["source", "tests"],
+        forbiddenChanges: ["report"],
+        expectedArtifacts: [
+          { kind: "source_diff", paths: scope.filter((path) => !path.endsWith(".test.tsx")) },
+          { kind: "test_delta", paths: scope.filter((path) => path.endsWith(".test.tsx")) },
+        ],
+        acceptanceCriteria: [
+          {
+            id: "ac-first-workflow",
+            description:
+              "The first visible workflow renders or executes with deterministic sample data.",
+            verification: "npm.cmd test",
+          },
+          {
+            id: "ac-first-workflow-test",
+            description:
+              "A focused test covers the first workflow against deterministic sample data.",
+            verification: "npm.cmd test",
+          },
+        ],
+        verificationCommands: ["npm.cmd test"],
+      }),
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({
+      task: {
+        id: "first-slice-task",
+        title: "Implement project first app slice",
+        description:
+          "Implement the first user-visible app slice without broad follow-on features.\nFile boundaries: src/app/**, src/components/**, src/routes/**, src/services/**, src/**/*.test.*\nAcceptance criteria: The first visible workflow renders or executes with deterministic sample data.; A focused test covers the first workflow against deterministic sample data.\nVerification: npm.cmd test",
+        taskIntent: "feature",
+      },
+      plan,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.categories).not.toContain("missing_task_specific_artifact_path");
+    expect(result.categories).not.toContain("plan_manifest_scope_mismatch");
+    expect(result.categories).not.toContain("task_size_split_required");
+  });
+
   it("requires diagnostic report path and diagnostic-only constraints", () => {
     const result = evaluateTaskPlanQuality({
       task: { title: "Audit planner output quality", description: "Discovery task." },

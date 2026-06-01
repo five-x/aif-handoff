@@ -840,6 +840,43 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toContain("npm.cmd test");
   });
 
+  it("uses deterministic implementation fallback before runtime for legacy broad first app slice plans", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-first-slice-fallback-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-first-slice-fallback",
+        projectId: "project-1",
+        title: "Implement project first app slice",
+        description:
+          "Implement the first user-visible app slice without broad follow-on features.\nFile boundaries: src/app/**, src/components/**, src/routes/**, src/services/**, src/**/*.test.*\nAcceptance criteria: The first visible workflow renders or executes with deterministic sample data.; A focused test covers the first workflow against deterministic sample data.\nVerification: npm.cmd test\nDependencies: Add CI workflow skeleton: project",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-first-slice-fallback",
+      })
+      .run();
+
+    await runPlanner("task-first-slice-fallback", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-first-slice-fallback"))
+      .get();
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain("src/app/App.tsx");
+    expect(updatedTask?.plan).toContain("src/components/AppShell.tsx");
+    expect(updatedTask?.plan).toContain("src/routes/HomeRoute.tsx");
+    expect(updatedTask?.plan).toContain("src/services/sampleData.ts");
+    expect(updatedTask?.plan).toContain("src/app/App.test.tsx");
+    expect(updatedTask?.plan).not.toContain("src/app/**");
+    expect(updatedTask?.plan).not.toContain("src/**/*.test.*");
+    expect(updatedTask?.plan).toContain("npm.cmd test");
+  });
+
   it("uses deterministic implementation fallback for .env.example roadmap children", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-env-fallback-"));

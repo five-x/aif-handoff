@@ -131,6 +131,29 @@ function isCiWorkflowSkeletonTask(task: PlannerTask): boolean {
   );
 }
 
+function isFirstAppSliceTask(task: PlannerTask): boolean {
+  const text = `${task.title}\n${task.description ?? ""}`;
+  return /\b(?:first\s+(?:app\s+)?slice|first\s+workflow|deterministic\s+sample\s+data|focused\s+test\s+covers\s+the\s+first\s+workflow)\b/i.test(
+    text,
+  );
+}
+
+function normalizeFirstAppSliceScopePath(path: string): string | null {
+  const normalized = path.toLowerCase();
+  if (normalized === "src/app" || normalized === "src/app/**") return "src/app/App.tsx";
+  if (normalized === "src/components" || normalized === "src/components/**") {
+    return "src/components/AppShell.tsx";
+  }
+  if (normalized === "src/routes" || normalized === "src/routes/**") {
+    return "src/routes/HomeRoute.tsx";
+  }
+  if (normalized === "src/services" || normalized === "src/services/**") {
+    return "src/services/sampleData.ts";
+  }
+  if (normalized === "src" || normalized === "src/**/*.test.*") return "src/app/App.test.tsx";
+  return null;
+}
+
 function normalizeDeterministicPlanScope(task: PlannerTask, fileBoundaries: string[]): string[] {
   const scope = fileBoundaries
     .flatMap((entry) => {
@@ -142,6 +165,10 @@ function normalizeDeterministicPlanScope(task: PlannerTask, fileBoundaries: stri
       if (isCiWorkflowSkeletonTask(task) && /^\.github\/workflows\/\*\*$/i.test(raw)) {
         return [".github/workflows/ci.yml"];
       }
+      const firstAppSlicePath = isFirstAppSliceTask(task)
+        ? normalizeFirstAppSliceScopePath(raw)
+        : null;
+      if (firstAppSlicePath) return [firstAppSlicePath];
       const normalizedEntry = normalizeDeterministicPlanScopePath(entry);
       return normalizedEntry ? [normalizedEntry] : [];
     })
@@ -174,14 +201,28 @@ function isDeterministicPlanConfigPath(path: string): boolean {
   );
 }
 
+function isDeterministicPlanTestPath(path: string): boolean {
+  const normalized = path.toLowerCase();
+  return (
+    /(?:^|\/)(?:__tests__|tests?)(?:\/|$)/.test(normalized) ||
+    /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normalized)
+  );
+}
+
 function buildDeterministicPlanExpectedArtifacts(
   scope: string[],
 ): AifPlanManifestExpectedArtifact[] {
-  const sourcePaths = scope.filter((path) => !isDeterministicPlanConfigPath(path));
+  const sourcePaths = scope.filter(
+    (path) => !isDeterministicPlanConfigPath(path) && !isDeterministicPlanTestPath(path),
+  );
+  const testPaths = scope.filter(isDeterministicPlanTestPath);
   const configPaths = scope.filter(isDeterministicPlanConfigPath);
   const artifacts: AifPlanManifestExpectedArtifact[] = [];
   if (sourcePaths.length > 0) {
     artifacts.push({ kind: "source_diff", paths: sourcePaths });
+  }
+  if (testPaths.length > 0) {
+    artifacts.push({ kind: "test_delta", paths: testPaths });
   }
   if (configPaths.length > 0) {
     artifacts.push({ kind: "config_update", paths: configPaths });
@@ -226,7 +267,11 @@ function buildDeterministicImplementationPlan(task: PlannerTask): string | null 
   const allowedChanges = [
     ...new Set(
       expectedArtifacts.flatMap((artifact) =>
-        artifact.kind === "config_update" ? ["config"] : ["source"],
+        artifact.kind === "config_update"
+          ? ["config"]
+          : artifact.kind === "test_delta"
+            ? ["tests"]
+            : ["source"],
       ),
     ),
   ];
