@@ -752,7 +752,7 @@ describe("runPlanner comment selection", () => {
         projectId: "project-1",
         title: "Initialize skeleton: Project structure initialization",
         description:
-          "Create only the minimal project skeleton.\nFile boundaries: package.json, index.html, vite.config.*, src/app/**, src/main.*, src/index.*\nAcceptance criteria: The application entry point exists and starts without placeholder-only wiring.\nVerification: npm.cmd run build\nDependencies: none",
+          "Create only the minimal project skeleton.\nFile boundaries: package.json, package-lock.json, index.html, tsconfig*.json, vite.config.*, .gitignore, src/app/**, src/main.*, src/index.*\nAcceptance criteria: The application entry point exists and starts without placeholder-only wiring.\nVerification: npm.cmd run build\nDependencies: none",
         status: "planning",
         plannerMode: "full",
         taskIntent: "feature",
@@ -773,9 +773,14 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toContain("- [ ] Inspect the declared file boundaries");
     expect(updatedTask?.plan).toContain("npm.cmd run build");
     expect(updatedTask?.plan).toContain("package.json");
+    expect(updatedTask?.plan).toContain("package-lock.json");
     expect(updatedTask?.plan).toContain("index.html");
+    expect(updatedTask?.plan).toContain("tsconfig*.json");
     expect(updatedTask?.plan).toContain("vite.config.*");
+    expect(updatedTask?.plan).toContain(".gitignore");
+    expect(updatedTask?.plan).toContain("src/app");
     expect(updatedTask?.plan).toContain("src/main.*");
+    expect(updatedTask?.plan).toContain("src/index.*");
   });
 
   it("creates a feature branch when plannerMode=full and git.create_branches=true", async () => {

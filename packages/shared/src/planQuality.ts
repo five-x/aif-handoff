@@ -177,6 +177,7 @@ const AUDIT_EXISTING_CHILD_REPORTS_PATTERN =
   /\b(?:existing|prior|previous|already generated|completed)\b[^\r\n.]{0,80}\b(?:child|source)?\s*audit reports?\b|\b(?:child|source)\s+audit reports?\b[^\r\n.]{0,80}\b(?:existing|prior|previous|already generated|completed)\b/i;
 const AUDIT_BOUNDARY_LINE_PATTERN =
   /^\s*(?:scope|scoped evidence targets?|evidence targets?|source targets?|target paths?|authorized source boundaries)\s*:\s*(.+)$/gim;
+const TASK_FILE_BOUNDARY_LINE_PATTERN = /^\s*file boundaries?\s*:\s*(.+)$/gim;
 const REPORT_ARTIFACT_LINE_PATTERN = /^\s*report artifact\s*:\s*(.+)$/gim;
 const CONCRETE_SOURCE_ROOT_PATTERN =
   /(?:^|[\s`'"\[(])((?:\.{1,2}\/)?(?:(?:packages|apps)\/[\w.@-]+(?:\/(?:src|test|tests|__tests__|config)(?:\/[\w.@-]+)*)?|(?:src|test|tests|__tests__|config|docs|scripts|lib|migrations|data)(?:\/[\w.@-]+)*))(?:[\s`'"),.;\]]|$)/gi;
@@ -813,7 +814,7 @@ function buildNormalizedAifPlanManifest(input: {
     roadmapAlias: input.task.roadmapAlias,
     tags: input.task.tags,
   });
-  const taskPaths = extractRepoPaths(combinedTaskText(input.task));
+  const taskPaths = extractTaskScopedPaths(combinedTaskText(input.task));
   const scope = normalizeManifestScope({ manifest: input.manifest, plan: input.plan, taskPaths });
   const verificationCommands = normalizeManifestVerificationCommands({
     manifest: input.manifest,
@@ -897,7 +898,7 @@ export function normalizeAifPlanManifestForTask(
     task: input.task,
     plan,
     taskIntent,
-    taskPaths: extractRepoPaths(combinedTaskText(input.task)),
+    taskPaths: extractTaskScopedPaths(combinedTaskText(input.task)),
   });
   if (currentValidation.issues.length === 0) return plan;
 
@@ -1187,6 +1188,7 @@ function evaluateTaskSizeTextOnlySplitIssue(input: {
     ...new Set(
       [
         ...extractRepoPaths(text),
+        ...extractTaskFileBoundaryPaths(text),
         ...extractConcreteSourceRoots(text).filter(isTaskSizeTextBoundaryCandidate),
       ]
         .filter((path) => !isAuditReportArtifactPath(path))
@@ -1624,6 +1626,43 @@ function extractRepoPaths(text: string): string[] {
   return [...paths].sort();
 }
 
+function normalizeTaskBoundaryPath(path: string): string {
+  return normalizePath(
+    path
+      .trim()
+      .replace(/^[-*]\s+/, "")
+      .replace(/^["'`(\[]+/, "")
+      .replace(/["'`)\]]+$/g, "")
+      .replace(/^\.\/+/, ""),
+  );
+}
+
+function looksLikeTaskBoundaryPath(path: string): boolean {
+  if (!path || TASK_SIZE_PLACEHOLDER_BOUNDARIES.has(path.toLowerCase())) return false;
+  return (
+    path.startsWith(".") ||
+    path.includes("/") ||
+    path.includes("*") ||
+    /^[\w.@-]+\.[A-Za-z0-9*.-]+$/.test(path)
+  );
+}
+
+function extractTaskFileBoundaryPaths(text: string): string[] {
+  const paths = new Set<string>();
+  for (const match of text.matchAll(TASK_FILE_BOUNDARY_LINE_PATTERN)) {
+    const boundaryText = match[1] ?? "";
+    for (const token of boundaryText.split(/[,;]+/)) {
+      const normalized = normalizeTaskBoundaryPath(token);
+      if (looksLikeTaskBoundaryPath(normalized)) paths.add(normalized);
+    }
+  }
+  return [...paths].sort();
+}
+
+function extractTaskScopedPaths(text: string): string[] {
+  return [...new Set([...extractRepoPaths(text), ...extractTaskFileBoundaryPaths(text)])].sort();
+}
+
 function extractConcreteSourceRoots(text: string): string[] {
   const paths = new Set<string>();
   for (const match of text.matchAll(CONCRETE_SOURCE_ROOT_PATTERN)) {
@@ -2005,7 +2044,7 @@ function isPersistedAuditSourceReportTask(task: TaskPlanQualityTask): boolean {
 export function evaluateTaskPlanQuality(input: TaskPlanQualityInput): TaskPlanQualityResult {
   const plan = input.plan?.trim() ?? "";
   const taskText = combinedTaskText(input.task);
-  const taskPaths = extractRepoPaths(taskText);
+  const taskPaths = extractTaskScopedPaths(taskText);
   const taskIntent = inferTaskIntent({
     taskIntent: input.task.taskIntent,
     title: input.task.title,

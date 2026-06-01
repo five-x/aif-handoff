@@ -294,11 +294,18 @@ describe("evaluateTaskPlanQuality", () => {
       "",
       planManifest({
         taskId: "task-vite-scaffold",
-        scope: ["package.json", "index.html", "vite.config.*", "src/app/**", "src/main.*"],
+        scope: [
+          "package.json",
+          "index.html",
+          "vite.config.*",
+          "src/app/**",
+          "src/main.*",
+          "src/index.*",
+        ],
         allowedChanges: ["source", "config"],
         forbiddenChanges: ["report", "metadata"],
         expectedArtifacts: [
-          { kind: "source_diff", paths: ["index.html", "src/app/**", "src/main.*"] },
+          { kind: "source_diff", paths: ["index.html", "src/app/**", "src/main.*", "src/index.*"] },
           { kind: "config_update", paths: ["package.json", "vite.config.*"] },
         ],
         acceptanceCriteria: [
@@ -320,6 +327,57 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.ok).toBe(true);
     expect(result.categories).not.toContain("plan_manifest_expected_artifact_violation");
     expect(result.categories).not.toContain("task_size_split_required");
+  });
+
+  it("rejects full-mode plans whose manifest omits declared file boundaries", () => {
+    const task = {
+      id: "task-vite-boundaries",
+      title: "Initialize runnable Vite scaffold",
+      description:
+        "File boundaries: package.json, package-lock.json, index.html, tsconfig*.json, vite.config.*, .gitignore, src/app/**, src/main.*, src/index.*\nVerification: npm.cmd run build",
+      taskIntent: "feature" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+    };
+    const plan = [
+      "## Plan",
+      "",
+      planManifest({
+        taskId: "task-vite-boundaries",
+        scope: [
+          ".gitignore",
+          "index.html",
+          "package-lock.json",
+          "package.json",
+          "tsconfig*.json",
+          "vite.config.*",
+        ],
+        allowedChanges: ["source", "config"],
+        forbiddenChanges: ["report"],
+        expectedArtifacts: [
+          { kind: "source_diff", paths: ["index.html"] },
+          { kind: "config_update", paths: ["package.json", "vite.config.*"] },
+        ],
+        acceptanceCriteria: [
+          {
+            id: "ac-vite-build",
+            description: "The Vite entrypoint and root HTML shell build successfully.",
+            verification: "npm.cmd run build",
+          },
+        ],
+        verificationCommands: ["npm.cmd run build"],
+      }),
+      "",
+      "- [ ] Create the Vite scaffold and run npm.cmd run build.",
+    ].join("\n");
+
+    const result = evaluateTaskPlanQuality({ task, plan });
+
+    expect(result.ok).toBe(false);
+    expect(result.categories).toContain("plan_manifest_scope_mismatch");
+    expect(
+      result.issues.find((entry) => entry.code === "plan_manifest_scope_mismatch")?.message,
+    ).toContain("src/app/**");
   });
 
   it("does not require a missing manifest for pre-rollout full-mode plans", () => {

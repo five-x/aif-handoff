@@ -94,7 +94,7 @@ function splitPlannerMetadataList(value: string | null): string[] {
         .map((entry) => entry.trim().replace(/^`|`$/g, ""))
         .filter((entry) => entry.length > 0),
     ),
-  ].slice(0, 6);
+  ];
 }
 
 function sanitizeDeterministicPlanSentence(value: string): string {
@@ -120,6 +120,7 @@ function normalizeDeterministicPlanScopePath(value: string): string | null {
 function isDeterministicPlanConfigPath(path: string): boolean {
   const normalized = path.toLowerCase();
   return (
+    normalized === ".gitignore" ||
     /(^|\/)(?:package|package-lock|pnpm-lock|yarn\.lock|bun\.lockb)(?:\.json)?$/.test(normalized) ||
     /(^|\/)(?:tsconfig|vite|vitest|eslint|prettier|turbo|dockerfile|docker-compose)\b/.test(
       normalized,
