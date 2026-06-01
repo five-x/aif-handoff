@@ -2579,12 +2579,15 @@ function splitMetadataList(values: string[]): string[] {
   return result;
 }
 
-function inferFileBoundaries(task: GeneratedTask): string[] {
-  const fromDescription = splitMetadataList([
-    ...extractMetadataLines(task.description, "Scope"),
-    ...extractMetadataLines(task.description, "File boundaries"),
-    ...extractMetadataLines(task.description, "Allowed changes"),
+function extractFileBoundaryMetadataValues(description: string): string[] {
+  return splitMetadataList([
+    ...extractMetadataLines(description, "Scope"),
+    ...extractMetadataLines(description, "File boundaries"),
   ]).filter((value) => !/^(?:none|n\/a|not applicable)$/i.test(value));
+}
+
+function inferFileBoundaries(task: GeneratedTask): string[] {
+  const fromDescription = extractFileBoundaryMetadataValues(task.description);
   if (fromDescription.length > 0) return fromDescription.slice(0, 6);
 
   const text = `${task.title}\n${task.description}`.toLowerCase();
@@ -2718,13 +2721,14 @@ function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
     ) ?? []
   ).length;
   const compoundTitleSignal = /[:;,]|\s(?:and|и)\s/i.test(title);
-  const fileBoundaryCount = inferFileBoundaries(task).length;
+  const explicitFileBoundaryCount = extractFileBoundaryMetadataValues(task.description).length;
+  const fileBoundaryCount =
+    explicitFileBoundaryCount > 0 ? explicitFileBoundaryCount : inferFileBoundaries(task).length;
   if (
-    hasStandardMicrotaskMetadata(task.description) &&
+    hasStructuredRoadmapMetadata(task.description) &&
     !isInfrastructureOrConfigSubjectTitle(task.title) &&
-    !broadScopeSignal &&
-    dimensionCount <= 2 &&
-    fileBoundaryCount <= 6
+    fileBoundaryCount <= 6 &&
+    (dimensionCount <= 2 || (verificationSignal && domainSignalCount <= 2))
   ) {
     return false;
   }
@@ -3093,6 +3097,14 @@ function resolveProposalChildMicrotaskMetadata(
 function hasStandardMicrotaskMetadata(description: string): boolean {
   return (
     /^\s*file boundaries\s*:/im.test(description) &&
+    /^\s*acceptance criteria\s*:/im.test(description) &&
+    /^\s*verification\s*:/im.test(description)
+  );
+}
+
+function hasStructuredRoadmapMetadata(description: string): boolean {
+  return (
+    /^\s*(?:scope|file boundaries)\s*:/im.test(description) &&
     /^\s*acceptance criteria\s*:/im.test(description) &&
     /^\s*verification\s*:/im.test(description)
   );

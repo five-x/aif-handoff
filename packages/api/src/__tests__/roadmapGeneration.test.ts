@@ -1579,6 +1579,47 @@ describe("roadmapGeneration", () => {
       expect(findTasksByRoadmapAlias(projectId, "domain-types")).toHaveLength(0);
     });
 
+    it("keeps Russian structured domain initialization tasks as one proposal child", () => {
+      const { projectId } = createProjectWithRoadmap("# Roadmap");
+      const seedTitle =
+        "\u0418\u043d\u0438\u0446\u0438\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u044f \u043a\u0430\u0442\u0430\u043b\u043e\u0433\u0430 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u0439 (Seed Data)";
+
+      const result = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_import",
+        sourceRef: "roadmap-import:ROADMAP.md",
+        sourceContent: `# Roadmap\n- [ ] ${seedTitle}`,
+        generation: {
+          alias: "ru-seed-data",
+          taskIntent: "feature",
+          tasks: [
+            {
+              title: seedTitle,
+              description:
+                "Acceptance criteria: Offer catalog returns deterministic sample offers.\nVerification: npm.cmd test -- offerCatalog\nScope: src/data/offers.json, src/services/offerCatalog.ts\nAllowed changes: Source, tests, docs, and config only as needed for the feature.",
+              taskIntent: "feature",
+              phase: 1,
+              phaseName: "Feature",
+              sequence: 1,
+            },
+          ],
+        },
+      });
+
+      expect(result.status).toBe("created");
+      expect(result.proposal.proposedChildren).toHaveLength(1);
+      expect(result.proposal.proposedChildren[0]).toEqual(
+        expect.objectContaining({
+          title: seedTitle,
+          verificationCommands: ["npm.cmd test -- offerCatalog"],
+          fileBoundaries: ["src/data/offers.json", "src/services/offerCatalog.ts"],
+          splitRationale: "Roadmap item is already narrow enough for one executable microtask.",
+        }),
+      );
+      expect(result.proposal.proposedChildren[0]?.title).not.toContain("dev-");
+      expect(findTasksByRoadmapAlias(projectId, "ru-seed-data")).toHaveLength(0);
+    });
+
     it("decomposes Russian broad feature children into proposal microtasks before persistence", () => {
       const { projectId } = createProjectWithRoadmap("# Roadmap");
 
