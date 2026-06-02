@@ -4,12 +4,13 @@
 
 Closed with `PLAN PASS`, `TEST PASS`, and `REVIEW PASS` on 2026-06-02.
 
-Final code state:
+Verified and deployed runtime code state:
 
 - Branch: `codex/roadmap-audit-oom-hardening`
-- Local HEAD: `88ea141b926e92ff6677907c9a0daf28dbb5335c`
-- GitHub remote branch: `origin/codex/roadmap-audit-oom-hardening` at `88ea141b926e92ff6677907c9a0daf28dbb5335c`
-- Server `/opt/aif-handoff` HEAD: `88ea141b926e92ff6677907c9a0daf28dbb5335c`
+- Code commit under test: `88ea141b926e92ff6677907c9a0daf28dbb5335c`
+- GitHub remote branch contains the tested code commit.
+- Server `/opt/aif-handoff` HEAD during final E2E verification: `88ea141b926e92ff6677907c9a0daf28dbb5335c`
+- This result file was committed after the runtime code deploy as a docs-only handoff artifact; it does not change runtime behavior.
 
 Gate chronology:
 
@@ -44,6 +45,8 @@ Main commits pushed to GitHub:
 - `a8e1003d` - `fix: trust operator closeout evidence in readbacks`
 - `7b0cef71` - `fix: bind operator closeout manifests to approved plans`
 - `88ea141b926e92ff6677907c9a0daf28dbb5335c` - `fix: harden operator closeout evidence validation`
+
+Handoff documentation was committed separately after runtime verification.
 
 Final touched code areas:
 
