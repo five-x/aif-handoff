@@ -3,12 +3,14 @@ import {
   coerceOperatorCompletionEvidence,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
+  getEnv,
   hashAifPlanManifest,
   inferTaskIntent,
   isManualReviewBlockedTask,
   isDevelopmentImplementationIntent,
   normalizeOperatorCompletionPath,
   readAifPlanManifestSnapshot,
+  resolveAuditPlanId,
   validateImplementationManifest,
   type OperatorCompletionEvidence,
 } from "@aif/shared";
@@ -38,6 +40,11 @@ export interface OperatorVerifiedCompletionInput {
   operatorNote?: string | null;
   allowBlockerOverride?: boolean;
   blockerOverrideJustification?: string | null;
+}
+
+interface OperatorGitValidationEvidence {
+  trustedCommittedFiles: string[];
+  dirtyUnrelatedFiles: string[];
 }
 
 export type OperatorVerifiedCompletionResult =
@@ -81,7 +88,7 @@ function normalizeSet(paths: string[]): Set<string> {
 
 function collectSubmittedCommitFiles(projectRoot: string, commitSha: string): string[] {
   const commitFiles = splitGitFiles(
-    runGit(projectRoot, ["diff-tree", "--no-commit-id", "--name-only", "-r", commitSha]),
+    runGit(projectRoot, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commitSha]),
   );
   return [...new Set(commitFiles)].sort((a, b) => a.localeCompare(b));
 }
@@ -89,7 +96,7 @@ function collectSubmittedCommitFiles(projectRoot: string, commitSha: string): st
 function validateGitEvidence(input: {
   projectRoot: string;
   evidence: OperatorCompletionEvidence;
-}): { ok: true; trustedCommittedFiles: string[] } | { ok: false; error: string } {
+}): { ok: true; evidence: OperatorGitValidationEvidence } | { ok: false; error: string } {
   const commit = runGit(input.projectRoot, [
     "rev-parse",
     "--verify",
@@ -141,8 +148,11 @@ function validateGitEvidence(input: {
       error: `operator_verified_completion rejected: reason=dirty_relevant_worktree files=${dirtyDeclared.join(",")}`,
     };
   }
+  const dirtyUnrelatedFiles = [...dirtySet]
+    .filter((file) => !declaredSet.has(file))
+    .sort((a, b) => a.localeCompare(b));
 
-  return { ok: true, trustedCommittedFiles };
+  return { ok: true, evidence: { trustedCommittedFiles, dirtyUnrelatedFiles } };
 }
 
 function hasPendingChecklist(task: TaskRow): boolean {
@@ -186,7 +196,7 @@ function auditEvidenceForTask(
   if (!auditArtifact) return [];
   return listAuditEvidenceEvents({
     taskId: task.id,
-    auditPlanId: `task:${task.id}`,
+    auditPlanId: resolveAuditPlanId({ taskId: task.id, roadmapBatchId: auditArtifact.batchId }),
     limit: 200,
   });
 }
@@ -260,6 +270,8 @@ function buildOperatorImplementationManifest(input: {
 }
 
 function nextStatusForOperatorCloseout(task: TaskRow): TaskRow["status"] {
+  const env = getEnv();
+  if (env.AIF_REQUIREMENTS_INTAKE_ENABLED && env.AIF_REQUIREMENTS_QA_ENABLED) return "qa";
   return task.skipReview ? "done" : "review";
 }
 
@@ -342,6 +354,12 @@ export function handleOperatorVerifiedCompletion(
 
   const gitValidation = validateGitEvidence({ projectRoot, evidence });
   if (!gitValidation.ok) return reject(task.id, 409, gitValidation.error);
+  const gitEvidence = gitValidation.evidence;
+  const acceptedEvidence: OperatorCompletionEvidence = {
+    ...evidence,
+    relevantWorktreeClean: true,
+    dirtyUnrelatedFiles: gitEvidence.dirtyUnrelatedFiles,
+  };
 
   const auditArtifact = findRoadmapBatchArtifactByTaskId(task.id);
   if (task.taskIntent === "audit" || auditArtifact) {
@@ -372,7 +390,7 @@ export function handleOperatorVerifiedCompletion(
         reworkStatus: "accepted",
         validationDetails: {
           action: "operator_verified_completion",
-          evidence,
+          evidence: acceptedEvidence,
           completionEvidence: auditResult.evidence,
         },
         contentSha: auditResult.evidence.auditReportValidation.artifactSha256,
@@ -385,26 +403,26 @@ export function handleOperatorVerifiedCompletion(
 
   const manifest = buildOperatorImplementationManifest({
     task,
-    evidence,
-    trustedCommittedFiles: gitValidation.trustedCommittedFiles,
+    evidence: acceptedEvidence,
+    trustedCommittedFiles: gitEvidence.trustedCommittedFiles,
   });
   const nextStatus = nextStatusForOperatorCloseout(task);
   if (manifest) {
     const manifestValidation = validateImplementationManifest({
       task,
       manifestJson: JSON.stringify(manifest),
-      changedFiles: gitValidation.trustedCommittedFiles,
+      changedFiles: gitEvidence.trustedCommittedFiles,
       meaningfulChangedFiles: [],
       dirtyChangedFiles: [],
-      trustedCommittedChangedFiles: gitValidation.trustedCommittedFiles,
-      trustedVerificationCommands: evidence.verification.map((entry) => entry.command),
+      trustedCommittedChangedFiles: gitEvidence.trustedCommittedFiles,
+      trustedVerificationCommands: acceptedEvidence.verification.map((entry) => entry.command),
       phase: nextStatus === "done" ? "completion" : "review_handoff",
     });
     if (!manifestValidation.ok) {
       return reject(task.id, 409, formatImplementationManifestRejection(manifestValidation));
     }
   }
-  const firstVerification = evidence.verification[0];
+  const firstVerification = acceptedEvidence.verification[0];
   setTaskFields(task.id, {
     status: nextStatus,
     blockedReason: null,
@@ -428,10 +446,12 @@ export function handleOperatorVerifiedCompletion(
     state: "accepted",
     outcome: "supported",
     trustLevel: "trusted",
-    summary: `Operator accepted ${gitValidation.trustedCommittedFiles.length} committed file(s).`,
+    summary: `Operator accepted ${gitEvidence.trustedCommittedFiles.length} committed file(s).`,
     metadata: {
-      evidence,
-      trustedCommittedFiles: gitValidation.trustedCommittedFiles,
+      evidence: acceptedEvidence,
+      trustedCommittedFiles: gitEvidence.trustedCommittedFiles,
+      relevantWorktreeClean: true,
+      dirtyUnrelatedFiles: gitEvidence.dirtyUnrelatedFiles,
       blockerOverride: overrideAllowed
         ? {
             blockers,
@@ -442,10 +462,10 @@ export function handleOperatorVerifiedCompletion(
   });
   appendTaskActivityLog(
     task.id,
-    `[${acceptedAt}] operator_verified_completion accepted: commit=${evidence.commitSha}; verification=${firstVerification.command}; outputSha=${firstVerification.outputSha256}; files=${gitValidation.trustedCommittedFiles.join(",")};${overrideAllowed ? ` blockerOverride=${blockers.join(",")};` : ""} nextStatus=${nextStatus}`,
+    `[${acceptedAt}] operator_verified_completion accepted: commit=${acceptedEvidence.commitSha}; verification=${firstVerification.command}; outputSha=${firstVerification.outputSha256}; files=${gitEvidence.trustedCommittedFiles.join(",")};${overrideAllowed ? ` blockerOverride=${blockers.join(",")};` : ""} nextStatus=${nextStatus}`,
   );
 
   const updated = findTaskById(task.id);
   if (!updated) return { ok: false, status: 404, error: "Task not found after closeout" };
-  return { ok: true, task: updated, evidence, nextStatus };
+  return { ok: true, task: updated, evidence: acceptedEvidence, nextStatus };
 }

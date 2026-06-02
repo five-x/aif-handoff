@@ -9,6 +9,7 @@ import {
   appSettings,
   buildEvidenceUnit,
   buildEvidenceUnitPayload,
+  computeAuditReportContentSha256,
   configAuditEvents,
   formatAuditSynthesisOutcomeForArtifact,
   projects,
@@ -3183,6 +3184,79 @@ describe("tasks API", () => {
       return execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootPath, encoding: "utf8" }).trim();
     }
 
+    function initEmptyGitProject(rootPath: string) {
+      execFileSync("git", ["init", "--initial-branch=main"], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "t@t.local"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["config", "user.name", "T"], { cwd: rootPath, stdio: "ignore" });
+    }
+
+    function gitSnapshot(rootPath: string): { id: string; commit: string; tree: string } {
+      const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: rootPath,
+        encoding: "utf8",
+      }).trim();
+      const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: rootPath,
+        encoding: "utf8",
+      }).trim();
+      return { id: `git:${commit}:${tree}`, commit, tree };
+    }
+
+    function validRoadmapAuditReport(input: {
+      taskId: string;
+      batchId: string;
+      roadmapAlias: string;
+      artifactPath: string;
+      snapshot: { id: string; commit: string; tree: string };
+    }): string {
+      const body = [
+        "No validated findings.",
+        "",
+        "Risk hypotheses: risk-1 for runtime evidence marker integrity in `README.md:2` was covered and is absent.",
+        "",
+        "Checked files:",
+        "- `README.md:2`",
+        "",
+        "Checked commands:",
+        '- Command `rg -n "runtime evidence" README.md` output: `README.md:2:runtime evidence marker`',
+        "",
+      ].join("\n");
+      const manifest = {
+        version: 1,
+        auditPlanId: `batch:${input.batchId}:task:${input.taskId}`,
+        taskId: input.taskId,
+        batchId: input.batchId,
+        roadmapAlias: input.roadmapAlias,
+        artifactPath: input.artifactPath,
+        contentSha256: computeAuditReportContentSha256(body),
+        sourceSnapshot: { ...input.snapshot, dirty: false },
+        outcome: "validated_no_findings",
+        scopeCoverage: [{ root: "README.md", covered: true, evidenceRefs: ["ev-1"] }],
+        riskHypotheses: [
+          { id: "risk-1", description: "Runtime evidence can be forged", status: "covered" },
+        ],
+        findings: [],
+        noFindingsClaims: [{ id: "nf-1", evidenceRefs: ["ev-1"] }],
+        evidenceRefs: ["ev-1"],
+      };
+      return `${body}\n\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest, null, 2)}\n\`\`\`\n`;
+    }
+
+    function auditCompletionActivityLog(): string {
+      return [
+        "[2026-05-09T00:00:00.000Z] Agent: implement-coordinator started",
+        "[2026-05-09T00:00:01.000Z] Tool: read_file README.md",
+        "[2026-05-09T00:00:02.000Z] Tool: write_file audit/report.md",
+        "[2026-05-09T00:00:03.000Z] Agent: implement-coordinator complete",
+        "[2026-05-09T00:00:04.000Z] Agent: review-gate started",
+        "[2026-05-09T00:00:05.000Z] Tool: read_file audit/report.md",
+        "[2026-05-09T00:00:06.000Z] Agent: review-gate complete",
+      ].join("\n");
+    }
+
     function planWithManifest(
       taskId: string,
       changedFiles = ["src/feature.ts"],
@@ -3276,6 +3350,82 @@ describe("tasks API", () => {
         type: "agent:wake",
         payload: expect.anything(),
       });
+    });
+
+    it("routes skip-review operator closeout to QA when the QA lifecycle is enabled", async () => {
+      mockRequirementsIntakeEnabled.value = true;
+      mockRequirementsQaEnabled.value = true;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-closeout-qa-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-closeout-qa-task",
+          projectId: "test-project",
+          title: "Build feature with QA",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-closeout-qa-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).status).toBe("qa");
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:moved",
+        payload: expect.objectContaining({ id: "operator-closeout-qa-task", status: "qa" }),
+      });
+    });
+
+    it("accepts root commit operator evidence using submitted commit diff collection", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-root-commit-"));
+      initEmptyGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-root-commit-task",
+          projectId: "test-project",
+          title: "Build feature from root commit",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-root-commit-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("done");
+      expect(body.implementationManifest.changedFiles).toEqual([
+        expect.objectContaining({ path: "src/feature.ts" }),
+      ]);
     });
 
     it("preserves plan manifest binding for planned operator closeout readbacks", async () => {
@@ -3682,6 +3832,21 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(200);
       expect((await res.json()).status).toBe("done");
+      const artifact = testDb.current
+        .select()
+        .from(taskStageArtifacts)
+        .where(eq(taskStageArtifacts.taskId, "operator-dirty-unrelated-task"))
+        .all()
+        .find((row) => row.stage === "operator_verified_completion");
+      const metadata = JSON.parse(artifact?.metadataJson ?? "{}");
+      expect(metadata.relevantWorktreeClean).toBe(true);
+      expect(metadata.dirtyUnrelatedFiles).toEqual(["notes.txt"]);
+      expect(metadata.evidence).toEqual(
+        expect.objectContaining({
+          relevantWorktreeClean: true,
+          dirtyUnrelatedFiles: ["notes.txt"],
+        }),
+      );
     });
 
     it("rejects unresolved blocking findings without an allowed override", async () => {
@@ -3855,6 +4020,100 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(409);
       expect((await res.json()).error).toContain("operator_verified_completion rejected");
+    });
+
+    it("uses roadmap batch audit plan ids when validating operator audit closeout evidence", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-batch-audit-"));
+      initGitProject(rootPath);
+      commitFile(rootPath, "README.md", "# test\nruntime evidence marker\n");
+      const sourceSnapshot = gitSnapshot(rootPath);
+      execFileSync("git", ["checkout", "-b", "feature/operator-batch-audit"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-batch-audit-task",
+          projectId: "test-project",
+          title: "Write batch audit report",
+          description: "Report artifact: audit/report.md",
+          taskIntent: "audit",
+          roadmapAlias: "operator-batch-audit",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+          agentActivityLog: auditCompletionActivityLog(),
+        })
+        .run();
+      const batch = createRoadmapBatchContract({
+        projectId: "test-project",
+        roadmapAlias: "operator-batch-audit",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["operator-batch-audit-task"],
+        artifacts: [
+          {
+            taskId: "operator-batch-audit-task",
+            role: "report",
+            artifactPath: "audit/report.md",
+            projectRoot: rootPath,
+            branchName: "feature/operator-batch-audit",
+          },
+        ],
+      });
+      const auditPlanId = `batch:${batch.batchId}:task:operator-batch-audit-task`;
+      const commitSha = commitFile(
+        rootPath,
+        "audit/report.md",
+        validRoadmapAuditReport({
+          taskId: "operator-batch-audit-task",
+          batchId: batch.batchId,
+          roadmapAlias: "operator-batch-audit",
+          artifactPath: "audit/report.md",
+          snapshot: sourceSnapshot,
+        }),
+      );
+      appendEvidenceUnitEvent(
+        buildEvidenceUnit(
+          {
+            taskId: "operator-batch-audit-task",
+            auditPlanId,
+            sourceSnapshotId: sourceSnapshot.id,
+            scopeIds: ["README.md"],
+            riskHypothesisIds: ["risk-1"],
+          },
+          buildEvidenceUnitPayload({
+            id: "ev-1",
+            toolName: "Grep",
+            evidenceKind: "search",
+            evidenceGrade: "substantive",
+            scopeIds: ["README.md"],
+            riskHypothesisIds: ["risk-1"],
+            paths: ["README.md"],
+            command: 'rg -n "runtime evidence" README.md',
+            output: "README.md:2:runtime evidence marker",
+          }),
+        ),
+      );
+
+      const res = await app.request(
+        "/tasks/operator-batch-audit-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            operatorVerificationPayload({ commitSha, changedFiles: ["audit/report.md"] }),
+          ),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).status).toBe("done");
+      const artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      expect(artifact.state).toBe("valid");
+      expect(artifact.failureFamily).toBeNull();
     });
 
     it("accepts clean committed plan, package, and smoke script evidence", async () => {

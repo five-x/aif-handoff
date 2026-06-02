@@ -429,7 +429,7 @@ function collectChangedFiles(projectRoot: string): {
   const diffArgs =
     baseDiffArgs.length > 0
       ? baseDiffArgs
-      : [["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]];
+      : [["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "HEAD"]];
   for (const args of diffArgs) {
     const diff = runGit(projectRoot, args);
     if (diff) {
@@ -1362,7 +1362,14 @@ function isHeadReportArtifactOnlyCommit(
   reportArtifactFiles: string[],
 ): boolean {
   if (reportArtifactFiles.length === 0) return false;
-  const changed = runGit(projectRoot, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]);
+  const changed = runGit(projectRoot, [
+    "diff-tree",
+    "--root",
+    "--no-commit-id",
+    "--name-only",
+    "-r",
+    "HEAD",
+  ]);
   if (!changed) return false;
   const reportArtifactSet = new Set(reportArtifactFiles.map(normalizePathForComparison));
   const changedFiles = changed.split(/\r?\n/).map(normalizePathForComparison).filter(Boolean);

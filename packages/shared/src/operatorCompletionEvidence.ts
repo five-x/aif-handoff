@@ -14,6 +14,8 @@ export interface OperatorCompletionEvidence {
   changedFiles: string[];
   verification: OperatorCompletionVerificationEvidence[];
   worktreeClean: boolean;
+  relevantWorktreeClean: boolean;
+  dirtyUnrelatedFiles: string[];
   operatorNote?: string | null;
   overriddenBlockers?: string[];
   blockerOverrideJustification?: string | null;
@@ -78,6 +80,7 @@ export function coerceOperatorCompletionEvidence(
     !isUsefulString(value.commitSha) ||
     !isValidOperatorCompletionCommitSha(value.commitSha) ||
     value.worktreeClean !== true ||
+    value.relevantWorktreeClean === false ||
     !Array.isArray(value.changedFiles) ||
     !Array.isArray(value.verification) ||
     !isUsefulString(value.acceptedAt)
@@ -118,6 +121,8 @@ export function coerceOperatorCompletionEvidence(
     changedFiles: [...new Set(changedFiles)].sort((a, b) => a.localeCompare(b)),
     verification,
     worktreeClean: true,
+    relevantWorktreeClean: true,
+    dirtyUnrelatedFiles: coerceStringArray(value.dirtyUnrelatedFiles),
     operatorNote: typeof value.operatorNote === "string" ? value.operatorNote : null,
     overriddenBlockers: coerceStringArray(value.overriddenBlockers),
     blockerOverrideJustification:

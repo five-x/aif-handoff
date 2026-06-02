@@ -37,6 +37,24 @@ The stabilization work helped. The system can now close a committed, manually ve
 
 The live E2E replay on a disposable project confirmed both the happy path and two negative cases. The accepted task reached `done` with a trusted/supported implementation-manifest timeline claim. A subset-diff payload and an out-of-plan commit both remained `blocked_external` with explicit rejection activity.
 
+## Follow-Up Hardening
+
+Completed after the operator-verified closeout PASS on 2026-06-02:
+
+- Operator closeout lifecycle routing now sends accepted closeout to `qa` when requirements intake and QA lifecycle are enabled, even when `skipReview=true`.
+- Roadmap batch audit closeout evidence lookup now resolves `auditPlanId` through `resolveAuditPlanId({ taskId, roadmapBatchId })` so batch-scoped ledger evidence is found.
+- Submitted commit diff collection now uses `git diff-tree --root --no-commit-id --name-only -r <commit>`, and shared completion-evidence fallback HEAD diff checks also include `--root`.
+- Relevant-clean worktree semantics are explicit in accepted operator evidence and stage artifact metadata through `relevantWorktreeClean=true`.
+- Unrelated dirty files are preserved in accepted evidence and metadata as `dirtyUnrelatedFiles` when they are allowed.
+- The original workflow stabilization P0 guard surface remains covered by focused and full-suite verification: repeated tool-call guards, checklist incomplete hard stop, invalid deterministic manifest rejection, split-required planner-state protections, same-failure fail-closed coverage, and tool-level allowed write path enforcement.
+
+Additional regression coverage:
+
+- `skipReview=true` operator closeout routes to `qa` when QA lifecycle is enabled.
+- Root commit operator closeout accepts submitted commit evidence.
+- Unrelated dirty worktree files are persisted in accepted operator metadata.
+- Roadmap batch audit operator closeout validates against batch-scoped ledger evidence.
+
 ## Code Changes
 
 Main commits pushed to GitHub:
@@ -64,7 +82,7 @@ Implemented behavior:
 
 - Added `POST /tasks/:id/operator-verified-completion`.
 - Added shared `OperatorCompletionEvidence` coercion and validation.
-- Validates submitted commit existence and collects changed files from the submitted commit using `git diff-tree --no-commit-id --name-only -r <commit>`.
+- Validates submitted commit existence and collects changed files from the submitted commit using `git diff-tree --root --no-commit-id --name-only -r <commit>`.
 - Rejects empty submitted commit diffs.
 - Rejects operator-declared files that are not in the submitted commit diff.
 - Rejects submitted commit files omitted from the operator payload with `undeclared_commit_files`.
@@ -75,13 +93,36 @@ Implemented behavior:
 - Derives generated acceptance criteria from approved plan criterion IDs, with the old `operator-verified-completion` fallback only when no plan criterion IDs exist.
 - Validates the generated implementation manifest before mutating task status.
 - Records accepted and rejected closeout decisions in the task activity log.
-- Persists accepted operator evidence, trusted committed files, overridden blockers, and blocker override justification in task stage artifact metadata.
+- Persists accepted operator evidence, trusted committed files, relevant-clean state, unrelated dirty files, overridden blockers, and blocker override justification in task stage artifact metadata.
 - Integrates accepted operator evidence into generic readback validation via `trustedCommittedFiles`.
 - Keeps the closeout path from broadcasting `agent:wake` or starting an implementer retry.
 
 ## Verification
 
 Lead local verification after final hardening:
+
+- `npm.cmd run test --workspace=@aif/api -- src/__tests__/tasks.test.ts` - passed.
+- `npm.cmd run test --workspace=@aif/shared -- src/__tests__/taskCompletionEvidence.test.ts src/__tests__/implementationManifest.test.ts` - passed, 170 tests.
+- `npm.cmd run lint` - passed with the known non-failing warning in `packages/agent/src/subagents/reviewer.ts:1462`.
+- `npm.cmd test` - first 3-minute attempt timed out before a result; rerun with a longer timeout passed.
+- `npm.cmd run build` - passed.
+
+Independent follow-up TEST gate by Goodall:
+
+- `npm.cmd run test --workspace=@aif/api -- src/__tests__/tasks.test.ts` - passed.
+- `npm.cmd run test --workspace=@aif/shared -- src/__tests__/taskCompletionEvidence.test.ts src/__tests__/implementationManifest.test.ts` - passed, 170 tests.
+- `npm.cmd run lint` - passed with the known reviewer warning.
+- `npm.cmd test` - passed.
+- `npm.cmd run build` - passed.
+- Verdict: `TEST PASS`.
+
+Independent follow-up REVIEW gate by Epicurus:
+
+- Reviewed `packages/api/src/services/operatorVerifiedCompletion.ts`, `packages/shared/src/operatorCompletionEvidence.ts`, `packages/shared/src/taskCompletionEvidence.ts`, and `packages/api/src/__tests__/tasks.test.ts`.
+- Confirmed QA routing overrides `skipReview`, batch audit evidence uses `resolveAuditPlanId`, root commit submitted diffs use `--root`, unrelated dirty files are persisted with relevant-clean metadata, and existing checklist/audit/manifest/normal-closeout guards remain covered.
+- Verdict: `REVIEW PASS`.
+
+Earlier closeout verification:
 
 - `npm.cmd run test --workspace=@aif/api -- src/__tests__/tasks.test.ts -t "operator-verified-completion"` - passed, 17 tests.
 - `npm.cmd run test --workspace=@aif/shared -- src/__tests__/implementationManifest.test.ts src/__tests__/taskCompletionEvidence.test.ts` - passed, 170 tests.
@@ -238,7 +279,7 @@ Out-of-plan rejection task:
 ## Residual Risks And Follow-Ups
 
 - Full `npm.cmd test` passed on the patched worktree before final commit, but the independent final tester reran focused tests, build, lint, and live assertions rather than the full suite.
-- `git diff-tree` is currently used without `--root`; reviewer Kepler noted this may reject root commits as having no changed files. This is acceptable for the current closeout but should be tested if initial-commit operator closeout needs support.
+- Root commit operator closeout is now covered by a focused route regression using submitted commit diff collection with `--root`.
 - User-facing generic `/artifact-trust` selection can surface an unrelated thin-plan issue even when the implementation-manifest timeline is trusted. This is not a closeout blocker, but it is worth a separate UX/trust-rollup follow-up if operators rely on the top-level rollup alone.
 - Audit/report artifact bypass protection is covered by focused tests, not by a separate live audit artifact replay.
 - Accepted operator evidence is persisted through task stage artifact metadata and implementation manifest readback, not a new task-table JSON column.
