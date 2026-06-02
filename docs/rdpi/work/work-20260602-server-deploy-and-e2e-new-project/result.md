@@ -99,6 +99,68 @@ Result:
 - `dashboard cold load`: DOM content loaded `289.1ms`, LCP `380ms`.
 - `runtime-profiles`: cold `1589.4ms`, warm `22.6ms`, both status `200`.
 
+## Continuation After Task Start
+
+The operator started the first E2E task after the initial rollout. The task requested a blocking scope clarification during `requirements_analysis`.
+
+Clarification answered:
+
+- Task: `1dbcc531-66b6-4a85-bb7d-d62cfe7e9f47` - `Add API contract smoke tests`.
+- Question batch: `36f3b996-41c9-41c9-8d8b-79a335fb1091`.
+- Question: `967be3ff-9460-416c-b8a5-46594ad02212`.
+- Answer scope: small API contract smoke artifact for project create/list, paused backlog task create/list, optional task comment create/readback, no agent execution, no UI expansion, no runtime/deployment changes.
+
+Workflow recovery evidence:
+
+- Requirements, research, and design stages completed.
+- The first planner attempt blocked with `operator_input_required` after `repeated_tool_loop_blocked` caught repeated `run_shell` calls with the same normalized fingerprint.
+- A fresh operator comment was added and `retry_from_blocked` resumed planning.
+- The planner passed after two plan-quality replans and reached `plan_ready`.
+- Implementation started, created `scripts/smoke-api-contract.js`, `package.json`, and `.ai-factory/PLAN.md`, but then blocked on runtime permissions during repeated commit activity.
+
+Manual completion evidence in the remote project:
+
+- Project repo path inside the API container: `/home/www/e2e-launch-lab-20260602`.
+- Commit: `1e296ad` - `test: add API contract smoke script`.
+- Files committed:
+  - `.ai-factory/PLAN.md`
+  - `package.json`
+  - `scripts/smoke-api-contract.js`
+- Local project git status after commit: clean on `master`.
+
+Smoke verification against the deployed server:
+
+- Command: `AIF_API_URL=http://192.168.88.67/api npm run test:smoke`.
+- Auth mode: no `AIF_API_TOKEN`.
+- Result: 27 PASS, 0 FAIL.
+- Covered:
+  - `POST /projects` with required `rootPath`.
+  - `GET /projects` readback.
+  - `POST /tasks` with `autoMode=false`, `paused=true`.
+  - `GET /tasks?projectId=<projectId>` readback preserving `status=backlog`, `autoMode=false`, `paused=true`.
+  - `POST /tasks/:id/comments` with `message`.
+  - `GET /tasks/:id/comments` readback.
+
+Additional workflow closeout attempts:
+
+- Retrying after manual completion advanced past the original runtime block but hit evidence-contract validation.
+- The task then blocked with `aif_result_contract_invalid: missing_aif_result_contract`.
+- A follow-up retry with an explicit `aif-result` contract reached implementation evidence guard rework, then returned to `operator_input_required`.
+- Final task state: `blocked_external`, `blockedFromStatus=implementing`, `paused=true`, blocked reason `operator_input_required: Runtime permissions blocked this task. Grant the required runtime access or update the approval/sandbox policy before retry.`
+
+Interpretation:
+
+- The deployed hardening helped by stopping repeated tool loops fail-closed instead of letting the workflow spin.
+- It did not fully stabilize the end-to-end task closeout. The remaining gap is closeout/rework handling for already-committed implementations and strict `aif-result`/implementation-manifest evidence validation.
+- The requested API smoke artifact itself is complete, committed, and passes against the deployed server.
+
+Current remote project task readback after continuation:
+
+- `1dbcc531-66b6-4a85-bb7d-d62cfe7e9f47` - `Add API contract smoke tests`, status `blocked_external`, `autoMode=false`, `paused=true`.
+- `87c2d580-ef4d-4095-a668-d2cc365357a0` - `Add deployment health probe script`, status `backlog`, `autoMode=false`, `paused=false`.
+- `735e8d40-484e-4f83-82f0-90395a2b5a76` - `Build remote launch checklist`, status `backlog`, `autoMode=false`, `paused=false`.
+- `2a4c3c67-d74e-4e83-9476-7bd52f590f31` - `Write onboarding smoke-test notes`, status `backlog`, `autoMode=false`, `paused=false`.
+
 ## Independent Test Gate
 
 Tester: Ohm.
