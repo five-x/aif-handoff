@@ -504,6 +504,28 @@ Here is unrelated JSON:
     expect(result.issues).toEqual([]);
   });
 
+  it("accepts trusted committed files without requiring them to remain dirty", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: JSON.stringify(validManifest()),
+      changedFiles: [],
+      meaningfulChangedFiles: [],
+      dirtyChangedFiles: [],
+      trustedCommittedChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues.map((issue) => issue.code)).not.toContain(
+      "implementation_changed_files_mismatch",
+    );
+  });
+
   it("keeps previous tool-bearing implementation activity when latest retry has no tools", () => {
     const result = validateImplementationManifest({
       task: {

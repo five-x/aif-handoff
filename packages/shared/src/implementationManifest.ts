@@ -129,6 +129,7 @@ export interface ValidateImplementationManifestInput {
   changedFiles: string[];
   meaningfulChangedFiles: string[];
   dirtyChangedFiles: string[];
+  trustedCommittedChangedFiles?: string[];
   phase: ImplementationManifestValidationPhase;
 }
 
@@ -942,7 +943,10 @@ export function validateImplementationManifest(
   }
 
   const manifestChangedFiles = sortedUniquePaths(manifest.changedFiles.map((entry) => entry.path));
-  const actualChangedFiles = sortedUniquePaths(input.meaningfulChangedFiles);
+  const actualChangedFiles = sortedUniquePaths([
+    ...input.meaningfulChangedFiles,
+    ...(input.trustedCommittedChangedFiles ?? []),
+  ]);
   if (!arraysEqual(manifestChangedFiles, actualChangedFiles)) {
     issues.push(
       issue(

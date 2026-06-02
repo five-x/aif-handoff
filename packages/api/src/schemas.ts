@@ -233,6 +233,26 @@ export const manualExceptionSchema = z.object({
   justification: z.string().min(1).max(20_000),
 });
 
+export const operatorVerifiedCompletionSchema = z.object({
+  commitSha: z.string().regex(/^[a-f0-9]{40}$/i, "commitSha must be a 40-character SHA"),
+  changedFiles: z.array(z.string().min(1).max(1000)).min(1).max(200),
+  verification: z
+    .array(
+      z.object({
+        command: z.string().min(1).max(1000),
+        status: z.literal("passed"),
+        outputPreview: z.string().min(1).max(20_000),
+        outputSha256: z.string().regex(/^[a-f0-9]{64}$/i, "outputSha256 must be SHA-256 hex"),
+      }),
+    )
+    .min(1)
+    .max(20),
+  worktreeClean: z.literal(true),
+  operatorNote: z.string().max(20_000).nullable().optional(),
+  allowBlockerOverride: z.boolean().optional(),
+  blockerOverrideJustification: z.string().max(20_000).nullable().optional(),
+});
+
 export const worktreeCleanupSchema = z.object({
   action: z.enum(["archive", "delete"]).default("archive"),
 });

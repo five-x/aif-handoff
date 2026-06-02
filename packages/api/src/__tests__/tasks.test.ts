@@ -3138,6 +3138,466 @@ describe("tasks API", () => {
     });
   });
 
+  describe("POST /tasks/:id/operator-verified-completion", () => {
+    function operatorVerificationPayload(overrides: Record<string, unknown> = {}) {
+      return {
+        commitSha: "a".repeat(40),
+        changedFiles: ["src/feature.ts"],
+        verification: [
+          {
+            command: "npm.cmd test",
+            status: "passed",
+            outputPreview: "Tests passed",
+            outputSha256: "b".repeat(64),
+          },
+        ],
+        worktreeClean: true,
+        ...overrides,
+      };
+    }
+
+    function commitFile(rootPath: string, path: string, content: string): string {
+      const dir = path.split("/").slice(0, -1).join("/");
+      if (dir) mkdirSync(join(rootPath, dir), { recursive: true });
+      writeFileSync(join(rootPath, path), content, "utf8");
+      execFileSync("git", ["add", path], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", `change ${path}`, "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      return execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootPath, encoding: "utf8" }).trim();
+    }
+
+    function commitFiles(rootPath: string, files: Record<string, string>): string {
+      for (const [path, content] of Object.entries(files)) {
+        const dir = path.split("/").slice(0, -1).join("/");
+        if (dir) mkdirSync(join(rootPath, dir), { recursive: true });
+        writeFileSync(join(rootPath, path), content, "utf8");
+      }
+      execFileSync("git", ["add", ...Object.keys(files)], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "operator closeout changes", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      return execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootPath, encoding: "utf8" }).trim();
+    }
+
+    it("accepts committed operator evidence without waking implementer", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-closeout-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-closeout-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request("/tasks/operator-closeout-task/operator-verified-completion", {
+        method: "POST",
+        body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("done");
+      expect(body.implementationManifest.commitEvidence.commitSha).toBe(commitSha);
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:moved",
+        payload: expect.objectContaining({ id: "operator-closeout-task", status: "done" }),
+      });
+      expect(mockBroadcast).not.toHaveBeenCalledWith({
+        type: "agent:wake",
+        payload: expect.anything(),
+      });
+    });
+
+    it("rejects declared files that only exist in the commit tree", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-tree-only-"));
+      initGitProject(rootPath);
+      commitFile(rootPath, "src/existing.ts", "export const oldValue = 1;\n");
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-tree-only-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request("/tasks/operator-tree-only-task/operator-verified-completion", {
+        method: "POST",
+        body: JSON.stringify(
+          operatorVerificationPayload({ commitSha, changedFiles: ["src/existing.ts"] }),
+        ),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("changed_file_not_in_commit_diff");
+    });
+
+    it("rejects pending checklist items before closeout", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-checklist-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-checklist-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+          implementationManifestJson: JSON.stringify({
+            planChecklist: { total: 2, completed: 1, pending: 1, pendingItems: ["finish"] },
+          }),
+        })
+        .run();
+
+      const res = await app.request("/tasks/operator-checklist-task/operator-verified-completion", {
+        method: "POST",
+        body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("pending_checklist_items");
+    });
+
+    it("rejects pending checklist even when pendingItems is empty", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-empty-checklist-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-empty-checklist-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+          implementationManifestJson: JSON.stringify({
+            planChecklist: { total: 2, completed: 1, pending: 1, pendingItems: [] },
+          }),
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-empty-checklist-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("pending_checklist_items");
+    });
+
+    it("rejects nonexistent commits", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-missing-commit-"));
+      initGitProject(rootPath);
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-missing-commit-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-missing-commit-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha: "c".repeat(40) })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("commit_not_found");
+    });
+
+    it("rejects invalid verification evidence before closeout", async () => {
+      const res = await app.request("/tasks/operator-closeout-task/operator-verified-completion", {
+        method: "POST",
+        body: JSON.stringify(
+          operatorVerificationPayload({
+            verification: [
+              {
+                command: "npm.cmd test",
+                status: "failed",
+                outputPreview: "",
+                outputSha256: "not-a-sha",
+              },
+            ],
+          }),
+        ),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects dirty files that intersect declared task scope", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-dirty-relevant-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      writeFileSync(join(rootPath, "src", "feature.ts"), "export const value = 2;\n", "utf8");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-dirty-relevant-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-dirty-relevant-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("dirty_relevant_worktree");
+    });
+
+    it("allows unrelated dirty files outside declared task scope", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-dirty-unrelated-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      writeFileSync(join(rootPath, "notes.txt"), "unrelated operator note\n", "utf8");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-dirty-unrelated-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-dirty-unrelated-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).status).toBe("done");
+    });
+
+    it("rejects unresolved blocking findings without an allowed override", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-blocker-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-blocker-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "review",
+          skipReview: true,
+          autoReviewStateJson: JSON.stringify({
+            strategy: "fix_first",
+            iteration: 1,
+            findings: [{ id: "finding-1", status: "still_blocking" }],
+          }),
+        })
+        .run();
+
+      const res = await app.request("/tasks/operator-blocker-task/operator-verified-completion", {
+        method: "POST",
+        body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("unresolved_blockers");
+    });
+
+    it("rejects manual-review blocked tasks before terminal operator closeout", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-manual-review-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-manual-review-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "review",
+          blockedReason: "manual_review_required: unresolved review finding",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-manual-review-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("manual_review_required");
+    });
+
+    it("rejects invalid audit artifacts instead of bypassing audit validation", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-invalid-audit-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "audit/report.md", "# Incomplete audit\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-invalid-audit-task",
+          projectId: "test-project",
+          title: "Write audit report",
+          description: "Report artifact: audit/report.md",
+          taskIntent: "audit",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+        })
+        .run();
+      createRoadmapBatchContract({
+        projectId: "test-project",
+        roadmapAlias: "operator-invalid-audit",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["operator-invalid-audit-task"],
+        artifacts: [
+          {
+            taskId: "operator-invalid-audit-task",
+            role: "report",
+            artifactPath: "audit/report.md",
+            projectRoot: rootPath,
+          },
+        ],
+      });
+
+      const res = await app.request(
+        "/tasks/operator-invalid-audit-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            operatorVerificationPayload({ commitSha, changedFiles: ["audit/report.md"] }),
+          ),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("operator_verified_completion rejected");
+    });
+
+    it("accepts clean committed plan, package, and smoke script evidence", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-smoke-shape-"));
+      initGitProject(rootPath);
+      const changedFiles = [".ai-factory/PLAN.md", "package.json", "scripts/smoke-api-contract.js"];
+      const commitSha = commitFiles(rootPath, {
+        ".ai-factory/PLAN.md": "## Plan\n- [x] Add smoke test\n",
+        "package.json": '{"scripts":{"test:smoke":"node scripts/smoke-api-contract.js"}}\n',
+        "scripts/smoke-api-contract.js": "console.log('27 PASS / 0 FAIL');\n",
+      });
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-smoke-shape-task",
+          projectId: "test-project",
+          title: "Add API contract smoke script",
+          description: "Add smoke script and npm command.",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-smoke-shape-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha, changedFiles })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("done");
+      expect(
+        body.implementationManifest.changedFiles.map((entry: { path: string }) => entry.path),
+      ).toEqual(changedFiles);
+    });
+  });
+
   describe("POST /tasks/:id/events", () => {
     it("blocks runtime-starting events when project config has deterministic errors", async () => {
       const projectRoot = mkdtempSync(join(tmpdir(), "config-governance-block-"));

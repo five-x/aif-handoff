@@ -31,11 +31,13 @@ import {
   reorderTaskSchema,
   broadcastTaskSchema,
   manualExceptionSchema,
+  operatorVerifiedCompletionSchema,
   operatorLimitQuerySchema,
   worktreeCleanupSchema,
 } from "../schemas.js";
 import { broadcast } from "../ws.js";
 import { handleTaskEvent } from "../services/taskEvents.js";
+import { handleOperatorVerifiedCompletion } from "../services/operatorVerifiedCompletion.js";
 import {
   archiveTaskWorktree,
   deleteTaskWorktree,
@@ -1591,6 +1593,41 @@ tasksRouter.post("/:id/manual-exception", jsonValidator(manualExceptionSchema), 
 });
 
 // POST /tasks/:id/events — apply a human action through state machine
+// POST /tasks/:id/operator-verified-completion - close committed, operator-verified work.
+tasksRouter.post(
+  "/:id/operator-verified-completion",
+  jsonValidator(operatorVerifiedCompletionSchema),
+  async (c) => {
+    const { id } = c.req.param();
+    const body = c.req.valid("json");
+    const existing = findTaskById(id);
+    if (!existing) return c.json({ error: "Task not found" }, 404);
+    try {
+      const handled = handleOperatorVerifiedCompletion({ taskId: id, ...body });
+      if (!handled.ok) {
+        return c.json({ error: handled.error }, handled.status as ContentfulStatusCode);
+      }
+      log.debug(
+        { taskId: id, from: existing.status, to: handled.task.status },
+        "Operator verified completion applied",
+      );
+      broadcast({ type: "task:moved", payload: toTaskBroadcastPayload(handled.task) });
+      broadcastTaskOperatorEvents(handled.task, ["task:timeline_updated", "task:trust_updated"]);
+      return c.json(toTaskRouteResponse(handled.task));
+    } catch (error) {
+      log.error(
+        {
+          taskId: id,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        "Operator verified completion failed",
+      );
+      return c.json({ error: "Internal server error" }, 500);
+    }
+  },
+);
+
 tasksRouter.post("/:id/events", jsonValidator(taskEventSchema), async (c) => {
   const { id } = c.req.param();
   const { event, deletePlanFile, commitOnApprove, manualExceptionJustification } =

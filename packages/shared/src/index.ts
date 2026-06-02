@@ -672,6 +672,16 @@ export {
   type ValidateImplementationManifestInput,
 } from "./implementationManifest.js";
 
+// Operator verified completion evidence
+export {
+  coerceOperatorCompletionEvidence,
+  isValidOperatorCompletionCommitSha,
+  isValidOperatorCompletionVerification,
+  normalizeOperatorCompletionPath,
+  type OperatorCompletionEvidence,
+  type OperatorCompletionVerificationEvidence,
+} from "./operatorCompletionEvidence.js";
+
 // Compact implementer/rework result contract
 export {
   extractAifResultBlocks,
