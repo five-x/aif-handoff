@@ -321,6 +321,25 @@ describe("task state machine", () => {
     }
   });
 
+  it("allows retry_from_blocked for QA schema fallback blocks", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "qa" as const,
+      blockedReason:
+        "qa_stage_blocked: QA output failed schema validation and deterministic fallback is unavailable: Expected exactly one fenced aif-qa-artifact JSON block, found 0",
+      manualReviewRequired: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("qa");
+      expect(result.patch.blockedReason).toBeNull();
+      expect(result.patch.blockedFromStatus).toBeNull();
+      expect(result.patch.manualReviewRequired).toBe(false);
+    }
+  });
+
   it("allows retry_from_blocked for resolved sequential branch dependency blocks", () => {
     const blocked = {
       ...makeTask("blocked_external"),

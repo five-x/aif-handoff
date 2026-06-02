@@ -5566,6 +5566,35 @@ describe("tasks API", () => {
       expect(body.retryCount).toBe(0);
     });
 
+    it("should allow retry_from_blocked for QA schema fallback blocks", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "ev-qa-schema-retry",
+          projectId: "test-project",
+          title: "QA schema retry task",
+          status: "blocked_external",
+          blockedFromStatus: "qa",
+          blockedReason:
+            "qa_stage_blocked: QA output failed schema validation and deterministic fallback is unavailable: Expected exactly one fenced aif-qa-artifact JSON block, found 0",
+          manualReviewRequired: true,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-qa-schema-retry/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "retry_from_blocked" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("qa");
+      expect(body.blockedReason).toBeNull();
+      expect(body.blockedFromStatus).toBeNull();
+      expect(body.manualReviewRequired).toBe(false);
+    });
+
     it("should reject operator input retry when the only human comment is stale", async () => {
       const db = testDb.current;
       db.insert(tasks)
