@@ -6,6 +6,7 @@ import {
   codexSessionFiles,
   codexSessions,
   getEnv,
+  hashAifPlanManifest,
   projects,
   tasks,
   type AifPlanManifest,
@@ -1289,6 +1290,136 @@ describe("data layer", () => {
       expect(buildTaskArtifactTrustRollup(blockedTask.id)?.reasonCodes).not.toContain(
         "manual_review_required",
       );
+    });
+
+    it("trusts operator accepted evidence in generic implementation manifest rollups", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Operator closed feature",
+        description: "Implement feature and close it out from committed operator evidence.",
+        taskIntent: "feature",
+        skipReview: true,
+      })!;
+      const commitSha = "a".repeat(40);
+      const outputSha256 = "b".repeat(64);
+      const verificationCommand = "npm.cmd test";
+      const plan = [
+        "```aif-plan-manifest",
+        JSON.stringify({
+          version: 1,
+          taskId: task.id,
+          intent: "feature",
+          scope: ["src/feature.ts"],
+          allowedChanges: ["source", "tests"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+          acceptanceCriteria: [
+            {
+              id: "AC1",
+              description: "Feature code changed.",
+              verification: verificationCommand,
+            },
+          ],
+          verificationCommands: [verificationCommand],
+        }),
+        "```",
+        "",
+        "## Plan",
+        "- [x] Implement feature",
+        "- [x] Run verification",
+      ].join("\n");
+      const manifest: ImplementationManifest = {
+        version: 1,
+        taskId: task.id,
+        intent: "feature",
+        planManifestHash: hashAifPlanManifest(plan),
+        changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+        diffSummary: { summary: "Changed src/feature.ts", filesChanged: 1 },
+        verificationEvidence: [
+          {
+            id: "verify-operator",
+            command: verificationCommand,
+            status: "passed",
+            outputSha256,
+            outputPreview: "tests passed",
+            outputPreviewTruncated: false,
+          },
+        ],
+        acceptanceCriteria: [
+          { id: "AC1", status: "satisfied", evidenceRefs: ["verify-operator"] },
+        ],
+        evidenceRefs: ["verify-operator"],
+        planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+        reviewClosure: { status: "passed", evidenceRefs: ["verify-operator"] },
+        commitEvidence: { status: "committed", commitSha, evidenceRefs: ["verify-operator"] },
+        knownLimitations: [],
+      };
+      updateTask(task.id, { implementationManifest: manifest });
+      updateTaskStatus(task.id, "done", { plan });
+      recordTaskStageArtifactAttempt({
+        taskId: task.id,
+        stage: "operator_verified_completion",
+        kind: "test_result",
+        label: "Operator verified completion",
+        state: "accepted",
+        outcome: "supported",
+        trustLevel: "trusted",
+        summary: "Operator accepted 1 committed file.",
+        metadata: {
+          evidence: {
+            version: 1,
+            taskId: task.id,
+            source: "operator",
+            status: "accepted",
+            commitSha,
+            changedFiles: ["src/feature.ts"],
+            verification: [
+              {
+                command: verificationCommand,
+                status: "passed",
+                outputPreview: "tests passed",
+                outputSha256,
+              },
+            ],
+            worktreeClean: true,
+            acceptedAt: "2026-06-02T00:00:00.000Z",
+          },
+          trustedCommittedFiles: ["src/feature.ts"],
+        },
+      });
+
+      const rollup = buildTaskArtifactTrustRollup(task.id);
+      expect(rollup).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactTrustLevel: "trusted",
+          claimOutcome: "supported",
+          nextAction: "none",
+        }),
+      );
+      expect(rollup?.reasonCodes).not.toEqual(
+        expect.arrayContaining([
+          "verification_command_not_observed",
+          "missing_verification_evidence",
+        ]),
+      );
+      const timeline = buildTaskWorkflowTimeline(task.id);
+      expect(timeline).not.toBeNull();
+      if (!timeline) throw new Error("Expected operator closeout timeline");
+      const manifestArtifact = timeline.artifacts.find(
+        (artifact) => artifact.kind === "implementation_manifest",
+      );
+      expect(manifestArtifact).toEqual(
+        expect.objectContaining({
+          state: "accepted",
+          metadata: expect.objectContaining({
+            reasonCodes: ["implementation_manifest_valid"],
+          }),
+        }),
+      );
+      expect(
+        timeline.claims.find((claim) => claim.artifactId === manifestArtifact?.id),
+      ).toEqual(expect.objectContaining({ outcome: "supported", trustLevel: "trusted" }));
     });
 
     it("keeps done generic tasks untrusted when required artifact metadata is invalid", () => {

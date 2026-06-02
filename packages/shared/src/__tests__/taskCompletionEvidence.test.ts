@@ -859,6 +859,35 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("missing_implementation_manifest");
   });
 
+  it("trusts operator-accepted implementation evidence without agent-observed commands", () => {
+    const root = initRepo();
+    const taskId = "feature-with-operator-evidence";
+    const verificationCommand =
+      "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts";
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "completion",
+      task: {
+        id: taskId,
+        title: "Add feature flag",
+        taskIntent: "feature",
+        implementationManifestJson: implementationManifest({
+          taskId,
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+        }),
+        trustedCommittedChangedFiles: ["src/feature.ts"],
+        trustedVerificationCommands: [verificationCommand],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
+    expect(codes(result)).not.toContain("missing_verification_evidence");
+    expect(codes(result)).not.toContain("verification_command_not_observed");
+  });
+
   it("allows plan-backed development review handoff when all plan criteria are covered", () => {
     const root = initRepo();
     mkdirSync(join(root, "src"), { recursive: true });

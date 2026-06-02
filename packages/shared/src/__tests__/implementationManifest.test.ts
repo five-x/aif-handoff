@@ -526,6 +526,30 @@ Here is unrelated JSON:
     );
   });
 
+  it("accepts trusted verification commands from operator evidence", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        skipReview: true,
+        agentActivityLog: null,
+      },
+      manifestJson: JSON.stringify(validManifest()),
+      changedFiles: [],
+      meaningfulChangedFiles: [],
+      dirtyChangedFiles: [],
+      trustedCommittedChangedFiles: ["src/index.ts"],
+      trustedVerificationCommands: ["npm test"],
+      phase: "completion",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues.map((issue) => issue.code)).not.toContain(
+      "verification_command_not_observed",
+    );
+  });
+
   it("keeps previous tool-bearing implementation activity when latest retry has no tools", () => {
     const result = validateImplementationManifest({
       task: {

@@ -3212,6 +3212,31 @@ describe("tasks API", () => {
       const body = await res.json();
       expect(body.status).toBe("done");
       expect(body.implementationManifest.commitEvidence.commitSha).toBe(commitSha);
+      expect(body.artifactTrust).toMatchObject({
+        artifactTrustLevel: "trusted",
+        claimOutcome: "supported",
+        nextAction: "none",
+      });
+      expect(body.artifactTrust.reasonCodes ?? []).not.toEqual(
+        expect.arrayContaining([
+          "verification_command_not_observed",
+          "missing_verification_evidence",
+        ]),
+      );
+      const detailRes = await app.request("/tasks/operator-closeout-task");
+      expect(detailRes.status).toBe(200);
+      const detailBody = await detailRes.json();
+      expect(detailBody.artifactTrust).toMatchObject({
+        artifactTrustLevel: "trusted",
+        claimOutcome: "supported",
+        nextAction: "none",
+      });
+      expect(detailBody.artifactTrust.reasonCodes ?? []).not.toEqual(
+        expect.arrayContaining([
+          "verification_command_not_observed",
+          "missing_verification_evidence",
+        ]),
+      );
       expect(mockBroadcast).toHaveBeenCalledWith({
         type: "task:moved",
         payload: expect.objectContaining({ id: "operator-closeout-task", status: "done" }),

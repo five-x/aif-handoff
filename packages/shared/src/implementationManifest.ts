@@ -130,6 +130,7 @@ export interface ValidateImplementationManifestInput {
   meaningfulChangedFiles: string[];
   dirtyChangedFiles: string[];
   trustedCommittedChangedFiles?: string[];
+  trustedVerificationCommands?: string[];
   phase: ImplementationManifestValidationPhase;
 }
 
@@ -992,14 +993,22 @@ export function validateImplementationManifest(
   const unsupportedPassedEntries = passedEntries.filter((entry) =>
     isRepositoryInspectionOnlyVerificationCommand(entry.command),
   );
-  const unobservedPassedEntries = passedEntries.filter(
-    (entry) =>
-      usefulString(entry.command) &&
+  const trustedVerificationCommands = new Set(
+    (input.trustedVerificationCommands ?? [])
+      .map(normalizeImplementationVerificationCommandText)
+      .filter(usefulString),
+  );
+  const unobservedPassedEntries = passedEntries.filter((entry) => {
+    const normalizedCommand = normalizeImplementationVerificationCommandText(entry.command);
+    return (
+      usefulString(normalizedCommand) &&
+      !trustedVerificationCommands.has(normalizedCommand) &&
       !verificationCommandObservedInLatestImplementationActivity({
         command: entry.command,
         agentActivityLog: input.task.agentActivityLog,
-      }),
-  );
+      })
+    );
+  });
   const admitsFabricatedVerification = manifestAdmitsFabricatedVerification(manifest);
   const passedVerification =
     passedEntries.length > 0 &&

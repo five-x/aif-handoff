@@ -85,6 +85,8 @@ export interface TaskCompletionEvidenceTask {
   auditArtifactRole?: "report" | "synthesis" | null;
   roadmapBatchId?: string | null;
   auditPlanId?: string | null;
+  trustedCommittedChangedFiles?: string[] | null;
+  trustedVerificationCommands?: string[] | null;
 }
 
 export interface TaskCompletionEvidenceIssue {
@@ -1562,6 +1564,8 @@ export function evaluateTaskCompletionEvidence(
           changedFiles: gitEvidence.files,
           meaningfulChangedFiles,
           dirtyChangedFiles: meaningfulDirtyChangedFiles,
+          trustedCommittedChangedFiles: task.trustedCommittedChangedFiles ?? [],
+          trustedVerificationCommands: task.trustedVerificationCommands ?? [],
           phase,
         })
       : null;

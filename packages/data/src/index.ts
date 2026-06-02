@@ -175,6 +175,7 @@ import {
   validateImplementationManifest,
   isDevelopmentImplementationIntent,
   normalizeImplementationVerificationCommandText,
+  coerceOperatorCompletionEvidence,
   inferTaskIntent,
   normalizeTaskIntent,
   resolveRuntimeLimitFutureHint,
@@ -205,6 +206,7 @@ import {
   type AuditArtifactState,
   type AuditArtifactReworkStatus,
   type AuditFailureFamily,
+  type OperatorCompletionEvidence,
   type ResolvedConfigIssue,
   type ResolvedProjectConfigView,
   findSecretLikeKeys,
@@ -8551,6 +8553,23 @@ function listTaskStageArtifactAttemptRowsByTaskId(taskId: string): TaskStageArti
     .all();
 }
 
+function findAcceptedOperatorCompletionEvidence(taskId: string): OperatorCompletionEvidence | null {
+  const rows = listTaskStageArtifactRowsByTaskId(taskId)
+    .filter(
+      (row) =>
+        row.stage === "operator_verified_completion" &&
+        row.kind === "test_result" &&
+        row.state === "accepted",
+    )
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  for (const row of rows) {
+    const metadata = parseRuntimeObject(row.metadataJson);
+    const evidence = coerceOperatorCompletionEvidence(metadata?.evidence);
+    if (evidence) return evidence;
+  }
+  return null;
+}
+
 function taskStatusTerminalForGenericTrust(status: TaskStatus): boolean {
   return status === "done" || status === "verified";
 }
@@ -8667,6 +8686,10 @@ function buildGenericArtifactSeeds(task: TaskRow): GenericArtifactSeed[] {
     manifestObject?.changedFiles
       ?.map((entry) => (typeof entry === "string" ? entry : String(entry.path ?? "")))
       .filter((entry) => entry.trim().length > 0) ?? [];
+  const acceptedOperatorEvidence = findAcceptedOperatorCompletionEvidence(task.id);
+  const trustedOperatorChangedFiles = acceptedOperatorEvidence?.changedFiles ?? [];
+  const trustedOperatorVerificationCommands =
+    acceptedOperatorEvidence?.verification.map((entry) => entry.command) ?? [];
   const requiresImplementationManifest =
     isDevelopmentImplementationIntent(workflowKind) &&
     (task.status === "review" || taskStatusTerminalForGenericTrust(task.status as TaskStatus));
@@ -8678,6 +8701,8 @@ function buildGenericArtifactSeeds(task: TaskRow): GenericArtifactSeed[] {
           changedFiles: manifestChangedFiles,
           meaningfulChangedFiles: manifestChangedFiles,
           dirtyChangedFiles: [],
+          trustedCommittedChangedFiles: trustedOperatorChangedFiles,
+          trustedVerificationCommands: trustedOperatorVerificationCommands,
           phase: task.status === "review" ? "review_handoff" : "completion",
         })
       : null;
