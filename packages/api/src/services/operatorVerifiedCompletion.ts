@@ -4,6 +4,7 @@ import {
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
   getProjectConfig,
+  hashAifPlanManifest,
   inferTaskIntent,
   isManualReviewBlockedTask,
   isDevelopmentImplementationIntent,
@@ -204,7 +205,7 @@ function buildOperatorImplementationManifest(input: {
     version: 1,
     taskId: input.task.id,
     intent,
-    planManifestHash: null,
+    planManifestHash: hashAifPlanManifest(input.task.plan),
     changedFiles: input.evidence.changedFiles.map((path) => ({
       path,
       status: "modified" as const,

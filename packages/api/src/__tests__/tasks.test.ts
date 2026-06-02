@@ -3182,6 +3182,34 @@ describe("tasks API", () => {
       return execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootPath, encoding: "utf8" }).trim();
     }
 
+    function planWithManifest(taskId: string, changedFiles = ["src/feature.ts"]): string {
+      return [
+        "```aif-plan-manifest",
+        JSON.stringify({
+          version: 1,
+          taskId,
+          intent: "feature",
+          scope: changedFiles,
+          allowedChanges: ["source", "tests", "docs", "config"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [{ kind: "source_diff", paths: changedFiles }],
+          acceptanceCriteria: [
+            {
+              id: "operator-verified-completion",
+              description: "Operator verified completion evidence is accepted.",
+              verification: "npm.cmd test",
+            },
+          ],
+          verificationCommands: ["npm.cmd test"],
+        }),
+        "```",
+        "",
+        "## Plan",
+        "- [x] Commit the implementation delta",
+        "- [x] Run focused verification",
+      ].join("\n");
+    }
+
     it("accepts committed operator evidence without waking implementer", async () => {
       const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-closeout-"));
       initGitProject(rootPath);
@@ -3245,6 +3273,67 @@ describe("tasks API", () => {
         type: "agent:wake",
         payload: expect.anything(),
       });
+    });
+
+    it("preserves plan manifest binding for planned operator closeout readbacks", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-planned-closeout-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-planned-closeout-task",
+          projectId: "test-project",
+          title: "Build planned feature",
+          description: "Implement planned feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+          plan: planWithManifest("operator-planned-closeout-task"),
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-planned-closeout-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("done");
+      expect(body.implementationManifest.planManifestHash).toEqual(expect.any(String));
+      expect(body.artifactTrust).toMatchObject({
+        artifactState: "accepted",
+        artifactTrustLevel: "trusted",
+        claimOutcome: "supported",
+        nextAction: "none",
+      });
+      const timelineRes = await app.request("/tasks/operator-planned-closeout-task/timeline");
+      expect(timelineRes.status).toBe(200);
+      const timelineBody = await timelineRes.json();
+      const manifestArtifact = timelineBody.artifacts.find(
+        (artifact: { kind: string }) => artifact.kind === "implementation_manifest",
+      );
+      expect(manifestArtifact).toEqual(
+        expect.objectContaining({
+          state: "accepted",
+          metadata: expect.objectContaining({
+            reasonCodes: ["implementation_manifest_valid"],
+          }),
+        }),
+      );
+      expect(
+        timelineBody.claims.find(
+          (claim: { artifactId: string }) => claim.artifactId === manifestArtifact?.id,
+        ),
+      ).toEqual(expect.objectContaining({ outcome: "supported", trustLevel: "trusted" }));
     });
 
     it("rejects declared files that only exist in the commit tree", async () => {
