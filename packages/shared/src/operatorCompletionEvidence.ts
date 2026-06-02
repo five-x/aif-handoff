@@ -15,6 +15,8 @@ export interface OperatorCompletionEvidence {
   verification: OperatorCompletionVerificationEvidence[];
   worktreeClean: boolean;
   operatorNote?: string | null;
+  overriddenBlockers?: string[];
+  blockerOverrideJustification?: string | null;
   acceptedAt: string;
 }
 
@@ -27,6 +29,18 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isUsefulString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function coerceStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .filter(isUsefulString)
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
 }
 
 export function normalizeOperatorCompletionPath(path: string): string {
@@ -105,6 +119,11 @@ export function coerceOperatorCompletionEvidence(
     verification,
     worktreeClean: true,
     operatorNote: typeof value.operatorNote === "string" ? value.operatorNote : null,
+    overriddenBlockers: coerceStringArray(value.overriddenBlockers),
+    blockerOverrideJustification:
+      typeof value.blockerOverrideJustification === "string"
+        ? value.blockerOverrideJustification.trim()
+        : null,
     acceptedAt: value.acceptedAt,
   };
 }

@@ -3,12 +3,13 @@ import {
   coerceOperatorCompletionEvidence,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
-  getProjectConfig,
   hashAifPlanManifest,
   inferTaskIntent,
   isManualReviewBlockedTask,
   isDevelopmentImplementationIntent,
   normalizeOperatorCompletionPath,
+  readAifPlanManifestSnapshot,
+  validateImplementationManifest,
   type OperatorCompletionEvidence,
 } from "@aif/shared";
 import {
@@ -78,23 +79,11 @@ function normalizeSet(paths: string[]): Set<string> {
   return new Set(paths.map((path) => normalizeOperatorCompletionPath(path).toLowerCase()));
 }
 
-function resolveBaseBranch(projectRoot: string): string | null {
-  const configured = getProjectConfig(projectRoot).git.base_branch || "main";
-  for (const ref of [configured, `origin/${configured}`, "main", "origin/main"]) {
-    if (runGit(projectRoot, ["rev-parse", "--verify", ref])) return ref;
-  }
-  return null;
-}
-
-function collectTrustedCommittedFiles(projectRoot: string, commitSha: string): string[] {
+function collectSubmittedCommitFiles(projectRoot: string, commitSha: string): string[] {
   const commitFiles = splitGitFiles(
     runGit(projectRoot, ["diff-tree", "--no-commit-id", "--name-only", "-r", commitSha]),
   );
-  const baseBranch = resolveBaseBranch(projectRoot);
-  const branchFiles = baseBranch
-    ? splitGitFiles(runGit(projectRoot, ["diff", "--name-only", `${baseBranch}...${commitSha}`]))
-    : [];
-  return [...new Set([...commitFiles, ...branchFiles])].sort((a, b) => a.localeCompare(b));
+  return [...new Set(commitFiles)].sort((a, b) => a.localeCompare(b));
 }
 
 function validateGitEvidence(input: {
@@ -109,10 +98,16 @@ function validateGitEvidence(input: {
   if (!commit)
     return { ok: false, error: "operator_verified_completion rejected: reason=commit_not_found" };
 
-  const trustedCommittedFiles = collectTrustedCommittedFiles(
+  const trustedCommittedFiles = collectSubmittedCommitFiles(
     input.projectRoot,
     input.evidence.commitSha,
   );
+  if (trustedCommittedFiles.length === 0) {
+    return {
+      ok: false,
+      error: "operator_verified_completion rejected: reason=commit_has_no_changed_files",
+    };
+  }
   const trustedSet = normalizeSet(trustedCommittedFiles);
   const missingFiles = input.evidence.changedFiles.filter(
     (file) => !trustedSet.has(file.toLowerCase()),
@@ -123,13 +118,22 @@ function validateGitEvidence(input: {
       error: `operator_verified_completion rejected: reason=changed_file_not_in_commit_diff files=${missingFiles.join(",")}`,
     };
   }
+  const declaredSet = normalizeSet(input.evidence.changedFiles);
+  const undeclaredCommitFiles = trustedCommittedFiles.filter(
+    (file) => !declaredSet.has(file.toLowerCase()),
+  );
+  if (undeclaredCommitFiles.length > 0) {
+    return {
+      ok: false,
+      error: `operator_verified_completion rejected: reason=undeclared_commit_files files=${undeclaredCommitFiles.join(",")}`,
+    };
+  }
 
   const dirtySet = normalizeSet(
     parseStatusFiles(
       runGit(input.projectRoot, ["status", "--porcelain=v1", "--untracked-files=all"]),
     ),
   );
-  const declaredSet = normalizeSet(input.evidence.changedFiles);
   const dirtyDeclared = [...dirtySet].filter((file) => declaredSet.has(file));
   if (dirtyDeclared.length > 0) {
     return {
@@ -190,6 +194,7 @@ function auditEvidenceForTask(
 function buildOperatorImplementationManifest(input: {
   task: TaskRow;
   evidence: OperatorCompletionEvidence;
+  trustedCommittedFiles: string[];
 }) {
   const intent = inferTaskIntent({
     taskIntent: input.task.taskIntent === "general" ? null : input.task.taskIntent,
@@ -201,18 +206,23 @@ function buildOperatorImplementationManifest(input: {
   });
   if (!isDevelopmentImplementationIntent(intent)) return null;
   const evidenceRefs = input.evidence.verification.map((_, index) => `operator-ver-${index + 1}`);
+  const planManifest = readAifPlanManifestSnapshot(input.task.plan);
+  const acceptanceCriterionIds =
+    planManifest.acceptanceCriterionIds.length > 0
+      ? planManifest.acceptanceCriterionIds
+      : ["operator-verified-completion"];
   return {
     version: 1,
     taskId: input.task.id,
     intent,
     planManifestHash: hashAifPlanManifest(input.task.plan),
-    changedFiles: input.evidence.changedFiles.map((path) => ({
+    changedFiles: input.trustedCommittedFiles.map((path) => ({
       path,
       status: "modified" as const,
     })),
     diffSummary: {
       summary: `Operator verified committed changes in ${input.evidence.commitSha}.`,
-      filesChanged: input.evidence.changedFiles.length,
+      filesChanged: input.trustedCommittedFiles.length,
     },
     verificationEvidence: input.evidence.verification.map((entry, index) => ({
       id: evidenceRefs[index],
@@ -222,15 +232,19 @@ function buildOperatorImplementationManifest(input: {
       outputPreview: entry.outputPreview,
       outputPreviewTruncated: false,
     })),
-    acceptanceCriteria: [
-      {
-        id: "operator-verified-completion",
-        status: "satisfied" as const,
-        evidenceRefs,
-      },
-    ],
+    acceptanceCriteria: acceptanceCriterionIds.map((id) => ({
+      id,
+      status: "satisfied" as const,
+      evidenceRefs,
+    })),
     evidenceRefs,
-    planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+    planChecklist: {
+      total: acceptanceCriterionIds.length,
+      completed: acceptanceCriterionIds.length,
+      pending: 0,
+      synced: true,
+      pendingItems: [],
+    },
     reviewClosure: input.task.skipReview
       ? { status: "skipped" as const, evidenceRefs }
       : { status: "pending" as const, evidenceRefs: [] },
@@ -252,6 +266,13 @@ function nextStatusForOperatorCloseout(task: TaskRow): TaskRow["status"] {
 function reject(taskId: string, status: number, error: string): OperatorVerifiedCompletionResult {
   appendTaskActivityLog(taskId, `[${new Date().toISOString()}] ${error}`);
   return { ok: false, status, error };
+}
+
+function formatImplementationManifestRejection(
+  result: ReturnType<typeof validateImplementationManifest>,
+): string {
+  const codes = result.issues.map((issue) => issue.code);
+  return `operator_verified_completion rejected: reason=implementation_manifest_invalid codes=${codes.join(",") || "unknown"}`;
 }
 
 export function handleOperatorVerifiedCompletion(
@@ -305,6 +326,10 @@ export function handleOperatorVerifiedCompletion(
     verification: input.verification,
     worktreeClean: input.worktreeClean,
     operatorNote: input.operatorNote ?? null,
+    overriddenBlockers: overrideAllowed ? blockers : [],
+    blockerOverrideJustification: overrideAllowed
+      ? input.blockerOverrideJustification?.trim()
+      : null,
     acceptedAt,
   });
   if (!evidence) {
@@ -358,8 +383,27 @@ export function handleOperatorVerifiedCompletion(
     }
   }
 
-  const manifest = buildOperatorImplementationManifest({ task, evidence });
+  const manifest = buildOperatorImplementationManifest({
+    task,
+    evidence,
+    trustedCommittedFiles: gitValidation.trustedCommittedFiles,
+  });
   const nextStatus = nextStatusForOperatorCloseout(task);
+  if (manifest) {
+    const manifestValidation = validateImplementationManifest({
+      task,
+      manifestJson: JSON.stringify(manifest),
+      changedFiles: gitValidation.trustedCommittedFiles,
+      meaningfulChangedFiles: [],
+      dirtyChangedFiles: [],
+      trustedCommittedChangedFiles: gitValidation.trustedCommittedFiles,
+      trustedVerificationCommands: evidence.verification.map((entry) => entry.command),
+      phase: nextStatus === "done" ? "completion" : "review_handoff",
+    });
+    if (!manifestValidation.ok) {
+      return reject(task.id, 409, formatImplementationManifestRejection(manifestValidation));
+    }
+  }
   const firstVerification = evidence.verification[0];
   setTaskFields(task.id, {
     status: nextStatus,
@@ -384,12 +428,21 @@ export function handleOperatorVerifiedCompletion(
     state: "accepted",
     outcome: "supported",
     trustLevel: "trusted",
-    summary: `Operator accepted ${evidence.changedFiles.length} committed file(s).`,
-    metadata: { evidence, trustedCommittedFiles: gitValidation.trustedCommittedFiles },
+    summary: `Operator accepted ${gitValidation.trustedCommittedFiles.length} committed file(s).`,
+    metadata: {
+      evidence,
+      trustedCommittedFiles: gitValidation.trustedCommittedFiles,
+      blockerOverride: overrideAllowed
+        ? {
+            blockers,
+            justification: input.blockerOverrideJustification?.trim(),
+          }
+        : null,
+    },
   });
   appendTaskActivityLog(
     task.id,
-    `[${acceptedAt}] operator_verified_completion accepted: commit=${evidence.commitSha}; verification=${firstVerification.command}; outputSha=${firstVerification.outputSha256}; nextStatus=${nextStatus}`,
+    `[${acceptedAt}] operator_verified_completion accepted: commit=${evidence.commitSha}; verification=${firstVerification.command}; outputSha=${firstVerification.outputSha256}; files=${gitValidation.trustedCommittedFiles.join(",")};${overrideAllowed ? ` blockerOverride=${blockers.join(",")};` : ""} nextStatus=${nextStatus}`,
   );
 
   const updated = findTaskById(task.id);

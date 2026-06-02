@@ -14,6 +14,7 @@ import {
   projects,
   roadmapBatchArtifacts,
   runtimeProfiles,
+  taskStageArtifacts,
   usageEvents,
   memoryItems,
   taskRequirementQuestions,
@@ -3182,7 +3183,11 @@ describe("tasks API", () => {
       return execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootPath, encoding: "utf8" }).trim();
     }
 
-    function planWithManifest(taskId: string, changedFiles = ["src/feature.ts"]): string {
+    function planWithManifest(
+      taskId: string,
+      changedFiles = ["src/feature.ts"],
+      acceptanceCriterionIds = ["operator-verified-completion"],
+    ): string {
       return [
         "```aif-plan-manifest",
         JSON.stringify({
@@ -3193,13 +3198,11 @@ describe("tasks API", () => {
           allowedChanges: ["source", "tests", "docs", "config"],
           forbiddenChanges: ["report"],
           expectedArtifacts: [{ kind: "source_diff", paths: changedFiles }],
-          acceptanceCriteria: [
-            {
-              id: "operator-verified-completion",
-              description: "Operator verified completion evidence is accepted.",
-              verification: "npm.cmd test",
-            },
-          ],
+          acceptanceCriteria: acceptanceCriterionIds.map((id) => ({
+            id,
+            description: `${id} is satisfied by operator verification evidence.`,
+            verification: "npm.cmd test",
+          })),
           verificationCommands: ["npm.cmd test"],
         }),
         "```",
@@ -3334,6 +3337,134 @@ describe("tasks API", () => {
           (claim: { artifactId: string }) => claim.artifactId === manifestArtifact?.id,
         ),
       ).toEqual(expect.objectContaining({ outcome: "supported", trustLevel: "trusted" }));
+    });
+
+    it("derives acceptance criteria from the approved plan manifest", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-custom-ac-closeout-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-custom-ac-closeout-task",
+          projectId: "test-project",
+          title: "Build planned feature with custom criteria",
+          description: "Implement planned feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+          plan: planWithManifest(
+            "operator-custom-ac-closeout-task",
+            ["src/feature.ts"],
+            ["AC1", "AC2"],
+          ),
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-custom-ac-closeout-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(
+        body.implementationManifest.acceptanceCriteria.map((entry: { id: string }) => entry.id),
+      ).toEqual(["AC1", "AC2"]);
+      expect(body.artifactTrust).toMatchObject({
+        artifactTrustLevel: "trusted",
+        claimOutcome: "supported",
+        nextAction: "none",
+      });
+    });
+
+    it("rejects operator evidence that omits files changed by the submitted commit", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-subset-diff-"));
+      initGitProject(rootPath);
+      const commitSha = commitFiles(rootPath, {
+        "src/feature.ts": "export const value = 1;\n",
+        "package.json": '{"scripts":{"test":"vitest"}}\n',
+      });
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-subset-diff-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-subset-diff-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            operatorVerificationPayload({ commitSha, changedFiles: ["src/feature.ts"] }),
+          ),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("undeclared_commit_files");
+      const detailRes = await app.request("/tasks/operator-subset-diff-task");
+      expect((await detailRes.json()).status).toBe("blocked_external");
+    });
+
+    it("rejects out-of-plan committed files before moving task state", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-out-of-plan-"));
+      initGitProject(rootPath);
+      const changedFiles = ["src/feature.ts", "package.json"];
+      const commitSha = commitFiles(rootPath, {
+        "src/feature.ts": "export const value = 1;\n",
+        "package.json": '{"scripts":{"test":"vitest"}}\n',
+      });
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-out-of-plan-task",
+          projectId: "test-project",
+          title: "Build scoped feature",
+          description: "Implement scoped feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: true,
+          plan: planWithManifest("operator-out-of-plan-task", ["src/feature.ts"], ["AC1"]),
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-out-of-plan-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha, changedFiles })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("implementation_manifest_invalid");
+      expect(body.error).toContain("implementation_scope_mismatch");
+      const detailRes = await app.request("/tasks/operator-out-of-plan-task");
+      expect((await detailRes.json()).status).toBe("blocked_external");
     });
 
     it("rejects declared files that only exist in the commit tree", async () => {
@@ -3585,6 +3716,63 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(409);
       expect((await res.json()).error).toContain("unresolved_blockers");
+    });
+
+    it("records blocker override evidence when an allowed override is accepted", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-blocker-override-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-blocker-override-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "review",
+          skipReview: true,
+          autoReviewStateJson: JSON.stringify({
+            strategy: "fix_first",
+            iteration: 1,
+            findings: [{ id: "finding-1", status: "still_blocking" }],
+          }),
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-blocker-override-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            operatorVerificationPayload({
+              commitSha,
+              allowBlockerOverride: true,
+              blockerOverrideJustification: "Operator verified finding-1 is stale after commit.",
+            }),
+          ),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      const artifact = testDb.current
+        .select()
+        .from(taskStageArtifacts)
+        .where(eq(taskStageArtifacts.taskId, "operator-blocker-override-task"))
+        .all()
+        .find((row) => row.stage === "operator_verified_completion");
+      const metadata = JSON.parse(artifact?.metadataJson ?? "{}");
+      expect(metadata.evidence.overriddenBlockers).toEqual(["finding-1"]);
+      expect(metadata.evidence.blockerOverrideJustification).toBe(
+        "Operator verified finding-1 is stale after commit.",
+      );
+      expect(metadata.blockerOverride).toEqual({
+        blockers: ["finding-1"],
+        justification: "Operator verified finding-1 is stale after commit.",
+      });
     });
 
     it("rejects manual-review blocked tasks before terminal operator closeout", async () => {

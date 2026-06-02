@@ -176,6 +176,7 @@ import {
   isDevelopmentImplementationIntent,
   normalizeImplementationVerificationCommandText,
   coerceOperatorCompletionEvidence,
+  normalizeOperatorCompletionPath,
   inferTaskIntent,
   normalizeTaskIntent,
   resolveRuntimeLimitFutureHint,
@@ -206,7 +207,6 @@ import {
   type AuditArtifactState,
   type AuditArtifactReworkStatus,
   type AuditFailureFamily,
-  type OperatorCompletionEvidence,
   type ResolvedConfigIssue,
   type ResolvedProjectConfigView,
   findSecretLikeKeys,
@@ -8553,7 +8553,22 @@ function listTaskStageArtifactAttemptRowsByTaskId(taskId: string): TaskStageArti
     .all();
 }
 
-function findAcceptedOperatorCompletionEvidence(taskId: string): OperatorCompletionEvidence | null {
+function coerceTrustedCommittedFiles(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .map(normalizeOperatorCompletionPath)
+        .filter(Boolean),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
+}
+
+function findAcceptedOperatorCompletionEvidence(taskId: string): {
+  evidence: ReturnType<typeof coerceOperatorCompletionEvidence>;
+  trustedCommittedFiles: string[];
+} | null {
   const rows = listTaskStageArtifactRowsByTaskId(taskId)
     .filter(
       (row) =>
@@ -8565,7 +8580,14 @@ function findAcceptedOperatorCompletionEvidence(taskId: string): OperatorComplet
   for (const row of rows) {
     const metadata = parseRuntimeObject(row.metadataJson);
     const evidence = coerceOperatorCompletionEvidence(metadata?.evidence);
-    if (evidence) return evidence;
+    if (evidence) {
+      const trustedCommittedFiles = coerceTrustedCommittedFiles(metadata?.trustedCommittedFiles);
+      return {
+        evidence,
+        trustedCommittedFiles:
+          trustedCommittedFiles.length > 0 ? trustedCommittedFiles : evidence.changedFiles,
+      };
+    }
   }
   return null;
 }
@@ -8687,9 +8709,9 @@ function buildGenericArtifactSeeds(task: TaskRow): GenericArtifactSeed[] {
       ?.map((entry) => (typeof entry === "string" ? entry : String(entry.path ?? "")))
       .filter((entry) => entry.trim().length > 0) ?? [];
   const acceptedOperatorEvidence = findAcceptedOperatorCompletionEvidence(task.id);
-  const trustedOperatorChangedFiles = acceptedOperatorEvidence?.changedFiles ?? [];
+  const trustedOperatorChangedFiles = acceptedOperatorEvidence?.trustedCommittedFiles ?? [];
   const trustedOperatorVerificationCommands =
-    acceptedOperatorEvidence?.verification.map((entry) => entry.command) ?? [];
+    acceptedOperatorEvidence?.evidence?.verification.map((entry) => entry.command) ?? [];
   const requiresImplementationManifest =
     isDevelopmentImplementationIntent(workflowKind) &&
     (task.status === "review" || taskStatusTerminalForGenericTrust(task.status as TaskStatus));
