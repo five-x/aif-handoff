@@ -664,13 +664,29 @@ function verificationHasOutputIdentity(entry: ImplementationManifestVerification
 }
 
 function normalizeCommandText(value: string): string {
-  return value
+  const normalized = value
     .trim()
     .replace(/\s+/g, " ")
     .toLowerCase()
     .replace(/\b(npm|npx|pnpm|yarn|bun)\.cmd\b/g, "$1")
     .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+--\s+/g, "npx ")
     .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+/g, "npx ");
+  return normalizeNpmTestCommandText(normalized);
+}
+
+function normalizeNpmTestCommandText(value: string): string {
+  const tokens = value.split(" ").filter(Boolean);
+  if (tokens[0] !== "npm") return value;
+
+  const testIndex = tokens.indexOf("test");
+  if (testIndex <= 1 || !tokens.includes("--")) return value;
+
+  const args = [...tokens.slice(1, testIndex), ...tokens.slice(testIndex + 1)];
+  const cleanedArgs = args.filter((arg) => arg !== "--");
+  if (cleanedArgs.length === 0) return "npm test";
+  const positionalArgs = cleanedArgs.filter((arg) => !arg.startsWith("-"));
+  const optionArgs = cleanedArgs.filter((arg) => arg.startsWith("-"));
+  return ["npm", "test", "--", ...positionalArgs, ...optionArgs].join(" ");
 }
 
 function isRepositoryInspectionOnlyVerificationCommand(value: string): boolean {

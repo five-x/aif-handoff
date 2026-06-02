@@ -571,17 +571,10 @@ function normalizeNpmTestCommandText(value: string): string {
   const tokens = value.split(" ").filter(Boolean);
   if (tokens[0] !== "npm") return value;
 
-  let args: string[] | null = null;
-  if (tokens[1] === "test") {
-    args = tokens.slice(2);
-  } else if (tokens[1] === "run" && tokens[2] === "test") {
-    args = tokens.slice(3);
-  } else {
-    const testIndex = tokens.indexOf("test");
-    if (testIndex < 0 || !tokens.includes("--")) return value;
-    args = [...tokens.slice(1, testIndex), ...tokens.slice(testIndex + 1)];
-  }
+  const testIndex = tokens.indexOf("test");
+  if (testIndex <= 1 || !tokens.includes("--")) return value;
 
+  const args = [...tokens.slice(1, testIndex), ...tokens.slice(testIndex + 1)];
   const cleanedArgs = args.filter((arg) => arg !== "--");
   if (cleanedArgs.length === 0) return "npm test";
   const positionalArgs = cleanedArgs.filter((arg) => !arg.startsWith("-"));
