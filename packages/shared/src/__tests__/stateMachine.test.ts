@@ -302,6 +302,25 @@ describe("task state machine", () => {
     }
   });
 
+  it("allows retry_from_blocked for stalled review rework loops", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "review" as const,
+      blockedReason:
+        "manual_review_required: stalled_rework_loop after 3/3 same-blocker reviews; unresolved blockers: stale",
+      manualReviewRequired: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("review");
+      expect(result.patch.blockedReason).toBeNull();
+      expect(result.patch.manualReviewRequired).toBe(false);
+      expect(result.patch.autoReviewState).toBeNull();
+    }
+  });
+
   it("allows retry_from_blocked for resolved sequential branch dependency blocks", () => {
     const blocked = {
       ...makeTask("blocked_external"),

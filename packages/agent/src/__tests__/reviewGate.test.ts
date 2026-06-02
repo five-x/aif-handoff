@@ -1376,6 +1376,8 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "## Blocking Findings",
         "- [dup-code] code_review | [prior] still_blocking | Duplicate type definition: `src/data/offers.ts` declares local `interface LoanOffer` conflicting with `src/types/domain.ts`.",
         "- [dup-sec] security_audit | Severity: High | Claim: Duplicate type definition (LoanOffer) conflicts with domain contract | Required fix: Delete local `interface LoanOffer` from `src/data/offers.ts`. | Verification: Inspection showed interfaces in both files.",
+        "- [name-conflict] code_review | code_review | name_conflict: `src/data/offers.ts` declares local type `LoanOffer`, conflicting with `src/types/domain.ts`.",
+        "- [repo-file-request] security_audit | [dup-sec] security_audit | operator_input_required: provide the contents of `src/types/domain.ts` to verify the `LoanOffer` conflict.",
         "",
         "## Advisories",
         "- none",
@@ -1386,6 +1388,56 @@ describe("evaluateReviewCommentsForAutoMode", () => {
         "- unsafe_shell_network_file | covered | Checked shell/network/file operations",
         "- dependency_config | covered | Checked dependency configuration",
       ].join("\n"),
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.blockingFindings).toEqual([]);
+  });
+
+  it("filters security coverage contract-only failures when raw sidecars report no blockers", async () => {
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "- Contract Failure: structured_review_sidecar",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [structured-review-contract] review_gate | Structured review contract not satisfied: review output must include complete unique Security Coverage rows for secret_leaks, permissions_sandbox, unsafe_shell_network_file, and dependency_config. Failed sidecar(s): code_review.",
+        "",
+        "## Advisories",
+        "- review_gate | Raw sidecar output is retained below.",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | not_checked | Structured review contract failed before secret-leak coverage could be trusted.",
+        "- permissions_sandbox | not_checked | Structured review contract failed before permission and sandbox coverage could be trusted.",
+        "- unsafe_shell_network_file | not_checked | Structured review contract failed before shell, network, and file-operation coverage could be trusted.",
+        "- dependency_config | not_checked | Structured review contract failed before dependency and configuration coverage could be trusted.",
+        "",
+        "## Raw Code Review",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- Checked `src/data/offers.ts`.",
+        "",
+        "## Raw Security Audit",
+        "## Blocking Findings",
+        "- none",
+        "",
+        "## Advisories",
+        "- Checked `src/data/offers.ts`.",
+      ].join("\n"),
+      task: {
+        id: "seed-data-task",
+        title: "Create seed offers",
+        description: "Task intent: feature",
+        agentActivityLog: "",
+      },
     });
 
     expect(result.status).toBe("success");

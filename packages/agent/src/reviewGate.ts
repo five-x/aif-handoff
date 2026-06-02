@@ -219,16 +219,22 @@ function isRefutedLoanOfferDuplicateFinding(input: {
   finding: AutoReviewFinding;
 }): boolean {
   const text = input.finding.text;
-  if (!/\bsrc\/data\/offers\.ts\b/i.test(text)) return false;
+  if (!/\bsrc\/(?:data\/offers|types\/domain)\.ts\b/i.test(text)) return false;
   if (!/\bLoanOffer\b/.test(text)) return false;
   if (
-    !/\b(?:duplicate|conflict|interface|type definition|declaration|domain contract)\b/i.test(text)
+    !/\b(?:duplicate|conflict|interface|type definition|declaration|domain contract|name_conflict|operator_input_required)\b|(?:конфликт|дублик|локальн|тип)|(?:ÐºÐ¾Ð½Ñ|Ð´ÑƒÐ±Ð»|Ð»Ð¾ÐºÐ°Ð»|ÑÐ¸Ð¿)/i.test(
+      text,
+    )
   ) {
     return false;
   }
 
   const offersText = readProjectFileText(input.projectRoot, "src/data/offers.ts");
   if (!offersText) return false;
+  const domainText = readProjectFileText(input.projectRoot, "src/types/domain.ts");
+  if (!domainText || !/\b(?:export\s+)?(?:interface|type|class)\s+LoanOffer\b/.test(domainText)) {
+    return false;
+  }
 
   const hasLocalLoanOfferDeclaration =
     /\b(?:export\s+)?(?:interface|type|class)\s+LoanOffer\b/.test(offersText);
@@ -252,14 +258,73 @@ function filterRefutedRepositoryFindings(input: {
   );
 }
 
+function rawSidecarDeclaresNoBlockingFindings(
+  reviewComments: string | null,
+  heading: string,
+): boolean {
+  if (!reviewComments) return false;
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `## ${escapedHeading}\\b[\\s\\S]*?## Blocking Findings\\b\\s*\\r?\\n\\s*-\\s*none\\.?`,
+    "i",
+  ).test(reviewComments);
+}
+
+function isRefutedSecurityCoverageContractOnlyFinding(input: {
+  finding: AutoReviewFinding;
+  reviewComments?: string | null;
+  task?: TaskCompletionEvidenceTask;
+}): boolean {
+  if (input.finding.source !== "review_gate") return false;
+  if (
+    !/Structured review contract not satisfied: review output must include complete unique Security Coverage rows/i.test(
+      input.finding.text,
+    )
+  ) {
+    return false;
+  }
+  if (!input.task || isRiskyTask(input.task)) return false;
+  return (
+    rawSidecarDeclaresNoBlockingFindings(input.reviewComments ?? null, "Raw Code Review") &&
+    rawSidecarDeclaresNoBlockingFindings(input.reviewComments ?? null, "Raw Security Audit")
+  );
+}
+
+function isSecurityCoverageContractFinding(finding: AutoReviewFinding): boolean {
+  return finding.source === "review_gate" && /\bSecurity Coverage rows\b/i.test(finding.text);
+}
+
+function canRecoverSecurityCoverageOnlyContractFailure(input: {
+  findings: AutoReviewFinding[];
+  reviewComments: string | null;
+  task?: TaskCompletionEvidenceTask;
+}): boolean {
+  if (input.findings.length === 0) return false;
+  if (!input.task || isRiskyTask(input.task)) return false;
+  if (!input.findings.every(isSecurityCoverageContractFinding)) return false;
+  return (
+    rawSidecarDeclaresNoBlockingFindings(input.reviewComments, "Raw Code Review") &&
+    rawSidecarDeclaresNoBlockingFindings(input.reviewComments, "Raw Security Audit")
+  );
+}
+
 function filterActionableBlockingFindings(input: {
   projectRoot: string;
   findings: AutoReviewFinding[];
+  reviewComments?: string | null;
+  task?: TaskCompletionEvidenceTask;
 }): AutoReviewFinding[] {
   return filterRefutedRepositoryFindings({
     projectRoot: input.projectRoot,
     findings: filterNonBlockingOperatorInputFindings(input.findings),
-  });
+  }).filter(
+    (finding) =>
+      !isRefutedSecurityCoverageContractOnlyFinding({
+        finding,
+        reviewComments: input.reviewComments,
+        task: input.task,
+      }),
+  );
 }
 
 function normalizeOperatorInputFindings(findings: AutoReviewFinding[]): AutoReviewFinding[] {
@@ -853,10 +918,18 @@ function buildStructuredDecision(
     parsed.blockingFindings,
     deterministicFindings,
   );
-  const actionableBlockingFindings = filterActionableBlockingFindings({
-    projectRoot: input.projectRoot,
+  const actionableBlockingFindings = canRecoverSecurityCoverageOnlyContractFailure({
     findings: blockingFindings,
-  });
+    reviewComments: input.reviewComments,
+    task: input.task,
+  })
+    ? []
+    : filterActionableBlockingFindings({
+        projectRoot: input.projectRoot,
+        findings: blockingFindings,
+        reviewComments: input.reviewComments,
+        task: input.task,
+      });
   const stillBlockingIds = new Set(
     parsed.previousFindings
       .filter(
@@ -973,6 +1046,8 @@ function buildFallbackDecision(
   const fallbackAndDeterministicFindings = filterActionableBlockingFindings({
     projectRoot: input.projectRoot,
     findings: mergeFindings(fallbackFindings, deterministicFindings),
+    reviewComments: input.reviewComments,
+    task: input.task,
   });
   const mergedFindings =
     input.previousFindings.length > 0
@@ -1069,6 +1144,8 @@ function buildLegacyBlockingSectionDecision(
   const mergedBlockingFindings = filterActionableBlockingFindings({
     projectRoot: input.projectRoot,
     findings: mergeFindings(blockingFindings, deterministicFindings),
+    reviewComments: input.reviewComments,
+    task: input.task,
   });
   const stillBlockingFindings = mergedBlockingFindings.filter((finding) =>
     previousIds.has(finding.id),
@@ -1274,6 +1351,35 @@ function buildMalformedStructuredReviewContractHandoff(
     text: STRUCTURED_REVIEW_CONTRACT_FAILURE_TEXT,
   };
   const specializedFindings = extractSpecializedContractFailureFindings(input.reviewComments);
+  const contractOnlyFindings = mergeFindings(
+    [contractFinding],
+    specializedFindings,
+    deterministicFindings,
+  );
+  if (
+    input.previousFindings.length === 0 &&
+    canRecoverSecurityCoverageOnlyContractFailure({
+      findings: contractOnlyFindings,
+      reviewComments: input.reviewComments,
+      task: input.task,
+    })
+  ) {
+    return {
+      status: "success",
+      metrics: buildMetrics({
+        strategy: input.strategy,
+        iteration: input.iteration,
+        previousBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 0,
+        totalBlockingCount: 0,
+        parserMode: "structured",
+      }),
+      blockingFindings: [],
+      fixesMarkdown: "- none",
+      autoReviewState: null,
+    };
+  }
   const mergedFindings =
     input.previousFindings.length > 0
       ? mergeFindings(

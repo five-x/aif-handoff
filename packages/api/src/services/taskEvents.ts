@@ -804,6 +804,10 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     event === "retry_from_blocked" &&
     task.blockedFromStatus === "implementing" &&
     task.blockedReason?.toLowerCase().includes("no_substantive_rework_delta") === true;
+  const stalledReworkLoopRetry =
+    event === "retry_from_blocked" &&
+    task.blockedFromStatus === "review" &&
+    task.blockedReason?.toLowerCase().includes("stalled_rework_loop") === true;
   if (event !== "cancel_task" && isOperatorCancelledTask(task) && !operatorInputRetry) {
     return {
       ok: false,
@@ -1026,6 +1030,9 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
       ? { reviewComments: null, autoReviewState: null, reworkRequested: false }
       : {}),
     ...(noSubstantiveReworkRetry
+      ? { reviewComments: null, autoReviewState: null, reworkRequested: false }
+      : {}),
+    ...(stalledReworkLoopRetry
       ? { reviewComments: null, autoReviewState: null, reworkRequested: false }
       : {}),
     lastHeartbeatAt: nowIso,
