@@ -672,6 +672,19 @@ export {
   type ValidateImplementationManifestInput,
 } from "./implementationManifest.js";
 
+// Compact implementer/rework result contract
+export {
+  extractAifResultBlocks,
+  formatAifResultContractBlockedReason,
+  validateAifResultContract,
+  type AifResultContract,
+  type AifResultContractIssue,
+  type AifResultContractIssueCode,
+  type AifResultContractValidationResult,
+  type AifResultStatus,
+  type ValidateAifResultContractOptions,
+} from "./aifResultContract.js";
+
 // Task plan quality guard
 export {
   TASK_PLAN_QUALITY_ISSUE_CODES,

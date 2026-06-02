@@ -38,9 +38,11 @@ import {
   hashAifPlanManifest,
   isLowSignalAuditEvidenceLine,
   normalizeImplementationVerificationCommandText,
+  formatAifResultContractBlockedReason,
   readAifPlanManifestSnapshot,
   resolveAuditPlanId,
   toAuditPublicReportOutcome,
+  validateAifResultContract,
   validateImplementationManifest,
   type AuditCardDecision,
   type AuditCardVerificationStrength,
@@ -815,11 +817,10 @@ function buildDeterministicImplementationManifest(input: {
       logActivity(
         input.task.id,
         "Agent",
-        `Saved deterministic implementation manifest fallback with validation issues: ${validation.issues
+        `Rejected invalid deterministic implementation manifest fallback; diagnostic issue codes: ${validation.issues
           .map((issue) => issue.code)
           .join(", ")}`,
       );
-      return validation.normalizedJson;
     }
     return null;
   }
@@ -4054,12 +4055,60 @@ function runDeterministicAuditSynthesisRework(input: {
   });
   writeFileSync(artifactPath, content, "utf8");
   const gitLog = commitArtifactIfChanged(input.projectRoot, gitPath);
-  return [
-    "Deterministic audit synthesis rework completed from validated report artifacts.",
-    `Report artifact: ${gitPath}`,
-    "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
-    gitLog,
+  return appendDeterministicAifResultContract(
+    [
+      "Deterministic audit synthesis rework completed from validated report artifacts.",
+      `Report artifact: ${gitPath}`,
+      "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
+      gitLog,
+    ].join("\n"),
+    {
+      status: "completed",
+      resolvedBlockers: ["deterministic audit synthesis rework completed"],
+      verificationEvidence: [`git log verification captured for ${gitPath}`],
+      changedFiles: [gitPath],
+    },
+  );
+}
+
+function appendDeterministicAifResultContract(
+  text: string,
+  contract: {
+    status: "completed" | "blocked" | "partial";
+    resolvedBlockers?: string[];
+    unresolvedBlockers?: string[];
+    verificationEvidence: string[];
+    changedFiles?: string[];
+  },
+): string {
+  const resultText = [
+    text.trimEnd(),
+    "",
+    "```aif-result",
+    JSON.stringify(
+      {
+        status: contract.status,
+        resolvedBlockers: contract.resolvedBlockers ?? [],
+        unresolvedBlockers: contract.unresolvedBlockers ?? [],
+        verificationEvidence: contract.verificationEvidence,
+        changedFiles: contract.changedFiles ?? [],
+      },
+      null,
+      2,
+    ),
+    "```",
   ].join("\n");
+  const validation = validateAifResultContract(resultText, {
+    requireVerificationEvidence: true,
+  });
+  if (!validation.ok) {
+    throw new Error(
+      `deterministic aif-result contract invalid: ${validation.issues
+        .map((issue) => issue.code)
+        .join(", ")}`,
+    );
+  }
+  return resultText;
 }
 
 type DeterministicAuditReportRepairResult = {
@@ -4236,7 +4285,27 @@ function runDeterministicAuditReportRepair(input: {
     "Verification: Command `git log -1 --name-only --oneline -- <artifact>` output:",
     gitLog,
   ].join("\n");
-  return { status, resultText, terminalReason, issueCodes };
+  const unresolvedBlockers =
+    status === "terminal_source_inconclusive"
+      ? [
+          ...(issueCodes.length > 0 ? issueCodes : ["source_inconclusive"]),
+          ...(terminalReason ? [terminalReason] : []),
+          ...repair.decision.reasons,
+        ]
+      : [];
+  return {
+    status,
+    resultText: appendDeterministicAifResultContract(resultText, {
+      status: status === "accepted" ? "completed" : "partial",
+      resolvedBlockers:
+        status === "accepted" ? ["deterministic audit report repair passed strict validation"] : [],
+      unresolvedBlockers,
+      verificationEvidence: [`git log verification captured for ${gitPath}`],
+      changedFiles: [gitPath],
+    }),
+    terminalReason,
+    issueCodes,
+  };
 }
 
 function auditReportValidationIssueCodes(
@@ -4821,11 +4890,21 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       validation: currentAuditReportValidation,
     });
     const nowIso = new Date().toISOString();
-    const resultText = [
-      "Audit report artifact is already source_inconclusive before rework implementation; terminalized before review handoff.",
-      `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Terminal reason: ${terminalReason}`,
-    ].join("\n");
+    const resultText = appendDeterministicAifResultContract(
+      [
+        "Audit report artifact is already source_inconclusive before rework implementation; terminalized before review handoff.",
+        `Report artifact: ${expectedAuditReportArtifactPath}`,
+        `Terminal reason: ${terminalReason}`,
+      ].join("\n"),
+      {
+        status: "partial",
+        unresolvedBlockers: [terminalReason],
+        verificationEvidence: [
+          `Terminal source_inconclusive state persisted for ${expectedAuditReportArtifactPath}`,
+        ],
+        changedFiles: [expectedAuditReportArtifactPath],
+      },
+    );
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
@@ -4858,11 +4937,21 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       validation: currentAuditReportValidation,
     });
     const nowIso = new Date().toISOString();
-    const resultText = [
-      "Audit report manifest already declares source_inconclusive before rework implementation; terminalized before review handoff.",
-      `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Terminal reason: ${terminalReason}`,
-    ].join("\n");
+    const resultText = appendDeterministicAifResultContract(
+      [
+        "Audit report manifest already declares source_inconclusive before rework implementation; terminalized before review handoff.",
+        `Report artifact: ${expectedAuditReportArtifactPath}`,
+        `Terminal reason: ${terminalReason}`,
+      ].join("\n"),
+      {
+        status: "partial",
+        unresolvedBlockers: [terminalReason],
+        verificationEvidence: [
+          `Terminal source_inconclusive manifest persisted for ${expectedAuditReportArtifactPath}`,
+        ],
+        changedFiles: [expectedAuditReportArtifactPath],
+      },
+    );
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
@@ -4889,10 +4978,20 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
     reviewCommentsDeclareNoBlockingFindings(task.reviewComments)
   ) {
     const nowIso = new Date().toISOString();
-    const resultText = [
-      "Audit report evidence already valid before rework implementation; skipped runtime repair.",
-      `Report artifact: ${expectedAuditReportArtifactPath}`,
-    ].join("\n");
+    const resultText = appendDeterministicAifResultContract(
+      [
+        "Audit report evidence already valid before rework implementation; skipped runtime repair.",
+        `Report artifact: ${expectedAuditReportArtifactPath}`,
+      ].join("\n"),
+      {
+        status: "completed",
+        resolvedBlockers: ["existing audit report evidence already passed strict validation"],
+        verificationEvidence: [
+          `Strict audit report validation was already trusted for ${expectedAuditReportArtifactPath}`,
+        ],
+        changedFiles: [],
+      },
+    );
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
@@ -4930,11 +5029,21 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       validation: currentAuditReportValidation,
     });
     const nowIso = new Date().toISOString();
-    const resultText = [
-      "Audit report evidence is already source_inconclusive before rework implementation; terminalized before review handoff.",
-      `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Terminal reason: ${terminalReason}`,
-    ].join("\n");
+    const resultText = appendDeterministicAifResultContract(
+      [
+        "Audit report evidence is already source_inconclusive before rework implementation; terminalized before review handoff.",
+        `Report artifact: ${expectedAuditReportArtifactPath}`,
+        `Terminal reason: ${terminalReason}`,
+      ].join("\n"),
+      {
+        status: "partial",
+        unresolvedBlockers: [terminalReason],
+        verificationEvidence: [
+          `Terminal source_inconclusive validation state persisted for ${expectedAuditReportArtifactPath}`,
+        ],
+        changedFiles: [expectedAuditReportArtifactPath],
+      },
+    );
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
@@ -5282,12 +5391,25 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
       operatorInputReason:
         "Generated audit report repair exhausted deterministic validation; provide narrower scope, missing evidence, or an explicit operator decision before retrying",
     });
-    const resultText = [
-      "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
-      `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}`,
-      `Terminal reason: ${terminalReason}`,
-    ].join("\n");
+    const resultText = appendDeterministicAifResultContract(
+      [
+        "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
+        `Report artifact: ${expectedAuditReportArtifactPath}`,
+        `Unresolved strict validator issue codes: ${issueCodes.join(", ") || "unknown"}`,
+        `Terminal reason: ${terminalReason}`,
+      ].join("\n"),
+      {
+        status: "partial",
+        unresolvedBlockers: [
+          ...(issueCodes.length > 0 ? issueCodes : ["source_inconclusive"]),
+          terminalReason,
+        ],
+        verificationEvidence: [
+          `Repeated deterministic audit repair terminalized ${expectedAuditReportArtifactPath}`,
+        ],
+        changedFiles: [expectedAuditReportArtifactPath],
+      },
+    );
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
@@ -5352,11 +5474,21 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
             },
           },
     });
-    const resultText = [
-      "Audit report card reached the final deterministic guard; terminalized as source_inconclusive before runtime prompt construction.",
-      `Report artifact: ${expectedAuditReportArtifactPath}`,
-      `Terminal reason: ${terminalReason}`,
-    ].join("\n");
+    const resultText = appendDeterministicAifResultContract(
+      [
+        "Audit report card reached the final deterministic guard; terminalized as source_inconclusive before runtime prompt construction.",
+        `Report artifact: ${expectedAuditReportArtifactPath}`,
+        `Terminal reason: ${terminalReason}`,
+      ].join("\n"),
+      {
+        status: "partial",
+        unresolvedBlockers: [terminalReason],
+        verificationEvidence: [
+          `Final deterministic guard terminalized ${expectedAuditReportArtifactPath}`,
+        ],
+        changedFiles: [expectedAuditReportArtifactPath],
+      },
+    );
     setTaskFields(taskId, {
       implementationLog: resultText,
       reworkRequested: false,
@@ -5430,9 +5562,9 @@ BLOCKING_FINDINGS_SNAPSHOT
     ? `
 
 Rework handling protocol:
-1) FIRST, restate the rework request in your own words (1-2 sentences) so it's clear you understood it. Reference specific files, functions, or plan items mentioned in the request.
-2) Identify which files in the codebase and/or plan items need to change to satisfy the request.
-3) Make the minimal set of changes required. Do NOT refactor unrelated code.
+1) Make the minimal changes required by the rework comment. Do NOT refactor unrelated code.
+2) Return one fenced \`aif-result\` JSON block with status, resolvedBlockers, unresolvedBlockers, verificationEvidence, and changedFiles.
+3) If the rework cannot be completed, set status to \`blocked\` and list unresolvedBlockers.
 4) If the rework request cannot be satisfied (e.g. it asks for something impossible or contradicts an earlier decision), say so EXPLICITLY in the final result text — do not silently skip it or claim "already done".
 5) If the plan checklist shows all items completed, do not interpret that as "nothing to do" — the rework comment is the source of truth for this run.
 6) Treat REWORK_BLOCKED_REASON as actionable guard feedback. If it names invalid or missing report references, edit the report artifact to remove or replace those exact references before closing.
@@ -6116,7 +6248,7 @@ Writer rules:
   if (checklistWarning) {
     log.warn(
       { taskId, pendingTaskCount: checklistAfterSync.pendingTaskCount },
-      "Checklist remains incomplete after auto-sync; continuing without blocking",
+      "Checklist remains incomplete after auto-sync; blocking review handoff",
     );
   }
   if (deterministicImplementationRuntimeRecovery && checklistWarning) {
@@ -6138,6 +6270,73 @@ Writer rules:
     finalResultNotes.length > 0
       ? `${finalResultText}\n\n${finalResultNotes.join("\n")}`
       : finalResultText;
+  if (checklistWarning) {
+    const nowIso = new Date().toISOString();
+    if (syncedPlan) {
+      persistTaskPlanForTask({
+        taskId,
+        planText: syncedPlan,
+        projectRoot,
+        isFix: task.isFix,
+        planPath: task.planPath,
+        updatedAt: nowIso,
+      });
+    }
+    const blockedReason = `implementation_checklist_incomplete: ${checklistAfterSync.pendingTaskCount} pending checklist item(s)`;
+    setTaskFields(taskId, {
+      status: "blocked_external",
+      implementationLog: enrichedResult,
+      blockedReason,
+      blockedFromStatus: "implementing",
+      retryAfter: null,
+      manualReviewRequired: false,
+      reworkRequested: true,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    logActivity(taskId, "Agent", blockedReason);
+    log.debug({ taskId, blockedReason }, "Implementation blocked by incomplete checklist");
+    return;
+  }
+
+  if (task.reworkRequested) {
+    const aifResult = validateAifResultContract(enrichedResult, {
+      requireCompleted: true,
+      requireVerificationEvidence: true,
+    });
+    if (!aifResult.ok) {
+      const nowIso = new Date().toISOString();
+      if (syncedPlan) {
+        persistTaskPlanForTask({
+          taskId,
+          planText: syncedPlan,
+          projectRoot,
+          isFix: task.isFix,
+          planPath: task.planPath,
+          updatedAt: nowIso,
+        });
+      }
+      const blockedReason = formatAifResultContractBlockedReason(aifResult);
+      setTaskFields(taskId, {
+        status: "blocked_external",
+        implementationLog: enrichedResult,
+        blockedReason,
+        blockedFromStatus: "implementing",
+        retryAfter: null,
+        manualReviewRequired: false,
+        reworkRequested: true,
+        lastHeartbeatAt: nowIso,
+        updatedAt: nowIso,
+      });
+      logActivity(taskId, "Agent", blockedReason);
+      log.debug(
+        { taskId, issueCodes: aifResult.issues.map((issue) => issue.code) },
+        "Implementation rework blocked by invalid aif-result contract",
+      );
+      return;
+    }
+  }
+
   let implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
   if (implementationManifestJson && shouldRequestImplementationManifest(task)) {
     implementationManifestJson = repairExtractedImplementationManifest({

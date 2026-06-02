@@ -54,6 +54,7 @@ describe("runtime stage policy", () => {
     expect(decision.allowed).toBe(false);
     expect(decision.reason).toBe("qwen_implementation_not_enabled");
     expect(decision.caps.maxToolTurns).toBe(20);
+    expect(decision.caps.repeatedToolCallLimit).toBe(2);
     expect(decision.caps.retryCount).toBe(0);
   });
 
@@ -127,10 +128,25 @@ describe("runtime stage policy", () => {
     const caps = getRuntimeStageCaps(profile(), "planner");
 
     expect(caps.maxToolTurns).toBe(20);
+    expect(caps.repeatedToolCallLimit).toBe(2);
     expect(caps.maxOutputTokens).toBe(4_000);
     expect(caps.repositoryInspectionToolBudget).toBe(16);
     expect(caps.sandboxMode).toBe("read-only");
     expect(caps.approvalPolicy).toBe("on-request");
+  });
+
+  it("sets qwen repeated tool-call defaults for workflow stages", () => {
+    for (const stage of [
+      "planner",
+      "plan_checker",
+      "implementer",
+      "reviewer",
+      "qa",
+      "audit",
+      "synthesis",
+    ] as const) {
+      expect(getRuntimeStageCaps(profile(), stage).repeatedToolCallLimit).toBe(2);
+    }
   });
 
   it("forces read-only sandbox caps for non-implementation codex planning stages", () => {
@@ -219,7 +235,7 @@ describe("runtime stage policy", () => {
     expect(caps).toEqual({
       maxToolTurns: 20,
       wallClockMs: 900_000,
-      repeatedToolCallLimit: 3,
+      repeatedToolCallLimit: 2,
       contextTokens: 16_000,
       maxOutputTokens: 4_000,
       maxBudgetUsd: 1.25,

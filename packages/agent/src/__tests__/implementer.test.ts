@@ -155,6 +155,24 @@ function streamSuccess(result: string): AsyncIterable<{
     },
   };
 }
+function aifResultSuccessBlock(overrides: Record<string, unknown> = {}): string {
+  return [
+    "```aif-result",
+    JSON.stringify(
+      {
+        status: "completed",
+        resolvedBlockers: ["rework-blocker"],
+        unresolvedBlockers: [],
+        verificationEvidence: ["Focused rework verification passed."],
+        changedFiles: [],
+        ...overrides,
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
 
 describe("runImplementer rework behavior", () => {
   let projectRoot: string;
@@ -1782,6 +1800,8 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain(
       "Deterministic audit synthesis rework completed",
     );
+    expect(updatedTask?.implementationLog).toContain("```aif-result");
+    expect(updatedTask?.implementationLog).toContain('"status": "completed"');
     expect(updatedTask?.agentActivityLog).toContain(
       "implement-coordinator started (deterministic audit synthesis)",
     );
@@ -2625,6 +2645,14 @@ describe("runImplementer rework behavior", () => {
 
   it("surfaces a loud rework header and injects the latest comment when rework is requested", async () => {
     const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        `Implementation done\n\n${aifResultSuccessBlock({
+          resolvedBlockers: ["finding-1"],
+          verificationEvidence: ["read-back check confirmed bad references are absent"],
+        })}`,
+      ),
+    );
     db.insert(tasks)
       .values({
         id: "task-2",
@@ -2716,7 +2744,7 @@ describe("runImplementer rework behavior", () => {
 
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-2")).get();
     expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.implementationLog).toBe("Implementation done");
+    expect(updatedTask?.implementationLog).toContain("Implementation done");
   });
 
   it("compacts oversized implement-coordinator rework prompts before runtime dispatch", async () => {
@@ -2815,6 +2843,8 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain(
       "Audit report card reached the final deterministic guard",
     );
+    expect(updatedTask?.implementationLog).toContain("```aif-result");
+    expect(updatedTask?.implementationLog).toContain('"status": "partial"');
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
     expect(updatedTask?.blockedReason).toContain("operator_input_required:");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repair");
@@ -4591,6 +4621,8 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain(
       "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
     );
+    expect(updatedTask?.implementationLog).toContain("```aif-result");
+    expect(updatedTask?.implementationLog).toContain('"status": "partial"');
     expect(updatedTask?.implementationLog).toContain("placeholder_author_metadata");
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
     expect(updatedTask?.blockedReason).toContain("operator_input_required:");
@@ -4962,6 +4994,14 @@ describe("runImplementer rework behavior", () => {
 
   it("routes readable product scope audit evidence repair back through runtime", async () => {
     const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        `Implementation done\n\n${aifResultSuccessBlock({
+          resolvedBlockers: ["finding-missing-manifest"],
+          verificationEvidence: ["audit/generic.md read-back checked"],
+        })}`,
+      ),
+    );
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
       cwd: projectRoot,
@@ -5090,6 +5130,14 @@ describe("runImplementer rework behavior", () => {
 
   it("routes scoped config audit evidence repair back through runtime before deterministic fallback", async () => {
     const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        `Implementation done\n\n${aifResultSuccessBlock({
+          resolvedBlockers: ["finding-missing-manifest"],
+          verificationEvidence: ["audit/generic.md config evidence read-back checked"],
+        })}`,
+      ),
+    );
     execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "test@example.com"], {
       cwd: projectRoot,
@@ -5474,6 +5522,8 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.reworkRequested).toBe(false);
     expect(updatedTask?.blockedReason).toBeNull();
     expect(updatedTask?.implementationLog).toContain("already valid before rework");
+    expect(updatedTask?.implementationLog).toContain("```aif-result");
+    expect(updatedTask?.implementationLog).toContain('"status": "completed"');
   });
 
   it("terminalizes an existing source_inconclusive report instead of treating it as trusted valid", async () => {
@@ -5585,6 +5635,8 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain(
       "manifest already declares source_inconclusive",
     );
+    expect(updatedTask?.implementationLog).toContain("```aif-result");
+    expect(updatedTask?.implementationLog).toContain('"status": "partial"');
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-existing-source-inconclusive");
     if (!artifact) throw new Error("missing existing source_inconclusive artifact");
     expect(artifact.state).toBe("source_inconclusive");
@@ -5727,7 +5779,7 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toBe("Implementation done");
   });
 
-  it("does not fail when checkbox Task checklist remains pending after auto-sync", async () => {
+  it("blocks when checkbox Task checklist remains pending after auto-sync", async () => {
     const db = testDb.current;
     queryMock
       .mockReturnValueOnce(streamSuccess("Implementation done"))
@@ -5748,6 +5800,13 @@ describe("runImplementer rework behavior", () => {
     await expect(runImplementer("task-5", projectRoot)).resolves.toBeUndefined();
 
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-5")).get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_checklist_incomplete: 1 pending checklist item(s)",
+    );
+    expect(updatedTask?.blockedFromStatus).toBe("implementing");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
     expect(updatedTask?.implementationLog).toContain("Implementation done");
     expect(updatedTask?.implementationLog).toContain(
       "Checklist remains incomplete after auto-sync",
@@ -6873,6 +6932,16 @@ describe("runImplementer rework behavior", () => {
               knownLimitations: [],
             }),
             "```",
+            "",
+            "```aif-result",
+            JSON.stringify({
+              status: "completed",
+              resolvedBlockers: ["finding-1"],
+              unresolvedBlockers: [],
+              verificationEvidence: ["ev-feature-rework-test"],
+              changedFiles: ["src/feature.ts"],
+            }),
+            "```",
           ].join("\n"),
         };
       },
@@ -6916,7 +6985,79 @@ describe("runImplementer rework behavior", () => {
     );
   });
 
-  it("stores deterministic fallback manifest even when scope validation must block later", async () => {
+  it("blocks feature rework output that omits the aif-result contract", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess("Implementation done without structured rework result."),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-feature-rework-missing-result",
+        projectId: "project-1",
+        title: "Feature rework missing result",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "## Plan\n- [x] Implement feature behavior",
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-rework-missing-result", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-rework-missing-result"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toContain("missing_aif_result_contract");
+    expect(updatedTask?.blockedFromStatus).toBe("implementing");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+    expect(
+      (updatedTask as { implementationManifestJson?: string | null } | undefined)
+        ?.implementationManifestJson,
+    ).toBeNull();
+  });
+
+  it("blocks non-manifest rework output that omits the aif-result contract", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(streamSuccess("General rework done without structured result."));
+    db.insert(tasks)
+      .values({
+        id: "task-general-rework-missing-result",
+        projectId: "project-1",
+        title: "General rework missing result",
+        description: "Update operational notes.",
+        taskIntent: "general",
+        status: "implementing",
+        plan: "## Plan\n- [x] Update notes",
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-general-rework-missing-result", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-general-rework-missing-result"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toContain("missing_aif_result_contract");
+    expect(updatedTask?.blockedFromStatus).toBe("implementing");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+    expect(
+      (updatedTask as { implementationManifestJson?: string | null } | undefined)
+        ?.implementationManifestJson,
+    ).toBeNull();
+  });
+
+  it("rejects deterministic fallback manifest when scope validation fails", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], {
@@ -7038,22 +7179,10 @@ describe("runImplementer rework behavior", () => {
       .get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    expect(manifestJson).toBeTruthy();
-    const validation = validateImplementationManifest({
-      task: updatedTask!,
-      manifestJson,
-      changedFiles: ["Dockerfile", "src/feature.ts"],
-      meaningfulChangedFiles: ["Dockerfile", "src/feature.ts"],
-      dirtyChangedFiles: ["Dockerfile", "src/feature.ts"],
-      phase: "review_handoff",
-    });
-    const manifest = JSON.parse(manifestJson ?? "{}");
-    expect(manifest.changedFiles).toEqual([
-      { path: "Dockerfile", status: "added" },
-      { path: "src/feature.ts", status: "added" },
-    ]);
-    expect(validation.ok).toBe(false);
-    expect(validation.issues.map((issue) => issue.code)).toContain("implementation_scope_mismatch");
+    expect(manifestJson).toBeNull();
+    expect(updatedTask?.agentActivityLog).toContain(
+      "Rejected invalid deterministic implementation manifest fallback",
+    );
   });
 
   it("asks fix tasks to include a regression explanation in the implementation manifest", async () => {

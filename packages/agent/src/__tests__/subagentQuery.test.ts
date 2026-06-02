@@ -778,11 +778,16 @@ describe("executeSubagentQuery attribution", () => {
         }),
         options: expect.objectContaining({
           contextWindowTokens: 16_000,
-          repeatedToolCallLimit: 3,
+          repeatedToolCallLimit: 2,
           maxInputTokens: 16_000,
           maxTokens: 1_000,
           maxOutputTokens: 1_000,
           repositoryInspectionToolBudget: 4,
+          runtimeStageCaps: expect.objectContaining({
+            implementer: expect.objectContaining({
+              repeatedToolCallLimit: 3,
+            }),
+          }),
         }),
       }),
     );

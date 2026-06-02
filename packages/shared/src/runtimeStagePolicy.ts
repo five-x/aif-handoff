@@ -87,6 +87,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   planner: {
     maxToolTurns: 20,
     wallClockMs: 10 * 60 * 1000,
+    repeatedToolCallLimit: 2,
     contextTokens: 24_000,
     maxOutputTokens: 4_000,
     retryCount: 0,
@@ -95,6 +96,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   plan_checker: {
     maxToolTurns: 8,
     wallClockMs: 8 * 60 * 1000,
+    repeatedToolCallLimit: 2,
     contextTokens: 24_000,
     maxOutputTokens: 1_500,
     retryCount: 0,
@@ -103,7 +105,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   implementer: {
     maxToolTurns: 20,
     wallClockMs: 15 * 60 * 1000,
-    repeatedToolCallLimit: 3,
+    repeatedToolCallLimit: 2,
     contextTokens: 24_000,
     maxOutputTokens: 4_000,
     retryCount: 0,
@@ -112,6 +114,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   reviewer: {
     maxToolTurns: 12,
     wallClockMs: 12 * 60 * 1000,
+    repeatedToolCallLimit: 2,
     contextTokens: 24_000,
     maxOutputTokens: 2_000,
     retryCount: 0,
@@ -120,6 +123,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   qa: {
     maxToolTurns: 12,
     wallClockMs: 12 * 60 * 1000,
+    repeatedToolCallLimit: 2,
     contextTokens: 24_000,
     maxOutputTokens: 2_000,
     retryCount: 0,
@@ -136,6 +140,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   audit: {
     maxToolTurns: 20,
     wallClockMs: 18 * 60 * 1000,
+    repeatedToolCallLimit: 2,
     contextTokens: 24_000,
     maxOutputTokens: 4_000,
     retryCount: 0,
@@ -144,6 +149,7 @@ const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> =
   synthesis: {
     maxToolTurns: 20,
     wallClockMs: 18 * 60 * 1000,
+    repeatedToolCallLimit: 2,
     contextTokens: 24_000,
     maxOutputTokens: 4_000,
     retryCount: 0,

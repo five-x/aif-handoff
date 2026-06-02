@@ -942,6 +942,7 @@ describe("qwen-local-agent adapter", () => {
     const toolMessage = secondBody.messages.find((message) => message.role === "tool");
     const toolResult = JSON.parse(toolMessage.content);
     expect(toolResult.ok).toBe(false);
+    expect(toolResult.error).toContain("write_path_not_allowed: tmp_body.txt");
     expect(toolResult.error).toContain("allowed write paths (audit/report.md)");
   });
   it("rejects rogue write tool calls during planner workflows", async () => {
@@ -2320,20 +2321,224 @@ describe("qwen-local-agent adapter", () => {
         }),
       );
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          repeatedToolCallLimit: 2,
-          maxToolTurns: 20,
-        },
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "run_shell",
+        repeatedToolCallLimit: 2,
       }),
-    );
-
-    expect(result.outputText).toContain("repeated run_shell tool-call loop");
+    });
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(JSON.stringify(result.events)).toContain("Repeated identical run_shell call suppressed");
+    const blockedEvent = events.find((event) => event.type === "repeated_tool_loop_blocked");
+    expect(blockedEvent).toMatchObject({
+      level: "warn",
+      data: expect.objectContaining({
+        workflowKind: "implementer",
+        toolName: "run_shell",
+        repeatedCount: 3,
+        repeatedToolCallLimit: 2,
+        fingerprint: expect.objectContaining({
+          workflowKind: "implementer",
+          toolName: "run_shell",
+          targetPath: null,
+          args: { args: ["-la"], command: "ls" },
+          allowedWritePaths: [],
+        }),
+      }),
+    });
   });
+
+  it("blocks repeated read tools by normalized fingerprint and special cap", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-read-loop-fingerprint-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.ts"), "export const a = 1;\n", "utf8");
+    const readCalls = [
+      { lineCount: 10, path: "src\\a.ts", startLine: 1 },
+      { startLine: 1, path: "./src/a.ts", lineCount: 10 },
+      { path: "src/a.ts", startLine: 1, lineCount: 10 },
+    ];
+    for (const [index, args] of readCalls.entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-read-loop-fingerprint",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-read-${index + 1}`,
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify(args),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "read_file",
+        repeatedToolCallLimit: 2,
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        signatureCount: 3,
+        repeatedCount: 3,
+        fingerprint: expect.objectContaining({
+          workflowKind: "implementer",
+          toolName: "read_file",
+          targetPath: "src/a.ts",
+          args: { lineCount: 10, path: "src/a.ts", startLine: 1 },
+          allowedWritePaths: ["audit/report.md"],
+        }),
+      }),
+    });
+  });
+
+  it("blocks repeated list_files calls by normalized path", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-list-loop-fingerprint-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    for (const [index, args] of [{ path: "src" }, { path: "./src/" }, { path: "src" }].entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-list-loop-fingerprint",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-list-${index + 1}`,
+                    type: "function",
+                    function: {
+                      name: "list_files",
+                      arguments: JSON.stringify(args),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "list_files",
+        repeatedToolCallLimit: 2,
+        fingerprint: expect.objectContaining({
+          targetPath: "src",
+          args: { path: "src" },
+        }),
+      }),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("blocks repeated clean git_status checks", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-status-loop-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    for (const index of [1, 2, 3]) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-git-status-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-status-${index}`,
+                    type: "function",
+                    function: { name: "git_status", arguments: JSON.stringify({}) },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "git_status",
+        repeatedToolCallLimit: 2,
+      }),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("stops interleaved repeated git_commit loops before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-git-commit-loop-"));
     await expectSpawnOk(root, ["init", "-b", "main"]);
@@ -2382,22 +2587,229 @@ describe("qwen-local-agent adapter", () => {
       );
     }
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          repeatedToolCallLimit: 2,
-          maxToolTurns: 20,
-        },
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "git_commit",
+        repeatedToolCallLimit: 1,
       }),
-    );
-
-    expect(result.outputText).toContain("repeated git_commit tool-call loop");
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    expect(JSON.stringify(result.events)).toContain(
-      "Repeated identical git_commit call suppressed",
-    );
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        repeatedCount: 2,
+        nonconsecutive: true,
+        fingerprint: expect.objectContaining({
+          workflowKind: "implementer",
+          toolName: "git_commit",
+          targetPath: "audit/summary.md",
+          allowedWritePaths: [],
+        }),
+      }),
+    });
   }, 15_000);
+
+  it("allows git_commit retry after audit report content repair then blocks no-delta retry", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-commit-repair-retry-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    await writeFile(path.join(root, "audit", "report.md"), "# Audit\n\nNo manifest yet.\n", "utf8");
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.com"]);
+    await expectSpawnOk(root, ["config", "user.name", "Test User"]);
+    await expectSpawnOk(root, ["add", "src/config.ts"]);
+    await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
+    const commitSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const treeSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD^{tree}"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const evidenceId = "ev_33333333-3333-4333-8333-333333333333";
+    const reportBody = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+    const repairedReport = `${reportBody}\n\`\`\`audit-report-manifest\n${JSON.stringify({
+      version: 1,
+      auditPlanId: "task:task-commit-retry",
+      taskId: "task-commit-retry",
+      artifactPath: "audit/report.md",
+      contentSha256: computeAuditReportContentSha256(reportBody),
+      sourceSnapshot: {
+        id: `git:${commitSha}:${treeSha}`,
+        commit: commitSha,
+        tree: treeSha,
+        dirty: false,
+      },
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "src/config.ts", evidenceRefs: [evidenceId] }],
+      riskHypotheses: [
+        { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        { id: "nf-1", root: "src/config.ts", riskId: "risk-1", evidenceRefs: [evidenceId] },
+      ],
+      evidenceRefs: [evidenceId],
+    })}\n\`\`\`\n`;
+    const commitCall = {
+      type: "function",
+      function: {
+        name: "git_commit",
+        arguments: JSON.stringify({
+          paths: ["audit/report.md"],
+          message: "commit repaired report",
+        }),
+      },
+    };
+    for (const [index, toolCall] of [
+      commitCall,
+      {
+        type: "function",
+        function: {
+          name: "write_file",
+          arguments: JSON.stringify({ path: "audit/report.md", content: repairedReport }),
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "finalize_audit_report_manifest",
+          arguments: JSON.stringify({ path: "audit/report.md" }),
+        },
+      },
+      commitCall,
+      commitCall,
+    ].entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-git-commit-repair-retry",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: `call-commit-retry-${index + 1}`, ...toolCall }],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+            auditReportTaskDescription:
+              "Scope: src/config.ts\nRisk hypotheses: risk-1 Runtime configuration drift",
+            auditReportTaskId: "task-commit-retry",
+            auditReportAuditPlanId: "task:task-commit-retry",
+            auditReportEvidenceUnits: [
+              {
+                id: evidenceId,
+                taskId: "task-commit-retry",
+                auditPlanId: "task:task-commit-retry",
+                sourceSnapshotId: `git:${commitSha}:${treeSha}`,
+                toolName: "Grep",
+                evidenceKind: "search",
+                evidenceGrade: "substantive",
+                scopeIds: ["src/config.ts"],
+                riskHypothesisIds: ["risk-1"],
+                pathHashes: [],
+                pathRangeHashes: [],
+                command: { command: 'rg -n "timeoutMs" src/config.ts', args: [], cwd: null },
+                exitCode: 0,
+                outputSha256: "1".repeat(64),
+                outputPreview: "src/config.ts:1:export const timeoutMs = 1000;",
+                outputPreviewTruncated: false,
+                parsedSummary: {
+                  outputBytes: 46,
+                  outputLineCount: 1,
+                  previewChars: 46,
+                  exitCode: null,
+                },
+                redactionStatus: "clean",
+                createdAt: "2026-05-22T00:00:00.000Z",
+              },
+            ],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "git_commit",
+        repeatedToolCallLimit: 1,
+      }),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "git_commit"),
+    ).toHaveLength(2);
+    expect(
+      events.find((event) => event.type === "tool:result" && event.data?.name === "git_commit")
+        ?.data?.ok,
+    ).toBe(false);
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "git_commit")[1]
+        ?.data?.ok,
+    ).toBe(true);
+  }, 20_000);
 
   it("stops interleaved repeated run_shell loops before exhausting the run turn limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-run-shell-loop-"));
@@ -2438,20 +2850,100 @@ describe("qwen-local-agent adapter", () => {
       );
     }
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          repeatedToolCallLimit: 2,
-          maxToolTurns: 20,
-        },
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "run_shell",
+        repeatedToolCallLimit: 2,
       }),
-    );
-
-    expect(result.outputText).toContain("repeated run_shell tool-call loop");
+    });
     expect(fetchMock).toHaveBeenCalledTimes(5);
-    expect(JSON.stringify(result.events)).toContain("Repeated identical run_shell call suppressed");
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        repeatedCount: 3,
+        nonconsecutive: true,
+        fingerprint: expect.objectContaining({
+          workflowKind: "implementer",
+          toolName: "run_shell",
+          args: { args: ["-la"], command: "ls" },
+        }),
+      }),
+    });
   }, 15_000);
+
+  it("blocks repeated finalize_audit_report_manifest calls per artifact", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-finalize-loop-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(path.join(root, "audit", "report.md"), "# Audit\n", "utf8");
+    for (const index of [1, 2, 3]) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-finalize-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-finalize-${index}`,
+                    type: "function",
+                    function: {
+                      name: "finalize_audit_report_manifest",
+                      arguments: JSON.stringify({ path: "audit/report.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "finalize_audit_report_manifest",
+        repeatedToolCallLimit: 2,
+        fingerprint: expect.objectContaining({
+          targetPath: "audit/report.md",
+        }),
+      }),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 
   it("stops repeated audit report validation fingerprints before generic tool-loop suppression", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-loop-"));
@@ -2499,29 +2991,33 @@ describe("qwen-local-agent adapter", () => {
       );
     }
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        workflowKind: "audit",
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          repeatedToolCallLimit: 6,
-          maxToolTurns: 20,
-        },
-        execution: {
-          allowedWritePaths: ["audit/report.md"],
-          auditReportArtifactPath: "audit/report.md",
-        },
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "validate_audit_report",
+        auditValidation: expect.objectContaining({
+          deterministicRoute: expect.any(String),
+          fingerprint: expect.any(String),
+        }),
       }),
-    );
-
-    expect(result.outputText).toContain(
-      "Stopped after repeated audit report validation fingerprint",
-    );
-    expect(result.outputText).toContain("deterministicRoute=");
+    });
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(JSON.stringify(result.events)).not.toContain(
-      "Repeated identical validate_audit_report call suppressed",
-    );
   });
 
   it("stops repeated same audit validation fingerprint before generic tool-loop suppression", async () => {
@@ -2562,31 +3058,34 @@ describe("qwen-local-agent adapter", () => {
       );
     }
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        workflowKind: "audit",
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          repeatedToolCallLimit: 6,
-          maxToolTurns: 20,
-        },
-        execution: {
-          allowedWritePaths: ["audit/report.md"],
-          auditReportArtifactPath: "audit/report.md",
-        },
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "validate_audit_report",
+        auditValidation: expect.objectContaining({
+          repairMode: "bounded_deterministic_repair",
+          deterministicRoute: "bounded_deterministic_repair",
+          fingerprint: expect.any(String),
+        }),
       }),
-    );
-
-    expect(result.outputText).toContain(
-      "Stopped after repeated audit report validation fingerprint",
-    );
-    expect(result.outputText).toContain("validationFingerprint=");
-    expect(result.outputText).toContain("repairMode=bounded_deterministic_repair");
-    expect(result.outputText).toContain("deterministicRoute=bounded_deterministic_repair");
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.stringify(result.events)).not.toContain(
-      "Repeated identical validate_audit_report call suppressed",
-    );
   });
 
   it("routes repeated source-inconclusive audit validation fingerprints deterministically", async () => {
@@ -2644,33 +3143,35 @@ describe("qwen-local-agent adapter", () => {
       );
     }
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        workflowKind: "audit",
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          maxToolTurns: 20,
-        },
-        execution: {
-          allowedWritePaths: ["audit/report.md"],
-          auditReportArtifactPath: "audit/report.md",
-        },
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "validate_audit_report",
+        auditValidation: expect.objectContaining({
+          repairMode: "source_inconclusive",
+          deterministicRoute: "source_inconclusive",
+          sourceClassification: "source_inconclusive",
+          issueCodes: expect.arrayContaining(["shallow_evidence"]),
+          fingerprint: expect.any(String),
+        }),
       }),
-    );
-
-    expect(result.outputText).toContain(
-      "Stopped after repeated audit report validation fingerprint",
-    );
-    expect(result.outputText).toContain("repairMode=source_inconclusive");
-    expect(result.outputText).toContain("deterministicRoute=source_inconclusive");
-    expect(result.outputText).toContain("sourceClassification=source_inconclusive");
-    expect(result.outputText).toContain("issueCodes=");
-    expect(result.outputText).toContain("shallow_evidence");
-    expect(result.outputText).toContain("validationFingerprint=");
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.stringify(result.events)).not.toContain(
-      "Repeated identical validate_audit_report call suppressed",
-    );
   });
 
   it("routes repeated operator-input audit validation fingerprints deterministically", async () => {
@@ -2725,33 +3226,35 @@ describe("qwen-local-agent adapter", () => {
       );
     }
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        workflowKind: "audit",
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          maxToolTurns: 20,
-        },
-        execution: {
-          allowedWritePaths: ["audit/report.md"],
-          auditReportArtifactPath: "audit/report.md",
-          auditReportTaskDescription: "Scope: .",
-        },
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+            auditReportTaskDescription: "Scope: .",
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "validate_audit_report",
+        auditValidation: expect.objectContaining({
+          repairMode: "operator_input_required",
+          deterministicRoute: "operator_input_required",
+          issueCodes: expect.arrayContaining(["missing_scope_coverage"]),
+          fingerprint: expect.any(String),
+        }),
       }),
-    );
-
-    expect(result.outputText).toContain(
-      "Stopped after repeated audit report validation fingerprint",
-    );
-    expect(result.outputText).toContain("repairMode=operator_input_required");
-    expect(result.outputText).toContain("deterministicRoute=operator_input_required");
-    expect(result.outputText).toContain("issueCodes=");
-    expect(result.outputText).toContain("missing_scope_coverage");
-    expect(result.outputText).toContain("validationFingerprint=");
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.stringify(result.events)).not.toContain(
-      "Repeated identical validate_audit_report call suppressed",
-    );
   });
 
   it("allows changed audit validation fingerprints after report repair", async () => {
@@ -2862,6 +3365,183 @@ describe("qwen-local-agent adapter", () => {
       "Stopped after repeated audit report validation fingerprint",
     );
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("blocks repeated successful audit validation loops by stable report state", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-audit-validate-success-loop-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "config.ts"),
+      "export const timeoutMs = 1000;\n",
+      "utf8",
+    );
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.com"]);
+    await expectSpawnOk(root, ["config", "user.name", "Test User"]);
+    await expectSpawnOk(root, ["add", "src/config.ts"]);
+    await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
+    const commitSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const treeSha = (
+      await spawnProcess({
+        command: "git",
+        args: ["rev-parse", "HEAD^{tree}"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      })
+    ).output.trim();
+    const evidenceId = "ev_22222222-2222-4222-8222-222222222222";
+    const reportBody = [
+      "# Runtime Audit",
+      "",
+      "No validated findings.",
+      "Risk hypotheses: risk-1 for `src/config.ts` timeout drift was covered and is absent.",
+      "",
+      "Checked files:",
+      "- `src/config.ts:1`",
+      "",
+      "Checked commands:",
+      '- Command `rg -n "timeoutMs" src/config.ts` output: `1:export const timeoutMs = 1000;`',
+      "",
+    ].join("\n");
+    const manifest = {
+      version: 1,
+      auditPlanId: "task:task-success-loop",
+      taskId: "task-success-loop",
+      artifactPath: "audit/report.md",
+      contentSha256: computeAuditReportContentSha256(reportBody),
+      sourceSnapshot: {
+        id: `git:${commitSha}:${treeSha}`,
+        commit: commitSha,
+        tree: treeSha,
+        dirty: false,
+      },
+      outcome: "validated_no_findings",
+      scopeCoverage: [{ root: "src/config.ts", evidenceRefs: [evidenceId] }],
+      riskHypotheses: [
+        { id: "risk-1", description: "Runtime configuration drift", status: "covered" },
+      ],
+      findings: [],
+      noFindingsClaims: [
+        { id: "nf-1", root: "src/config.ts", riskId: "risk-1", evidenceRefs: [evidenceId] },
+      ],
+      evidenceRefs: [evidenceId],
+    };
+    await writeFile(
+      path.join(root, "audit", "report.md"),
+      `${reportBody}\n\`\`\`audit-report-manifest\n${JSON.stringify(manifest)}\n\`\`\`\n`,
+      "utf8",
+    );
+    const validateCall = {
+      type: "function",
+      function: {
+        name: "validate_audit_report",
+        arguments: JSON.stringify({ path: "audit/report.md" }),
+      },
+    };
+    const statusCall = {
+      type: "function",
+      function: { name: "git_status", arguments: JSON.stringify({}) },
+    };
+    for (const [index, toolCall] of [
+      validateCall,
+      statusCall,
+      validateCall,
+      statusCall,
+      validateCall,
+    ].entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-audit-validate-success-loop",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: `call-success-${index + 1}`, ...toolCall }],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 6,
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+            auditReportTaskDescription:
+              "Scope: src/config.ts\nRisk hypotheses: risk-1 Runtime configuration drift",
+            auditReportTaskId: "task-success-loop",
+            auditReportAuditPlanId: "task:task-success-loop",
+            auditReportEvidenceUnits: [
+              {
+                id: evidenceId,
+                taskId: "task-success-loop",
+                auditPlanId: "task:task-success-loop",
+                sourceSnapshotId: `git:${commitSha}:${treeSha}`,
+                toolName: "Grep",
+                evidenceKind: "search",
+                evidenceGrade: "substantive",
+                scopeIds: ["src/config.ts"],
+                riskHypothesisIds: ["risk-1"],
+                pathHashes: [],
+                pathRangeHashes: [],
+                command: { command: 'rg -n "timeoutMs" src/config.ts', args: [], cwd: null },
+                exitCode: 0,
+                outputSha256: "1".repeat(64),
+                outputPreview: "src/config.ts:1:export const timeoutMs = 1000;",
+                outputPreviewTruncated: false,
+                parsedSummary: {
+                  outputBytes: 46,
+                  outputLineCount: 1,
+                  previewChars: 46,
+                  exitCode: null,
+                },
+                redactionStatus: "clean",
+                createdAt: "2026-05-22T00:00:00.000Z",
+              },
+            ],
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "validate_audit_report",
+        repeatedToolCallLimit: 2,
+        fingerprint: expect.objectContaining({
+          fileStates: [
+            expect.objectContaining({
+              path: "audit/report.md",
+              status: "file",
+              sha256: expect.any(String),
+            }),
+          ],
+        }),
+      }),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("stops after max audit validation failure passes even when fingerprints change", async () => {
@@ -2999,25 +3679,32 @@ describe("qwen-local-agent adapter", () => {
       );
     }
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        workflowKind: "audit",
-        options: {
-          baseUrl: "http://qwen.local/v1",
-          maxToolTurns: 20,
-        },
-        execution: {
-          allowedWritePaths: ["audit/report.md"],
-          auditReportArtifactPath: "audit/report.md",
-        },
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          workflowKind: "audit",
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            auditReportArtifactPath: "audit/report.md",
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "validate_audit_report",
+        auditValidation: expect.objectContaining({
+          repairMode: "manual_review_required",
+          deterministicRoute: "manual_review_required",
+          fingerprint: expect.any(String),
+        }),
       }),
-    );
-
-    expect(result.outputText).toContain(
-      "Stopped after repeated audit report validation fingerprint",
-    );
-    expect(result.outputText).toContain("repairMode=manual_review_required");
-    expect(result.outputText).toContain("deterministicRoute=manual_review_required");
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -3514,6 +4201,9 @@ describe("qwen-local-agent adapter", () => {
     expect(deniedWrite.ok).toBe(false);
     expect(deniedPatch.ok).toBe(false);
     expect(deniedCommit.ok).toBe(false);
+    expect(deniedWrite.error).toContain("write_path_not_allowed: tmp_hash.py");
+    expect(deniedPatch.error).toContain("write_path_not_allowed: tmp_body.txt");
+    expect(deniedCommit.error).toContain("write_path_not_allowed: tmp_hash.py");
     expect(`${deniedWrite.error} ${deniedPatch.error} ${deniedCommit.error}`).toContain(
       "allowed write paths (audit/report.md)",
     );
@@ -4302,6 +4992,578 @@ describe("qwen-local-agent adapter", () => {
     expect(result.output).toContain("none");
     expect(result.output).not.toContain("sk-");
   });
+  it("denies package-manager scripts that can write outside allowed write paths", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-write-scope-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+        },
+      }),
+      "utf8",
+    );
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 2_000,
+        execution: { allowedWritePaths: ["audit/report.md"] },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("write_path_not_allowed: src/out.ts");
+    await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  it("denies package-manager script writes resolved from subpackage cwd", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-cwd-scope-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await mkdir(path.join(root, "subpkg", "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "subpkg", "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "node -e \"require('fs').writeFileSync('audit/report.md','bad')\"",
+        },
+      }),
+      "utf8",
+    );
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      {
+        command: process.platform === "win32" ? "npm.cmd" : "npm",
+        args: ["test"],
+        cwd: "subpkg",
+      },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 2_000,
+        execution: { allowedWritePaths: ["audit/report.md"] },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("write_path_not_allowed: subpkg/audit/report.md");
+    await expect(
+      readFile(path.join(root, "subpkg", "audit", "report.md"), "utf8"),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  for (const invocation of [
+    { label: "npm", command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+    { label: "pnpm", command: "pnpm", args: ["test"] },
+    { label: "yarn", command: "yarn", args: ["test"] },
+    { label: "bun", command: "bun", args: ["test"] },
+  ]) {
+    it(`denies ${invocation.label} package-manager scripts resolved from nested package cwd`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-nested-cwd-scope-"));
+      await mkdir(path.join(root, "audit"), { recursive: true });
+      await mkdir(path.join(root, "src", "nested"), { recursive: true });
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          scripts: {
+            test: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+          },
+        }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        {
+          command: invocation.command,
+          args: invocation.args,
+          cwd: "src/nested",
+        },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("write_path_not_allowed: src/out.ts");
+      await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  }
+  for (const workspaceInvocation of [
+    { label: "--workspace", args: ["run", "test", "--workspace", "subpkg"] },
+    { label: "-w", args: ["run", "test", "-w", "subpkg"] },
+    { label: "-w=", args: ["run", "test", "-w=subpkg"] },
+  ]) {
+    it(`denies scoped package-manager workspace scripts before alternate package execution with ${workspaceInvocation.label}`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-workspace-scope-"));
+      await mkdir(path.join(root, "audit"), { recursive: true });
+      await mkdir(path.join(root, "subpkg", "src"), { recursive: true });
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          workspaces: ["subpkg"],
+          scripts: {
+            test: "node -e \"require('fs').writeFileSync('audit/report.md','root')\"",
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(
+        path.join(root, "subpkg", "package.json"),
+        JSON.stringify({
+          scripts: {
+            test: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+          },
+        }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        {
+          command: process.platform === "win32" ? "npm.cmd" : "npm",
+          args: workspaceInvocation.args,
+        },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("workspace or alternate package-root arguments");
+      await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        readFile(path.join(root, "subpkg", "src", "out.ts"), "utf8"),
+      ).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  }
+  for (const lifecycle of [
+    {
+      name: "pretest",
+      args: ["test"],
+      scripts: {
+        pretest: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+        test: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\"",
+      },
+    },
+    {
+      name: "posttest",
+      args: ["test"],
+      scripts: {
+        test: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\"",
+        posttest: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+      },
+    },
+    {
+      name: "prebuild",
+      args: ["run", "build"],
+      scripts: {
+        prebuild: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+        build: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\"",
+      },
+    },
+    {
+      name: "postbuild",
+      args: ["run", "build"],
+      scripts: {
+        build: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\"",
+        postbuild: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+      },
+    },
+  ]) {
+    it(`denies scoped package-manager lifecycle script ${lifecycle.name} before execution`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-lifecycle-scope-"));
+      await mkdir(path.join(root, "audit"), { recursive: true });
+      await mkdir(path.join(root, "src"), { recursive: true });
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({ scripts: lifecycle.scripts }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        { command: process.platform === "win32" ? "npm.cmd" : "npm", args: lifecycle.args },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain(`package.json script ${lifecycle.name}`);
+      expect(result.error).toContain("write_path_not_allowed: src/out.ts");
+      await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  }
+  it("denies scoped package-manager scripts that delegate to another package script", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-nested-run-scope-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "npm run write-out",
+          "write-out": "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+        },
+      }),
+      "utf8",
+    );
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 2_000,
+        execution: { allowedWritePaths: ["audit/report.md"] },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("delegates to another package-manager script");
+    await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  for (const delegation of [
+    { label: "unquoted", script: "node scripts/write-out.js" },
+    { label: "double-quoted", script: 'node "scripts/write-out.js"' },
+    { label: "single-quoted", script: "node 'scripts/write-out.js'" },
+    { label: "dot-backslash", script: "node .\\scripts\\write-out.js" },
+    { label: "quoted dot-backslash", script: 'node ".\\scripts\\write-out.js"' },
+  ]) {
+    it(`denies scoped package-manager scripts that delegate to local script files with ${delegation.label} paths`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-local-file-scope-"));
+      await mkdir(path.join(root, "scripts"), { recursive: true });
+      await mkdir(path.join(root, "src"), { recursive: true });
+      await writeFile(
+        path.join(root, "scripts", "write-out.js"),
+        "require('fs').writeFileSync('src/out.ts','bad')\n",
+        "utf8",
+      );
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          scripts: {
+            test: delegation.script,
+          },
+        }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("delegates to a local script file");
+      await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  }
+  it("denies package-manager scripts with mixed scoped and dynamic writes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-dynamic-write-"));
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "node -e \"const fs=require('fs'); const target='src/out.ts'; fs.writeFileSync('audit/report.md','ok'); fs.writeFileSync(target,'bad')\"",
+        },
+      }),
+      "utf8",
+    );
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 2_000,
+        execution: { allowedWritePaths: ["audit/report.md"] },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("can write files but does not declare a scoped write target");
+    await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  for (const unsafe of [
+    {
+      name: "copyFileSync",
+      script: "node -e \"require('fs').copyFileSync('audit/report.md','src/out.ts')\"",
+    },
+    {
+      name: "cpSync",
+      script: "node -e \"require('fs').cpSync('audit/report.md','src/out.ts')\"",
+    },
+    {
+      name: "copyFile",
+      script: "node -e \"require('fs').copyFile('audit/report.md','src/out.ts',()=>{})\"",
+    },
+  ]) {
+    it(`denies package-manager scripts with scoped ${unsafe.name} destination writes`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-copy-write-"));
+      await mkdir(path.join(root, "audit"), { recursive: true });
+      await mkdir(path.join(root, "src"), { recursive: true });
+      await writeFile(path.join(root, "audit", "report.md"), "source", "utf8");
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          scripts: {
+            test: unsafe.script,
+          },
+        }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("write_path_not_allowed: src/out.ts");
+      await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  }
+  for (const unsafe of [
+    {
+      name: "copyFileSync",
+      script: "node -e \"require('fs').copyFileSync('src/out.ts','audit/report.md')\"",
+    },
+    {
+      name: "cpSync",
+      script: "node -e \"require('fs').cpSync('src/out.ts','audit/report.md')\"",
+    },
+    {
+      name: "copyFile",
+      script: "node -e \"require('fs').copyFile('src/out.ts','audit/report.md',()=>{})\"",
+    },
+    {
+      name: "cp",
+      script: "node -e \"require('fs').cp('src/out.ts','audit/report.md',()=>{})\"",
+    },
+    {
+      name: "fs.promises.copyFile",
+      script: "node -e \"require('fs').promises.copyFile('src/out.ts','audit/report.md')\"",
+    },
+    {
+      name: "fs.promises.cp",
+      script: "node -e \"require('fs').promises.cp('src/out.ts','audit/report.md')\"",
+    },
+  ]) {
+    it(`denies package-manager scripts with scoped ${unsafe.name} source reads`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-copy-source-"));
+      await mkdir(path.join(root, "audit"), { recursive: true });
+      await mkdir(path.join(root, "src"), { recursive: true });
+      await writeFile(path.join(root, "audit", "report.md"), "target", "utf8");
+      await writeFile(path.join(root, "src", "out.ts"), "source", "utf8");
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          scripts: {
+            test: unsafe.script,
+          },
+        }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("write_path_not_allowed: src/out.ts");
+      expect(await readFile(path.join(root, "src", "out.ts"), "utf8")).toBe("source");
+      expect(await readFile(path.join(root, "audit", "report.md"), "utf8")).toBe("target");
+    });
+  }
+  for (const unsafe of [
+    {
+      name: "rename destination",
+      script: "require('fs').rename('audit/report.md','src/out.ts',()=>{})",
+      deniedPath: "src/out.ts",
+      sourcePath: "audit/report.md",
+      sourceContent: "source",
+      destinationPath: "src/out.ts",
+      destinationContent: null,
+    },
+    {
+      name: "fs.promises.rename destination",
+      script: "require('fs').promises.rename('audit/report.md','src/out.ts')",
+      deniedPath: "src/out.ts",
+      sourcePath: "audit/report.md",
+      sourceContent: "source",
+      destinationPath: "src/out.ts",
+      destinationContent: null,
+    },
+    {
+      name: "rename source",
+      script: "require('fs').rename('src/out.ts','audit/report.md',()=>{})",
+      deniedPath: "src/out.ts",
+      sourcePath: "src/out.ts",
+      sourceContent: "source",
+      destinationPath: "audit/report.md",
+      destinationContent: "target",
+    },
+    {
+      name: "fs.promises.rename source",
+      script: "require('fs').promises.rename('src/out.ts','audit/report.md')",
+      deniedPath: "src/out.ts",
+      sourcePath: "src/out.ts",
+      sourceContent: "source",
+      destinationPath: "audit/report.md",
+      destinationContent: "target",
+    },
+  ]) {
+    it(`denies package-manager scripts with scoped ${unsafe.name} writes`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-rename-write-"));
+      await mkdir(path.join(root, "audit"), { recursive: true });
+      await mkdir(path.join(root, "src"), { recursive: true });
+      await writeFile(path.join(root, unsafe.sourcePath), unsafe.sourceContent, "utf8");
+      if (unsafe.destinationContent !== null) {
+        await writeFile(path.join(root, unsafe.destinationPath), unsafe.destinationContent, "utf8");
+      }
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          scripts: {
+            test: `node -e "${unsafe.script}"`,
+          },
+        }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain(`write_path_not_allowed: ${unsafe.deniedPath}`);
+      expect(await readFile(path.join(root, unsafe.sourcePath), "utf8")).toBe(unsafe.sourceContent);
+      if (unsafe.destinationContent === null) {
+        await expect(
+          readFile(path.join(root, unsafe.destinationPath), "utf8"),
+        ).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        expect(await readFile(path.join(root, unsafe.destinationPath), "utf8")).toBe(
+          unsafe.destinationContent,
+        );
+      }
+    });
+  }
+  for (const unsafe of [
+    {
+      name: "rm -rf",
+      script: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && rm -rf src",
+    },
+    {
+      name: "rm -fr",
+      script: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && rm -fr src",
+    },
+    {
+      name: "rm -r -f",
+      script: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && rm -r -f src",
+    },
+    {
+      name: "sed -i",
+      script:
+        "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && sed -i s/original/changed/ src/out.ts",
+    },
+    {
+      name: "sed -E -i",
+      script:
+        "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && sed -E -i s/original/changed/ src/out.ts",
+    },
+    {
+      name: "sed -E -i.bak",
+      script:
+        "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && sed -E -i.bak s/original/changed/ src/out.ts",
+    },
+    {
+      name: "find -delete",
+      script: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && find src -delete",
+    },
+    {
+      name: "cp",
+      script:
+        "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && cp audit/report.md src/out.ts",
+    },
+    {
+      name: "mv",
+      script:
+        "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && mv audit/report.md src/out.ts",
+    },
+    {
+      name: "del",
+      script: "node -e \"require('fs').writeFileSync('audit/report.md','ok')\" && del src/out.ts",
+    },
+  ]) {
+    it(`denies package-manager scripts with mixed scoped and unparsed ${unsafe.name} writes`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-script-unparsed-write-"));
+      await mkdir(path.join(root, "audit"), { recursive: true });
+      await mkdir(path.join(root, "src"), { recursive: true });
+      await writeFile(path.join(root, "src", "out.ts"), "original", "utf8");
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({
+          scripts: {
+            test: unsafe.script,
+          },
+        }),
+        "utf8",
+      );
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+        createDefaultQwenToolContext({
+          projectRoot: root,
+          maxOutputChars: 2_000,
+          execution: { allowedWritePaths: ["audit/report.md"] },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("can write files but does not declare a scoped write target");
+      await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readFile(path.join(root, "src", "out.ts"), "utf8")).toBe("original");
+    });
+  }
   it("allows safe npm dependency hydration without lifecycle scripts", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-safe-"));
     await writeFile(
@@ -4325,6 +5587,76 @@ describe("qwen-local-agent adapter", () => {
     expect(await readFile(path.join(root, "package-lock.json"), "utf8")).toContain(
       '"lockfileVersion"',
     );
+  });
+  it("denies npm dependency hydration outside allowed write paths", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-scope-deny-"));
+    await writeFile(path.join(root, "package.json"), JSON.stringify({}), "utf8");
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["install"] },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 2_000,
+        execution: { allowedWritePaths: ["audit/report.md"] },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("write_path_not_allowed: package.json");
+    await expect(readFile(path.join(root, "package-lock.json"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  it("denies npm dependency hydration from subpackage cwd outside allowed write paths", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-subpkg-scope-deny-"));
+    await mkdir(path.join(root, "subpkg"), { recursive: true });
+    await writeFile(path.join(root, "package.json"), JSON.stringify({}), "utf8");
+    await writeFile(path.join(root, "subpkg", "package.json"), JSON.stringify({}), "utf8");
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      {
+        command: process.platform === "win32" ? "npm.cmd" : "npm",
+        args: ["install"],
+        cwd: "subpkg",
+      },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 2_000,
+        execution: { allowedWritePaths: ["package.json", "package-lock.json"] },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("write_path_not_allowed: subpkg/package.json");
+    await expect(
+      readFile(path.join(root, "subpkg", "package-lock.json"), "utf8"),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  it("denies npm dependency hydration from nested cwd below subpackage root", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-nested-subpkg-deny-"));
+    await mkdir(path.join(root, "subpkg", "src"), { recursive: true });
+    await writeFile(path.join(root, "package.json"), JSON.stringify({}), "utf8");
+    await writeFile(path.join(root, "subpkg", "package.json"), JSON.stringify({}), "utf8");
+    const result = await executeQwenLocalTool(
+      "run_shell",
+      {
+        command: process.platform === "win32" ? "npm.cmd" : "npm",
+        args: ["install"],
+        cwd: "subpkg/src",
+      },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 2_000,
+        execution: { allowedWritePaths: ["package.json", "package-lock.json"] },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("write_path_not_allowed: subpkg/package.json");
+    await expect(
+      readFile(path.join(root, "subpkg", "package-lock.json"), "utf8"),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
   it("denies npm dependency hydration with package specs", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-npm-install-spec-deny-"));

@@ -1,5 +1,8 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
+import { createHash } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
+import path from "node:path";
 import {
   AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
   buildAuditEvidencePayload,
@@ -26,7 +29,6 @@ const DEFAULT_MAX_TOOL_TURNS = 12;
 const MAX_CONFIGURED_TOOL_TURNS = 400;
 const DEFAULT_REPEATED_TOOL_CALL_LIMIT = 6;
 const AUDIT_REPORT_VALIDATION_FAILURE_PASS_LIMIT = 4;
-const REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS = 2;
 const REPOSITORY_INSPECTION_BUDGET_FINAL_DENIALS = 3;
 const DEFAULT_REPOSITORY_INSPECTION_BUDGET_FINAL_RESPONSE_TIMEOUT_MS = 3 * 60 * 1000;
 const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3;
@@ -79,6 +81,14 @@ const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set([
   "git_commit",
   "run_shell",
   "validate_audit_report",
+]);
+const REPEATED_TOOL_CALL_SPECIAL_LIMITS = new Map([
+  ["read_file", 2],
+  ["list_files", 2],
+  ["git_status", 2],
+  ["git_commit", 1],
+  ["finalize_audit_report_manifest", 2],
+  ["validate_audit_report", 2],
 ]);
 const AUDIT_REPORT_REPEATED_TOOL_CALL_LIMIT = 2;
 const TOOLLESS_WORKFLOWS = new Set(["roadmap-generate", "roadmap-extract"]);
@@ -720,16 +730,15 @@ function readRepeatedToolCallLimit(input) {
   return Math.max(2, Math.min(Math.floor(raw), 12));
 }
 function repeatedToolCallLimitForTool(workflowKind, toolName, fallbackLimit) {
+  const specialLimit = REPEATED_TOOL_CALL_SPECIAL_LIMITS.get(toolName);
   if (workflowKind === "audit" && toolName === "validate_audit_report") {
-    return fallbackLimit;
+    return specialLimit == null ? fallbackLimit : Math.min(fallbackLimit, specialLimit);
   }
   if (workflowKind === "audit" && toolName === "finalize_audit_report_manifest") {
     return Math.min(fallbackLimit, AUDIT_REPORT_REPEATED_TOOL_CALL_LIMIT);
   }
+  if (specialLimit != null) return Math.min(fallbackLimit, specialLimit);
   return fallbackLimit;
-}
-function usesAuditValidationFingerprintGuard(workflowKind, toolName) {
-  return workflowKind === "audit" && toolName === "validate_audit_report";
 }
 function parseToolArguments(raw) {
   if (raw == null) return {};
@@ -770,8 +779,129 @@ function stableToolValue(value) {
       .map(([key, child]) => [key, stableToolValue(child)]),
   );
 }
-function buildToolCallSignature(toolName, args) {
-  return JSON.stringify({ toolName, args: stableToolValue(args) });
+function normalizeToolLoopPath(value) {
+  const raw = readString(value);
+  if (!raw) return null;
+  const normalized = raw
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+/g, "/")
+    .replace(/\/$/, "");
+  return normalized || ".";
+}
+function normalizeToolLoopPaths(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => normalizeToolLoopPath(entry))
+    .filter((entry) => entry !== null)
+    .sort((left, right) => left.localeCompare(right));
+}
+function buildToolLoopTargetPath(toolName, args) {
+  if (toolName === "git_commit") {
+    const paths = normalizeToolLoopPaths(args.paths);
+    return paths.length > 0 ? paths.join(",") : null;
+  }
+  return normalizeToolLoopPath(args.path) ?? normalizeToolLoopPath(args.cwd);
+}
+function normalizeToolLoopArgs(toolName, args) {
+  const normalized = stableToolValue(args);
+  if (toolName === "git_commit" && normalized && typeof normalized === "object") {
+    return { ...normalized, paths: normalizeToolLoopPaths(args.paths) };
+  }
+  if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
+    const result = { ...normalized };
+    if (typeof result.path === "string") result.path = normalizeToolLoopPath(result.path);
+    if (typeof result.cwd === "string") result.cwd = normalizeToolLoopPath(result.cwd);
+    return result;
+  }
+  return normalized;
+}
+function toolLoopStatePaths(toolName, args) {
+  if (toolName === "git_commit") return normalizeToolLoopPaths(args.paths);
+  if (toolName === "finalize_audit_report_manifest" || toolName === "validate_audit_report") {
+    const target = normalizeToolLoopPath(args.path);
+    return target ? [target] : [];
+  }
+  return [];
+}
+function isSafeToolLoopStatePath(relativePath) {
+  if (!relativePath || relativePath === ".") return false;
+  const segments = relativePath.split("/").filter(Boolean);
+  if (segments.some((segment) => segment === ".." || segment === ".git")) return false;
+  return !path.isAbsolute(relativePath);
+}
+async function pathHasSymlinkComponent(root, relativePath) {
+  let current = root;
+  for (const segment of relativePath.split("/").filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+async function readToolLoopFileState(projectRoot, relativePath) {
+  if (!isSafeToolLoopStatePath(relativePath)) {
+    return { path: relativePath, status: "unsafe_path" };
+  }
+  const root = path.resolve(projectRoot);
+  const absolutePath = path.resolve(root, relativePath);
+  if (absolutePath !== root && !absolutePath.startsWith(`${root}${path.sep}`)) {
+    return { path: relativePath, status: "outside_project" };
+  }
+  if (await pathHasSymlinkComponent(root, relativePath)) {
+    return { path: relativePath, status: "symlink_path" };
+  }
+  try {
+    const info = await lstat(absolutePath);
+    if (!info.isFile()) {
+      return {
+        path: relativePath,
+        status: info.isDirectory() ? "directory" : "not_file",
+        size: info.size,
+      };
+    }
+    const content = await readFile(absolutePath);
+    return {
+      path: relativePath,
+      status: "file",
+      size: content.length,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    };
+  } catch {
+    return { path: relativePath, status: "missing" };
+  }
+}
+async function buildToolLoopFileStates(projectRoot, paths) {
+  const states = [];
+  for (const entry of paths) {
+    states.push(await readToolLoopFileState(projectRoot, entry));
+  }
+  return states;
+}
+async function buildToolCallFingerprint(input, toolContext, toolName, args) {
+  const safeToolName = sanitizeQwenToolNameForLog(toolName);
+  const allowedWritePaths = (toolContext.allowedWritePaths ?? [])
+    .map((entry) => normalizeToolLoopPath(entry))
+    .filter((entry) => entry !== null)
+    .sort((left, right) => left.localeCompare(right));
+  const fileStatePaths = toolLoopStatePaths(safeToolName, args);
+  const fileStates =
+    fileStatePaths.length > 0
+      ? await buildToolLoopFileStates(toolContext.projectRoot, fileStatePaths)
+      : [];
+  return {
+    workflowKind: input.workflowKind,
+    toolName: safeToolName,
+    cwd: normalizeToolLoopPath(input.cwd ?? input.projectRoot ?? toolContext.projectRoot),
+    targetPath: buildToolLoopTargetPath(safeToolName, args),
+    args: normalizeToolLoopArgs(safeToolName, args),
+    allowedWritePaths,
+    ...(fileStates.length > 0 ? { fileStates } : {}),
+  };
 }
 function emitEvent(input, events, event) {
   events.push(event);
@@ -871,20 +1001,28 @@ function emitAuditEvidenceResult(input, events, toolCall, evidenceUnit, result) 
     },
   });
 }
-function repeatedToolCallResult(toolName, repeatedCount, repeatedToolCallLimit) {
-  const safeToolName = sanitizeQwenToolNameForLog(toolName);
-  return {
-    ok: false,
-    output: "",
-    error: [
-      `Repeated identical ${safeToolName} call suppressed after ${repeatedCount} consecutive attempts.`,
-      "Do not call the same tool with the same arguments again.",
-      "Use a different verification step, commit required artifacts, or finish with the final result.",
-      `repeatLimit=${repeatedToolCallLimit}`,
-    ].join(" "),
-    exitCode: null,
-    touchedFiles: [],
-  };
+function emitRepeatedToolLoopBlocked(input, events, params) {
+  emitEvent(input, events, {
+    type: "repeated_tool_loop_blocked",
+    timestamp: new Date().toISOString(),
+    level: "warn",
+    message: `Blocked repeated ${params.toolName} tool-call loop`,
+    data: params,
+  });
+}
+function repeatedToolLoopBlockedError(params) {
+  return new RuntimeExecutionError(
+    `repeated_tool_loop_blocked: qwen-local-agent repeated ${params.toolName} with the same normalized fingerprint ${params.repeatedCount} time(s), exceeding limit ${params.repeatedToolCallLimit}.`,
+    undefined,
+    "permission",
+    {
+      providerMeta: {
+        status: "repeated_tool_loop_blocked",
+        category: "permission",
+        ...params,
+      },
+    },
+  );
 }
 function auditReportValidationFailurePayload(toolName, result) {
   if (toolName !== "validate_audit_report" || result?.ok !== false) return null;
@@ -911,20 +1049,6 @@ function deterministicAuditValidationRoute(repairMode) {
     return repairMode;
   }
   return "manual_review_required";
-}
-function repeatedAuditValidationFingerprintText(payload, count) {
-  const route = deterministicAuditValidationRoute(payload.repairMode);
-  return [
-    `Stopped after repeated audit report validation fingerprint ${payload.fingerprint}.`,
-    "Repeated identical validator failures do not allow another generic repair turn.",
-    `deterministicRoute=${route}`,
-    `repairMode=${payload.repairMode}`,
-    `sourceClassification=${payload.sourceClassification}`,
-    `manifestStatus=${payload.manifestStatus}`,
-    `issueCodes=${payload.issueCodes.length > 0 ? payload.issueCodes.join(",") : "unknown"}`,
-    `validationFingerprint=${payload.fingerprint}`,
-    `repeatCount=${count}`,
-  ].join("\n");
 }
 function maxAuditValidationPassesText(payload, count) {
   return [
@@ -2208,7 +2332,6 @@ export async function runQwenLocalAgentApi(input, logger) {
   let raw = null;
   let lastToolCallSignature = null;
   let repeatedToolCallCount = 0;
-  let repeatedToolCallSuppressions = 0;
   let repositoryInspectionToolCalls = 0;
   let repositoryInspectionBudgetWarnings = 0;
   let repositoryInspectionBudgetCompacted = false;
@@ -2482,7 +2605,13 @@ export async function runQwenLocalAgentApi(input, logger) {
           return await completeAfterRepositoryInspectionBudgetExhaustion();
         }
         emitToolUse(input, events, toolCall, args);
-        const signature = buildToolCallSignature(toolCall.function.name, args);
+        const fingerprint = await buildToolCallFingerprint(
+          input,
+          toolContext,
+          toolCall.function.name,
+          args,
+        );
+        const signature = JSON.stringify(fingerprint);
         const effectiveRepeatedToolCallLimit = repeatedToolCallLimitForTool(
           input.workflowKind,
           toolCall.function.name,
@@ -2495,65 +2624,70 @@ export async function runQwenLocalAgentApi(input, logger) {
         } else {
           lastToolCallSignature = signature;
           repeatedToolCallCount = 1;
-          repeatedToolCallSuppressions = 0;
         }
         const repeatedNonconsecutiveLoop =
-          !usesAuditValidationFingerprintGuard(input.workflowKind, toolCall.function.name) &&
           NONCONSECUTIVE_LOOP_PRONE_TOOLS.has(toolCall.function.name) &&
           signatureCount > effectiveRepeatedToolCallLimit;
         const shouldSuppressRepeatedCall =
           repeatedToolCallCount > effectiveRepeatedToolCallLimit || repeatedNonconsecutiveLoop;
+        if (shouldSuppressRepeatedCall) {
+          const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
+          const repeatedCount = Math.max(repeatedToolCallCount, signatureCount);
+          const loopEvent = {
+            runtimeId: input.runtimeId,
+            profileId: input.profileId ?? null,
+            workflowKind: input.workflowKind,
+            toolName: safeToolName,
+            toolUseId: redactProviderText(toolCall.id),
+            repeatedToolCallCount,
+            signatureCount,
+            repeatedCount,
+            repeatedToolCallLimit: effectiveRepeatedToolCallLimit,
+            nonconsecutive: repeatedNonconsecutiveLoop,
+            fingerprint,
+          };
+          emitRepeatedToolLoopBlocked(input, events, loopEvent);
+          logger?.warn?.(loopEvent, "Blocked qwen-local-agent after repeated identical tool calls");
+          throw repeatedToolLoopBlockedError(loopEvent);
+        }
         const shouldDenyRepositoryInspection =
           toolAllowed &&
-          !shouldSuppressRepeatedCall &&
           repositoryInspectionToolBudget != null &&
           isRepositoryInspectionTool &&
           repositoryInspectionToolCalls >= repositoryInspectionToolBudget;
         const shouldDenyAuditRepairInspection =
-          toolAllowed &&
-          !shouldSuppressRepeatedCall &&
-          auditLowQualityRepairLock &&
-          isRepositoryInspectionTool;
+          toolAllowed && auditLowQualityRepairLock && isRepositoryInspectionTool;
         const shouldDenyReadOnlyShell =
           toolAllowed &&
-          !shouldSuppressRepeatedCall &&
           READ_ONLY_WORKFLOWS.has(input.workflowKind) &&
           toolCall.function.name === "run_shell" &&
           !isReadOnlyShellCommandAllowed(args);
-        const result = shouldSuppressRepeatedCall
-          ? repeatedToolCallResult(
-              toolCall.function.name,
-              Math.max(repeatedToolCallCount, signatureCount),
-              effectiveRepeatedToolCallLimit,
-            )
-          : shouldDenyAuditRepairInspection
-            ? auditReportRepairInspectionDeniedResult(toolCall.function.name)
-            : shouldDenyRepositoryInspection
-              ? repositoryInspectionBudgetExhaustedResult(
-                  toolCall.function.name,
-                  repositoryInspectionToolBudget,
-                )
-              : shouldDenyReadOnlyShell
-                ? readOnlyShellDeniedResult()
-                : !toolAllowed
-                  ? {
-                      ok: false,
-                      output: "",
-                      error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
-                      exitCode: null,
-                      touchedFiles: [],
-                    }
-                  : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+        const result = shouldDenyAuditRepairInspection
+          ? auditReportRepairInspectionDeniedResult(toolCall.function.name)
+          : shouldDenyRepositoryInspection
+            ? repositoryInspectionBudgetExhaustedResult(
+                toolCall.function.name,
+                repositoryInspectionToolBudget,
+              )
+            : shouldDenyReadOnlyShell
+              ? readOnlyShellDeniedResult()
+              : !toolAllowed
+                ? {
+                    ok: false,
+                    output: "",
+                    error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
+                    exitCode: null,
+                    touchedFiles: [],
+                  }
+                : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
         if (
           toolAllowed &&
-          !shouldSuppressRepeatedCall &&
           isLowQualityAuditReportRepairValidationResult(toolCall.function.name, result)
         ) {
           auditLowQualityRepairLock = true;
         }
         if (
           toolAllowed &&
-          !shouldSuppressRepeatedCall &&
           isRepositoryInspectionTool &&
           !shouldDenyRepositoryInspection &&
           !shouldDenyAuditRepairInspection
@@ -2563,11 +2697,6 @@ export async function runQwenLocalAgentApi(input, logger) {
         const repositoryInspectionBudgetExhaustedAfterTool =
           repositoryInspectionToolBudget != null &&
           repositoryInspectionToolCalls >= repositoryInspectionToolBudget;
-        if (shouldSuppressRepeatedCall) {
-          repeatedToolCallSuppressions += repeatedNonconsecutiveLoop
-            ? REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS
-            : 1;
-        }
         if (shouldDenyRepositoryInspection) {
           repositoryInspectionBudgetWarnings += 1;
           if (repositoryInspectionBudgetWarnings === 1) {
@@ -2599,7 +2728,7 @@ export async function runQwenLocalAgentApi(input, logger) {
           result,
         );
         const auditValidationPayload =
-          input.workflowKind === "audit" && toolAllowed && !shouldSuppressRepeatedCall
+          input.workflowKind === "audit" && toolAllowed
             ? auditReportValidationFailurePayload(toolCall.function.name, result)
             : null;
         if (auditValidationPayload) {
@@ -2612,6 +2741,26 @@ export async function runQwenLocalAgentApi(input, logger) {
             fingerprintCount,
           );
           if (fingerprintCount >= 2) {
+            const loopEvent = {
+              runtimeId: input.runtimeId,
+              profileId: input.profileId ?? null,
+              workflowKind: input.workflowKind,
+              toolName: sanitizeQwenToolNameForLog(toolCall.function.name),
+              toolUseId: redactProviderText(toolCall.id),
+              repeatedToolCallCount,
+              signatureCount,
+              repeatedCount: fingerprintCount,
+              repeatedToolCallLimit: Math.min(effectiveRepeatedToolCallLimit, 2),
+              nonconsecutive: signatureCount > effectiveRepeatedToolCallLimit,
+              fingerprint,
+              auditValidation: {
+                ...auditValidationPayload,
+                deterministicRoute: deterministicAuditValidationRoute(
+                  auditValidationPayload.repairMode,
+                ),
+              },
+            };
+            emitRepeatedToolLoopBlocked(input, events, loopEvent);
             logger?.warn?.(
               {
                 runtimeId: input.runtimeId,
@@ -2620,18 +2769,9 @@ export async function runQwenLocalAgentApi(input, logger) {
                 repairMode: auditValidationPayload.repairMode,
                 issueCodes: auditValidationPayload.issueCodes,
               },
-              "Stopped qwen-local-agent after repeated audit validation fingerprint",
+              "Blocked qwen-local-agent after repeated audit validation fingerprint",
             );
-            return {
-              outputText: repeatedAuditValidationFingerprintText(
-                auditValidationPayload,
-                fingerprintCount,
-              ),
-              sessionId,
-              usage,
-              events,
-              raw,
-            };
+            throw repeatedToolLoopBlockedError(loopEvent);
           }
           if (failedAuditReportValidationPasses >= AUDIT_REPORT_VALIDATION_FAILURE_PASS_LIMIT) {
             logger?.warn?.(
@@ -2696,28 +2836,6 @@ export async function runQwenLocalAgentApi(input, logger) {
           }
           return {
             outputText: budgetFinalizationValidationFailedText(args, result),
-            sessionId,
-            usage,
-            events,
-            raw,
-          };
-        }
-        if (repeatedToolCallSuppressions >= REPEATED_TOOL_CALL_FINAL_SUPPRESSIONS) {
-          const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
-          logger?.warn?.(
-            {
-              runtimeId: input.runtimeId,
-              profileId: input.profileId ?? null,
-              repeatedToolName: safeToolName,
-              repeatedToolCallCount,
-              repeatedToolCallLimit: effectiveRepeatedToolCallLimit,
-            },
-            "Stopped qwen-local-agent after repeated identical tool calls",
-          );
-          return {
-            outputText:
-              `Stopped after a repeated ${safeToolName} tool-call loop. ` +
-              "Partial repository changes may exist; coordinator evidence checks must decide whether rework is required.",
             sessionId,
             usage,
             events,

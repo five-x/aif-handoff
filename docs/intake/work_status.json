@@ -867,6 +867,60 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260602-close-aif-roadmap-blockers",
       "updated": "2026-06-02"
+    },
+    {
+      "taskId": "work-20260602-aif-agent-workflow-stabilization",
+      "title": "AIF Agent Workflow Stabilization",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260602-aif-agent-workflow-stabilization",
+      "updated": "2026-06-02"
+    },
+    {
+      "taskId": "work-20260602-strict-planner-decision-contract",
+      "title": "Strict Planner Decision Contract",
+      "status": "queued",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260602-strict-planner-decision-contract",
+      "updated": "2026-06-02"
+    },
+    {
+      "taskId": "work-20260602-same-failure-recovery-gates",
+      "title": "Same-Failure And Recovery Gates",
+      "status": "queued",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260602-same-failure-recovery-gates",
+      "updated": "2026-06-02"
+    },
+    {
+      "taskId": "work-20260602-audit-report-prompt-validator-cleanup",
+      "title": "Audit Report Prompt And Validator Cleanup",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260602-audit-report-prompt-validator-cleanup",
+      "updated": "2026-06-02"
+    },
+    {
+      "taskId": "work-20260602-config-driven-reviewgate-refutations",
+      "title": "Config-Driven ReviewGate Refutations",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations",
+      "updated": "2026-06-02"
+    },
+    {
+      "taskId": "work-20260602-agent-hardening-observability-events",
+      "title": "Agent Hardening Observability Events",
+      "status": "queued",
+      "priority": "high",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260602-agent-hardening-observability-events",
+      "updated": "2026-06-02"
     }
   ]
 }

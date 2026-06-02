@@ -847,8 +847,9 @@ function assertWritePathAllowed(context, relativePath, label) {
   if (allowed.some((allowedPath) => pathMatchesAllowedWriteBoundary(normalized, allowedPath))) {
     return;
   }
+  const deniedPath = relativePath.replaceAll("\\", "/");
   throw new RuntimeExecutionError(
-    `${label} is outside this workflow's allowed write paths (${allowed.join(", ")})`,
+    `write_path_not_allowed: ${deniedPath}; ${label} is outside this workflow's allowed write paths (${allowed.join(", ")})`,
     undefined,
     "permission",
   );
@@ -861,7 +862,7 @@ function shouldSkipSearchPath(relativePath) {
   }
   return SEARCH_SKIP_FILE_EXTENSIONS.has(path.extname(normalized));
 }
-function validateStructuredShellCommand(command, args) {
+function validateStructuredShellCommand(command, args, context) {
   if (command === "pwd") {
     if (args.length > 0) {
       throw new RuntimeExecutionError("pwd does not accept arguments", undefined, "permission");
@@ -889,6 +890,7 @@ function validateStructuredShellCommand(command, args) {
     return;
   }
   if (isPackageManagerCommand(command)) {
+    if (context) validatePackageManagerWorkspaceWriteScope(command, args, context);
     validatePackageManagerShellArgs(command, args);
     return;
   }
@@ -925,10 +927,32 @@ const LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_NAMES = new Set([
 ]);
 const DEPENDENCY_MUTATION_SCRIPT_PATTERN =
   /\b(?:npm(?:\.cmd)?|pnpm|yarn|bun)\s+(?:add|audit|ci|i|install|pack|publish|rebuild|remove|uninstall|update|upgrade)\b|\bnpx\b/i;
+const NESTED_PACKAGE_MANAGER_SCRIPT_PATTERN =
+  /\b(?:npm(?:\.cmd)?|pnpm|yarn|bun)\s+(?:(?:run|test)\b|run\s+[A-Za-z0-9_./:-]+)/i;
 const LONG_RUNNING_PACKAGE_MANAGER_ARG_PATTERN =
   /^(?:--watch(?:all)?|-w|--host|--serve|--open|--inspect(?:-brk)?|--listen)$/i;
 const LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_PATTERN =
   /(?:^|[;&|]\s*)(?:vite|next\s+dev|nuxt\s+dev|astro\s+dev|webpack\s+serve|vite\s+preview|nodemon|storybook\s+dev)\b(?![^\n]*\bbuild\b)|\b(?:--watch|--watchall|-w|--host|--serve|vite\s+preview|webpack\s+serve)\b/i;
+const PACKAGE_MANAGER_SCRIPT_WRITE_INTENT_PATTERN =
+  /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|mkdirSync|rmSync|unlinkSync|renameSync|copyFileSync|copyFile|cpSync|cp|sed\s+-i|rm\s+-rf|find\s+[^;&|]*\s+-delete|(?:cp|copy|xcopy|robocopy|mv|move|del|erase|rmdir)\s+[^;&|]+|tee\s+[^;&|]+|>{1,2}\s*[^&\s])/i;
+const PACKAGE_MANAGER_SCRIPT_UNSCOPED_WRITE_INTENT_PATTERN =
+  /\b(?:sed\s+-i(?:\b|[.\s])|rm\s+-rf\b|find\s+[^;&|]*\s+-delete\b|(?:cp|copy|xcopy|robocopy|mv|move|del|erase|rmdir)\s+[^;&|]+)/i;
+const PACKAGE_MANAGER_SCRIPT_RM_RECURSIVE_FORCE_PATTERN =
+  /\brm\b(?=[^;&|\n]*\s(?:-[A-Za-z]*r[A-Za-z]*|--recursive)\b)(?=[^;&|\n]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)\b)[^;&|\n]*/i;
+const PACKAGE_MANAGER_SCRIPT_SED_IN_PLACE_PATTERN =
+  /\bsed\b(?=[^;&|\n]*\s-[A-Za-z]*i[A-Za-z0-9_.-]*(?:\s|$))[^;&|\n]*/i;
+const PACKAGE_MANAGER_LOCAL_SCRIPT_FILE_DELEGATION_PATTERN =
+  /(?:^|[;&|]\s*)(?:(?:(?:node|tsx|ts-node|bun|python3?|bash|sh)\b(?![^;&|\n]*\s(?:-e|--eval|-c)(?:\s|=|$))[^;&|\n]*?\s["']?(?:\.[/\\])?(?:scripts|src|tools|bin|test|tests|__tests__)[/\\][^"';&|\n\s]+\.(?:[cm]?js|[cm]?ts|jsx|tsx|py|sh)["']?)|["']?(?:\.[/\\])?(?:scripts|tools|bin)[/\\][^"';&|\n\s]+\.(?:[cm]?js|[cm]?ts|jsx|tsx|py|sh)["']?)/i;
+const PACKAGE_MANAGER_SCRIPT_SINGLE_FS_TARGET_PATTERN =
+  /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|mkdirSync|rmSync|unlinkSync)\s*\(\s*["']([^"']+)["']/gi;
+const PACKAGE_MANAGER_SCRIPT_COPY_FS_TARGET_PATTERN =
+  /\b(?:copyFileSync|copyFile|cpSync|cp)\s*\(\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']/gi;
+const PACKAGE_MANAGER_SCRIPT_RENAME_FS_TARGET_PATTERN =
+  /\b(?:renameSync|rename)\s*\(\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']/gi;
+const PACKAGE_MANAGER_SCRIPT_REDIRECT_TARGET_PATTERN =
+  /(?:^|\s)(?:>{1,2}|tee)\s+["']?([A-Za-z0-9_./\\-]+)["']?/gi;
+const PACKAGE_MANAGER_WORKSPACE_ARG_PATTERN =
+  /^(?:workspace|workspaces|--workspace(?:=.*)?|--workspaces(?:=.*)?|--include-workspace-root(?:=.*)?|--prefix(?:=.*)?|--filter(?:=.*)?|--dir(?:=.*)?|--cwd(?:=.*)?|-w(?:=.*)?|-F(?:=.*)?|-C(?:=.*)?)$/i;
 function packageManagerScriptName(args) {
   const verb = args[0];
   if (verb === "test") return "test";
@@ -1020,6 +1044,142 @@ function validatePackageManagerShellArgs(command, args) {
     "permission",
   );
 }
+function packageScriptWriteTargets(script) {
+  const targets = new Set();
+  for (const match of script.matchAll(PACKAGE_MANAGER_SCRIPT_SINGLE_FS_TARGET_PATTERN)) {
+    if (match[1]) targets.add(match[1]);
+  }
+  for (const match of script.matchAll(PACKAGE_MANAGER_SCRIPT_COPY_FS_TARGET_PATTERN)) {
+    if (match[1]) targets.add(match[1]);
+    if (match[2]) targets.add(match[2]);
+  }
+  for (const match of script.matchAll(PACKAGE_MANAGER_SCRIPT_RENAME_FS_TARGET_PATTERN)) {
+    if (match[1]) targets.add(match[1]);
+    if (match[2]) targets.add(match[2]);
+  }
+  for (const match of script.matchAll(PACKAGE_MANAGER_SCRIPT_REDIRECT_TARGET_PATTERN)) {
+    if (match[1]) targets.add(match[1]);
+  }
+  return [...targets].filter((entry) => entry.length > 0 && !entry.startsWith("-"));
+}
+function packageScriptFsWriteIntentCount(script) {
+  return [
+    ...script.matchAll(
+      /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|mkdirSync|rmSync|unlinkSync|renameSync|rename|copyFileSync|copyFile|cpSync|cp)\s*\(/gi,
+    ),
+  ].length;
+}
+function packageScriptRedirectWriteIntentCount(script) {
+  return [...script.matchAll(/(?:^|\s)(?:>{1,2}|tee)\s+/gi)].length;
+}
+function normalizePackageScriptWriteTarget(target, context, cwd) {
+  const cwdRelative = path
+    .relative(resolveProjectRoot(context.projectRoot), cwd)
+    .replaceAll("\\", "/");
+  const joined = cwdRelative && cwdRelative !== "." ? `${cwdRelative}/${target}` : target;
+  const resolved = resolveInsideProjectRoot(
+    context.projectRoot,
+    joined,
+    "package script write path",
+  );
+  return normalizePathForPolicy(resolved.relativePath);
+}
+function validatePackageScriptWriteScope(command, args, scriptName, script, context, cwd) {
+  const allowed = context.allowedWritePaths ?? [];
+  if (allowed.length === 0) return;
+  const hasUnscopedShellWriteIntent =
+    PACKAGE_MANAGER_SCRIPT_UNSCOPED_WRITE_INTENT_PATTERN.test(script) ||
+    PACKAGE_MANAGER_SCRIPT_RM_RECURSIVE_FORCE_PATTERN.test(script) ||
+    PACKAGE_MANAGER_SCRIPT_SED_IN_PLACE_PATTERN.test(script);
+  const fsWriteIntentCount = packageScriptFsWriteIntentCount(script);
+  const redirectWriteIntentCount = packageScriptRedirectWriteIntentCount(script);
+  if (
+    !hasUnscopedShellWriteIntent &&
+    fsWriteIntentCount === 0 &&
+    redirectWriteIntentCount === 0 &&
+    !PACKAGE_MANAGER_SCRIPT_WRITE_INTENT_PATTERN.test(script)
+  ) {
+    return;
+  }
+  if (hasUnscopedShellWriteIntent) {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} can write files but does not declare a scoped write target`,
+      undefined,
+      "permission",
+    );
+  }
+  const targets = packageScriptWriteTargets(script);
+  if (targets.length === 0 || targets.length < fsWriteIntentCount + redirectWriteIntentCount) {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} can write files but does not declare a scoped write target`,
+      undefined,
+      "permission",
+    );
+  }
+  for (const target of targets) {
+    const normalized = normalizePackageScriptWriteTarget(target, context, cwd);
+    if (!isAllowedPathForContext(context, normalized)) {
+      throw new RuntimeExecutionError(
+        `write_path_not_allowed: ${normalized}; package.json script ${scriptName} can write outside this workflow's allowed write paths (${allowed.join(", ")})`,
+        undefined,
+        "permission",
+      );
+    }
+  }
+}
+function validateNpmDependencyHydrationWriteScope(command, args, context, packageRoot) {
+  if (!isNpmDependencyHydrationCommand(command, args)) return;
+  const allowed = context.allowedWritePaths ?? [];
+  if (allowed.length === 0) return;
+  if (!packageRoot) {
+    throw new RuntimeExecutionError(
+      `${command} ${args[0]} cannot run under scoped allowed write paths because no package.json was found at or above the shell cwd inside the project root`,
+      undefined,
+      "permission",
+    );
+  }
+  for (const target of ["package.json", "package-lock.json"]) {
+    const normalized = normalizePackageScriptWriteTarget(target, context, packageRoot);
+    if (!isAllowedPathForContext(context, normalized)) {
+      throw new RuntimeExecutionError(
+        `write_path_not_allowed: ${normalized}; ${command} ${args[0]} can update dependency files outside this workflow's allowed write paths (${allowed.join(", ")})`,
+        undefined,
+        "permission",
+      );
+    }
+  }
+}
+function validatePackageManagerWorkspaceWriteScope(command, args, context) {
+  const allowed = context.allowedWritePaths ?? [];
+  if (allowed.length === 0) return;
+  const scopedArg = args.find((arg) => PACKAGE_MANAGER_WORKSPACE_ARG_PATTERN.test(arg));
+  if (!scopedArg) return;
+  throw new RuntimeExecutionError(
+    `${command} ${args.join(" ")} is not supported with workspace or alternate package-root arguments under scoped allowed write paths; set run_shell.cwd to the package directory instead`,
+    undefined,
+    "permission",
+  );
+}
+function validateNestedPackageManagerScriptScope(command, args, scriptName, script, context) {
+  const allowed = context.allowedWritePaths ?? [];
+  if (allowed.length === 0) return;
+  if (!NESTED_PACKAGE_MANAGER_SCRIPT_PATTERN.test(script)) return;
+  throw new RuntimeExecutionError(
+    `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} delegates to another package-manager script under scoped allowed write paths`,
+    undefined,
+    "permission",
+  );
+}
+function validateLocalScriptFileDelegationScope(command, args, scriptName, script, context) {
+  const allowed = context.allowedWritePaths ?? [];
+  if (allowed.length === 0) return;
+  if (!PACKAGE_MANAGER_LOCAL_SCRIPT_FILE_DELEGATION_PATTERN.test(script)) return;
+  throw new RuntimeExecutionError(
+    `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} delegates to a local script file under scoped allowed write paths`,
+    undefined,
+    "permission",
+  );
+}
 function assertNoLongRunningPackageManagerArgs(command, args) {
   const deniedArg = args.find((arg) => LONG_RUNNING_PACKAGE_MANAGER_ARG_PATTERN.test(arg));
   if (!deniedArg) return;
@@ -1029,10 +1189,79 @@ function assertNoLongRunningPackageManagerArgs(command, args) {
     "permission",
   );
 }
-async function validatePackageManagerProjectScript(command, args, cwd) {
+function validatePackageManagerScriptBody(command, args, scriptName, script, context, cwd) {
+  if (DEPENDENCY_MUTATION_SCRIPT_PATTERN.test(script)) {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} mutates dependencies or executes package-manager install/update commands`,
+      undefined,
+      "permission",
+    );
+  }
+  if (LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_PATTERN.test(script)) {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} starts a long-running dev/watch/server process; run bounded build/test/lint verification instead`,
+      undefined,
+      "permission",
+    );
+  }
+  validateNestedPackageManagerScriptScope(command, args, scriptName, script, context);
+  validateLocalScriptFileDelegationScope(command, args, scriptName, script, context);
+  validatePackageScriptWriteScope(command, args, scriptName, script, context, cwd);
+}
+async function findNearestPackageManagerProjectRoot(projectRoot, cwd) {
+  const root = resolveProjectRoot(projectRoot);
+  let current = path.resolve(cwd);
+  const initialRelative = path.relative(root, current);
+  if (initialRelative.startsWith("..") || path.isAbsolute(initialRelative)) return null;
+  while (true) {
+    const packageJsonPath = path.join(current, "package.json");
+    try {
+      const info = await lstat(packageJsonPath);
+      if (info.isSymbolicLink()) {
+        throw new RuntimeExecutionError(
+          "package.json crosses a symbolic link or junction",
+          undefined,
+          "permission",
+        );
+      }
+      if (info.isFile()) return current;
+    } catch (error) {
+      if (error instanceof RuntimeExecutionError) throw error;
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") {
+        throw new RuntimeExecutionError(
+          "cannot inspect package.json for package-manager command",
+          undefined,
+          "permission",
+        );
+      }
+    }
+    if (current === root) return null;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+async function resolvePackageManagerProjectRoot(command, args, context, cwd) {
+  const packageRoot = await findNearestPackageManagerProjectRoot(context.projectRoot, cwd);
+  if (packageRoot) return packageRoot;
+  const allowed = context.allowedWritePaths ?? [];
+  if (
+    allowed.length > 0 &&
+    (isNpmDependencyHydrationCommand(command, args) || packageManagerScriptName(args))
+  ) {
+    throw new RuntimeExecutionError(
+      `${command} ${args.join(" ")} cannot run under scoped allowed write paths because no package.json was found at or above the shell cwd inside the project root`,
+      undefined,
+      "permission",
+    );
+  }
+  return null;
+}
+async function validatePackageManagerProjectScript(command, args, packageRoot, context) {
   const scriptName = packageManagerScriptName(args);
   if (!scriptName) return;
-  const packageJsonPath = path.join(cwd, "package.json");
+  if (!packageRoot) return;
+  const packageJsonPath = path.join(packageRoot, "package.json");
   let packageJsonText;
   try {
     packageJsonText = await readFile(packageJsonPath, "utf8");
@@ -1049,21 +1278,12 @@ async function validatePackageManagerProjectScript(command, args, cwd) {
       "permission",
     );
   }
-  const script = parsed?.scripts?.[scriptName];
-  if (typeof script !== "string") return;
-  if (DEPENDENCY_MUTATION_SCRIPT_PATTERN.test(script)) {
-    throw new RuntimeExecutionError(
-      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} mutates dependencies or executes package-manager install/update commands`,
-      undefined,
-      "permission",
-    );
-  }
-  if (LONG_RUNNING_PACKAGE_MANAGER_SCRIPT_PATTERN.test(script)) {
-    throw new RuntimeExecutionError(
-      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} starts a long-running dev/watch/server process; run bounded build/test/lint verification instead`,
-      undefined,
-      "permission",
-    );
+  const scripts = parsed?.scripts;
+  if (!scripts || typeof scripts !== "object") return;
+  for (const candidateName of [`pre${scriptName}`, scriptName, `post${scriptName}`]) {
+    const script = scripts[candidateName];
+    if (typeof script !== "string") continue;
+    validatePackageManagerScriptBody(command, args, candidateName, script, context, packageRoot);
   }
 }
 function packageManagerEnvExtras(command) {
@@ -1535,7 +1755,7 @@ async function runShellTool(args, context) {
       "permission",
     );
   }
-  validateStructuredShellCommand(command, commandArgs);
+  validateStructuredShellCommand(command, commandArgs, context);
   const cwd = await resolveExistingPathInsideProjectRoot(
     context.projectRoot,
     readString(args.cwd),
@@ -1545,7 +1765,14 @@ async function runShellTool(args, context) {
     throw new RuntimeExecutionError("shell cwd is not a directory", undefined, "permission");
   }
   if (isPackageManagerCommand(command)) {
-    await validatePackageManagerProjectScript(command, commandArgs, cwd.absolutePath);
+    const packageRoot = await resolvePackageManagerProjectRoot(
+      command,
+      commandArgs,
+      context,
+      cwd.absolutePath,
+    );
+    validateNpmDependencyHydrationWriteScope(command, commandArgs, context, packageRoot);
+    await validatePackageManagerProjectScript(command, commandArgs, packageRoot, context);
   }
   const timeoutMs = readPositiveInt(
     args.timeoutMs,
