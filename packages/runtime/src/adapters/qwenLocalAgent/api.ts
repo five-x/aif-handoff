@@ -111,12 +111,17 @@ const LOCAL_WAIT_ABORT = Symbol("qwenLocalAgentLocalWaitAbort");
 const endpointSemaphores = new Map();
 const endpointCircuitBreakers = new Map();
 const READ_ONLY_WORKFLOWS = new Set([
+  "researcher",
+  "research",
+  "designer",
+  "design",
   "planner",
   "plan-checker",
   "reviewer",
   "review-gate",
   "review-security",
   "security_review",
+  "qa",
 ]);
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -633,6 +638,31 @@ function resolveQwenToolsForWorkflow(workflowKind) {
 }
 function isQwenToolAllowedForWorkflow(workflowKind, toolName) {
   return resolveQwenToolsForWorkflow(workflowKind).some((tool) => tool.function.name === toolName);
+}
+function isReadOnlyShellCommandAllowed(args) {
+  const command = readString(args.command);
+  if (!command) return false;
+  const commandArgs = Array.isArray(args.args)
+    ? args.args.filter((entry) => typeof entry === "string").map((entry) => entry.trim())
+    : [];
+  if (command === "pwd" || command === "ls") return true;
+  if (!["npm", "npm.cmd", "pnpm", "yarn", "bun"].includes(command)) return false;
+  if (commandArgs.length === 0) return true;
+  const first = commandArgs[0]?.toLowerCase();
+  if (first === "--version" || first === "-v" || first === "help" || first === "--help") {
+    return true;
+  }
+  return first === "run" && commandArgs.length === 1;
+}
+function readOnlyShellDeniedResult() {
+  return {
+    ok: false,
+    output: "",
+    error:
+      "run_shell command denied: this workflow is read-only and allows only inspection commands.",
+    exitCode: null,
+    touchedFiles: [],
+  };
 }
 function readMaxToolTurns(input) {
   const options = asRecord(input.options);
@@ -2484,6 +2514,12 @@ export async function runQwenLocalAgentApi(input, logger) {
           !shouldSuppressRepeatedCall &&
           auditLowQualityRepairLock &&
           isRepositoryInspectionTool;
+        const shouldDenyReadOnlyShell =
+          toolAllowed &&
+          !shouldSuppressRepeatedCall &&
+          READ_ONLY_WORKFLOWS.has(input.workflowKind) &&
+          toolCall.function.name === "run_shell" &&
+          !isReadOnlyShellCommandAllowed(args);
         const result = shouldSuppressRepeatedCall
           ? repeatedToolCallResult(
               toolCall.function.name,
@@ -2497,15 +2533,17 @@ export async function runQwenLocalAgentApi(input, logger) {
                   toolCall.function.name,
                   repositoryInspectionToolBudget,
                 )
-              : !toolAllowed
-                ? {
-                    ok: false,
-                    output: "",
-                    error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
-                    exitCode: null,
-                    touchedFiles: [],
-                  }
-                : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+              : shouldDenyReadOnlyShell
+                ? readOnlyShellDeniedResult()
+                : !toolAllowed
+                  ? {
+                      ok: false,
+                      output: "",
+                      error: `${sanitizeQwenToolNameForLog(toolCall.function.name)} is not allowed for ${input.workflowKind} workflow`,
+                      exitCode: null,
+                      touchedFiles: [],
+                    }
+                  : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
         if (
           toolAllowed &&
           !shouldSuppressRepeatedCall &&

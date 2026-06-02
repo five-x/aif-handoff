@@ -721,6 +721,51 @@ describe("qwen-local-agent adapter", () => {
     expect(toolNames).not.toContain("apply_patch");
     expect(toolNames).not.toContain("git_commit");
   });
+  it("denies write-capable shell operations in read-only planner workflows", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-shell-deny-"));
+    await writeFile(path.join(root, "package.json"), JSON.stringify({}), "utf8");
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-readonly-shell-deny",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-install",
+                    type: "function",
+                    function: {
+                      name: "run_shell",
+                      arguments: JSON.stringify({
+                        command: process.platform === "win32" ? "npm.cmd" : "npm",
+                        args: ["install"],
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-readonly-shell-deny-final",
+          choices: [{ message: { role: "assistant", content: "done" } }],
+        }),
+      );
+
+    const result = await runQwenLocalAgentApi(createRunInput(root, { workflowKind: "planner" }));
+
+    expect(result.outputText).toBe("done");
+    expect(JSON.stringify(result.events)).toContain("workflow is read-only");
+    await expect(readFile(path.join(root, "package-lock.json"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
   it.each(["roadmap-generate", "roadmap-extract"])(
     "omits repository tools for %s one-shot workflows",
     async (workflowKind) => {

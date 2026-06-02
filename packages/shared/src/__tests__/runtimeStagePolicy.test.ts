@@ -129,6 +129,53 @@ describe("runtime stage policy", () => {
     expect(caps.maxToolTurns).toBe(20);
     expect(caps.maxOutputTokens).toBe(4_000);
     expect(caps.repositoryInspectionToolBudget).toBe(16);
+    expect(caps.sandboxMode).toBe("read-only");
+    expect(caps.approvalPolicy).toBe("on-request");
+  });
+
+  it("forces read-only sandbox caps for non-implementation codex planning stages", () => {
+    const caps = getRuntimeStageCaps(
+      profile({
+        runtimeId: "codex",
+        providerId: "openai",
+        options: {
+          runtimeStageCaps: {
+            planner: {
+              sandboxMode: "workspace-write",
+              approvalPolicy: "never",
+            },
+          },
+        },
+      }),
+      "planner",
+    );
+
+    expect(caps.sandboxMode).toBe("read-only");
+    expect(caps.approvalPolicy).toBe("on-request");
+  });
+
+  it("does not force artifact-writing audit stages into read-only sandbox caps", () => {
+    const auditCaps = getRuntimeStageCaps(
+      profile({
+        runtimeId: "codex",
+        providerId: "openai",
+        options: {
+          runtimeStageCaps: {
+            audit: {
+              sandboxMode: "workspace-write",
+              approvalPolicy: "never",
+            },
+          },
+        },
+      }),
+      "audit",
+    );
+    const synthesisCaps = getRuntimeStageCaps(profile(), "synthesis");
+
+    expect(auditCaps.sandboxMode).toBe("workspace-write");
+    expect(auditCaps.approvalPolicy).toBe("never");
+    expect(synthesisCaps.sandboxMode).toBeUndefined();
+    expect(synthesisCaps.approvalPolicy).toBeUndefined();
   });
 
   it("uses structured canary caps for approved qwen implementation", () => {

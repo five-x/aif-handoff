@@ -287,12 +287,16 @@ export function synthesizeQaArtifactFromMandatoryInventory(input: {
     markdown: [
       "# QA",
       "",
+      `Parser failure: ${input.parserError}`,
+      "",
       "Mandatory implementation verification evidence is present and passed.",
       "QA model output missed the required structured artifact block, so AIF synthesized this strict artifact from the mandatory evidence inventory.",
+      "Evidence source: implementation manifest mandatory verification inventory.",
       "",
       "Mandatory checks:",
       ...mandatoryChecks.map(
-        (check) => `- ${check.id}: passed${check.command ? ` (${check.command})` : ""}`,
+        (check) =>
+          `- ${check.id}: passed${check.command ? ` (${check.command})` : ""}; ${check.evidence}`,
       ),
     ].join("\n"),
     mandatoryChecks,

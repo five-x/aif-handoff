@@ -54,6 +54,7 @@ const {
   buildTaskArtifactTrustRollup,
   hasFreshAcceptedTaskAcceptancePack,
   hasFreshAcceptedTaskQaArtifact,
+  hasSatisfiedContainerParentCloseout,
   createRoadmapBatchContract,
   findRoadmapBatchByProjectAlias,
   listRoadmapBatchArtifacts,
@@ -3994,7 +3995,8 @@ describe("data layer", () => {
               command: "npm.cmd test --workspace=@aif/data -- qa",
               status: "passed",
               mandatory: true,
-              outputSummary: "Tests passed.",
+              outputSummary:
+                "Tests passed. Built dist bundle and artifact. Preview smoke passed on localhost. Public domain routing limitation: DNS not configured. git push origin/task succeeded.",
             },
           ],
           limitations: ["No browser E2E run."],
@@ -4007,7 +4009,17 @@ describe("data layer", () => {
       expect(pack.changedFiles).toEqual(["packages/app/src/feature.ts"]);
       expect(pack.qaResult).toContain("QA passed.");
       expect(hasFreshAcceptedTaskAcceptancePack(task!.id)).toBe(true);
-      expect(buildTaskAcceptancePack(task!.id)?.readiness.ready).toBe(true);
+      const readPack = buildTaskAcceptancePack(task!.id);
+      expect(readPack?.readiness.ready).toBe(true);
+      expect(readPack?.deployReadiness).toEqual(
+        expect.objectContaining({
+          builtArtifacts: expect.stringContaining("recorded"),
+          previewSmoke: expect.stringContaining("recorded"),
+          publicDomainRouting: expect.stringContaining("recorded"),
+          gitRemotePush: expect.stringContaining("recorded"),
+        }),
+      );
+      expect(readPack?.markdown).toContain("## Deployment Readiness");
 
       setTaskFields(task!.id, { reviewComments: "Review changed after QA." });
       expect(hasFreshAcceptedTaskQaArtifact(task!.id)).toBe(false);
@@ -5177,6 +5189,8 @@ describe("data layer", () => {
       const rolledUp = findTaskById(parent.id)!;
       expect(rolledUp.status).toBe("done");
       expect(rolledUp.status).not.toBe("verified");
+      expect(hasSatisfiedContainerParentCloseout(parent.id)).toBe(true);
+      expect(hasSatisfiedContainerParentCloseout(first.id)).toBe(false);
     });
 
     it("rolls up implementation runtime exhaustion with a specific child-blocked reason", () => {

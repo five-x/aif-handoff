@@ -112,6 +112,64 @@ describe("evaluateTaskPlanQuality", () => {
     expect(result.categories).not.toContain("missing_plan_manifest");
   });
 
+  it("repairs a single malformed full-mode manifest block from deterministic task context", () => {
+    const task = {
+      id: "task-full",
+      title: "Fix plan quality manifest repair",
+      description: "Scope: packages/shared/src/planQuality.ts.",
+      taskIntent: "feature" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+    };
+    const plan = [
+      "## Manifest repair plan",
+      "",
+      "```aif-plan-manifest",
+      '{"version":1,"taskId":',
+      "```",
+      "",
+      "- [ ] Update packages/shared/src/planQuality.ts with manifest repair.",
+      "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+    ].join("\n");
+
+    const normalized = normalizeAifPlanManifestForTask({ task, plan });
+    const result = evaluateTaskPlanQuality({ task, plan: normalized });
+
+    expect(result.planManifest?.status).toBe("valid");
+    expect(result.categories).not.toContain("invalid_plan_manifest");
+    expect(normalized).toContain('"taskId": "task-full"');
+  });
+
+  it("does not synthesize a missing full-mode manifest unless explicitly requested", () => {
+    const task = {
+      id: "task-full-missing",
+      title: "Fix plan quality manifest enforcement",
+      description: "Scope: packages/shared/src/planQuality.ts.",
+      taskIntent: "feature" as const,
+      plannerMode: "full",
+      createdAt: PLAN_MANIFEST_REQUIRED_CREATED_AT,
+    };
+    const plan = [
+      "## Plan",
+      "",
+      "- [ ] Update packages/shared/src/planQuality.ts with manifest enforcement.",
+      "- [ ] Run npm.cmd test --workspace=@aif/shared -- --run src/__tests__/planQuality.test.ts.",
+    ].join("\n");
+
+    const normalized = normalizeAifPlanManifestForTask({ task, plan });
+    const repaired = normalizeAifPlanManifestForTask({
+      task,
+      plan,
+      repairMissingManifest: true,
+    });
+
+    expect(normalized).toBe(plan);
+    expect(evaluateTaskPlanQuality({ task, plan: normalized }).categories).toContain(
+      "missing_plan_manifest",
+    );
+    expect(evaluateTaskPlanQuality({ task, plan: repaired }).planManifest?.status).toBe("valid");
+  });
+
   it("rejects broad scaffold, local dev stack, and base configuration manifests", () => {
     const malformedManifest = JSON.stringify(
       {

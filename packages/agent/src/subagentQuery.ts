@@ -519,6 +519,12 @@ function applyRuntimeStageCapsToAdapterOptions(
     "repositoryInspectionToolBudget",
     caps.repositoryInspectionToolBudget,
   );
+  if (caps.sandboxMode) {
+    capped.sandboxMode = caps.sandboxMode;
+  }
+  if (caps.approvalPolicy) {
+    capped.approvalPolicy = caps.approvalPolicy;
+  }
   return capped;
 }
 

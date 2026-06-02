@@ -11,6 +11,8 @@ export interface RuntimeStageCaps {
   maxBudgetUsd?: number;
   retryCount?: number;
   repositoryInspectionToolBudget?: number;
+  sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
+  approvalPolicy?: "untrusted" | "on-request" | "on-failure" | "never";
 }
 
 export type RuntimeStageCapabilityReason =
@@ -54,6 +56,16 @@ const QWEN_DEFAULT_ALLOWED_STAGES = new Set<RuntimeStage>([
   "audit",
   "synthesis",
 ]);
+
+const READ_ONLY_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> = {
+  researcher: { sandboxMode: "read-only", approvalPolicy: "on-request" },
+  designer: { sandboxMode: "read-only", approvalPolicy: "on-request" },
+  planner: { sandboxMode: "read-only", approvalPolicy: "on-request" },
+  plan_checker: { sandboxMode: "read-only", approvalPolicy: "on-request" },
+  reviewer: { sandboxMode: "read-only", approvalPolicy: "on-request" },
+  qa: { sandboxMode: "read-only", approvalPolicy: "on-request" },
+  security: { sandboxMode: "read-only", approvalPolicy: "on-request" },
+};
 
 const QWEN_DEFAULT_STAGE_CAPS: Partial<Record<RuntimeStage, RuntimeStageCaps>> = {
   researcher: {
@@ -157,6 +169,8 @@ const CAP_ALIASES: Record<keyof RuntimeStageCaps, string[]> = {
     "inspectionToolBudget",
     "repository_inspection_tool_budget",
   ],
+  sandboxMode: ["sandboxMode", "sandbox_mode"],
+  approvalPolicy: ["approvalPolicy", "approval_policy"],
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -173,6 +187,25 @@ function readPositiveNumber(value: unknown): number | undefined {
 function readPositiveInteger(value: unknown): number | undefined {
   const parsed = readPositiveNumber(value);
   return parsed === undefined ? undefined : Math.floor(parsed);
+}
+
+function readSandboxMode(value: unknown): RuntimeStageCaps["sandboxMode"] | undefined {
+  if (value !== "read-only" && value !== "workspace-write" && value !== "danger-full-access") {
+    return undefined;
+  }
+  return value;
+}
+
+function readApprovalPolicy(value: unknown): RuntimeStageCaps["approvalPolicy"] | undefined {
+  if (
+    value !== "untrusted" &&
+    value !== "on-request" &&
+    value !== "on-failure" &&
+    value !== "never"
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 function readCanaryContextTokens(canary: Record<string, unknown>): number | undefined {
@@ -206,11 +239,15 @@ function readConfiguredCaps(
   >) {
     for (const alias of aliases) {
       const parsed =
-        capKey === "maxBudgetUsd"
-          ? readPositiveNumber(source[alias])
-          : readPositiveInteger(source[alias]);
+        capKey === "sandboxMode"
+          ? readSandboxMode(source[alias])
+          : capKey === "approvalPolicy"
+            ? readApprovalPolicy(source[alias])
+            : capKey === "maxBudgetUsd"
+              ? readPositiveNumber(source[alias])
+              : readPositiveInteger(source[alias]);
       if (parsed !== undefined) {
-        caps[capKey] = parsed;
+        (caps as Record<keyof RuntimeStageCaps, unknown>)[capKey] = parsed;
         break;
       }
     }
@@ -256,12 +293,30 @@ function mergeStrictCaps(
   configured: RuntimeStageCaps,
 ): RuntimeStageCaps {
   const merged: RuntimeStageCaps = { ...defaults };
+  const numericKeys = new Set<keyof RuntimeStageCaps>([
+    "maxToolTurns",
+    "wallClockMs",
+    "repeatedToolCallLimit",
+    "tokenBudget",
+    "contextTokens",
+    "maxOutputTokens",
+    "maxBudgetUsd",
+    "retryCount",
+    "repositoryInspectionToolBudget",
+  ]);
   for (const key of Object.keys(configured) as Array<keyof RuntimeStageCaps>) {
     const configuredValue = configured[key];
     if (configuredValue === undefined) continue;
+    if (key === "sandboxMode" || key === "approvalPolicy") {
+      if (merged[key] === undefined) {
+        (merged as Record<keyof RuntimeStageCaps, unknown>)[key] = configuredValue;
+      }
+      continue;
+    }
+    if (!numericKeys.has(key) || typeof configuredValue !== "number") continue;
     const defaultValue = merged[key];
-    merged[key] =
-      defaultValue === undefined ? configuredValue : Math.min(defaultValue, configuredValue);
+    (merged as Record<keyof RuntimeStageCaps, unknown>)[key] =
+      typeof defaultValue === "number" ? Math.min(defaultValue, configuredValue) : configuredValue;
   }
   return merged;
 }
@@ -277,7 +332,10 @@ function getQwenStageDefaultCaps(
   options: Record<string, unknown>,
   stage: RuntimeStage,
 ): RuntimeStageCaps {
-  const defaults = QWEN_DEFAULT_STAGE_CAPS[stage] ?? {};
+  const defaults = {
+    ...(READ_ONLY_STAGE_CAPS[stage] ?? {}),
+    ...(QWEN_DEFAULT_STAGE_CAPS[stage] ?? {}),
+  };
   const canaryCaps = readCanaryApprovedCaps(options, stage);
   return mergeCanaryApprovedCaps(defaults, canaryCaps);
 }
@@ -373,7 +431,9 @@ export function getRuntimeStageCaps(
 ): RuntimeStageCaps {
   const options = asRecord(profile.options);
   const configured = readConfiguredCaps(options, stage);
-  if (!isQwenLocalRuntimeProfile(profile)) return configured;
+  if (!isQwenLocalRuntimeProfile(profile)) {
+    return mergeStrictCaps(READ_ONLY_STAGE_CAPS[stage] ?? {}, configured);
+  }
   return mergeStrictCaps(getQwenStageDefaultCaps(options, stage), configured);
 }
 

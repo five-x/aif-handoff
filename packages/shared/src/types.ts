@@ -381,6 +381,13 @@ export interface TaskAcceptancePackReadiness {
   reason: string;
 }
 
+export interface TaskAcceptancePackDeployReadiness {
+  builtArtifacts: string;
+  previewSmoke: string;
+  publicDomainRouting: string;
+  gitRemotePush: string;
+}
+
 export interface TaskAcceptancePack {
   taskId: string;
   generatedAt: string;
@@ -391,6 +398,7 @@ export interface TaskAcceptancePack {
   limitations: string[];
   rollbackNotes: string[];
   readiness: TaskAcceptancePackReadiness;
+  deployReadiness?: TaskAcceptancePackDeployReadiness | null;
   qaArtifactId: string | null;
   qaAttemptNumber: number | null;
   acceptanceArtifactId?: string | null;

@@ -822,6 +822,15 @@ function computeParentRollupStatus(parent: TaskRow, children: TaskRow[]): TaskSt
   return synthesisChild?.status === "verified" ? "done" : "backlog";
 }
 
+export function hasSatisfiedContainerParentCloseout(taskId: string): boolean {
+  const parent = findTaskById(taskId);
+  if (!parent || effectiveHierarchyRole(parent) !== "container") return false;
+  const children = directChildrenOf(parent.id);
+  if (children.length === 0) return false;
+  if (children.some((child) => effectiveHierarchyRole(child) !== "executable")) return false;
+  return computeParentRollupStatus(parent, children) === "done";
+}
+
 const GENERIC_HIERARCHY_ROLLUP_BLOCKED_REASON = "hierarchy_rollup: child task is blocked";
 const IMPLEMENTATION_RUNTIME_EXHAUSTED_REASON_PREFIX =
   "implementation_runtime_exhausted_requires_split:";
@@ -3150,6 +3159,7 @@ function acceptanceArtifactHasCompletePackMetadata(input: {
   if (!isRecord(metadata.readiness)) return false;
   if (metadata.readiness.ready !== true) return false;
   if (!usefulString(metadata.readiness.reason)) return false;
+  if (!isRecord(metadata.deployReadiness)) return false;
   if (usefulString(metadata.qaArtifactId) !== qaArtifact.id) return false;
   if (metadata.qaAttemptNumber !== qaArtifact.currentAttemptNumber) return false;
   const sourceFingerprint = readSourceFingerprint(metadata.sourceFingerprint);
@@ -3175,6 +3185,51 @@ function qaSummaryFromArtifact(artifact: TaskStageArtifact): string {
   return `${artifact.summary || "QA accepted."}${suffix}`;
 }
 
+function buildDeployReadinessSignals(input: {
+  changedFiles: string[];
+  qaArtifact: TaskStageArtifact;
+  limitations: string[];
+}) {
+  const commands = Array.isArray(input.qaArtifact.metadata.commands)
+    ? input.qaArtifact.metadata.commands
+    : [];
+  const commandText = commands
+    .filter(isRecord)
+    .map((entry) =>
+      [usefulString(entry.command), usefulString(entry.outputSummary)].filter(Boolean).join(" "),
+    )
+    .join("\n")
+    .toLowerCase();
+  const changedText = input.changedFiles.join("\n").toLowerCase();
+  const limitationText = input.limitations.join("\n").toLowerCase();
+  const builtArtifacts =
+    /\b(?:dist|build|out|artifact|bundle|docker image|container image)\b/i.test(
+      `${changedText}\n${commandText}`,
+    )
+      ? "recorded: build or artifact evidence appears in changed files or QA commands."
+      : "not_recorded: no built artifact evidence is recorded in the acceptance pack.";
+  const previewSmoke =
+    /\b(?:preview|smoke|localhost|127\.0\.0\.1|playwright|curl)\b/i.test(commandText)
+      ? "recorded: preview or smoke evidence appears in QA commands."
+      : "not_recorded: no preview smoke evidence is recorded in QA commands.";
+  const publicDomainRouting =
+    /\b(?:public domain|domain routing|dns|cname|route53|cloudflare|vercel domain|netlify domain)\b/i.test(
+      `${commandText}\n${limitationText}`,
+    )
+      ? "recorded: public domain routing evidence or limitation is recorded."
+      : "unverified: public domain routing was not probed by acceptance pack generation.";
+  const gitRemotePush =
+    /\b(?:git remote|git push|pushed|origin\/|remote branch)\b/i.test(commandText)
+      ? "recorded: git remote or push evidence appears in QA commands."
+      : "unverified: git remote/push availability was not probed by acceptance pack generation.";
+  return {
+    builtArtifacts,
+    previewSmoke,
+    publicDomainRouting,
+    gitRemotePush,
+  };
+}
+
 function buildAcceptanceMarkdown(pack: Omit<TaskAcceptancePack, "markdown">): string {
   const list = (items: string[]): string =>
     items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- None recorded.";
@@ -3186,6 +3241,13 @@ function buildAcceptanceMarkdown(pack: Omit<TaskAcceptancePack, "markdown">): st
     "## Readiness",
     "",
     `${pack.readiness.ready ? "Ready" : "Not ready"}: ${pack.readiness.reason}`,
+    "",
+    "## Deployment Readiness",
+    "",
+    `Built artifacts: ${pack.deployReadiness?.builtArtifacts ?? "not_recorded"}`,
+    `Preview smoke: ${pack.deployReadiness?.previewSmoke ?? "not_recorded"}`,
+    `Public domain routing: ${pack.deployReadiness?.publicDomainRouting ?? "unverified"}`,
+    `Git remote/push: ${pack.deployReadiness?.gitRemotePush ?? "unverified"}`,
     "",
     "## Covered Requirements",
     "",
@@ -3240,6 +3302,7 @@ function buildTaskAcceptancePackPayload(taskId: string): Omit<TaskAcceptancePack
     : task.reviewComments?.trim()
       ? `Review completed at iteration ${task.reviewIterationCount ?? 0}.`
       : "No review comments recorded.";
+  const limitations = [...manifestLimitations, ...qaLimitations].filter(Boolean);
   const pack: Omit<TaskAcceptancePack, "markdown"> = {
     taskId,
     generatedAt: new Date().toISOString(),
@@ -3247,7 +3310,7 @@ function buildTaskAcceptancePackPayload(taskId: string): Omit<TaskAcceptancePack
     changedFiles,
     reviewResult,
     qaResult: qaSummaryFromArtifact(qaArtifact),
-    limitations: [...manifestLimitations, ...qaLimitations].filter(Boolean),
+    limitations,
     rollbackNotes:
       qaRollbackNotes.length > 0
         ? qaRollbackNotes
@@ -3256,6 +3319,11 @@ function buildTaskAcceptancePackPayload(taskId: string): Omit<TaskAcceptancePack
       ready: true,
       reason: "Fresh QA artifact and acceptance pack are ready for human approval.",
     },
+    deployReadiness: buildDeployReadinessSignals({
+      changedFiles,
+      qaArtifact,
+      limitations,
+    }),
     qaArtifactId: qaArtifact.id,
     qaAttemptNumber: qaArtifact.currentAttemptNumber,
     acceptanceArtifactId: null,
@@ -3327,6 +3395,14 @@ export function buildTaskAcceptancePack(taskId: string): TaskAcceptancePack | nu
           reason: usefulString(metadata.readiness.reason) ?? "",
         }
       : { ready: false, reason: "Acceptance readiness metadata is missing." },
+    deployReadiness: isRecord(metadata.deployReadiness)
+      ? {
+          builtArtifacts: usefulString(metadata.deployReadiness.builtArtifacts) ?? "",
+          previewSmoke: usefulString(metadata.deployReadiness.previewSmoke) ?? "",
+          publicDomainRouting: usefulString(metadata.deployReadiness.publicDomainRouting) ?? "",
+          gitRemotePush: usefulString(metadata.deployReadiness.gitRemotePush) ?? "",
+        }
+      : null,
     qaArtifactId: usefulString(metadata.qaArtifactId),
     qaAttemptNumber:
       typeof metadata.qaAttemptNumber === "number" ? metadata.qaAttemptNumber : null,

@@ -89,6 +89,26 @@ describe("requirements analyst", () => {
     expect(questions?.openBlockingCount ?? 0).toBe(0);
   });
 
+  it("does not ask primary actor for internal test-only operator cards with scope and acceptance", async () => {
+    seedTask({
+      id: "internal-test-only-task",
+      title: "Add internal QA permission regression",
+      description: [
+        "Test-only internal system maintenance card for the AIF runtime.",
+        "Scope: packages/agent/src/__tests__/requirementsAnalyst.test.ts only.",
+        "Acceptance criteria: permission workflow regression is covered by a deterministic test.",
+        "Verification: npm.cmd test --workspace=@aif/agent -- requirementsAnalyst",
+      ].join("\n"),
+    });
+
+    await runRequirementsAnalyst("internal-test-only-task");
+
+    const task = findTaskById("internal-test-only-task");
+    const questions = getTaskRequirementQuestionsResponse("internal-test-only-task");
+    expect(task?.requirementsConfidence).toBe(0.86);
+    expect(questions?.openBlockingCount ?? 0).toBe(0);
+  });
+
   it("still asks for an actor when the task is actor-dependent and no actor is supplied", async () => {
     seedTask({
       id: "permissions-task",

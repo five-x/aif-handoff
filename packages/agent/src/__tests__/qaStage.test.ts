@@ -187,6 +187,13 @@ describe("QA stage artifact parser", () => {
         status: "passed",
       }),
     ]);
+    expect(parsed?.markdown).toContain(
+      "Parser failure: Expected exactly one fenced aif-qa-artifact JSON block, found 0",
+    );
+    expect(parsed?.markdown).toContain(
+      "Evidence source: implementation manifest mandatory verification inventory.",
+    );
+    expect(parsed?.markdown).toContain("output sha256");
   });
 
   it("does not synthesize when mandatory evidence is blocked or not from implementation evidence", () => {

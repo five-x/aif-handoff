@@ -3343,6 +3343,60 @@ describe("tasks API", () => {
       expect(body.plan).toContain("Existing Plan");
     });
 
+    it("repairs malformed full-mode manifest blocks before accepting existing plans", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-accept-plan-repair-"));
+      const aiFactoryDir = join(rootPath, ".ai-factory");
+      mkdirSync(aiFactoryDir, { recursive: true });
+      writeFileSync(
+        join(aiFactoryDir, "PLAN.md"),
+        [
+          "# Existing Full Plan",
+          "",
+          "```aif-plan-manifest",
+          '{"version":1,"taskId":',
+          "```",
+          "",
+          "- [ ] Update packages/api/src/services/taskEvents.ts to normalize existing plans before validation.",
+          "- [ ] Add a regression test in packages/api/src/__tests__/tasks.test.ts.",
+          "- [ ] Run npm.cmd test --workspace=@aif/api -- --run src/__tests__/tasks.test.ts.",
+        ].join("\n"),
+      );
+
+      db.insert(projects)
+        .values({ id: "proj-accept-repair", name: "Accept Repair", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-accept-plan-repair",
+          projectId: "proj-accept-repair",
+          title: "Repair accept existing plan manifest",
+          description:
+            "Scope: packages/api/src/services/taskEvents.ts and packages/api/src/__tests__/tasks.test.ts.",
+          status: "backlog",
+          taskIntent: "feature",
+          plannerMode: "full",
+          createdAt: "2026-05-20T00:00:00.000Z",
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-accept-plan-repair/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "accept_existing_plan" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("plan_ready");
+      expect(body.plan).toContain("```aif-plan-manifest");
+      expect(body.plan).toContain('"taskId": "ev-accept-plan-repair"');
+      expect(body.plan).not.toContain('{"version":1,"taskId":');
+      expect(readFileSync(join(aiFactoryDir, "PLAN.md"), "utf8")).toContain(
+        '"taskId": "ev-accept-plan-repair"',
+      );
+    });
+
     it("blocks accept_existing_plan when the on-disk plan is generic", async () => {
       const db = testDb.current;
       const rootPath = mkdtempSync(join(tmpdir(), "aif-accept-plan-generic-"));
@@ -4905,6 +4959,45 @@ describe("tasks API", () => {
       expect(res.status).toBe(409);
       const body = await res.json();
       expect(body.error).toContain("fresh accepted QA and acceptance artifacts");
+    });
+
+    it("should allow satisfied container parents to approve without parent QA artifacts", async () => {
+      const db = testDb.current;
+      insertTestProject(db);
+      mockRequirementsIntakeEnabled.value = true;
+      mockRequirementsQaEnabled.value = true;
+      db.insert(tasks)
+        .values({
+          id: "ev-container-qa-bypass",
+          projectId: "test-project",
+          title: "Roadmap parent",
+          status: "done",
+          hierarchyRole: "container",
+          parentCloseoutPolicy: "all_children_verified",
+        })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-container-child-verified",
+          projectId: "test-project",
+          title: "Executable child",
+          status: "verified",
+          hierarchyRole: "executable",
+          parentTaskId: "ev-container-qa-bypass",
+          rootTaskId: "ev-container-qa-bypass",
+          hierarchyDepth: 1,
+        })
+        .run();
+
+      const res = await app.request("/tasks/ev-container-qa-bypass/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(res.status).toBe(200);
+      const updated = db.select().from(tasks).where(eq(tasks.id, "ev-container-qa-bypass")).get();
+      expect(updated?.status).toBe("verified");
     });
 
     it("should block approve_done when QA acceptance artifact metadata is malformed", async () => {

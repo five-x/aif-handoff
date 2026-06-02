@@ -442,6 +442,123 @@ describe("executeSubagentQuery attribution", () => {
     );
   });
 
+  it("passes read-only sandbox options to runtime adapters for planning stages", async () => {
+    let capturedOptions: Record<string, unknown> | null = null;
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-runtime",
+        displayName: "Test Runtime",
+        providerId: "test",
+        defaultTransport: "api",
+        capabilities: auditRuntimeCapabilities(),
+      },
+      async run(input: RuntimeRunInput) {
+        capturedOptions = input.options ?? null;
+        return {
+          outputText: "done",
+          events: [],
+          usage: null,
+          raw: null,
+        };
+      },
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-runtime", adapter };
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test",
+        runtimeId: "test-runtime",
+        providerId: "test",
+        transport: "api",
+        options: {
+          runtimeStageCaps: {
+            planner: {
+              sandboxMode: "workspace-write",
+              approvalPolicy: "never",
+            },
+          },
+        },
+      },
+      taskRuntimeProfileId: "profile-test",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-plan-readonly",
+      projectRoot: "/tmp/project",
+      agentName: "planner",
+      prompt: "plan",
+      workflowKind: "planner",
+    });
+
+    expect(capturedOptions).toEqual(
+      expect.objectContaining({
+        sandboxMode: "read-only",
+        approvalPolicy: "on-request",
+      }),
+    );
+  });
+
+  it("does not force read-only sandbox options onto artifact-writing audit workflows", async () => {
+    let capturedOptions: Record<string, unknown> | null = null;
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-runtime",
+        displayName: "Test Runtime",
+        providerId: "test",
+        defaultTransport: "api",
+        capabilities: auditRuntimeCapabilities(),
+      },
+      async run(input: RuntimeRunInput) {
+        capturedOptions = input.options ?? null;
+        return {
+          outputText: "done",
+          events: [],
+          usage: null,
+          raw: null,
+        };
+      },
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-runtime", adapter };
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test",
+        runtimeId: "test-runtime",
+        providerId: "test",
+        transport: "api",
+        options: {
+          runtimeStageCaps: {
+            audit: {
+              sandboxMode: "workspace-write",
+              approvalPolicy: "never",
+            },
+          },
+        },
+      },
+      taskRuntimeProfileId: "profile-test",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-audit-writer",
+      projectRoot: "/tmp/project",
+      agentName: "audit-report-ledger-writer",
+      prompt: "write audit report",
+      profileMode: "audit",
+      workflowKind: "audit",
+    });
+
+    expect(capturedOptions).toEqual(
+      expect.objectContaining({
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+      }),
+    );
+  });
+
   it("passes Handoff branch contract in runtime environment", async () => {
     findTaskByIdMock.mockReturnValue({
       id: "task-branch",

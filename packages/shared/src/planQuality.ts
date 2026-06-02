@@ -137,6 +137,7 @@ export interface DeterministicDiagnosticPlanInput {
 export interface NormalizeAifPlanManifestForTaskInput {
   task: TaskPlanQualityTask;
   plan: string;
+  repairMissingManifest?: boolean;
 }
 
 const CHECKLIST_PATTERN = /^\s*[-*]\s+\[(?: |x|X)\]\s+\S/m;
@@ -596,6 +597,7 @@ function concreteVerificationCommandsFromText(text: string): string[] {
       .replace(/^[-*]\s+(?:\[[ xX]\]\s*)?/, "")
       .replace(/^\d+[.)]\s+/, "")
       .replace(/^#+\s+/, "")
+      .replace(/^(?:run|verify|verification|test command|command)\s*:?\s+/i, "")
       .replace(/^`+|`+$/g, "")
       .trim();
     if (isConcreteVerificationCommand(normalized)) commands.add(normalized);
@@ -876,7 +878,7 @@ export function normalizeAifPlanManifestForTask(
   if (blocks.length > 1) return plan;
 
   if (blocks.length === 0) {
-    if (!isPlanManifestRequired(input.task)) return plan;
+    if (!isPlanManifestRequired(input.task) || !input.repairMissingManifest) return plan;
     const manifest = buildNormalizedAifPlanManifest({
       task: input.task,
       manifest: null,
@@ -889,7 +891,6 @@ export function normalizeAifPlanManifestForTask(
   }
 
   const parsed = parseAifPlanManifest(blocks[0] ?? "");
-  if (!parsed) return plan;
   const taskIntent = inferTaskIntent({
     taskIntent: input.task.taskIntent,
     title: input.task.title,
@@ -907,7 +908,7 @@ export function normalizeAifPlanManifestForTask(
 
   const manifest = buildNormalizedAifPlanManifest({
     task: input.task,
-    manifest: parsed,
+    manifest: parsed ?? null,
     plan,
   });
   if (!manifest) return plan;

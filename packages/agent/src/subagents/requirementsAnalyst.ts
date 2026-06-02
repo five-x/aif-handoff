@@ -78,6 +78,12 @@ function hasBlockingActorQuestionSignal(text: string): boolean {
   );
 }
 
+function hasInternalOperatorActorSignal(text: string): boolean {
+  return /\b(?:internal|test[-\s]?only|operator|system\s+maintenance|maintenance\s+card|runtime\s+maintenance|automation|platform\s+maintenance)\b/i.test(
+    text,
+  );
+}
+
 function hasScopeSignal(text: string): boolean {
   return /\b(scope|out of scope|include|exclude|first version|mvp|must|must not|file boundaries|allowed changes|allowed write paths|minimal|в scope|состав|включить|исключить|mvp|первая версия|минималь|только|границ)\b/i.test(
     text,
@@ -93,7 +99,12 @@ function hasAcceptanceSignal(text: string): boolean {
 function buildMissingQuestions(taskId: string, text: string): TaskRequirementQuestionInput[] {
   const normalized = normalizeText(text);
   const missingKeys = new Set<string>();
-  if (hasBlockingActorQuestionSignal(normalized) && !hasActorSignal(normalized)) {
+  const actorAlreadyDeclared =
+    hasActorSignal(normalized) ||
+    (hasInternalOperatorActorSignal(normalized) &&
+      hasScopeSignal(normalized) &&
+      hasAcceptanceSignal(normalized));
+  if (hasBlockingActorQuestionSignal(normalized) && !actorAlreadyDeclared) {
     missingKeys.add("primary-user-role");
   }
   if (!hasScopeSignal(normalized)) missingKeys.add("first-version-scope");

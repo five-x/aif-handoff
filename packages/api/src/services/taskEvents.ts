@@ -15,6 +15,7 @@ import {
   isRecoverableAuditFailureFamily,
   isBranchIsolationError,
   looksLikeFullPlanUpdate,
+  normalizeAifPlanManifestForTask,
   getEnv,
   getProjectConfig,
   projectSupportsTaskWorktrees,
@@ -34,6 +35,7 @@ import {
   findTaskById,
   hasFreshAcceptedTaskAcceptancePack,
   hasFreshAcceptedTaskQaArtifact,
+  hasSatisfiedContainerParentCloseout,
   getLatestHumanComment,
   listTasks,
   appendTaskActivityLog,
@@ -894,7 +896,9 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
       return { ok: false, status: 404, error: "Project not found for task" };
     }
     const env = getEnv();
+    const satisfiedContainerParent = hasSatisfiedContainerParentCloseout(task.id);
     if (
+      !satisfiedContainerParent &&
       env.AIF_REQUIREMENTS_INTAKE_ENABLED &&
       env.AIF_REQUIREMENTS_QA_ENABLED &&
       (!hasFreshAcceptedTaskQaArtifact(task.id) || !hasFreshAcceptedTaskAcceptancePack(task.id))
@@ -905,11 +909,39 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         error: "approve_done requires fresh accepted QA and acceptance artifacts",
       };
     }
-    const executionRoot = task.worktreePath ?? project.rootPath;
-    const auditArtifact = findRoadmapBatchArtifactByTaskId(task.id);
-    const auditEvidenceUnits = auditEvidenceForArtifact(task, auditArtifact, executionRoot);
-    const branchError = restoreTaskBranchForMutation(task, executionRoot);
-    if (branchError && !branchError.ok) {
+    if (satisfiedContainerParent) {
+      // Direct executable children are the evidence for container closeout.
+      // Parent-owned implementation/QA artifacts are irrelevant coordination noise.
+    } else {
+      const executionRoot = task.worktreePath ?? project.rootPath;
+      const auditArtifact = findRoadmapBatchArtifactByTaskId(task.id);
+      const auditEvidenceUnits = auditEvidenceForArtifact(task, auditArtifact, executionRoot);
+      const branchError = restoreTaskBranchForMutation(task, executionRoot);
+      if (branchError && !branchError.ok) {
+        const result = evaluateTaskCompletionEvidence({
+          task: {
+            ...task,
+            expectedReportArtifactPath: auditArtifact?.artifactPath,
+            allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
+            auditArtifactRole: auditArtifactRoleFor(auditArtifact),
+            roadmapBatchId: auditArtifact?.batchId ?? null,
+          },
+          projectRoot: executionRoot,
+          branchIsolationReason: branchError.error,
+          auditEvidenceUnits,
+          requireAuditLedgerEvidence: auditArtifactRequiresLedgerEvidence({
+            auditArtifact,
+            projectRoot: executionRoot,
+            auditEvidenceUnits,
+          }),
+        });
+        return blockTaskForCompletionEvidence(task, result, {
+          auditArtifact,
+          allowAuditRework: true,
+          projectRoot: executionRoot,
+        });
+      }
+
       const result = evaluateTaskCompletionEvidence({
         task: {
           ...task,
@@ -919,7 +951,6 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
           roadmapBatchId: auditArtifact?.batchId ?? null,
         },
         projectRoot: executionRoot,
-        branchIsolationReason: branchError.error,
         auditEvidenceUnits,
         requireAuditLedgerEvidence: auditArtifactRequiresLedgerEvidence({
           auditArtifact,
@@ -927,59 +958,37 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
           auditEvidenceUnits,
         }),
       });
-      return blockTaskForCompletionEvidence(task, result, {
-        auditArtifact,
-        allowAuditRework: true,
-        projectRoot: executionRoot,
-      });
-    }
-
-    const result = evaluateTaskCompletionEvidence({
-      task: {
-        ...task,
-        expectedReportArtifactPath: auditArtifact?.artifactPath,
-        allowedEvidenceArtifactPaths: allowedEvidenceArtifactPathsFor(auditArtifact),
-        auditArtifactRole: auditArtifactRoleFor(auditArtifact),
-        roadmapBatchId: auditArtifact?.batchId ?? null,
-      },
-      projectRoot: executionRoot,
-      auditEvidenceUnits,
-      requireAuditLedgerEvidence: auditArtifactRequiresLedgerEvidence({
-        auditArtifact,
-        projectRoot: executionRoot,
-        auditEvidenceUnits,
-      }),
-    });
-    if (!result.ok) {
-      return blockTaskForCompletionEvidence(task, result, {
-        auditArtifact,
-        allowAuditRework: true,
-        projectRoot: executionRoot,
-      });
-    }
-    if (auditArtifact) {
-      const auditCardDecision = acceptedAuditCardDecision({
-        task,
-        auditArtifact,
-        result,
-        projectRoot: executionRoot,
-      });
-      updateRoadmapBatchArtifactState({
-        taskId: task.id,
-        state: "valid",
-        failureFamily: null,
-        reworkStatus: "accepted",
-        attemptBoundaryId: auditArtifact.attemptBoundaryId,
-        validationDetails: {
-          action: "approve_done",
-          evidence: result.evidence,
-          auditCardDecision,
-        },
-        contentSha: result.evidence.auditReportValidation.artifactSha256,
-        branchName: task.branchName ?? auditArtifact.branchName,
-        worktreePath: task.worktreePath ?? auditArtifact.worktreePath,
-        projectRoot: executionRoot,
-      });
+      if (!result.ok) {
+        return blockTaskForCompletionEvidence(task, result, {
+          auditArtifact,
+          allowAuditRework: true,
+          projectRoot: executionRoot,
+        });
+      }
+      if (auditArtifact) {
+        const auditCardDecision = acceptedAuditCardDecision({
+          task,
+          auditArtifact,
+          result,
+          projectRoot: executionRoot,
+        });
+        updateRoadmapBatchArtifactState({
+          taskId: task.id,
+          state: "valid",
+          failureFamily: null,
+          reworkStatus: "accepted",
+          attemptBoundaryId: auditArtifact.attemptBoundaryId,
+          validationDetails: {
+            action: "approve_done",
+            evidence: result.evidence,
+            auditCardDecision,
+          },
+          contentSha: result.evidence.auditReportValidation.artifactSha256,
+          branchName: task.branchName ?? auditArtifact.branchName,
+          worktreePath: task.worktreePath ?? auditArtifact.worktreePath,
+          projectRoot: executionRoot,
+        });
+      }
     }
   }
 
@@ -1127,21 +1136,27 @@ function handleAcceptExistingPlan(input: EventHandlerInput): EventHandlerResult 
   }
 
   const nowIso = new Date().toISOString();
-  const planQuality = evaluateTaskPlanQuality({
-    task: {
-      id: task.id,
-      title: task.title,
-      description: task.description,
-      taskIntent: task.taskIntent,
-      tags: task.tags,
-      roadmapAlias: task.roadmapAlias,
-      planPath: task.planPath,
-      plannerMode: task.plannerMode,
-      createdAt: task.createdAt,
-      blockedFromStatus: task.blockedFromStatus,
-      blockedReason: task.blockedReason,
-    },
+  const planQualityTask = {
+    id: task.id,
+    title: task.title,
+    description: task.description,
+    taskIntent: task.taskIntent,
+    tags: task.tags,
+    roadmapAlias: task.roadmapAlias,
+    planPath: task.planPath,
+    plannerMode: task.plannerMode,
+    createdAt: task.createdAt,
+    blockedFromStatus: task.blockedFromStatus,
+    blockedReason: task.blockedReason,
+  };
+  const normalizedPlan = normalizeAifPlanManifestForTask({
+    task: planQualityTask,
     plan: filePlan,
+    repairMissingManifest: true,
+  });
+  const planQuality = evaluateTaskPlanQuality({
+    task: planQualityTask,
+    plan: normalizedPlan,
     executionContext: {
       packageJsonText: readProjectPackageJsonText(executionRoot),
     },
@@ -1170,7 +1185,7 @@ function handleAcceptExistingPlan(input: EventHandlerInput): EventHandlerResult 
 
   persistTaskPlanForTask({
     taskId: input.taskId,
-    planText: filePlan,
+    planText: normalizedPlan,
     projectRoot: executionRoot,
     isFix: task.isFix,
     planPath: task.planPath ?? undefined,

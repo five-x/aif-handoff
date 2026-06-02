@@ -1,6 +1,6 @@
 {
   "lane": "work",
-  "updated": "2026-05-30",
+  "updated": "2026-06-02",
   "tasks": [
     {
       "taskId": "work-20260508-fix-realtime-ui-updates",
@@ -858,6 +858,15 @@
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260530-roadmap-microtask-decomposition-contract",
       "updated": "2026-05-30"
+    },
+    {
+      "taskId": "work-20260602-close-aif-roadmap-blockers",
+      "title": "Close AIF Roadmap Execution Blockers",
+      "status": "done",
+      "priority": "critical",
+      "rdpiNeeded": true,
+      "rdpiPath": "docs/rdpi/work/work-20260602-close-aif-roadmap-blockers",
+      "updated": "2026-06-02"
     }
   ]
 }
