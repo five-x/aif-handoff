@@ -800,6 +800,10 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
     task.implementationLog?.includes("Stopped after a repeated") === true &&
     reviewCommentsLower.includes("manual_review_required |") &&
     reviewCommentsLower.includes("reviewer returned inconclusive or malformed output");
+  const noSubstantiveReworkRetry =
+    event === "retry_from_blocked" &&
+    task.blockedFromStatus === "implementing" &&
+    task.blockedReason?.toLowerCase().includes("no_substantive_rework_delta") === true;
   if (event !== "cancel_task" && isOperatorCancelledTask(task) && !operatorInputRetry) {
     return {
       ok: false,
@@ -1019,6 +1023,9 @@ function handleRegularTransition(input: EventHandlerInput): EventHandlerResult {
         }
       : {}),
     ...(malformedReviewReworkRetry
+      ? { reviewComments: null, autoReviewState: null, reworkRequested: false }
+      : {}),
+    ...(noSubstantiveReworkRetry
       ? { reviewComments: null, autoReviewState: null, reworkRequested: false }
       : {}),
     lastHeartbeatAt: nowIso,

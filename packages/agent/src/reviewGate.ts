@@ -200,6 +200,68 @@ function filterNonBlockingOperatorInputFindings(
   return findings.filter((finding) => !isAmbiguousProductScopeOperatorInputFinding(finding));
 }
 
+function readProjectFileText(projectRoot: string, filePath: string): string | null {
+  try {
+    const root = resolve(projectRoot);
+    const candidate = resolve(root, filePath);
+    const relativePath = relative(root, candidate);
+    if (relativePath === "" || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+      return null;
+    }
+    return existsSync(candidate) ? readFileSync(candidate, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+function isRefutedLoanOfferDuplicateFinding(input: {
+  projectRoot: string;
+  finding: AutoReviewFinding;
+}): boolean {
+  const text = input.finding.text;
+  if (!/\bsrc\/data\/offers\.ts\b/i.test(text)) return false;
+  if (!/\bLoanOffer\b/.test(text)) return false;
+  if (
+    !/\b(?:duplicate|conflict|interface|type definition|declaration|domain contract)\b/i.test(text)
+  ) {
+    return false;
+  }
+
+  const offersText = readProjectFileText(input.projectRoot, "src/data/offers.ts");
+  if (!offersText) return false;
+
+  const hasLocalLoanOfferDeclaration =
+    /\b(?:export\s+)?(?:interface|type|class)\s+LoanOffer\b/.test(offersText);
+  if (hasLocalLoanOfferDeclaration) return false;
+
+  return /\bimport\s+(?:type\s+)?\{[^}]*\bLoanOffer\b[^}]*\}\s+from\s+["'][^"']*types\/domain["'];?/m.test(
+    offersText,
+  );
+}
+
+function filterRefutedRepositoryFindings(input: {
+  projectRoot: string;
+  findings: AutoReviewFinding[];
+}): AutoReviewFinding[] {
+  return input.findings.filter(
+    (finding) =>
+      !isRefutedLoanOfferDuplicateFinding({
+        projectRoot: input.projectRoot,
+        finding,
+      }),
+  );
+}
+
+function filterActionableBlockingFindings(input: {
+  projectRoot: string;
+  findings: AutoReviewFinding[];
+}): AutoReviewFinding[] {
+  return filterRefutedRepositoryFindings({
+    projectRoot: input.projectRoot,
+    findings: filterNonBlockingOperatorInputFindings(input.findings),
+  });
+}
+
 function normalizeOperatorInputFindings(findings: AutoReviewFinding[]): AutoReviewFinding[] {
   return findings.map((finding) => {
     const safeText = sanitizeReviewText(finding.text);
@@ -791,7 +853,10 @@ function buildStructuredDecision(
     parsed.blockingFindings,
     deterministicFindings,
   );
-  const actionableBlockingFindings = filterNonBlockingOperatorInputFindings(blockingFindings);
+  const actionableBlockingFindings = filterActionableBlockingFindings({
+    projectRoot: input.projectRoot,
+    findings: blockingFindings,
+  });
   const stillBlockingIds = new Set(
     parsed.previousFindings
       .filter(
@@ -905,7 +970,10 @@ function buildFallbackDecision(
   // preserve all previous blockers and escalate to manual review instead of
   // guessing that malformed output means the loop converged.
   const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
-  const fallbackAndDeterministicFindings = mergeFindings(fallbackFindings, deterministicFindings);
+  const fallbackAndDeterministicFindings = filterActionableBlockingFindings({
+    projectRoot: input.projectRoot,
+    findings: mergeFindings(fallbackFindings, deterministicFindings),
+  });
   const mergedFindings =
     input.previousFindings.length > 0
       ? mergeFindings(input.previousFindings, fallbackAndDeterministicFindings)
@@ -998,7 +1066,10 @@ function buildLegacyBlockingSectionDecision(
   deterministicFindings: AutoReviewFinding[],
 ): ReviewGateResult {
   const previousIds = new Set(input.previousFindings.map((finding) => finding.id));
-  const mergedBlockingFindings = mergeFindings(blockingFindings, deterministicFindings);
+  const mergedBlockingFindings = filterActionableBlockingFindings({
+    projectRoot: input.projectRoot,
+    findings: mergeFindings(blockingFindings, deterministicFindings),
+  });
   const stillBlockingFindings = mergedBlockingFindings.filter((finding) =>
     previousIds.has(finding.id),
   );

@@ -120,6 +120,19 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     return root;
   }
 
+  function initLoanOfferRepo(offersText: string): string {
+    const root = mkdtempSync(join(tmpdir(), "aif-review-gate-"));
+    mkdirSync(join(root, "src", "data"), { recursive: true });
+    mkdirSync(join(root, "src", "types"), { recursive: true });
+    writeFileSync(join(root, "src", "data", "offers.ts"), offersText, "utf8");
+    writeFileSync(
+      join(root, "src", "types", "domain.ts"),
+      ["export interface LoanOffer {", "  id: string;", "  amount: number;", "}", ""].join("\n"),
+      "utf8",
+    );
+    return root;
+  }
+
   it("returns operator_input_required for explicit operator input findings", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,
@@ -1336,6 +1349,82 @@ describe("evaluateReviewCommentsForAutoMode", () => {
       ]);
     },
   );
+
+  it("filters refuted LoanOffer duplicate blockers when offers imports the domain type", async () => {
+    const root = initLoanOfferRepo(
+      [
+        "import type { LoanOffer } from '../types/domain';",
+        "",
+        "export interface CatalogLoanOffer extends LoanOffer {",
+        "  title: string;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [dup-code] code_review | [prior] still_blocking | Duplicate type definition: `src/data/offers.ts` declares local `interface LoanOffer` conflicting with `src/types/domain.ts`.",
+        "- [dup-sec] security_audit | Severity: High | Claim: Duplicate type definition (LoanOffer) conflicts with domain contract | Required fix: Delete local `interface LoanOffer` from `src/data/offers.ts`. | Verification: Inspection showed interfaces in both files.",
+        "",
+        "## Advisories",
+        "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell/network/file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.blockingFindings).toEqual([]);
+  });
+
+  it("keeps LoanOffer duplicate blockers when offers declares the local type", async () => {
+    const root = initLoanOfferRepo(
+      ["export interface LoanOffer {", "  id: string;", "  amount: number;", "}", ""].join("\n"),
+    );
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [dup-code] code_review | Duplicate type definition: `src/data/offers.ts` declares local `interface LoanOffer` conflicting with `src/types/domain.ts`.",
+        "",
+        "## Advisories",
+        "- none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell/network/file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.blockingFindings).toHaveLength(1);
+  });
 
   it("does not close strict audit validator blockers from resolved prose while validation still fails", async () => {
     const root = initReportRepoWithReport(

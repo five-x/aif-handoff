@@ -283,6 +283,25 @@ describe("task state machine", () => {
     }
   });
 
+  it("allows retry_from_blocked for no substantive rework delta handoffs", () => {
+    const blocked = {
+      ...makeTask("blocked_external"),
+      blockedFromStatus: "implementing" as const,
+      blockedReason:
+        "manual_review_required: no_substantive_rework_delta for task worktree; changed files digest unchanged.",
+      manualReviewRequired: true,
+    };
+
+    const result = applyHumanTaskEvent(blocked, "retry_from_blocked");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.patch.status).toBe("implementing");
+      expect(result.patch.blockedReason).toBeNull();
+      expect(result.patch.manualReviewRequired).toBe(false);
+      expect(result.patch.autoReviewState).toBeNull();
+    }
+  });
+
   it("allows retry_from_blocked for resolved sequential branch dependency blocks", () => {
     const blocked = {
       ...makeTask("blocked_external"),
