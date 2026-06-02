@@ -174,6 +174,7 @@ import {
   type WorkflowTimelineTrustLevel,
   validateImplementationManifest,
   isDevelopmentImplementationIntent,
+  normalizeImplementationVerificationCommandText,
   inferTaskIntent,
   normalizeTaskIntent,
   resolveRuntimeLimitFutureHint,
@@ -2810,6 +2811,11 @@ function normalizeCommand(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeMandatoryVerificationCommandKey(value: string | null | undefined): string {
+  const command = normalizeCommand(value);
+  return command ? normalizeImplementationVerificationCommandText(command) : "";
+}
+
 function parseImplementationManifestFromTask(
   task: Pick<TaskRow, "implementationManifestJson">,
 ): ImplementationManifest | null {
@@ -2856,12 +2862,13 @@ export function buildTaskQaMandatoryCheckInventory(taskId: string): TaskQaMandat
   const workflowKind = resolveInferredTaskIntent(task);
   const manifest = parseImplementationManifestFromTask(task);
   const checks = new Map<string, TaskQaMandatoryCheck>();
-  const manifestCommands = new Set<string>();
+  const manifestCommandKeys = new Set<string>();
 
   for (const entry of manifest?.verificationEvidence ?? []) {
     const id = usefulString(entry.id) ?? `verification-${checks.size + 1}`;
     const command = normalizeCommand(entry.command);
-    if (command) manifestCommands.add(command);
+    const commandKey = normalizeMandatoryVerificationCommandKey(command);
+    if (commandKey) manifestCommandKeys.add(commandKey);
     checks.set(`manifest:${id}`, {
       id: `manifest:${id}`,
       label: `Implementation verification: ${id}`,
@@ -2891,7 +2898,8 @@ export function buildTaskQaMandatoryCheckInventory(taskId: string): TaskQaMandat
   const planManifest = parsePlanManifestFromTask(task);
   const addPlanCommand = (id: string, label: string, commandValue: unknown): void => {
     const command = normalizeCommand(usefulString(commandValue));
-    if (!command || manifestCommands.has(command)) return;
+    const commandKey = normalizeMandatoryVerificationCommandKey(command);
+    if (!command || manifestCommandKeys.has(commandKey)) return;
     const checkId = id.replace(/[^a-zA-Z0-9:_-]/g, "-");
     checks.set(checkId, {
       id: checkId,

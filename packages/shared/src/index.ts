@@ -647,6 +647,7 @@ export {
   extractImplementationManifestBlock,
   hashAifPlanManifest,
   isDevelopmentImplementationIntent,
+  normalizeImplementationVerificationCommandText,
   normalizeImplementationManifestJson,
   readAifPlanManifestSnapshot,
   validateImplementationManifest,

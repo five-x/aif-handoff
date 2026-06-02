@@ -8,6 +8,7 @@ import {
   getEnv,
   projects,
   tasks,
+  type AifPlanManifest,
   type ImplementationManifest,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
@@ -4012,6 +4013,75 @@ describe("data layer", () => {
       expect(hasFreshAcceptedTaskQaArtifact(task!.id)).toBe(false);
       expect(hasFreshAcceptedTaskAcceptancePack(task!.id)).toBe(false);
       expect(buildTaskAcceptancePack(task!.id)).toBeNull();
+    });
+
+    it("treats equivalent npm test forms as already covered by implementation evidence", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Seed offers",
+        description: "Feature task",
+        taskIntent: "feature",
+      });
+      const planManifest: AifPlanManifest = {
+        version: 1,
+        taskId: task!.id,
+        intent: "feature",
+        scope: ["Seed offers catalog"],
+        allowedChanges: ["src/data/offers.ts", "tests/offers-seed.test.ts"],
+        forbiddenChanges: ["runtime routing"],
+        expectedArtifacts: [{ kind: "code", paths: ["src/data/offers.ts"] }],
+        acceptanceCriteria: [
+          {
+            id: "AC-1",
+            description: "Offers seed data is covered by tests.",
+            verification: "npm test -- offers-seed.test.ts",
+          },
+        ],
+        verificationCommands: ["npm test -- offers-seed.test.ts"],
+      };
+      const manifest: ImplementationManifest = {
+        version: 1,
+        taskId: task!.id,
+        intent: "feature",
+        planManifestHash: null,
+        changedFiles: [
+          { path: "src/data/offers.ts", status: "modified" },
+          { path: "tests/offers-seed.test.ts", status: "added" },
+        ],
+        diffSummary: { summary: "Added seed offers and tests." },
+        verificationEvidence: [
+          {
+            id: "offers-seed",
+            command: "npm.cmd -- offers-seed.test.ts test",
+            status: "passed",
+            outputSha256: "b".repeat(64),
+            outputPreview: "18 tests passed.",
+          },
+        ],
+        acceptanceCriteria: [],
+        evidenceRefs: ["offers-seed"],
+        planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+        reviewClosure: { status: "passed", evidenceRefs: ["review"] },
+        commitEvidence: { status: "not_required" },
+        knownLimitations: [],
+      };
+      setTaskFields(task!.id, {
+        plan: `# Plan\n\n\`\`\`aif-plan-manifest\n${JSON.stringify(planManifest)}\n\`\`\``,
+        implementationManifestJson: JSON.stringify(manifest),
+        reviewComments: "Review accepted.",
+      });
+
+      const inventory = buildTaskQaMandatoryCheckInventory(task!.id);
+
+      expect(inventory).toEqual([
+        expect.objectContaining({
+          id: "manifest:offers-seed",
+          source: "implementation_manifest",
+          command: "npm.cmd -- offers-seed.test.ts test",
+          originalStatus: "passed",
+        }),
+      ]);
+      expect(inventory).not.toContainEqual(expect.objectContaining({ source: "plan_manifest" }));
     });
 
     it("rejects accepted QA artifacts with incomplete mandatory metadata", () => {

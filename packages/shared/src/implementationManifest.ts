@@ -663,7 +663,7 @@ function verificationHasOutputIdentity(entry: ImplementationManifestVerification
   );
 }
 
-function normalizeCommandText(value: string): string {
+export function normalizeImplementationVerificationCommandText(value: string): string {
   const normalized = value
     .trim()
     .replace(/\s+/g, " ")
@@ -726,10 +726,10 @@ function verificationCommandObservedInLatestImplementationActivity(input: {
   command: string;
   agentActivityLog?: string | null;
 }): boolean {
-  const normalizedCommand = normalizeCommandText(input.command);
+  const normalizedCommand = normalizeImplementationVerificationCommandText(input.command);
   if (!normalizedCommand) return false;
   return latestImplementationActivitySection(input.agentActivityLog).some((line) => {
-    const normalizedLine = normalizeCommandText(line);
+    const normalizedLine = normalizeImplementationVerificationCommandText(line);
     return normalizedLine.includes("tool:") && normalizedLine.includes(normalizedCommand);
   });
 }
