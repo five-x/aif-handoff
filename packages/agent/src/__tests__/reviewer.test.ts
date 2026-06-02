@@ -208,6 +208,40 @@ describe("resolveRequiredSpecializedReviewerRoles", () => {
       ),
     ).toEqual([]);
   });
+
+  it("does not treat ordinary roadmap implementation artifacts as audit review tasks", () => {
+    expect(
+      resolveRequiredSpecializedReviewerRoles(
+        roleResolutionTask({
+          title: "Создание начального каталога офферов (Seed Data)",
+          description:
+            "Feature task generated from product roadmap\nEvidence requirements: implementation diff and unit test output.",
+          taskIntent: "feature",
+          roadmapAlias: "zai-mi-mvp-clean-e2e",
+          tags: ["roadmap", "kind:feature"].join(","),
+        }),
+        {
+          role: "implementation_manifest",
+          artifactPath: ".ai-factory/plans/seed-data.md",
+        },
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps audit artifact roles on specialized review fan-out", () => {
+    expect(
+      resolveRequiredSpecializedReviewerRoles(
+        roleResolutionTask({
+          title: "Validate generated audit report",
+          taskIntent: "feature",
+        }),
+        {
+          role: "report",
+          artifactPath: "audit/source.md",
+        },
+      ),
+    ).toEqual(["correctness", "security_data_loss", "regression_api_contract", "audit_evidence"]);
+  });
 });
 
 type FixtureSourceClassification = "validated_no_findings" | "validated_findings_present";

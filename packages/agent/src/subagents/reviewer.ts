@@ -176,14 +176,19 @@ function buildSpecializedReviewerPassEvidenceFallback(task: TaskRow): string | n
   return `Implementation manifest evidence: ${evidenceParts.join("; ")}.`;
 }
 
+function hasAuditReviewArtifactRole(roadmapArtifact: unknown): boolean {
+  if (!roadmapArtifact || typeof roadmapArtifact !== "object") return false;
+  const role = (roadmapArtifact as { role?: unknown }).role;
+  return role === "report" || role === "synthesis";
+}
+
 function isAuditReviewTask(task: TaskRow, roadmapArtifact: unknown): boolean {
+  const auditRoutingText = [task.title, task.roadmapAlias, task.tags].filter(Boolean).join("\n");
   return (
     task.taskIntent === "audit" ||
     isRiskyTask(task) ||
-    Boolean(roadmapArtifact) ||
-    /\b(audit|evidence|findings?|report|synthesis)\b/i.test(
-      [task.title, task.description, task.roadmapAlias, task.tags].filter(Boolean).join("\n"),
-    )
+    hasAuditReviewArtifactRole(roadmapArtifact) ||
+    /\b(audit|evidence|findings?|report|synthesis)\b/i.test(auditRoutingText)
   );
 }
 
