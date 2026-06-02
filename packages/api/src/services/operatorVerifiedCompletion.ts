@@ -86,6 +86,33 @@ function normalizeSet(paths: string[]): Set<string> {
   return new Set(paths.map((path) => normalizeOperatorCompletionPath(path).toLowerCase()));
 }
 
+function pathMatchesRelevantBoundary(path: string, boundary: string): boolean {
+  const normalizedPath = normalizeOperatorCompletionPath(path).toLowerCase();
+  const normalizedBoundary = normalizeOperatorCompletionPath(boundary).toLowerCase();
+  if (!normalizedBoundary) return false;
+  if (normalizedBoundary.includes("*")) {
+    let pattern = "^";
+    for (let index = 0; index < normalizedBoundary.length; index += 1) {
+      const char = normalizedBoundary[index];
+      const next = normalizedBoundary[index + 1];
+      if (char === "*" && next === "*") {
+        pattern += ".*";
+        index += 1;
+        continue;
+      }
+      if (char === "*") {
+        pattern += "[^/]*";
+        continue;
+      }
+      pattern += char.replace(/[\\^$+?.()|[\]{}]/g, "\\$&");
+    }
+    return new RegExp(`${pattern}$`).test(normalizedPath);
+  }
+  return (
+    normalizedPath === normalizedBoundary || normalizedPath.startsWith(`${normalizedBoundary}/`)
+  );
+}
+
 function collectSubmittedCommitFiles(projectRoot: string, commitSha: string): string[] {
   const commitFiles = splitGitFiles(
     runGit(projectRoot, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commitSha]),
@@ -96,6 +123,7 @@ function collectSubmittedCommitFiles(projectRoot: string, commitSha: string): st
 function validateGitEvidence(input: {
   projectRoot: string;
   evidence: OperatorCompletionEvidence;
+  approvedDirtyFileBoundaries?: string[];
 }): { ok: true; evidence: OperatorGitValidationEvidence } | { ok: false; error: string } {
   const commit = runGit(input.projectRoot, [
     "rev-parse",
@@ -126,6 +154,10 @@ function validateGitEvidence(input: {
     };
   }
   const declaredSet = normalizeSet(input.evidence.changedFiles);
+  const dirtyRelevantBoundaries = [
+    ...input.evidence.changedFiles,
+    ...(input.approvedDirtyFileBoundaries ?? []),
+  ];
   const undeclaredCommitFiles = trustedCommittedFiles.filter(
     (file) => !declaredSet.has(file.toLowerCase()),
   );
@@ -141,15 +173,22 @@ function validateGitEvidence(input: {
       runGit(input.projectRoot, ["status", "--porcelain=v1", "--untracked-files=all"]),
     ),
   );
-  const dirtyDeclared = [...dirtySet].filter((file) => declaredSet.has(file));
-  if (dirtyDeclared.length > 0) {
+  const dirtyRelevant = [...dirtySet]
+    .filter((file) =>
+      dirtyRelevantBoundaries.some((boundary) => pathMatchesRelevantBoundary(file, boundary)),
+    )
+    .sort((a, b) => a.localeCompare(b));
+  if (dirtyRelevant.length > 0) {
     return {
       ok: false,
-      error: `operator_verified_completion rejected: reason=dirty_relevant_worktree files=${dirtyDeclared.join(",")}`,
+      error: `operator_verified_completion rejected: reason=dirty_relevant_worktree files=${dirtyRelevant.join(",")}`,
     };
   }
   const dirtyUnrelatedFiles = [...dirtySet]
-    .filter((file) => !declaredSet.has(file))
+    .filter(
+      (file) =>
+        !dirtyRelevantBoundaries.some((boundary) => pathMatchesRelevantBoundary(file, boundary)),
+    )
     .sort((a, b) => a.localeCompare(b));
 
   return { ok: true, evidence: { trustedCommittedFiles, dirtyUnrelatedFiles } };
@@ -270,9 +309,10 @@ function buildOperatorImplementationManifest(input: {
 }
 
 function nextStatusForOperatorCloseout(task: TaskRow): TaskRow["status"] {
+  if (!task.skipReview) return "review";
   const env = getEnv();
   if (env.AIF_REQUIREMENTS_INTAKE_ENABLED && env.AIF_REQUIREMENTS_QA_ENABLED) return "qa";
-  return task.skipReview ? "done" : "review";
+  return "done";
 }
 
 function reject(taskId: string, status: number, error: string): OperatorVerifiedCompletionResult {
@@ -352,7 +392,12 @@ export function handleOperatorVerifiedCompletion(
     );
   }
 
-  const gitValidation = validateGitEvidence({ projectRoot, evidence });
+  const planManifest = readAifPlanManifestSnapshot(task.plan);
+  const gitValidation = validateGitEvidence({
+    projectRoot,
+    evidence,
+    approvedDirtyFileBoundaries: [...planManifest.scope, ...planManifest.expectedArtifactPaths],
+  });
   if (!gitValidation.ok) return reject(task.id, 409, gitValidation.error);
   const gitEvidence = gitValidation.evidence;
   const acceptedEvidence: OperatorCompletionEvidence = {

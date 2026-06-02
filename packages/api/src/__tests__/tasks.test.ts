@@ -3391,6 +3391,48 @@ describe("tasks API", () => {
       });
     });
 
+    it("routes reviewed operator closeout to review before QA when the QA lifecycle is enabled", async () => {
+      mockRequirementsIntakeEnabled.value = true;
+      mockRequirementsQaEnabled.value = true;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-closeout-review-qa-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-closeout-review-qa-task",
+          projectId: "test-project",
+          title: "Build feature with review and QA",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: false,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-closeout-review-qa-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).status).toBe("review");
+      expect(mockBroadcast).toHaveBeenCalledWith({
+        type: "task:moved",
+        payload: expect.objectContaining({
+          id: "operator-closeout-review-qa-task",
+          status: "review",
+        }),
+      });
+    });
+
     it("accepts root commit operator evidence using submitted commit diff collection", async () => {
       const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-root-commit-"));
       initEmptyGitProject(rootPath);
@@ -3799,6 +3841,42 @@ describe("tasks API", () => {
 
       expect(res.status).toBe(409);
       expect((await res.json()).error).toContain("dirty_relevant_worktree");
+    });
+
+    it("rejects dirty files inside approved plan scope even when outside the submitted commit", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-dirty-plan-scope-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      writeFileSync(join(rootPath, "src", "other.ts"), "export const other = 1;\n", "utf8");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-dirty-plan-scope-task",
+          projectId: "test-project",
+          title: "Build scoped feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+          plan: planWithManifest("operator-dirty-plan-scope-task", ["src/**"]),
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-dirty-plan-scope-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(operatorVerificationPayload({ commitSha })),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toContain("dirty_relevant_worktree");
+      expect(body.error).toContain("src/other.ts");
     });
 
     it("allows unrelated dirty files outside declared task scope", async () => {
