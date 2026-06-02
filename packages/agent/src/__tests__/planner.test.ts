@@ -815,6 +815,43 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).not.toContain("Compiler verification:");
   });
 
+  it("adds plan test artifacts from verification commands to deterministic roadmap fallback scope", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-compliance-test-scope-"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-compliance-fallback",
+        projectId: "project-1",
+        title: "Compliance display and legal texts",
+        description:
+          "Create compliance disclaimer UI and Russian legal text locale.\nFile boundaries: src/locales/ru.json, src/ui/ComplianceDisclaimer.tsx\nAcceptance criteria: Disclaimer and offer texts are available from locale data and rendered by the component.\nVerification: npm test -- compliance-ui.test.ts\nDependencies: Eligibility ranking",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        roadmapAlias: "roadmap-compliance-fallback",
+        planTests: true,
+      })
+      .run();
+
+    await runPlanner("task-compliance-fallback", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-compliance-fallback"))
+      .get();
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(updatedTask?.plan).toContain("```aif-plan-manifest");
+    expect(updatedTask?.plan).toContain("src/locales/ru.json");
+    expect(updatedTask?.plan).toContain("src/ui/ComplianceDisclaimer.tsx");
+    expect(updatedTask?.plan).toContain("tests/compliance-ui.test.ts");
+    expect(updatedTask?.plan).toContain('"kind": "test_delta"');
+    expect(updatedTask?.plan).toContain('"tests"');
+    expect(updatedTask?.plan).toContain("npm test -- compliance-ui.test.ts");
+    expect(updatedTask?.plan).not.toContain("package.json");
+  });
+
   it("uses deterministic implementation fallback before runtime for legacy broad compose child plans", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-compose-fallback-"));

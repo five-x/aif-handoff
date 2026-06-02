@@ -233,6 +233,21 @@ function normalizeDeterministicPlanScope(task: PlannerTask, fileBoundaries: stri
   return [...new Set(scope)].sort();
 }
 
+function extractVerificationTestScopePaths(command: string | null): string[] {
+  if (!command) return [];
+  return [...command.matchAll(/(?:^|\s)([^\s"'`]+?\.(?:test|spec)\.[cm]?[jt]sx?)(?=\s|$)/gi)]
+    .flatMap((match) => {
+      const raw = match[1]
+        ?.trim()
+        .replaceAll("\\", "/")
+        .replace(/^\.\/+/, "");
+      if (!raw) return [];
+      if (raw.includes("/")) return [raw];
+      return [`tests/${raw}`];
+    })
+    .filter((path) => isDeterministicPlanTestPath(path));
+}
+
 function isDeterministicPlanConfigPath(path: string): boolean {
   const normalized = path.toLowerCase();
   return (
@@ -297,8 +312,12 @@ function buildDeterministicImplementationPlan(task: PlannerTask): string | null 
   const fileBoundaries = splitPlannerMetadataList(
     extractPlannerMetadataLine(description, "File boundaries"),
   );
-  const scope = normalizeDeterministicPlanScope(task, fileBoundaries);
   const verification = extractPlannerVerificationCommand(description);
+  const boundaryScope = normalizeDeterministicPlanScope(task, fileBoundaries);
+  const verificationTestScope = task.planTests
+    ? extractVerificationTestScopePaths(verification)
+    : [];
+  const scope = [...new Set([...boundaryScope, ...verificationTestScope])].sort();
   const acceptance = sanitizeDeterministicPlanSentence(
     extractPlannerMetadataLine(description, "Acceptance criteria") ??
       `${task.title} satisfies the declared task scope.`,
