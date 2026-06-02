@@ -245,6 +245,42 @@ function isRefutedLoanOfferDuplicateFinding(input: {
   );
 }
 
+function referencedJsonPaths(text: string): string[] {
+  return [...text.matchAll(/`([^`]+\.json)`|(?:^|[\s([:])([\w./\\-]+\.json)\b/gi)].flatMap(
+    (match) => {
+      const raw = (match[1] ?? match[2] ?? "").trim();
+      return raw ? [raw.replaceAll("\\", "/").replace(/^\.\/+/, "")] : [];
+    },
+  );
+}
+
+function isJsonSyntaxClaim(text: string): boolean {
+  if (!/\bjson\b/i.test(text)) return false;
+  return /\b(?:invalid|malformed|syntax|parse|parser|unclosed|unterminated)\b|(?:невалид|синтакс|ошибк|незакрыт)/i.test(
+    text,
+  );
+}
+
+function isValidProjectJsonFile(projectRoot: string, filePath: string): boolean {
+  const text = readProjectFileText(projectRoot, filePath);
+  if (text == null) return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isRefutedJsonSyntaxFinding(input: {
+  projectRoot: string;
+  finding: AutoReviewFinding;
+}): boolean {
+  const paths = referencedJsonPaths(input.finding.text);
+  if (paths.length === 0 || !isJsonSyntaxClaim(input.finding.text)) return false;
+  return paths.every((path) => isValidProjectJsonFile(input.projectRoot, path));
+}
+
 function filterRefutedRepositoryFindings(input: {
   projectRoot: string;
   findings: AutoReviewFinding[];
@@ -252,6 +288,10 @@ function filterRefutedRepositoryFindings(input: {
   return input.findings.filter(
     (finding) =>
       !isRefutedLoanOfferDuplicateFinding({
+        projectRoot: input.projectRoot,
+        finding,
+      }) &&
+      !isRefutedJsonSyntaxFinding({
         projectRoot: input.projectRoot,
         finding,
       }),

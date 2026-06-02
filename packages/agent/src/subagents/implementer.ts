@@ -37,6 +37,7 @@ import {
   formatAuditSynthesisOutcomeForArtifact,
   hashAifPlanManifest,
   isLowSignalAuditEvidenceLine,
+  normalizeImplementationVerificationCommandText,
   readAifPlanManifestSnapshot,
   resolveAuditPlanId,
   toAuditPublicReportOutcome,
@@ -556,32 +557,6 @@ async function extractNormalizedImplementationManifest(resultText: string): Prom
   }
 }
 
-function normalizeVerificationCommandText(value: string): string {
-  const normalized = value
-    .replace(/\bnpm\.cmd\b/gi, "npm")
-    .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+--\s+/gi, "npx ")
-    .replace(/\b(?:npm|pnpm|yarn|bun)\s+exec\s+/gi, "npx ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-  return normalizeNpmTestCommandText(normalized);
-}
-
-function normalizeNpmTestCommandText(value: string): string {
-  const tokens = value.split(" ").filter(Boolean);
-  if (tokens[0] !== "npm") return value;
-
-  const testIndex = tokens.indexOf("test");
-  if (testIndex <= 1 || !tokens.includes("--")) return value;
-
-  const args = [...tokens.slice(1, testIndex), ...tokens.slice(testIndex + 1)];
-  const cleanedArgs = args.filter((arg) => arg !== "--");
-  if (cleanedArgs.length === 0) return "npm test";
-  const positionalArgs = cleanedArgs.filter((arg) => !arg.startsWith("-"));
-  const optionArgs = cleanedArgs.filter((arg) => arg.startsWith("-"));
-  return ["npm", "test", "--", ...positionalArgs, ...optionArgs].join(" ");
-}
-
 function auditEvidenceCommandText(unit: AuditEvidenceUnit): string {
   if (!unit.command) return "";
   return [unit.command.command, ...unit.command.args].filter(Boolean).join(" ").trim();
@@ -634,7 +609,9 @@ function findPassedVerificationEvidence(input: {
   agentActivityLog: string | null | undefined;
 }): ImplementationManifest["verificationEvidence"][number] | null {
   const planManifest = readAifPlanManifestSnapshot(input.planText);
-  const requiredCommands = planManifest.verificationCommands.map(normalizeVerificationCommandText);
+  const requiredCommands = planManifest.verificationCommands.map(
+    normalizeImplementationVerificationCommandText,
+  );
   const latestStartMs = latestToolBearingImplementerStartMs(input.agentActivityLog);
   const units = listAuditEvidenceEvents({ taskId: input.taskId })
     .filter((unit) => unit.toolName === "run_shell")
@@ -645,7 +622,7 @@ function findPassedVerificationEvidence(input: {
   const unit =
     requiredCommands.length > 0
       ? units.find((entry) => {
-          const normalizedCommand = normalizeVerificationCommandText(
+          const normalizedCommand = normalizeImplementationVerificationCommandText(
             auditEvidenceCommandText(entry),
           );
           return requiredCommands.some(

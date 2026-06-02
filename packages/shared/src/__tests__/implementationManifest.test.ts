@@ -597,6 +597,40 @@ Here is unrelated JSON:
     );
   });
 
+  it("treats qwen npm run test argv order as equivalent to observed npm run test command", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        agentActivityLog: validActivityLog("npm.cmd run test -- compliance-ui.test.ts"),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          verificationEvidence: [
+            {
+              id: "ver-1",
+              command: "npm.cmd -- compliance-ui.test.ts run test",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "Tests 7 passed",
+              outputPreviewTruncated: false,
+            },
+          ],
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.issues.map((entry) => entry.code)).not.toContain(
+      "verification_command_not_observed",
+    );
+  });
+
   it("treats npm exec tsc as equivalent to npx tsc for observed verification", () => {
     const result = validateImplementationManifest({
       task: {

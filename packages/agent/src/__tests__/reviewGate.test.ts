@@ -200,6 +200,73 @@ describe("evaluateReviewCommentsForAutoMode", () => {
     expect(result.blockingFindings[0]?.text).toContain("source system account id");
   });
 
+  it("drops JSON syntax blockers refuted by deterministic local parsing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aif-review-gate-json-"));
+    mkdirSync(join(root, "src", "locales"), { recursive: true });
+    writeFileSync(join(root, "src", "locales", "ru.json"), '{"compliance":true}\n', "utf8");
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [json-1] code_review | critical: syntax error in JSON | File `src/locales/ru.json` contains invalid JSON.",
+        "",
+        "## Advisories",
+        "- code_review | none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("success");
+  });
+
+  it("keeps JSON syntax blockers when deterministic local parsing fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aif-review-gate-json-"));
+    mkdirSync(join(root, "src", "locales"), { recursive: true });
+    writeFileSync(join(root, "src", "locales", "ru.json"), '{"compliance":\n', "utf8");
+
+    const result = await evaluateReviewCommentsForAutoMode({
+      ...baseInput,
+      projectRoot: root,
+      reviewComments: [
+        "## Auto Review Metadata",
+        "- Strategy: full_re_review",
+        "- Review Iteration: 1",
+        "",
+        "## Previous Findings",
+        "- none",
+        "",
+        "## Blocking Findings",
+        "- [json-1] code_review | critical: syntax error in JSON | File `src/locales/ru.json` contains invalid JSON.",
+        "",
+        "## Advisories",
+        "- code_review | none",
+        "",
+        "## Security Coverage",
+        "- secret_leaks | covered | Checked secret handling",
+        "- permissions_sandbox | covered | Checked sandbox boundaries",
+        "- unsafe_shell_network_file | covered | Checked shell network and file operations",
+        "- dependency_config | covered | Checked dependency configuration",
+      ].join("\n"),
+    });
+
+    expect(result.status).toBe("request_changes");
+    expect(result.blockingFindings[0]?.id).toBe("json-1");
+  });
+
   it("does not block operator input for vague optional-field scope questions", async () => {
     const result = await evaluateReviewCommentsForAutoMode({
       ...baseInput,

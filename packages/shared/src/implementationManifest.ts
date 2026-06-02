@@ -676,17 +676,80 @@ export function normalizeImplementationVerificationCommandText(value: string): s
 
 function normalizeNpmTestCommandText(value: string): string {
   const tokens = value.split(" ").filter(Boolean);
-  if (tokens[0] !== "npm") return value;
+  const npmIndex = tokens.indexOf("npm");
+  if (npmIndex === -1) return value;
+
+  const normalizedInvocation = normalizeNpmTestInvocationTokens(tokens.slice(npmIndex));
+  if (!normalizedInvocation) return value;
+
+  return [...tokens.slice(0, npmIndex), ...normalizedInvocation].join(" ");
+}
+
+function normalizeNpmTestInvocationTokens(tokens: string[]): string[] | null {
+  if (tokens[0] !== "npm") return null;
+
+  if (tokens[1] === "test") {
+    return ["npm", "test", ...normalizeNpmTestArgs(tokens.slice(2))];
+  }
+
+  if (tokens[1] === "run" && tokens[2] === "test") {
+    return ["npm", "test", ...normalizeNpmTestArgs(tokens.slice(3))];
+  }
+
+  const runTestIndex = tokens.findIndex(
+    (token, index) =>
+      index > 1 && token === "run" && tokens[index + 1] === "test" && tokens.includes("--"),
+  );
+  if (runTestIndex > 1) {
+    return [
+      "npm",
+      "test",
+      ...normalizeNpmTestArgs([
+        ...tokens.slice(1, runTestIndex),
+        ...tokens.slice(runTestIndex + 2),
+      ]),
+    ];
+  }
 
   const testIndex = tokens.indexOf("test");
-  if (testIndex <= 1 || !tokens.includes("--")) return value;
+  if (testIndex <= 1 || !tokens.includes("--")) return null;
 
   const args = [...tokens.slice(1, testIndex), ...tokens.slice(testIndex + 1)];
-  const cleanedArgs = args.filter((arg) => arg !== "--");
-  if (cleanedArgs.length === 0) return "npm test";
+  return ["npm", "test", ...normalizeNpmTestArgs(args)];
+}
+
+function normalizeNpmTestArgs(args: string[]): string[] {
+  const cleanedArgs = args.filter(Boolean);
+  if (cleanedArgs.length === 0) return [];
+
+  const separatorIndex = cleanedArgs.indexOf("--");
+  if (separatorIndex === 0) {
+    return ["--", ...cleanedArgs.slice(1).filter((arg) => arg !== "--")];
+  }
+  if (separatorIndex > 0) {
+    const beforeSeparator = cleanedArgs.slice(0, separatorIndex);
+    const afterSeparator = cleanedArgs.slice(separatorIndex + 1);
+    if (beforeSeparator.some(isNpmConfigArg) || afterSeparator.some((arg) => arg.startsWith("-"))) {
+      return [...beforeSeparator, "--", ...afterSeparator];
+    }
+    return ["--", ...beforeSeparator, ...afterSeparator];
+  }
+
+  if (cleanedArgs.some(isNpmConfigArg)) return cleanedArgs;
+
   const positionalArgs = cleanedArgs.filter((arg) => !arg.startsWith("-"));
   const optionArgs = cleanedArgs.filter((arg) => arg.startsWith("-"));
-  return ["npm", "test", "--", ...positionalArgs, ...optionArgs].join(" ");
+  return positionalArgs.length > 0 ? ["--", ...positionalArgs, ...optionArgs] : cleanedArgs;
+}
+
+function isNpmConfigArg(arg: string): boolean {
+  return (
+    arg === "-w" ||
+    arg === "--workspace" ||
+    arg === "--workspaces" ||
+    arg === "--if-present" ||
+    arg.startsWith("--workspace=")
+  );
 }
 
 function isRepositoryInspectionOnlyVerificationCommand(value: string): boolean {
