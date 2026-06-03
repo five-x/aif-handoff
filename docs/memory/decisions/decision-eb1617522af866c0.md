@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::03_invalid_manifest_fallback_fail_closed::project-capsule
+memory_id: task::aif-handoff::work::03_invalid_manifest_fallback_fail_closed::decision-eb1617522af866c0
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: 03_invalid_manifest_fallback_fail_closed
 source_path: docs/rdpi/work/03_invalid_manifest_fallback_fail_closed
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: decision
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- decision
   source_refs:
 - docs/rdpi/work/03_invalid_manifest_fallback_fail_closed/research.md
 - docs/rdpi/work/03_invalid_manifest_fallback_fail_closed/design.md
@@ -35,16 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 03_invalid_manifest_fallback_fail_closed.
+Request implementation rework below the implementation evidence rework cap using the same counter policy as the coordinator implementation evidence guard: `retryCount + 1`, capped by `min(bounded maxReviewIterations, AGENT_IMPLEMENTATION_EVIDENCE_MAX_REWORK)`. Below cap, set `status="implementing"`, `manualReviewRequired=false`, `reworkRequested=true`, and `retryCount=nextIteration`.
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable decision made during the task.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same design pressure appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
+Do not reuse when the constraints that justified the decision changed.

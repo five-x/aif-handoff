@@ -212,6 +212,33 @@ function implementationManifestBlock(input: {
   ].join("\n");
 }
 
+function staleImplementationManifestJson(taskId: string): string {
+  return JSON.stringify({
+    version: 1,
+    taskId,
+    intent: "feature",
+    planManifestHash: null,
+    changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+    diffSummary: { summary: "Stale previous manifest.", filesChanged: 1 },
+    verificationEvidence: [
+      {
+        id: "verify-stale",
+        command: "npm.cmd test",
+        status: "passed",
+        outputSha256: "a".repeat(64),
+        outputPreview: "previous tests passed",
+        outputPreviewTruncated: false,
+      },
+    ],
+    acceptanceCriteria: [{ id: "ac-1", status: "satisfied", evidenceRefs: ["verify-stale"] }],
+    evidenceRefs: ["verify-stale"],
+    planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+    reviewClosure: { status: "pending", evidenceRefs: [] },
+    commitEvidence: { status: "not_required", evidenceRefs: [] },
+    knownLimitations: [],
+  });
+}
+
 describe("runImplementer rework behavior", () => {
   let projectRoot: string;
 
@@ -5903,6 +5930,9 @@ describe("runImplementer rework behavior", () => {
         taskIntent: "feature",
         status: "implementing",
         plan: "## Plan\n- [ ] Task 1: Still pending",
+        implementationManifestJson: staleImplementationManifestJson(
+          "task-checklist-invalid-disposition",
+        ),
         reworkRequested: false,
         agentActivityLog: [
           "[2026-06-03T00:00:00.000Z] Agent: implement-coordinator started",
@@ -5994,12 +6024,13 @@ describe("runImplementer rework behavior", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-checklist-invalid-disposition"))
       .get();
-    expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.blockedReason).toBe(
-      "implementation_checklist_incomplete: 1 pending checklist item(s)",
-    );
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toContain("implementation_manifest_invalid:");
+    expect(updatedTask?.blockedReason).toContain("plan_checklist_drift");
+    expect(updatedTask?.retryCount).toBe(1);
     expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(true);
+    expect(updatedTask?.implementationManifestJson).toBeNull();
   });
 
   it("blocks duplicate pending checklist descriptions when only one task is disposed", async () => {
@@ -6071,12 +6102,13 @@ describe("runImplementer rework behavior", () => {
       .from(tasks)
       .where(eq(tasks.id, "task-checklist-duplicate-one-disposed"))
       .get();
-    expect(updatedTask?.status).toBe("blocked_external");
-    expect(updatedTask?.blockedReason).toBe(
-      "implementation_checklist_incomplete: 2 pending checklist item(s)",
-    );
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toContain("implementation_manifest_invalid:");
+    expect(updatedTask?.blockedReason).toContain("plan_checklist_drift");
+    expect(updatedTask?.retryCount).toBe(1);
     expect(updatedTask?.manualReviewRequired).toBe(false);
     expect(updatedTask?.reworkRequested).toBe(true);
+    expect(updatedTask?.implementationManifestJson).toBeNull();
   });
 
   it("allows duplicate pending checklist descriptions only when each task is disposed", async () => {
@@ -6250,12 +6282,11 @@ describe("runImplementer rework behavior", () => {
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-feature-manifest")).get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    expect(manifestJson).toBeTruthy();
-    expect(JSON.parse(manifestJson ?? "{}")).toMatchObject({
-      taskId: "task-feature-manifest",
-      intent: "feature",
-      changedFiles: [{ path: "src/feature.ts", status: "modified" }],
-    });
+    expect(manifestJson).toBeNull();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toContain("implementation_manifest_invalid:");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
   it("prefers structured implementation evidence over textual blocked markers", async () => {
@@ -6325,13 +6356,14 @@ describe("runImplementer rework behavior", () => {
       .get();
     expect(updatedTask?.implementationLog).toContain("Implementation done.");
     expect(updatedTask?.implementationLog).toContain("cannot proceed with unrelated cleanup");
-    expect(JSON.parse(updatedTask?.implementationManifestJson ?? "{}")).toMatchObject({
-      taskId: "task-feature-incidental-cannot-proceed",
-      intent: "feature",
-    });
+    expect(updatedTask?.implementationManifestJson).toBeNull();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toContain("implementation_manifest_invalid:");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
-  it("still blocks explicit implementation permission denials", async () => {
+  it("routes textual blocked output without a current manifest through fail-closed manifest rework", async () => {
     const db = testDb.current;
     queryMock.mockReturnValueOnce(
       streamSuccess(
@@ -6349,14 +6381,28 @@ describe("runImplementer rework behavior", () => {
         taskIntent: "feature",
         status: "implementing",
         plan: "Plan:\n- add the feature",
+        implementationManifestJson: staleImplementationManifestJson(
+          "task-feature-explicit-permission-block",
+        ),
         reworkRequested: false,
         useSubagents: true,
       })
       .run();
 
-    await expect(
-      runImplementer("task-feature-explicit-permission-block", projectRoot),
-    ).rejects.toThrow("Implementer blocked by permissions");
+    await runImplementer("task-feature-explicit-permission-block", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-explicit-permission-block"))
+      .get();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_manifest_invalid: missing_implementation_manifest",
+    );
+    expect(updatedTask?.implementationManifestJson).toBeNull();
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
   it("prompts plan-manifest-backed tasks with the expected hash and stores validating evidence", async () => {
@@ -6457,28 +6503,14 @@ describe("runImplementer rework behavior", () => {
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-feature-plan-hash")).get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    expect(manifestJson).toBeTruthy();
-    const validation = validateImplementationManifest({
-      task: {
-        id: "task-feature-plan-hash",
-        title: "Feature manifest with plan hash",
-        taskIntent: "feature",
-        plan,
-        agentActivityLog:
-          "[2026-05-29T19:00:00.000Z] Agent: aif-implement started\n" +
-          "[2026-05-29T19:00:01.000Z] Tool: npm.cmd test",
-      },
-      manifestJson,
-      changedFiles: ["src/feature.ts"],
-      meaningfulChangedFiles: ["src/feature.ts"],
-      dirtyChangedFiles: ["src/feature.ts"],
-      phase: "review_handoff",
-    });
-    expect(validation.ok).toBe(true);
-    expect(validation.planManifestHash).toBe(expectedPlanManifestHash);
+    expect(manifestJson).toBeNull();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toContain("implementation_manifest_invalid:");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
-  it("stores a deterministic implementation manifest when the implementer omits one but evidence is valid", async () => {
+  it("fails closed when a required implementation manifest is omitted even if deterministic evidence exists", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], {
@@ -6609,41 +6641,17 @@ describe("runImplementer rework behavior", () => {
       .get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    expect(manifestJson).toBeTruthy();
-    const manifest = JSON.parse(manifestJson ?? "{}");
-    expect(manifest).toMatchObject({
-      taskId: "task-feature-fallback-manifest",
-      intent: "feature",
-      planManifestHash: hashAifPlanManifest(plan),
-      changedFiles: [{ path: "src/feature.ts", status: "modified" }],
-      verificationEvidence: [
-        {
-          id: "verify-1",
-          command: "npm.cmd test",
-          status: "passed",
-          outputSha256: "b".repeat(64),
-          outputPreview: "tests passed",
-          outputPreviewTruncated: false,
-        },
-      ],
-      acceptanceCriteria: [{ id: "AC1", status: "satisfied", evidenceRefs: ["verify-1"] }],
-      planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
-      reviewClosure: { status: "pending", evidenceRefs: [] },
-      commitEvidence: { status: "not_committed", evidenceRefs: [] },
-      knownLimitations: [],
-    });
-    const validation = validateImplementationManifest({
-      task: updatedTask!,
-      manifestJson,
-      changedFiles: ["src/feature.ts"],
-      meaningfulChangedFiles: ["src/feature.ts"],
-      dirtyChangedFiles: ["src/feature.ts"],
-      phase: "review_handoff",
-    });
-    expect(validation.ok).toBe(true);
+    expect(manifestJson).toBeNull();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_manifest_invalid: missing_implementation_manifest",
+    );
+    expect(updatedTask?.retryCount).toBe(1);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
-  it("recovers a deterministic implementation manifest when runtime exhausts after valid evidence", async () => {
+  it("does not persist deterministic runtime recovery as accepted implementation manifest evidence", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], {
@@ -6803,40 +6811,22 @@ describe("runImplementer rework behavior", () => {
       "Deterministic implementation runtime recovery completed after runtime exhaustion",
     );
     expect(updatedTask?.agentActivityLog).toContain(
-      "deterministic implementation manifest recovery completed after runtime exhaustion",
+      "deterministic implementation manifest recovery retained as diagnostic evidence after runtime exhaustion",
     );
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    const manifest = JSON.parse(manifestJson ?? "{}");
-    expect(manifest).toMatchObject({
-      taskId: "task-feature-runtime-recovery",
-      intent: "feature",
-      changedFiles: [{ path: "src/feature.ts", status: "modified" }],
-      verificationEvidence: [
-        {
-          id: "verify-1",
-          command: "npm.cmd test",
-          status: "passed",
-          outputSha256: "d".repeat(64),
-          outputPreview: "tests passed",
-          outputPreviewTruncated: false,
-        },
-      ],
-      acceptanceCriteria: [{ id: "AC1", status: "satisfied", evidenceRefs: ["verify-1"] }],
-      commitEvidence: { status: "committed", commitSha: head, evidenceRefs: [] },
-    });
-    const validation = validateImplementationManifest({
-      task: updatedTask!,
-      manifestJson,
-      changedFiles: ["src/feature.ts"],
-      meaningfulChangedFiles: ["src/feature.ts"],
-      dirtyChangedFiles: [],
-      phase: "review_handoff",
-    });
-    expect(validation.ok).toBe(true);
+    expect(manifestJson).toBeNull();
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_manifest_invalid: missing_implementation_manifest",
+    );
+    expect(updatedTask?.retryCount).toBe(1);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
-  it("stores actual verification command when deterministic manifest evidence matches an equivalent plan command", async () => {
+  it("does not synthesize an equivalent-command deterministic manifest when the implementer omits one", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], {
@@ -6968,29 +6958,18 @@ describe("runImplementer rework behavior", () => {
       .get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    const manifest = JSON.parse(manifestJson ?? "{}");
-    expect(manifest.verificationEvidence).toEqual([
-      {
-        id: "verify-1",
-        command: actualCommand,
-        status: "passed",
-        outputSha256: "d".repeat(64),
-        outputPreview: "tsc passed",
-        outputPreviewTruncated: false,
-      },
-    ]);
-    const validation = validateImplementationManifest({
-      task: updatedTask!,
-      manifestJson,
-      changedFiles: ["src/feature.ts"],
-      meaningfulChangedFiles: ["src/feature.ts"],
-      dirtyChangedFiles: ["src/feature.ts"],
-      phase: "review_handoff",
-    });
-    expect(validation.ok).toBe(true);
+    expect(actualCommand).toContain("tsc --noEmit");
+    expect(manifestJson).toBeNull();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_manifest_invalid: missing_implementation_manifest",
+    );
+    expect(updatedTask?.retryCount).toBe(1);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
-  it("repairs extracted implementation manifest when changedFiles drift from actual git changes", async () => {
+  it("fails closed when extracted normalized implementation manifest changedFiles drift from actual git changes", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], {
@@ -7144,15 +7123,17 @@ describe("runImplementer rework behavior", () => {
       .get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    const manifest = JSON.parse(manifestJson ?? "{}");
-    expect(manifest.changedFiles).toEqual([{ path: "src/feature.ts", status: "modified" }]);
-    expect(manifest.diffSummary.filesChanged).toBe(1);
-    expect(updatedTask?.agentActivityLog).toContain(
-      "Replaced invalid extracted implementation manifest with deterministic fallback",
-    );
+    expect(manifestJson).toBeNull();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toContain("implementation_manifest_invalid:");
+    expect(updatedTask?.blockedReason).toContain("implementation_changed_files_mismatch");
+    expect(updatedTask?.retryCount).toBe(1);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+    expect(updatedTask?.agentActivityLog).toContain("implementation_manifest_invalid:");
   });
 
-  it("rebuilds formally valid extracted manifests on rework to avoid stale review evidence", async () => {
+  it("does not use deterministic fallback to override invalid rework implementation manifests", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], {
@@ -7255,7 +7236,7 @@ describe("runImplementer rework behavior", () => {
               taskId: "task-feature-rework-manifest",
               intent: "feature",
               planManifestHash: hashAifPlanManifest(plan),
-              changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+              changedFiles: [],
               diffSummary: {
                 summary: "Stale initial implementation summary: local LoanOffer conflict remains.",
                 filesChanged: 1,
@@ -7315,20 +7296,14 @@ describe("runImplementer rework behavior", () => {
       .get();
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
-    const manifest = JSON.parse(manifestJson ?? "{}");
-    expect(manifest.changedFiles).toEqual([{ path: "src/feature.ts", status: "modified" }]);
-    expect(manifest.diffSummary.summary).not.toContain("LoanOffer");
-    expect(manifest.verificationEvidence).toEqual([
-      expect.objectContaining({
-        command: "npm.cmd -- feature.test.ts test",
-        outputSha256: "f".repeat(64),
-        outputPreview: "fresh 18 tests passed",
-      }),
-    ]);
-    expect(updatedTask?.reworkRequested).toBe(false);
-    expect(updatedTask?.agentActivityLog).toContain(
-      "Rebuilt rework implementation manifest from current-attempt deterministic evidence",
-    );
+    expect(manifestJson).toBeNull();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toContain("implementation_manifest_invalid:");
+    expect(updatedTask?.blockedReason).toContain("implementation_changed_files_mismatch");
+    expect(updatedTask?.retryCount).toBe(1);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+    expect(updatedTask?.agentActivityLog).toContain("implementation_manifest_invalid:");
   });
 
   it("blocks feature rework output that omits the aif-result contract", async () => {
@@ -7345,6 +7320,9 @@ describe("runImplementer rework behavior", () => {
         taskIntent: "feature",
         status: "implementing",
         plan: "## Plan\n- [x] Implement feature behavior",
+        implementationManifestJson: staleImplementationManifestJson(
+          "task-feature-rework-missing-result",
+        ),
         reworkRequested: true,
         useSubagents: true,
       })
@@ -7403,7 +7381,7 @@ describe("runImplementer rework behavior", () => {
     ).toBeNull();
   });
 
-  it("rejects deterministic fallback manifest when scope validation fails", async () => {
+  it("does not build deterministic fallback for an omitted manifest with scope validation issues", async () => {
     const db = testDb.current;
     execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "t@t.local"], {
@@ -7526,9 +7504,92 @@ describe("runImplementer rework behavior", () => {
     const manifestJson = (updatedTask as { implementationManifestJson?: string | null } | undefined)
       ?.implementationManifestJson;
     expect(manifestJson).toBeNull();
-    expect(updatedTask?.agentActivityLog).toContain(
-      "Rejected invalid deterministic implementation manifest fallback",
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_manifest_invalid: missing_implementation_manifest",
     );
+    expect(updatedTask?.retryCount).toBe(1);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+  });
+
+  it("requires manual review when invalid required manifest rework exceeds the cap", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        [
+          "Implementation done without a manifest block.",
+          "",
+          "```aif-result",
+          JSON.stringify({
+            status: "completed",
+            resolvedBlockers: ["finding-1"],
+            unresolvedBlockers: [],
+            verificationEvidence: ["manual verification noted"],
+            changedFiles: ["src/feature.ts"],
+          }),
+          "```",
+        ].join("\n"),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-feature-manifest-rework-limit",
+        projectId: "project-1",
+        title: "Feature manifest rework limit",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "## Plan\n- [x] Implement feature behavior\n- [x] Run tests",
+        implementationManifestJson: JSON.stringify({
+          version: 1,
+          taskId: "task-feature-manifest-rework-limit",
+          intent: "feature",
+          planManifestHash: null,
+          changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+          diffSummary: { summary: "Stale previous manifest.", filesChanged: 1 },
+          verificationEvidence: [
+            {
+              id: "verify-stale",
+              command: "npm.cmd test",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "previous tests passed",
+              outputPreviewTruncated: false,
+            },
+          ],
+          acceptanceCriteria: [{ id: "ac-1", status: "satisfied", evidenceRefs: ["verify-stale"] }],
+          evidenceRefs: ["verify-stale"],
+          planChecklist: { total: 2, completed: 2, pending: 0, synced: true },
+          reviewClosure: { status: "pending", evidenceRefs: [] },
+          commitEvidence: { status: "not_required", evidenceRefs: [] },
+          knownLimitations: [],
+        }),
+        retryCount: 1,
+        maxReviewIterations: 1,
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-manifest-rework-limit", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-manifest-rework-limit"))
+      .get();
+    expect(
+      (updatedTask as { implementationManifestJson?: string | null } | undefined)
+        ?.implementationManifestJson,
+    ).toBeNull();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_manifest_invalid_after_rework_limit: missing_implementation_manifest",
+    );
+    expect(updatedTask?.retryCount).toBe(1);
+    expect(updatedTask?.manualReviewRequired).toBe(true);
+    expect(updatedTask?.reworkRequested).toBe(false);
   });
 
   it("asks fix tasks to include a regression explanation in the implementation manifest", async () => {

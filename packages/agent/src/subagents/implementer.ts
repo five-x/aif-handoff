@@ -20,6 +20,7 @@ import {
 } from "@aif/data";
 import {
   logger,
+  getEnv,
   AUDIT_ABSENCE_PROOF_REQUIREMENT,
   formatAttachmentsForPrompt,
   formatTaskIntentContractForPrompt,
@@ -68,6 +69,7 @@ import { buildTaskMemoryContext } from "../memoryContext.js";
 import { findRuntimeExecutionError } from "../errorClassifier.js";
 
 const log = logger("implementer");
+const env = getEnv();
 const AGENT_NAME = "implement-coordinator";
 // Keep user prompt below the 27K prompt-token envelope so Qwen profiles with
 // max_tokens=5000 still have room for system text and tool schemas in 32K ctx.
@@ -77,6 +79,7 @@ const IMPLEMENT_COORDINATOR_CHAR_BUDGET =
   IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET * PROMPT_BUDGET_CHARS_PER_TOKEN;
 const DETERMINISTIC_SYNTHESIS_NO_FINDINGS_RISK_ID = "risk-deterministic-synthesis-no-findings";
 const DEVELOPMENT_IMPLEMENTATION_MANIFEST_INTENTS = new Set(["feature", "fix", "docs", "tests"]);
+const IMPLEMENTATION_EVIDENCE_REWORK_MAX_ITERATIONS = env.AGENT_IMPLEMENTATION_EVIDENCE_MAX_REWORK;
 const SOURCE_AUDIT_FIRST_RUN_MIN_MAX_TURNS = 36;
 const SOURCE_AUDIT_FIRST_RUN_MAX_MAX_TURNS = 64;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_MAX_TURNS = 18;
@@ -824,31 +827,45 @@ function buildDeterministicImplementationManifest(input: {
     }
     return null;
   }
-  logActivity(input.task.id, "Agent", "Saved deterministic implementation manifest fallback");
+  logActivity(
+    input.task.id,
+    "Agent",
+    "Validated deterministic implementation manifest diagnostic fallback",
+  );
   return validation.normalizedJson ?? manifestJson;
 }
 
-function shouldRepairExtractedImplementationManifest(
-  validation: ReturnType<typeof validateImplementationManifest>,
-): boolean {
-  if (validation.ok) return false;
-  const repairableIssueCodes = new Set([
-    "invalid_implementation_manifest",
-    "implementation_changed_files_mismatch",
-    "missing_verification_evidence",
-    "plan_checklist_drift",
-    "unsupported_verification_command",
-    "verification_command_not_observed",
-  ]);
-  return validation.issues.some((issue) => repairableIssueCodes.has(issue.code));
+function boundedImplementationManifestReworkLimit(value: number | null | undefined): number {
+  return Math.min(value ?? env.AGENT_MAX_REVIEW_ITERATIONS, 10);
 }
 
-function repairExtractedImplementationManifest(input: {
-  manifestJson: string;
+function implementationManifestReworkMaxIterations(task: TaskRow): number {
+  return Math.min(
+    boundedImplementationManifestReworkLimit(task.maxReviewIterations),
+    IMPLEMENTATION_EVIDENCE_REWORK_MAX_ITERATIONS,
+  );
+}
+
+function issueCodesForImplementationManifestBlock(issueCodes: string[]): string {
+  const uniqueCodes = Array.from(new Set(issueCodes.filter(Boolean)));
+  return uniqueCodes.length > 0 ? uniqueCodes.join(", ") : "invalid_implementation_manifest";
+}
+
+function validateImplementationManifestForPersistence(input: {
+  manifestJson: string | null;
   task: TaskRow;
   projectRoot: string;
   planText: string | null | undefined;
-}): string {
+}):
+  | { ok: true; manifestJson: string }
+  | { ok: false; issueCodes: string[]; diagnosticNormalizedJson: string | null } {
+  if (!input.manifestJson) {
+    return {
+      ok: false,
+      issueCodes: ["missing_implementation_manifest"],
+      diagnosticNormalizedJson: null,
+    };
+  }
   const latestTask = findTaskById(input.task.id) ?? input.task;
   const changed = collectTaskCompletionChangedFiles({
     task: { ...input.task, plan: input.planText ?? input.task.plan },
@@ -862,32 +879,64 @@ function repairExtractedImplementationManifest(input: {
     dirtyChangedFiles: changed.meaningfulDirtyChangedFiles,
     phase: "review_handoff",
   });
-  if (!shouldRepairExtractedImplementationManifest(validation)) {
-    return input.manifestJson;
+  if (validation.ok) {
+    return { ok: true, manifestJson: validation.normalizedJson ?? input.manifestJson };
   }
+  return {
+    ok: false,
+    issueCodes: validation.issues.map((issue) => issue.code),
+    diagnosticNormalizedJson: validation.normalizedJson ?? null,
+  };
+}
 
-  const repairedManifest = buildDeterministicImplementationManifest({
-    task: input.task,
-    projectRoot: input.projectRoot,
-    planText: input.planText,
+function clearStaleImplementationManifestPatch(
+  task: TaskRow,
+): Pick<TaskFieldsPatch, "implementationManifestJson"> | Record<string, never> {
+  return shouldRequestImplementationManifest(task) && taskSupportsImplementationManifestField(task)
+    ? { implementationManifestJson: null }
+    : {};
+}
+
+function blockTaskForImplementationManifestFailure(input: {
+  taskId: string;
+  task: TaskRow;
+  implementationLog: string;
+  nowIso: string;
+  issueCodes: string[];
+  diagnosticNormalizedJson?: string | null;
+}): void {
+  const issueCodes = issueCodesForImplementationManifestBlock(input.issueCodes);
+  const currentIteration = input.task.retryCount ?? 0;
+  const maxIterations = implementationManifestReworkMaxIterations(input.task);
+  const nextIteration = currentIteration + 1;
+  const reworkAllowed = nextIteration <= maxIterations;
+  const blockedReason = reworkAllowed
+    ? `implementation_manifest_invalid: ${issueCodes}`
+    : `implementation_manifest_invalid_after_rework_limit: ${issueCodes}`;
+  setTaskFields(input.taskId, {
+    status: reworkAllowed ? "implementing" : "blocked_external",
+    implementationLog: input.implementationLog,
+    implementationManifestJson: null,
+    blockedReason,
+    blockedFromStatus: "implementing",
+    retryAfter: null,
+    retryCount: reworkAllowed ? nextIteration : currentIteration,
+    manualReviewRequired: !reworkAllowed,
+    reworkRequested: reworkAllowed,
+    lastHeartbeatAt: input.nowIso,
+    updatedAt: input.nowIso,
   });
-  if (!repairedManifest) return input.manifestJson;
-
+  logActivity(input.taskId, "Agent", blockedReason);
   log.warn(
     {
-      taskId: input.task.id,
-      issueCodes: validation.issues.map((issue) => issue.code),
+      taskId: input.taskId,
+      issueCodes: input.issueCodes,
+      hasDiagnosticNormalizedJson: Boolean(input.diagnosticNormalizedJson),
+      implementationEvidenceReworkCount: reworkAllowed ? nextIteration : currentIteration,
+      maxReviewIterations: maxIterations,
     },
-    "Replacing invalid extracted implementation manifest with deterministic fallback",
+    "Implementation manifest failed validation before persistence",
   );
-  logActivity(
-    input.task.id,
-    "Agent",
-    `Replaced invalid extracted implementation manifest with deterministic fallback: ${validation.issues
-      .map((issue) => issue.code)
-      .join(", ")}`,
-  );
-  return repairedManifest;
 }
 
 function taskSupportsImplementationManifestField(task: TaskRow): boolean {
@@ -6020,21 +6069,17 @@ Writer rules:
         if (recoveredManifestJson) {
           recoveredResultText = [
             "Deterministic implementation runtime recovery completed after runtime exhaustion.",
-            "A structured implementation manifest was rebuilt from observed repository-tool evidence and current git state.",
-            "",
-            "```aif-implementation-manifest",
-            recoveredManifestJson,
-            "```",
+            "Observed repository-tool evidence was sufficient for diagnostics, but deterministic recovery is not accepted implementation manifest evidence.",
           ].join("\n");
           deterministicImplementationRuntimeRecovery = true;
           logActivity(
             taskId,
             "Agent",
-            "deterministic implementation manifest recovery completed after runtime exhaustion",
+            "deterministic implementation manifest recovery retained as diagnostic evidence after runtime exhaustion",
           );
           log.info(
             { taskId },
-            "Recovered implementation stage from runtime exhaustion with deterministic manifest",
+            "Recovered implementation stage from runtime exhaustion with diagnostic deterministic manifest evidence",
           );
         } else {
           log.warn(
@@ -6271,28 +6316,24 @@ Writer rules:
       ? `${finalResultText}\n\n${finalResultNotes.join("\n")}`
       : finalResultText;
   let implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
-  if (implementationManifestJson && shouldRequestImplementationManifest(task)) {
-    implementationManifestJson = repairExtractedImplementationManifest({
+  let checklistDispositionExceptionAccepted = false;
+  let checklistManifestValidationFailure: {
+    issueCodes: string[];
+    diagnosticNormalizedJson: string | null;
+  } | null = null;
+  if (checklistWarning && shouldRequestImplementationManifest(task)) {
+    const manifestValidation = validateImplementationManifestForPersistence({
       manifestJson: implementationManifestJson,
       task,
       projectRoot,
       planText: syncedPlan,
     });
-  }
-  let checklistDispositionExceptionAccepted = false;
-  if (checklistWarning && implementationManifestJson && shouldRequestImplementationManifest(task)) {
-    const changed = collectTaskCompletionChangedFiles({
-      task: { ...task, plan: syncedPlan ?? task.plan },
-      projectRoot,
-    });
-    checklistDispositionExceptionAccepted = validateImplementationManifest({
-      task: { ...(findTaskById(task.id) ?? task), plan: syncedPlan ?? task.plan },
-      manifestJson: implementationManifestJson,
-      changedFiles: changed.changedFiles,
-      meaningfulChangedFiles: changed.meaningfulChangedFiles,
-      dirtyChangedFiles: changed.meaningfulDirtyChangedFiles,
-      phase: "review_handoff",
-    }).ok;
+    if (manifestValidation.ok) {
+      implementationManifestJson = manifestValidation.manifestJson;
+      checklistDispositionExceptionAccepted = true;
+    } else {
+      checklistManifestValidationFailure = manifestValidation;
+    }
   }
   if (checklistWarning) {
     if (checklistDispositionExceptionAccepted) {
@@ -6301,6 +6342,27 @@ Writer rules:
         "Agent",
         `Accepted implementation checklist disposition exception for ${checklistAfterSync.pendingTaskCount} pending checklist item(s)`,
       );
+    } else if (checklistManifestValidationFailure) {
+      const nowIso = new Date().toISOString();
+      if (syncedPlan) {
+        persistTaskPlanForTask({
+          taskId,
+          planText: syncedPlan,
+          projectRoot,
+          isFix: task.isFix,
+          planPath: task.planPath,
+          updatedAt: nowIso,
+        });
+      }
+      blockTaskForImplementationManifestFailure({
+        taskId,
+        task,
+        implementationLog: enrichedResult,
+        nowIso,
+        issueCodes: checklistManifestValidationFailure.issueCodes,
+        diagnosticNormalizedJson: checklistManifestValidationFailure.diagnosticNormalizedJson,
+      });
+      return;
     } else {
       const nowIso = new Date().toISOString();
       if (syncedPlan) {
@@ -6317,6 +6379,7 @@ Writer rules:
       setTaskFields(taskId, {
         status: "blocked_external",
         implementationLog: enrichedResult,
+        ...clearStaleImplementationManifestPatch(task),
         blockedReason,
         blockedFromStatus: "implementing",
         retryAfter: null,
@@ -6352,6 +6415,7 @@ Writer rules:
       setTaskFields(taskId, {
         status: "blocked_external",
         implementationLog: enrichedResult,
+        ...clearStaleImplementationManifestPatch(task),
         blockedReason,
         blockedFromStatus: "implementing",
         retryAfter: null,
@@ -6369,30 +6433,30 @@ Writer rules:
     }
   }
 
-  if (!implementationManifestJson && shouldRequestImplementationManifest(task)) {
-    implementationManifestJson = buildDeterministicImplementationManifest({
-      task,
-      projectRoot,
-      planText: syncedPlan,
-    });
-  }
-  if (task.reworkRequested && shouldRequestImplementationManifest(task)) {
-    const deterministicReworkManifestJson = buildDeterministicImplementationManifest({
-      task,
-      projectRoot,
-      planText: syncedPlan,
-    });
-    if (deterministicReworkManifestJson) {
-      implementationManifestJson = deterministicReworkManifestJson;
-      logActivity(
-        taskId,
-        "Agent",
-        "Rebuilt rework implementation manifest from current-attempt deterministic evidence",
-      );
-    }
-  }
+  const nowIso = new Date().toISOString();
   if (implementationTextBlocked) {
     if (!implementationManifestJson) {
+      if (shouldRequestImplementationManifest(task)) {
+        if (syncedPlan) {
+          persistTaskPlanForTask({
+            taskId,
+            planText: syncedPlan,
+            projectRoot,
+            isFix: task.isFix,
+            planPath: task.planPath,
+            updatedAt: nowIso,
+          });
+        }
+        blockTaskForImplementationManifestFailure({
+          taskId,
+          task,
+          implementationLog: enrichedResult,
+          nowIso,
+          issueCodes: ["missing_implementation_manifest"],
+          diagnosticNormalizedJson: null,
+        });
+        return;
+      }
       throw new Error("Implementer blocked by permissions");
     }
     logActivity(
@@ -6402,7 +6466,6 @@ Writer rules:
     );
   }
 
-  const nowIso = new Date().toISOString();
   if (syncedPlan) {
     persistTaskPlanForTask({
       taskId,
@@ -6412,6 +6475,28 @@ Writer rules:
       planPath: task.planPath,
       updatedAt: nowIso,
     });
+  }
+
+  if (shouldRequestImplementationManifest(task)) {
+    const finalizedManifest = validateImplementationManifestForPersistence({
+      manifestJson: implementationManifestJson,
+      task,
+      projectRoot,
+      planText: syncedPlan,
+    });
+    if (finalizedManifest.ok) {
+      implementationManifestJson = finalizedManifest.manifestJson;
+    } else {
+      blockTaskForImplementationManifestFailure({
+        taskId,
+        task,
+        implementationLog: enrichedResult,
+        nowIso,
+        issueCodes: finalizedManifest.issueCodes,
+        diagnosticNormalizedJson: finalizedManifest.diagnosticNormalizedJson,
+      });
+      return;
+    }
   }
 
   const taskPatch: TaskFieldsPatch & { implementationManifestJson?: string | null } = {
