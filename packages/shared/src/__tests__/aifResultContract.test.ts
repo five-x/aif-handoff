@@ -84,6 +84,51 @@ describe("aifResultContract", () => {
     );
   });
 
+  it.each([
+    ["completed", "needs_human_input"],
+    ["blocked", "done"],
+    ["needs_input", "done"],
+  ])("rejects inconsistent status/stopReason pairs: %s + %s", (status, stopReason) => {
+    const result = validateAifResultContract(block({ status, stopReason }), {
+      expectedTaskId: "task-1",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toContain("invalid_aif_result_stop_reason");
+  });
+
+  it("accepts valid blocked and needs_input stop reasons as structured non-success", () => {
+    const blocked = validateAifResultContract(
+      block({
+        status: "blocked",
+        verification: [
+          { command: "npm.cmd test", status: "failed", evidence: "Validation failed." },
+        ],
+        resolvedBlockers: [],
+        unresolvedBlockers: [{ id: "validation", reason: "Tests still fail." }],
+        stopReason: "blocked_by_scope",
+      }),
+      { expectedTaskId: "task-1" },
+    );
+    const needsInput = validateAifResultContract(
+      block({
+        status: "needs_input",
+        verification: [
+          { command: "npm.cmd test", status: "not_run", evidence: "Needs operator input." },
+        ],
+        resolvedBlockers: [],
+        unresolvedBlockers: [{ id: "operator", reason: "Need credentials." }],
+        stopReason: "needs_human_input",
+      }),
+      { expectedTaskId: "task-1" },
+    );
+
+    expect(blocked.ok).toBe(true);
+    expect(blocked.result?.stopReason).toBe("blocked_by_scope");
+    expect(needsInput.ok).toBe(true);
+    expect(needsInput.result?.stopReason).toBe("needs_human_input");
+  });
+
   it("rejects missing or wrong task ids", () => {
     const missing = validateAifResultContract(block({ taskId: "" }), {
       expectedTaskId: "task-1",
@@ -107,6 +152,47 @@ describe("aifResultContract", () => {
 
     expect(result.ok).toBe(false);
     expect(result.issues.map((issue) => issue.code)).toContain("unexpected_aif_result_field");
+  });
+
+  it.each([
+    [
+      "verification",
+      {
+        verification: [
+          {
+            command: "npm.cmd test",
+            status: "passed",
+            evidence: "Focused tests passed.",
+            rawProviderDiagnostics: "provider trace",
+          },
+        ],
+      },
+    ],
+    [
+      "resolvedBlockers",
+      {
+        resolvedBlockers: [
+          { id: "finding-1", evidence: "Updated src/index.ts.", reasoning: "hidden" },
+        ],
+      },
+    ],
+    [
+      "unresolvedBlockers",
+      {
+        unresolvedBlockers: [
+          { id: "finding-2", reason: "Still failing.", repeatedReviewComment: "old comment" },
+        ],
+        stopReason: "blocked_by_validation",
+        status: "blocked",
+      },
+    ],
+  ])("rejects unsupported nested fields in %s entries", (_field, overrides) => {
+    const result = validateAifResultContract(block(overrides), {
+      expectedTaskId: "task-1",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toContain("invalid_aif_result_schema");
   });
 
   it("rejects completed results with unresolved blockers", () => {

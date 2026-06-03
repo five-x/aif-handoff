@@ -75,6 +75,9 @@ const AIF_RESULT_ALLOWED_KEYS = new Set([
   "unresolvedBlockers",
   "stopReason",
 ]);
+const AIF_RESULT_VERIFICATION_ALLOWED_KEYS = new Set(["command", "status", "evidence"]);
+const AIF_RESULT_RESOLVED_BLOCKER_ALLOWED_KEYS = new Set(["id", "evidence"]);
+const AIF_RESULT_UNRESOLVED_BLOCKER_ALLOWED_KEYS = new Set(["id", "reason"]);
 
 function issue(code: AifResultContractIssueCode, message: string): AifResultContractIssue {
   return { code, message };
@@ -90,11 +93,25 @@ function readStringArray(value: unknown): string[] | null {
   return values.every((entry) => entry.length > 0) ? values : null;
 }
 
+function hasOnlyAllowedKeys(record: Record<string, unknown>, allowedKeys: Set<string>): boolean {
+  return Object.keys(record).every((key) => allowedKeys.has(key));
+}
+
+function isValidStopReasonForStatus(status: string, stopReason: string): boolean {
+  if (status === "completed") return stopReason === "done";
+  if (status === "blocked") {
+    return stopReason === "blocked_by_validation" || stopReason === "blocked_by_scope";
+  }
+  if (status === "needs_input") return stopReason === "needs_human_input";
+  return false;
+}
+
 function readVerification(value: unknown): AifResultVerification[] | null {
   if (!Array.isArray(value)) return null;
   const entries = value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const record = entry as Record<string, unknown>;
+    if (!hasOnlyAllowedKeys(record, AIF_RESULT_VERIFICATION_ALLOWED_KEYS)) return null;
     const command = readString(record.command);
     const status = readString(record.status);
     const evidence = readString(record.evidence);
@@ -115,6 +132,7 @@ function readResolvedBlockers(value: unknown): AifResultResolvedBlocker[] | null
   const entries = value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const record = entry as Record<string, unknown>;
+    if (!hasOnlyAllowedKeys(record, AIF_RESULT_RESOLVED_BLOCKER_ALLOWED_KEYS)) return null;
     const id = readString(record.id);
     const evidence = readString(record.evidence);
     return id.length > 0 && evidence.length > 0 ? { id, evidence } : null;
@@ -129,6 +147,7 @@ function readUnresolvedBlockers(value: unknown): AifResultUnresolvedBlocker[] | 
   const entries = value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const record = entry as Record<string, unknown>;
+    if (!hasOnlyAllowedKeys(record, AIF_RESULT_UNRESOLVED_BLOCKER_ALLOWED_KEYS)) return null;
     const id = readString(record.id);
     const reason = readString(record.reason);
     return id.length > 0 && reason.length > 0 ? { id, reason } : null;
@@ -236,6 +255,21 @@ export function validateAifResultContract(
       issue(
         "invalid_aif_result_stop_reason",
         "aif-result stopReason must be done, blocked_by_validation, blocked_by_scope, or needs_human_input.",
+      ),
+    );
+  }
+  if (
+    (status === "completed" || status === "blocked" || status === "needs_input") &&
+    (stopReason === "done" ||
+      stopReason === "blocked_by_validation" ||
+      stopReason === "blocked_by_scope" ||
+      stopReason === "needs_human_input") &&
+    !isValidStopReasonForStatus(status, stopReason)
+  ) {
+    issues.push(
+      issue(
+        "invalid_aif_result_stop_reason",
+        "aif-result stopReason must match status: completed uses done, blocked uses blocked_by_validation or blocked_by_scope, and needs_input uses needs_human_input.",
       ),
     );
   }

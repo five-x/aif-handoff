@@ -67,6 +67,23 @@
 - Implementation choice to validate: whether non-success statuses (`blocked`, `needs_input`) should pass the parser as valid contracts while the implementer treats them as non-success terminal/blocked outcomes rather than successful rework completion.
 - Implementation choice to validate: whether completed verification requires at least one `passed` verification entry. The source says completed without verification is rejected; the strictest practical interpretation is at least one `verification` entry with `status="passed"` and non-empty command/evidence.
 
+## Follow-up after commit 555596e9
+
+- User direction: do not close `04_aif_result_contract_and_output` yet; follow up on commit `555596e9`.
+- New gap: the contract is strict at the top level, but still accepts inconsistent `status`/`stopReason` pairs.
+- Required status/stopReason matrix:
+  - `completed` -> `done` only.
+  - `blocked` -> `blocked_by_validation` or `blocked_by_scope` only.
+  - `needs_input` -> `needs_human_input` only.
+- New gap: nested object readers accept extra fields because they read the required properties without checking object key sets.
+- Required nested allowlists:
+  - `verification[]`: `command`, `status`, `evidence` only.
+  - `resolvedBlockers[]`: `id`, `evidence` only.
+  - `unresolvedBlockers[]`: `id`, `reason` only.
+- Regression requirement: implementer rework output with `status=completed` and `stopReason=needs_human_input` must be blocked as an invalid contract, not treated as successful closeout.
+- Explicit exclusions: do not loosen the validator, do not restore stale `implementationManifestJson` override, and do not implement the change as prompt-only guidance.
+- Closeout boundary: do not update `result.md` to close the task and do not run memsync during this follow-up unless the user later asks to close 04.
+
 ## Hypotheses
 
 - The safest change is to make `packages/shared/src/aifResultContract.ts` the single strict schema parser/validator and keep prompt/implementer code as consumers.

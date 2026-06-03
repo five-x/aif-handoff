@@ -34,10 +34,10 @@
 6. Update `packages/agent/src/__tests__/implementer.test.ts`.
    - Update `aifResultSuccessBlock` and all old-shape fixtures.
    - Add/adjust tests for missing `aif-result`, multiple blocks, invalid JSON, blocked status, completed without verification, operator/trusted evidence override where applicable, and prompt text no longer requiring restatement or narrative prose.
-7. Complete result documentation after implementation and gates.
-   - Record before/after rework prompt block size in `result.md`.
-   - Record PLAN/TEST/REVIEW gate verdicts and verification commands.
-   - Run memsync after successful closeout.
+7. Deferred closeout work.
+   - Do not update `result.md` as a closeout artifact during this follow-up.
+   - Do not run memsync during this follow-up.
+   - Record final gates and run memsync only after the user explicitly asks to close 04.
 
 ## Acceptance criteria
 
@@ -45,8 +45,8 @@
 - Narrative output is not required by the rework prompt.
 - Parser/validator covers the strict result contract with tests.
 - `blocked` and `needs_input` are structured outcomes, not successful closeout.
-- `result.md` records before/after prompt size for the rework block.
-- Mandatory RDPI gates pass: `PLAN PASS`, `TEST PASS`, `REVIEW PASS`.
+- This follow-up does not close 04 and does not run memsync.
+- Mandatory follow-up gates pass before final response: `PLAN PASS`, `TEST PASS`, `REVIEW PASS`.
 
 ## Verification plan
 
@@ -62,3 +62,22 @@
 
 - Centralize machine-readable result contracts in shared validators and let prompts consume the validator contract.
 - Keep evidence hierarchy explicit: higher-trust manifests/operator evidence can override lower-trust missing closeout text, but invalid deterministic recovery cannot.
+
+## Follow-up implementation plan after commit 555596e9
+
+1. Update `packages/shared/src/aifResultContract.ts`.
+   - Add nested exact-key allowlist validation for `verification`, `resolvedBlockers`, and `unresolvedBlockers`.
+   - Add `status`/`stopReason` matrix validation after enum checks.
+   - Keep valid non-success contracts accepted only when their stop reason matches the status.
+2. Update `packages/shared/src/__tests__/aifResultContract.test.ts`.
+   - Add passing cases for valid `blocked` and `needs_input` stop reasons.
+   - Add failing cases for `completed + needs_human_input`, `blocked + done`, and `needs_input + done`.
+   - Add failing cases for extra nested fields in each nested array type.
+3. Update `packages/agent/src/__tests__/implementer.test.ts`.
+   - Add a rework regression where the model returns `status=completed` with `stopReason=needs_human_input`.
+   - Assert the task remains blocked with `invalid_aif_result_stop_reason` and does not clear `reworkRequested`.
+4. Do not modify the stale persisted manifest override tests except as necessary to keep them passing.
+5. Verification for this follow-up:
+   - `npm.cmd run test --workspace=@aif/shared -- src/__tests__/aifResultContract.test.ts`
+   - `npm.cmd run test --workspace=@aif/agent -- src/__tests__/implementer.test.ts`
+   - `git diff --check`

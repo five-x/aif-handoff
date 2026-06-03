@@ -7516,6 +7516,45 @@ describe("runImplementer rework behavior", () => {
     ).toBeNull();
   });
 
+  it("blocks completed aif-result rework with a needs_input stop reason", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        aifResultSuccessBlock({
+          taskId: "task-general-rework-inconsistent-stop-reason",
+          stopReason: "needs_human_input",
+        }),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-general-rework-inconsistent-stop-reason",
+        projectId: "project-1",
+        title: "General rework inconsistent stop reason",
+        description: "Update operational notes.",
+        taskIntent: "general",
+        status: "implementing",
+        plan: "## Plan\n- [x] Update notes",
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-general-rework-inconsistent-stop-reason", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-general-rework-inconsistent-stop-reason"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toContain("invalid_aif_result_stop_reason");
+    expect(updatedTask?.blockedFromStatus).toBe("implementing");
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+    expect(updatedTask?.implementationManifestJson).toBeNull();
+  });
+
   it("persists blocked aif-result rework as structured non-success", async () => {
     const db = testDb.current;
     queryMock.mockReturnValueOnce(

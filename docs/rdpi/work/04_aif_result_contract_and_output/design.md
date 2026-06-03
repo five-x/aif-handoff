@@ -45,3 +45,21 @@ Use the existing shared `aifResultContract` module as the strict contract bounda
 
 - Strict `aif-result` output blocks should be schema-validated in shared code, not by prompt-only conventions.
 - Lower-priority missing narrative/contract evidence should not override higher-priority trusted implementation or operator evidence.
+
+## Follow-up design after commit 555596e9
+
+Extend the existing shared validator instead of changing prompt text alone.
+
+1. Add a shared status/stopReason consistency check after both fields pass enum validation.
+   - `completed` is valid only with `done`.
+   - `blocked` is valid only with `blocked_by_validation` or `blocked_by_scope`.
+   - `needs_input` is valid only with `needs_human_input`.
+2. Add exact key allowlist checks to nested object readers before accepting each array entry.
+   - `verification[]` entries may contain only `command`, `status`, and `evidence`.
+   - `resolvedBlockers[]` entries may contain only `id` and `evidence`.
+   - `unresolvedBlockers[]` entries may contain only `id` and `reason`.
+3. Reuse existing issue codes for schema invalidity unless a narrower code already exists.
+   - Inconsistent valid enum pairs can use `invalid_aif_result_stop_reason` because the stop reason is invalid for that status.
+   - Nested extra fields can use `invalid_aif_result_schema` so consumers continue to fail closed.
+4. Add focused shared validator tests plus one implementer regression for `completed` with `needs_human_input`.
+5. Preserve existing current-manifest behavior: only the current extracted manifest may be considered; do not reintroduce stored `implementationManifestJson` fallback.
