@@ -54,6 +54,15 @@ export interface ImplementationManifestPlanChecklist {
   pending: number;
   synced: boolean;
   pendingItems?: string[];
+  supersededItems?: ImplementationManifestChecklistDisposition[];
+  cancelledItems?: ImplementationManifestChecklistDisposition[];
+  waivedItems?: ImplementationManifestChecklistDisposition[];
+}
+
+export interface ImplementationManifestChecklistDisposition {
+  item: string;
+  reason: string;
+  evidenceRefs: string[];
 }
 
 export interface ImplementationManifestReviewClosure {
@@ -401,9 +410,33 @@ function normalizePlanChecklistShape(value: unknown): unknown {
       pending: value.length,
       synced: false,
       pendingItems: value.filter((entry): entry is string => typeof entry === "string"),
+      supersededItems: [],
+      cancelledItems: [],
+      waivedItems: [],
+    };
+  }
+  if (isObject(value)) {
+    return {
+      ...value,
+      pendingItems: isStringArray(value.pendingItems) ? value.pendingItems : [],
+      supersededItems: normalizeChecklistDispositionsShape(value.supersededItems),
+      cancelledItems: normalizeChecklistDispositionsShape(value.cancelledItems),
+      waivedItems: normalizeChecklistDispositionsShape(value.waivedItems),
     };
   }
   return value;
+}
+
+function normalizeChecklistDispositionsShape(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    if (!isObject(entry)) return { item: "", reason: "", evidenceRefs: [] };
+    return {
+      item: typeof entry.item === "string" ? entry.item : "",
+      reason: typeof entry.reason === "string" ? entry.reason : "",
+      evidenceRefs: isStringArray(entry.evidenceRefs) ? entry.evidenceRefs : [],
+    };
+  });
 }
 
 function normalizeReviewClosureShape(value: unknown): unknown {
@@ -435,6 +468,18 @@ function normalizeCommitEvidenceShape(value: unknown): unknown {
     return { ...value, status: "committed" };
   }
   return value;
+}
+
+function coerceChecklistDispositions(value: unknown): ImplementationManifestChecklistDisposition[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    if (!isObject(entry)) return { item: "", reason: "", evidenceRefs: [] };
+    return {
+      item: typeof entry.item === "string" ? entry.item : "",
+      reason: typeof entry.reason === "string" ? entry.reason : "",
+      evidenceRefs: isStringArray(entry.evidenceRefs) ? entry.evidenceRefs : [],
+    };
+  });
 }
 
 function expectedArtifactPathsFromManifest(parsed: Record<string, unknown> | null): string[] {
@@ -586,6 +631,9 @@ function coerceManifest(rawJson: string): ImplementationManifest | null {
     pending: typeof planChecklist.pending === "number" ? planChecklist.pending : -1,
     synced: planChecklist.synced === true,
     pendingItems: isStringArray(planChecklist.pendingItems) ? planChecklist.pendingItems : [],
+    supersededItems: coerceChecklistDispositions(planChecklist.supersededItems),
+    cancelledItems: coerceChecklistDispositions(planChecklist.cancelledItems),
+    waivedItems: coerceChecklistDispositions(planChecklist.waivedItems),
   };
   if (
     planChecklistValue.total < 0 ||
@@ -862,6 +910,120 @@ function changedFileWithinApprovedPlan(
   return approvedPaths.some((approvedPath) => pathMatchesApprovedBoundary(path, approvedPath));
 }
 
+function normalizeChecklistItemText(value: string): string {
+  return value
+    .replace(/^\s*(?:[-*]\s*)?\[[ x~!]\]\s*/i, "")
+    .replace(/^\*\*Task\s+\d+\s*:\s*(.+?)\*\*$/i, "$1")
+    .replace(/^Task\s+\d+\s*:\s*/i, "")
+    .replace(/\s*\([^)]*\)\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+interface PendingPlanChecklistItem {
+  taskNumber: number;
+  description: string;
+  key: string;
+}
+
+function parseChecklistDispositionItem(value: string): {
+  taskNumber: number | null;
+  description: string;
+} {
+  const trimmed = value.replace(/^\s*(?:[-*]\s*)?\[[ x~!]\]\s*/i, "").trim();
+  const boldMatch = trimmed.match(/^\*\*Task\s+(\d+)\s*:\s*(.+?)\*\*$/i);
+  if (boldMatch) {
+    return {
+      taskNumber: Number(boldMatch[1]),
+      description: normalizeChecklistItemText(boldMatch[2] ?? ""),
+    };
+  }
+  const taskMatch = trimmed.match(/^Task\s+(\d+)\s*:\s*(.+)$/i);
+  if (taskMatch) {
+    return {
+      taskNumber: Number(taskMatch[1]),
+      description: normalizeChecklistItemText(taskMatch[2] ?? ""),
+    };
+  }
+  return { taskNumber: null, description: normalizeChecklistItemText(trimmed) };
+}
+
+function checklistItemKey(taskNumber: number, description: string): string {
+  return `${taskNumber}:${description}`;
+}
+
+function extractPendingPlanChecklistItems(planText?: string | null): PendingPlanChecklistItem[] {
+  if (!planText) return [];
+  const items: PendingPlanChecklistItem[] = [];
+  const seen = new Set<string>();
+  for (const line of planText.split("\n")) {
+    const normalizedLine = line.replace(/^\s*#{1,6}\s*/, "").trim();
+    const boldMatch = normalizedLine.match(
+      /^(?:[-*]\s*)?\[([ x~!])\]\s+\*\*Task\s+(\d+)\s*:\s*(.+?)\*\*\s*(?:\(([^)]*)\))?\s*$/i,
+    );
+    const plainMatch = normalizedLine.match(
+      /^(?:[-*]\s*)?\[([ x~!])\]\s+Task\s+(\d+)\s*:\s*(.+?)\s*(?:\(([^)]*)\))?\s*$/i,
+    );
+    const match = boldMatch ?? plainMatch;
+    if (!match || match[1]?.toLowerCase() === "x") continue;
+    const taskNumber = Number(match[2]);
+    const description = normalizeChecklistItemText(match[3] ?? "");
+    if (!Number.isFinite(taskNumber) || !description) continue;
+    const key = checklistItemKey(taskNumber, description);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({ taskNumber, description, key });
+  }
+  return items;
+}
+
+function checklistDispositionsCoverPendingItems(input: {
+  manifest: ImplementationManifest;
+  pendingPlanItems: PendingPlanChecklistItem[];
+  allowedEvidenceRefs: Set<string>;
+}): boolean {
+  const pendingItems = input.pendingPlanItems;
+  const pendingByKey = new Map(pendingItems.map((item) => [item.key, item] as const));
+  const pendingByDescription = new Map<string, PendingPlanChecklistItem[]>();
+  for (const item of pendingItems) {
+    const matches = pendingByDescription.get(item.description) ?? [];
+    matches.push(item);
+    pendingByDescription.set(item.description, matches);
+  }
+  const covered = new Set<string>();
+  const dispositions = [
+    ...(input.manifest.planChecklist.supersededItems ?? []),
+    ...(input.manifest.planChecklist.cancelledItems ?? []),
+    ...(input.manifest.planChecklist.waivedItems ?? []),
+  ];
+
+  if (pendingItems.length === 0) return dispositions.length === 0;
+  if (dispositions.length === 0) return false;
+
+  for (const disposition of dispositions) {
+    const item = parseChecklistDispositionItem(disposition.item);
+    const reason = disposition.reason.trim();
+    const evidenceRefs = disposition.evidenceRefs.filter(usefulString);
+    const matchedPending =
+      item.taskNumber !== null
+        ? (pendingByKey.get(checklistItemKey(item.taskNumber, item.description)) ?? null)
+        : pendingByDescription.get(item.description)?.length === 1
+          ? pendingByDescription.get(item.description)?.[0]
+          : null;
+    if (
+      !matchedPending ||
+      !reason ||
+      evidenceRefs.length === 0 ||
+      evidenceRefs.some((ref) => !input.allowedEvidenceRefs.has(ref))
+    ) {
+      return false;
+    }
+    covered.add(matchedPending.key);
+  }
+
+  return pendingItems.every((item) => covered.has(item.key));
+}
+
 export function validateImplementationManifest(
   input: ValidateImplementationManifestInput,
 ): ImplementationManifestValidationResult {
@@ -1100,15 +1262,35 @@ export function validateImplementationManifest(
   const checklistCountsConsistent =
     manifest.planChecklist.total ===
     manifest.planChecklist.completed + manifest.planChecklist.pending;
+  const actualPendingChecklistItems = extractPendingPlanChecklistItems(input.task.plan);
+  const hasChecklistDispositions =
+    (manifest.planChecklist.supersededItems ?? []).length > 0 ||
+    (manifest.planChecklist.cancelledItems ?? []).length > 0 ||
+    (manifest.planChecklist.waivedItems ?? []).length > 0;
+  const checklistDispositionsValid = checklistDispositionsCoverPendingItems({
+    manifest,
+    pendingPlanItems: actualPendingChecklistItems,
+    allowedEvidenceRefs,
+  });
   const checklistHasCompleteCounts =
     manifest.planChecklist.total > 0 &&
     manifest.planChecklist.pending === 0 &&
-    manifest.planChecklist.completed === manifest.planChecklist.total;
+    manifest.planChecklist.completed === manifest.planChecklist.total &&
+    actualPendingChecklistItems.length === 0;
+  const checklistPendingItemsDisposed =
+    actualPendingChecklistItems.length > 0 &&
+    manifest.planChecklist.pending === actualPendingChecklistItems.length &&
+    checklistDispositionsValid;
+  const checklistSatisfiesActualPlan =
+    actualPendingChecklistItems.length > 0
+      ? checklistPendingItemsDisposed
+      : checklistHasCompleteCounts;
   if (
-    !checklistHasCompleteCounts ||
-    manifest.planChecklist.pending > 0 ||
+    !checklistSatisfiesActualPlan ||
     !checklistCountsConsistent ||
-    manifest.planChecklist.completed > manifest.planChecklist.total
+    manifest.planChecklist.completed > manifest.planChecklist.total ||
+    manifest.planChecklist.total <= 0 ||
+    (hasChecklistDispositions && !checklistDispositionsValid)
   ) {
     issues.push(
       issue(

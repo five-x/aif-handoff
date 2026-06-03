@@ -174,6 +174,44 @@ function aifResultSuccessBlock(overrides: Record<string, unknown> = {}): string 
   ].join("\n");
 }
 
+function implementationManifestBlock(input: {
+  taskId: string;
+  planChecklist: Record<string, unknown>;
+}): string {
+  return [
+    "```aif-implementation-manifest",
+    JSON.stringify(
+      {
+        version: 1,
+        taskId: input.taskId,
+        intent: "feature",
+        planManifestHash: null,
+        changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+        diffSummary: { summary: "Updated feature behavior.", filesChanged: 1 },
+        verificationEvidence: [
+          {
+            id: "verify-1",
+            command: "npm.cmd test",
+            status: "passed",
+            outputSha256: "a".repeat(64),
+            outputPreview: "tests passed",
+            outputPreviewTruncated: false,
+          },
+        ],
+        acceptanceCriteria: [{ id: "ac-1", status: "satisfied", evidenceRefs: ["verify-1"] }],
+        evidenceRefs: ["verify-1"],
+        planChecklist: input.planChecklist,
+        reviewClosure: { status: "pending", evidenceRefs: [] },
+        commitEvidence: { status: "not_committed", evidenceRefs: [] },
+        knownLimitations: [],
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
+
 describe("runImplementer rework behavior", () => {
   let projectRoot: string;
 
@@ -5811,6 +5849,314 @@ describe("runImplementer rework behavior", () => {
     expect(updatedTask?.implementationLog).toContain(
       "Checklist remains incomplete after auto-sync",
     );
+  });
+
+  it("allows review handoff when a manifest validly disposes every pending checklist item", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = false;\n");
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n");
+    queryMock
+      .mockReturnValueOnce(
+        streamSuccess(
+          [
+            "Implementation done",
+            implementationManifestBlock({
+              taskId: "task-checklist-disposed",
+              planChecklist: {
+                total: 2,
+                completed: 1,
+                pending: 1,
+                synced: true,
+                pendingItems: ["Still pending"],
+                supersededItems: [
+                  {
+                    item: "Task 1: Still pending",
+                    reason: "The implementation evidence supersedes this remaining checklist item.",
+                    evidenceRefs: ["verify-1"],
+                  },
+                ],
+              },
+            }),
+          ].join("\n\n"),
+        ),
+      )
+      .mockReturnValueOnce(streamSuccess("## Plan\n- [ ] Task 1: Still pending"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-checklist-disposed",
+        projectId: "project-1",
+        title: "Task",
+        description: "Desc",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Task 1: Still pending",
+        reworkRequested: false,
+        agentActivityLog: [
+          "[2026-06-03T00:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-06-03T00:00:01.000Z] Tool: run_shell npm.cmd test",
+          "[2026-06-03T00:00:02.000Z] Agent: implement-coordinator complete",
+        ].join("\n"),
+      })
+      .run();
+
+    await runImplementer("task-checklist-disposed", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-checklist-disposed"))
+      .get();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toBeNull();
+    expect(updatedTask?.reworkRequested).toBe(false);
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.implementationManifestJson).toContain("supersededItems");
+  });
+
+  it("still blocks when a manifest disposition is unsupported", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = false;\n");
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n");
+    queryMock
+      .mockReturnValueOnce(
+        streamSuccess(
+          [
+            "Implementation done",
+            implementationManifestBlock({
+              taskId: "task-checklist-invalid-disposition",
+              planChecklist: {
+                total: 2,
+                completed: 1,
+                pending: 1,
+                synced: true,
+                pendingItems: ["Still pending"],
+                waivedItems: [
+                  {
+                    item: "Task 1: Still pending",
+                    reason: "",
+                    evidenceRefs: ["verify-1"],
+                  },
+                ],
+              },
+            }),
+          ].join("\n\n"),
+        ),
+      )
+      .mockReturnValueOnce(streamSuccess("## Plan\n- [ ] Task 1: Still pending"));
+
+    db.insert(tasks)
+      .values({
+        id: "task-checklist-invalid-disposition",
+        projectId: "project-1",
+        title: "Task",
+        description: "Desc",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "## Plan\n- [ ] Task 1: Still pending",
+        reworkRequested: false,
+        agentActivityLog: [
+          "[2026-06-03T00:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-06-03T00:00:01.000Z] Tool: run_shell npm.cmd test",
+          "[2026-06-03T00:00:02.000Z] Agent: implement-coordinator complete",
+        ].join("\n"),
+      })
+      .run();
+
+    await runImplementer("task-checklist-invalid-disposition", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-checklist-invalid-disposition"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_checklist_incomplete: 1 pending checklist item(s)",
+    );
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+  });
+
+  it("blocks duplicate pending checklist descriptions when only one task is disposed", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = false;\n");
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n");
+    const duplicatePlan = "## Plan\n- [ ] Task 1: Run verification\n- [ ] Task 2: Run verification";
+    queryMock
+      .mockReturnValueOnce(
+        streamSuccess(
+          [
+            "Implementation done",
+            implementationManifestBlock({
+              taskId: "task-checklist-duplicate-one-disposed",
+              planChecklist: {
+                total: 2,
+                completed: 0,
+                pending: 2,
+                synced: true,
+                pendingItems: ["Run verification", "Run verification"],
+                waivedItems: [
+                  {
+                    item: "Task 1: Run verification",
+                    reason: "Verification task 1 was covered by the manifest evidence.",
+                    evidenceRefs: ["verify-1"],
+                  },
+                ],
+              },
+            }),
+          ].join("\n\n"),
+        ),
+      )
+      .mockReturnValueOnce(streamSuccess(duplicatePlan));
+
+    db.insert(tasks)
+      .values({
+        id: "task-checklist-duplicate-one-disposed",
+        projectId: "project-1",
+        title: "Task",
+        description: "Desc",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: duplicatePlan,
+        reworkRequested: false,
+        agentActivityLog: [
+          "[2026-06-03T00:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-06-03T00:00:01.000Z] Tool: run_shell npm.cmd test",
+          "[2026-06-03T00:00:02.000Z] Agent: implement-coordinator complete",
+        ].join("\n"),
+      })
+      .run();
+
+    await runImplementer("task-checklist-duplicate-one-disposed", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-checklist-duplicate-one-disposed"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toBe(
+      "implementation_checklist_incomplete: 2 pending checklist item(s)",
+    );
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(true);
+  });
+
+  it("allows duplicate pending checklist descriptions only when each task is disposed", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "-b", "main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = false;\n");
+    execFileSync("git", ["add", "src/feature.ts"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n");
+    const duplicatePlan = "## Plan\n- [ ] Task 1: Run verification\n- [ ] Task 2: Run verification";
+    queryMock
+      .mockReturnValueOnce(
+        streamSuccess(
+          [
+            "Implementation done",
+            implementationManifestBlock({
+              taskId: "task-checklist-duplicate-both-disposed",
+              planChecklist: {
+                total: 2,
+                completed: 0,
+                pending: 2,
+                synced: true,
+                pendingItems: ["Run verification", "Run verification"],
+                waivedItems: [
+                  {
+                    item: "Task 1: Run verification",
+                    reason: "Verification task 1 was covered by the manifest evidence.",
+                    evidenceRefs: ["verify-1"],
+                  },
+                  {
+                    item: "Task 2: Run verification",
+                    reason: "Verification task 2 was covered by the manifest evidence.",
+                    evidenceRefs: ["verify-1"],
+                  },
+                ],
+              },
+            }),
+          ].join("\n\n"),
+        ),
+      )
+      .mockReturnValueOnce(streamSuccess(duplicatePlan));
+
+    db.insert(tasks)
+      .values({
+        id: "task-checklist-duplicate-both-disposed",
+        projectId: "project-1",
+        title: "Task",
+        description: "Desc",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: duplicatePlan,
+        reworkRequested: false,
+        agentActivityLog: [
+          "[2026-06-03T00:00:00.000Z] Agent: implement-coordinator started",
+          "[2026-06-03T00:00:01.000Z] Tool: run_shell npm.cmd test",
+          "[2026-06-03T00:00:02.000Z] Agent: implement-coordinator complete",
+        ].join("\n"),
+      })
+      .run();
+
+    await runImplementer("task-checklist-duplicate-both-disposed", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-checklist-duplicate-both-disposed"))
+      .get();
+    expect(updatedTask?.status).toBe("implementing");
+    expect(updatedTask?.blockedReason).toBeNull();
+    expect(updatedTask?.manualReviewRequired).toBe(false);
+    expect(updatedTask?.reworkRequested).toBe(false);
   });
 
   it("uses /aif-implement command format only in skill mode", async () => {

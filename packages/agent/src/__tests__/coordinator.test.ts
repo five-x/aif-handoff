@@ -604,6 +604,46 @@ describe("coordinator", () => {
     expect(runReviewer).not.toHaveBeenCalled();
   });
 
+  it("does not move to review when implementer blocks on an incomplete checklist", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-checklist-blocked",
+        projectId: "test-project",
+        title: "Checklist blocked",
+        status: "plan_ready",
+        autoMode: true,
+        plan: "## Plan\n- [ ] Task 1: Still pending",
+      })
+      .run();
+
+    vi.mocked(runImplementer).mockImplementationOnce(async (taskId) => {
+      db.update(tasks)
+        .set({
+          status: "blocked_external",
+          blockedReason: "implementation_checklist_incomplete: 1 pending checklist item(s)",
+          blockedFromStatus: "implementing",
+          retryAfter: null,
+          manualReviewRequired: false,
+          reworkRequested: true,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-checklist-blocked")).get();
+    expect(task?.status).toBe("blocked_external");
+    expect(task?.blockedReason).toBe(
+      "implementation_checklist_incomplete: 1 pending checklist item(s)",
+    );
+    expect(task?.manualReviewRequired).toBe(false);
+    expect(task?.reworkRequested).toBe(true);
+    expect(runReviewer).not.toHaveBeenCalled();
+  });
+
   it("blocks exhausted synthesis plan-quality failure unless deterministic recovery is explicitly enabled", async () => {
     const db = testDb.current;
     vi.mocked(runPlanChecker).mockRejectedValueOnce(createPlanQualityError());

@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260603-implementer-checklist-hard-stop-exceptions::project-capsule
+memory_id: task::aif-handoff::work::work-20260603-implementer-checklist-hard-stop-exceptions::pattern-ab00b7c05395ee36
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: work-20260603-implementer-checklist-hard-stop-exceptions
 source_path: docs/rdpi/work/work-20260603-implementer-checklist-hard-stop-exceptions
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: pattern
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- pattern
   source_refs:
 - docs/rdpi/work/work-20260603-implementer-checklist-hard-stop-exceptions/research.md
 - docs/rdpi/work/work-20260603-implementer-checklist-hard-stop-exceptions/design.md
@@ -35,16 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260603-implementer-checklist-hard-stop-exceptions.
+Fail-closed exception design: every bypass of a hard stop must be structured, validated, evidence-backed, and covered by negative tests.
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable implementation or runbook pattern.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same operational or implementation pattern appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
+Do not reuse when the pattern depends on obsolete tools or constraints.

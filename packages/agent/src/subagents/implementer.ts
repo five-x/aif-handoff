@@ -6270,33 +6270,65 @@ Writer rules:
     finalResultNotes.length > 0
       ? `${finalResultText}\n\n${finalResultNotes.join("\n")}`
       : finalResultText;
+  let implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
+  if (implementationManifestJson && shouldRequestImplementationManifest(task)) {
+    implementationManifestJson = repairExtractedImplementationManifest({
+      manifestJson: implementationManifestJson,
+      task,
+      projectRoot,
+      planText: syncedPlan,
+    });
+  }
+  let checklistDispositionExceptionAccepted = false;
+  if (checklistWarning && implementationManifestJson && shouldRequestImplementationManifest(task)) {
+    const changed = collectTaskCompletionChangedFiles({
+      task: { ...task, plan: syncedPlan ?? task.plan },
+      projectRoot,
+    });
+    checklistDispositionExceptionAccepted = validateImplementationManifest({
+      task: { ...(findTaskById(task.id) ?? task), plan: syncedPlan ?? task.plan },
+      manifestJson: implementationManifestJson,
+      changedFiles: changed.changedFiles,
+      meaningfulChangedFiles: changed.meaningfulChangedFiles,
+      dirtyChangedFiles: changed.meaningfulDirtyChangedFiles,
+      phase: "review_handoff",
+    }).ok;
+  }
   if (checklistWarning) {
-    const nowIso = new Date().toISOString();
-    if (syncedPlan) {
-      persistTaskPlanForTask({
+    if (checklistDispositionExceptionAccepted) {
+      logActivity(
         taskId,
-        planText: syncedPlan,
-        projectRoot,
-        isFix: task.isFix,
-        planPath: task.planPath,
+        "Agent",
+        `Accepted implementation checklist disposition exception for ${checklistAfterSync.pendingTaskCount} pending checklist item(s)`,
+      );
+    } else {
+      const nowIso = new Date().toISOString();
+      if (syncedPlan) {
+        persistTaskPlanForTask({
+          taskId,
+          planText: syncedPlan,
+          projectRoot,
+          isFix: task.isFix,
+          planPath: task.planPath,
+          updatedAt: nowIso,
+        });
+      }
+      const blockedReason = `implementation_checklist_incomplete: ${checklistAfterSync.pendingTaskCount} pending checklist item(s)`;
+      setTaskFields(taskId, {
+        status: "blocked_external",
+        implementationLog: enrichedResult,
+        blockedReason,
+        blockedFromStatus: "implementing",
+        retryAfter: null,
+        manualReviewRequired: false,
+        reworkRequested: true,
+        lastHeartbeatAt: nowIso,
         updatedAt: nowIso,
       });
+      logActivity(taskId, "Agent", blockedReason);
+      log.debug({ taskId, blockedReason }, "Implementation blocked by incomplete checklist");
+      return;
     }
-    const blockedReason = `implementation_checklist_incomplete: ${checklistAfterSync.pendingTaskCount} pending checklist item(s)`;
-    setTaskFields(taskId, {
-      status: "blocked_external",
-      implementationLog: enrichedResult,
-      blockedReason,
-      blockedFromStatus: "implementing",
-      retryAfter: null,
-      manualReviewRequired: false,
-      reworkRequested: true,
-      lastHeartbeatAt: nowIso,
-      updatedAt: nowIso,
-    });
-    logActivity(taskId, "Agent", blockedReason);
-    log.debug({ taskId, blockedReason }, "Implementation blocked by incomplete checklist");
-    return;
   }
 
   if (task.reworkRequested) {
@@ -6337,15 +6369,6 @@ Writer rules:
     }
   }
 
-  let implementationManifestJson = await extractNormalizedImplementationManifest(enrichedResult);
-  if (implementationManifestJson && shouldRequestImplementationManifest(task)) {
-    implementationManifestJson = repairExtractedImplementationManifest({
-      manifestJson: implementationManifestJson,
-      task,
-      projectRoot,
-      planText: syncedPlan,
-    });
-  }
   if (!implementationManifestJson && shouldRequestImplementationManifest(task)) {
     implementationManifestJson = buildDeterministicImplementationManifest({
       task,

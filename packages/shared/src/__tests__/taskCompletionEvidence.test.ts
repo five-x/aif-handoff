@@ -56,6 +56,7 @@ function implementationManifest(input: {
     evidenceRefs?: string[];
     notes?: string | null;
   }>;
+  planChecklist?: Record<string, unknown>;
   regressionExplanation?: string | null;
 }): string {
   return JSON.stringify({
@@ -88,7 +89,13 @@ function implementationManifest(input: {
       },
     ],
     evidenceRefs: ["verify-1"],
-    planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+    planChecklist: input.planChecklist ?? {
+      total: 1,
+      completed: 1,
+      pending: 0,
+      synced: true,
+      pendingItems: [],
+    },
     reviewClosure: { status: "passed", evidenceRefs: ["verify-1"] },
     commitEvidence: { status: "not_committed", evidenceRefs: [] },
     regressionExplanation: input.regressionExplanation ?? null,
@@ -1428,6 +1435,80 @@ describe("taskCompletionEvidence", () => {
 
     expect(result.ok).toBe(false);
     expect(codes(result)).toContain("plan_checklist_drift");
+  });
+
+  it("blocks review handoff when the actual plan checklist still has raw pending items", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-pending-checklist",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [x] Task 1: Implement feature\n- [ ] Task 2: Remove obsolete branch",
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-pending-checklist",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+          planChecklist: {
+            total: 2,
+            completed: 1,
+            pending: 1,
+            synced: true,
+            pendingItems: ["Remove obsolete branch"],
+          },
+        }),
+        agentActivityLog:
+          "[2026-06-03T00:00:00.000Z] Tool: run_shell npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codes(result)).toContain("plan_checklist_drift");
+  });
+
+  it("accepts review handoff when all actual pending plan checklist items have valid dispositions", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+
+    const result = evaluateTaskCompletionEvidence({
+      projectRoot: root,
+      phase: "review_handoff",
+      task: {
+        id: "feature-disposed-checklist",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        plan: "## Plan\n- [x] Task 1: Implement feature\n- [ ] Task 2: Remove obsolete branch",
+        implementationManifestJson: implementationManifest({
+          taskId: "feature-disposed-checklist",
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+          planChecklist: {
+            total: 2,
+            completed: 1,
+            pending: 1,
+            synced: true,
+            pendingItems: ["Remove obsolete branch"],
+            waivedItems: [
+              {
+                item: "Task 2: Remove obsolete branch",
+                reason: "The approved implementation proved this branch no longer exists.",
+                evidenceRefs: ["verify-1"],
+              },
+            ],
+          },
+        }),
+        agentActivityLog:
+          "[2026-06-03T00:00:00.000Z] Tool: run_shell npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts",
+      },
+    });
+
+    expect(codes(result)).not.toContain("plan_checklist_drift");
   });
 
   it("blocks docs intent completion when changed files contradict the policy", () => {

@@ -42,6 +42,23 @@ describe("implementation manifest extraction", () => {
     ].join("\n");
   }
 
+  function validateManifestPlanChecklist(planChecklist: Record<string, unknown>) {
+    return validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        plan: "## Plan\n- [x] Task 1: Implement baseline\n- [ ] Task 2: Replace legacy path",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: JSON.stringify(validManifest({ planChecklist })),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+  }
+
   it("extracts a JSON fence when the model labels it as aif-implementation-manifest", () => {
     const text = `Done.
 
@@ -171,6 +188,247 @@ Here is unrelated JSON:
       "invalid_implementation_manifest",
     );
     expect(result.issues.map((issue) => issue.code)).toContain("missing_verification_evidence");
+  });
+
+  it.each(["supersededItems", "cancelledItems", "waivedItems"] as const)(
+    "accepts pending checklist items disposed by %s with verification evidence",
+    (field) => {
+      const result = validateManifestPlanChecklist({
+        total: 2,
+        completed: 1,
+        pending: 1,
+        synced: true,
+        pendingItems: ["Replace legacy path"],
+        [field]: [
+          {
+            item: "Task 2: Replace legacy path",
+            reason: "The approved implementation made this checklist item obsolete.",
+            evidenceRefs: ["ver-1"],
+          },
+        ],
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.issues.map((issue) => issue.code)).not.toContain("plan_checklist_drift");
+    },
+  );
+
+  it("rejects raw pending checklist items without valid dispositions", () => {
+    const result = validateManifestPlanChecklist({
+      total: 2,
+      completed: 1,
+      pending: 1,
+      synced: true,
+      pendingItems: ["Replace legacy path"],
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+  });
+
+  it("rejects bold pending checklist items even when manifest reports complete counts", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        plan: "## Plan\n- [x] **Task 1: Implement baseline**\n- [ ] **Task 2: Replace legacy path**",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          planChecklist: {
+            total: 2,
+            completed: 2,
+            pending: 0,
+            synced: true,
+            pendingItems: [],
+          },
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+  });
+
+  it("rejects checklist dispositions without a non-empty reason", () => {
+    const result = validateManifestPlanChecklist({
+      total: 2,
+      completed: 1,
+      pending: 1,
+      synced: true,
+      pendingItems: ["Replace legacy path"],
+      supersededItems: [{ item: "Replace legacy path", reason: " ", evidenceRefs: ["ver-1"] }],
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+  });
+
+  it("rejects checklist dispositions without verification evidence refs", () => {
+    const result = validateManifestPlanChecklist({
+      total: 2,
+      completed: 1,
+      pending: 1,
+      synced: true,
+      pendingItems: ["Replace legacy path"],
+      cancelledItems: [
+        {
+          item: "Replace legacy path",
+          reason: "Cancelled by approved scope change.",
+          evidenceRefs: [],
+        },
+      ],
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+  });
+
+  it("rejects checklist dispositions that reference undeclared verification evidence", () => {
+    const result = validateManifestPlanChecklist({
+      total: 2,
+      completed: 1,
+      pending: 1,
+      synced: true,
+      pendingItems: ["Replace legacy path"],
+      waivedItems: [
+        {
+          item: "Replace legacy path",
+          reason: "Waived by accepted implementation evidence.",
+          evidenceRefs: ["missing-verification"],
+        },
+      ],
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+  });
+
+  it("rejects checklist dispositions that do not cover actual pending plan items", () => {
+    const result = validateManifestPlanChecklist({
+      total: 2,
+      completed: 1,
+      pending: 1,
+      synced: true,
+      pendingItems: ["Replace legacy path"],
+      supersededItems: [
+        {
+          item: "Some other task",
+          reason: "The approved implementation made this obsolete.",
+          evidenceRefs: ["ver-1"],
+        },
+      ],
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+  });
+
+  it("rejects description-only dispositions for duplicate pending checklist descriptions", () => {
+    const result = validateImplementationManifest({
+      task: {
+        id: "task-feature",
+        title: "Build feature",
+        taskIntent: "feature",
+        plan: "## Plan\n- [ ] Task 1: Run verification\n- [ ] Task 2: Run verification",
+        agentActivityLog: validActivityLog(),
+      },
+      manifestJson: JSON.stringify(
+        validManifest({
+          planChecklist: {
+            total: 2,
+            completed: 0,
+            pending: 2,
+            synced: true,
+            pendingItems: ["Run verification", "Run verification"],
+            waivedItems: [
+              {
+                item: "Run verification",
+                reason: "Verification was covered by the manifest evidence.",
+                evidenceRefs: ["ver-1"],
+              },
+            ],
+          },
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+  });
+
+  it("requires dispositions to cover each duplicate pending checklist task identity", () => {
+    const baseTask = {
+      id: "task-feature",
+      title: "Build feature",
+      taskIntent: "feature" as const,
+      plan: "## Plan\n- [ ] Task 1: Run verification\n- [ ] Task 2: Run verification",
+      agentActivityLog: validActivityLog(),
+    };
+    const oneDisposition = validateImplementationManifest({
+      task: baseTask,
+      manifestJson: JSON.stringify(
+        validManifest({
+          planChecklist: {
+            total: 2,
+            completed: 0,
+            pending: 2,
+            synced: true,
+            pendingItems: ["Run verification", "Run verification"],
+            waivedItems: [
+              {
+                item: "Task 1: Run verification",
+                reason: "Verification task 1 was covered by the manifest evidence.",
+                evidenceRefs: ["ver-1"],
+              },
+            ],
+          },
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+    const bothDispositions = validateImplementationManifest({
+      task: baseTask,
+      manifestJson: JSON.stringify(
+        validManifest({
+          planChecklist: {
+            total: 2,
+            completed: 0,
+            pending: 2,
+            synced: true,
+            pendingItems: ["Run verification", "Run verification"],
+            waivedItems: [
+              {
+                item: "Task 1: Run verification",
+                reason: "Verification task 1 was covered by the manifest evidence.",
+                evidenceRefs: ["ver-1"],
+              },
+              {
+                item: "Task 2: Run verification",
+                reason: "Verification task 2 was covered by the manifest evidence.",
+                evidenceRefs: ["ver-1"],
+              },
+            ],
+          },
+        }),
+      ),
+      changedFiles: ["src/index.ts"],
+      meaningfulChangedFiles: ["src/index.ts"],
+      dirtyChangedFiles: ["src/index.ts"],
+      phase: "review_handoff",
+    });
+
+    expect(oneDisposition.issues.map((issue) => issue.code)).toContain("plan_checklist_drift");
+    expect(bothDispositions.ok).toBe(true);
+    expect(bothDispositions.issues.map((issue) => issue.code)).not.toContain(
+      "plan_checklist_drift",
+    );
   });
 
   it("normalizes completed commit evidence without rejecting the manifest shape", () => {
