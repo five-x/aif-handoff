@@ -33,6 +33,7 @@ import {
   classifyAuditCardDecision,
   classifyAuditSourceEvidence,
   classifyAuditSynthesisSourceReports,
+  classifyTrustedTaskCompletionEvidence,
   computeAuditReportArtifactSha256,
   computeAuditReportContentSha256,
   formatAuditSynthesisOutcomeForArtifact,
@@ -4112,6 +4113,7 @@ function runDeterministicAuditSynthesisRework(input: {
       gitLog,
     ].join("\n"),
     {
+      taskId: input.task.id,
       status: "completed",
       resolvedBlockers: ["deterministic audit synthesis rework completed"],
       verificationEvidence: [`git log verification captured for ${gitPath}`],
@@ -4123,7 +4125,9 @@ function runDeterministicAuditSynthesisRework(input: {
 function appendDeterministicAifResultContract(
   text: string,
   contract: {
-    status: "completed" | "blocked" | "partial";
+    taskId: string;
+    status: "completed" | "blocked" | "needs_input";
+    stopReason?: "done" | "blocked_by_validation" | "blocked_by_scope" | "needs_human_input";
     resolvedBlockers?: string[];
     unresolvedBlockers?: string[];
     verificationEvidence: string[];
@@ -4137,10 +4141,24 @@ function appendDeterministicAifResultContract(
     JSON.stringify(
       {
         status: contract.status,
-        resolvedBlockers: contract.resolvedBlockers ?? [],
-        unresolvedBlockers: contract.unresolvedBlockers ?? [],
-        verificationEvidence: contract.verificationEvidence,
+        taskId: contract.taskId,
         changedFiles: contract.changedFiles ?? [],
+        verification: contract.verificationEvidence.map((evidence) => ({
+          command: "deterministic validation",
+          status: contract.status === "completed" ? "passed" : "not_run",
+          evidence,
+        })),
+        resolvedBlockers: (contract.resolvedBlockers ?? []).map((entry) => ({
+          id: entry,
+          evidence: entry,
+        })),
+        unresolvedBlockers: (contract.unresolvedBlockers ?? []).map((entry) => ({
+          id: entry,
+          reason: entry,
+        })),
+        stopReason:
+          contract.stopReason ??
+          (contract.status === "completed" ? "done" : "blocked_by_validation"),
       },
       null,
       2,
@@ -4148,6 +4166,7 @@ function appendDeterministicAifResultContract(
     "```",
   ].join("\n");
   const validation = validateAifResultContract(resultText, {
+    expectedTaskId: contract.taskId,
     requireVerificationEvidence: true,
   });
   if (!validation.ok) {
@@ -4345,7 +4364,8 @@ function runDeterministicAuditReportRepair(input: {
   return {
     status,
     resultText: appendDeterministicAifResultContract(resultText, {
-      status: status === "accepted" ? "completed" : "partial",
+      taskId: input.task.id,
+      status: status === "accepted" ? "completed" : "blocked",
       resolvedBlockers:
         status === "accepted" ? ["deterministic audit report repair passed strict validation"] : [],
       unresolvedBlockers,
@@ -4946,7 +4966,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         `Terminal reason: ${terminalReason}`,
       ].join("\n"),
       {
-        status: "partial",
+        taskId,
+        status: "blocked",
         unresolvedBlockers: [terminalReason],
         verificationEvidence: [
           `Terminal source_inconclusive state persisted for ${expectedAuditReportArtifactPath}`,
@@ -4993,7 +5014,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         `Terminal reason: ${terminalReason}`,
       ].join("\n"),
       {
-        status: "partial",
+        taskId,
+        status: "blocked",
         unresolvedBlockers: [terminalReason],
         verificationEvidence: [
           `Terminal source_inconclusive manifest persisted for ${expectedAuditReportArtifactPath}`,
@@ -5033,6 +5055,7 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         `Report artifact: ${expectedAuditReportArtifactPath}`,
       ].join("\n"),
       {
+        taskId,
         status: "completed",
         resolvedBlockers: ["existing audit report evidence already passed strict validation"],
         verificationEvidence: [
@@ -5085,7 +5108,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         `Terminal reason: ${terminalReason}`,
       ].join("\n"),
       {
-        status: "partial",
+        taskId,
+        status: "blocked",
         unresolvedBlockers: [terminalReason],
         verificationEvidence: [
           `Terminal source_inconclusive validation state persisted for ${expectedAuditReportArtifactPath}`,
@@ -5448,7 +5472,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         `Terminal reason: ${terminalReason}`,
       ].join("\n"),
       {
-        status: "partial",
+        taskId,
+        status: "blocked",
         unresolvedBlockers: [
           ...(issueCodes.length > 0 ? issueCodes : ["source_inconclusive"]),
           terminalReason,
@@ -5530,7 +5555,8 @@ export async function runImplementer(taskId: string, projectRoot: string): Promi
         `Terminal reason: ${terminalReason}`,
       ].join("\n"),
       {
-        status: "partial",
+        taskId,
+        status: "blocked",
         unresolvedBlockers: [terminalReason],
         verificationEvidence: [
           `Final deterministic guard terminalized ${expectedAuditReportArtifactPath}`,
@@ -5612,19 +5638,20 @@ BLOCKING_FINDINGS_SNAPSHOT
 
 Rework handling protocol:
 1) Make the minimal changes required by the rework comment. Do NOT refactor unrelated code.
-2) Return one fenced \`aif-result\` JSON block with status, resolvedBlockers, unresolvedBlockers, verificationEvidence, and changedFiles.
-3) If the rework cannot be completed, set status to \`blocked\` and list unresolvedBlockers.
-4) If the rework request cannot be satisfied (e.g. it asks for something impossible or contradicts an earlier decision), say so EXPLICITLY in the final result text — do not silently skip it or claim "already done".
-5) If the plan checklist shows all items completed, do not interpret that as "nothing to do" — the rework comment is the source of truth for this run.
-6) Treat REWORK_BLOCKED_REASON as actionable guard feedback. If it names invalid or missing report references, edit the report artifact to remove or replace those exact references before closing.
-7) If REWORK_BLOCKED_REASON says invalid_or_missing_file_references, you MUST remove every exact bad reference token named there from the report artifact. Do not only describe the change in your final answer. Use repository tools to read the report, write the corrected report, run a command or read-back check proving the bad tokens are absent, git add/commit the report artifact, and verify with git log -1 --name-only --oneline.
-8) In diagnostic audit/report tasks, every Evidence reference must be an existing file under the project root with a concrete line or line range. Do not cite directories such as src:1-2 or src/bot_intevra:1-20; cite specific files instead.
-9) If REWORK_BLOCKED_REASON says low_quality_report_evidence, remove every placeholder, speculative claim, and fake command output from the report artifact. Replace it with exact output from tools you actually ran, or remove the finding.
-10) If the exact invalid tokens from REWORK_BLOCKED_REASON still appear in the report artifact, the rework is not complete. Continue editing until they are gone or explicitly report why the report cannot be corrected.
-11) Before handing back to review, perform a pre-review self-check against every blocking finding ID in BLOCKING_FINDINGS_SNAPSHOT. For each ID, identify the concrete closure condition, the file/artifact change or observed evidence that satisfies it, and whether the same finding remains unresolved.
-12) When a deterministic validator or guard exists, run the relevant self-check before closing. For audit/report artifacts, prove valid manifest requirements, bound evidenceRefs, declared scope coverage, and substantive evidence before review handoff.
-13) Do not claim a finding is addressed unless the final result text names its exact ID and includes closure evidence. If any finding ID remains unresolved or lacks proof, say so explicitly and leave the task for blocked/manual handling rather than presenting the rework as complete.
-14) In the final result text, explicitly list which blocking finding IDs from BLOCKING_FINDINGS_SNAPSHOT were addressed and which IDs remain unresolved, and include the git log verification for any report artifact commit.`
+2) Return exactly one fenced \`aif-result\` JSON block and no other fenced \`aif-result\` block.
+3) The block must be valid JSON with this schema: \`status\` (\`completed\`, \`blocked\`, or \`needs_input\`), \`taskId\` exactly \`${task.id}\`, \`changedFiles\` string array, \`verification\` array of \`{ "command": string, "status": "passed" | "failed" | "not_run", "evidence": string }\`, \`resolvedBlockers\` array of \`{ "id": string, "evidence": string }\`, \`unresolvedBlockers\` array of \`{ "id": string, "reason": string }\`, and \`stopReason\` (\`done\`, \`blocked_by_validation\`, \`blocked_by_scope\`, or \`needs_human_input\`).
+4) If rework is complete, set \`status\` to \`completed\`, \`stopReason\` to \`done\`, leave \`unresolvedBlockers\` empty, and include at least one \`verification\` entry with \`status\` \`passed\`.
+5) If the rework cannot be completed or needs operator input, set \`status\` to \`blocked\` or \`needs_input\`, use the matching \`stopReason\`, and put every remaining blocker in \`unresolvedBlockers\`.
+6) Do not include reasoning, raw provider diagnostics, chain-of-thought, repeated review comments, narrative summaries, or a prose restatement of the task in the final output. Keep all closeout facts inside the single \`aif-result\` block.
+7) If the plan checklist shows all items completed, do not interpret that as "nothing to do" — the rework comment is the source of truth for this run.
+8) Treat REWORK_BLOCKED_REASON as actionable guard feedback. If it names invalid or missing report references, edit the report artifact to remove or replace those exact references before closing.
+9) If REWORK_BLOCKED_REASON says invalid_or_missing_file_references, you MUST remove every exact bad reference token named there from the report artifact. Do not only describe the change in your final answer. Use repository tools to read the report, write the corrected report, run a command or read-back check proving the bad tokens are absent, git add/commit the report artifact, and verify with git log -1 --name-only --oneline.
+10) In diagnostic audit/report tasks, every Evidence reference must be an existing file under the project root with a concrete line or line range. Do not cite directories such as src:1-2 or src/bot_intevra:1-20; cite specific files instead.
+11) If REWORK_BLOCKED_REASON says low_quality_report_evidence, remove every placeholder, speculative claim, and fake command output from the report artifact. Replace it with exact output from tools you actually ran, or remove the finding.
+12) If the exact invalid tokens from REWORK_BLOCKED_REASON still appear in the report artifact, the rework is not complete. Continue editing until they are gone or explicitly report why the report cannot be corrected.
+13) Before handing back to review, perform a pre-review self-check against every blocking finding ID in BLOCKING_FINDINGS_SNAPSHOT. For each ID, identify the concrete closure condition, the file/artifact change or observed evidence that satisfies it, and whether the same finding remains unresolved.
+14) When a deterministic validator or guard exists, run the relevant self-check before closing. For audit/report artifacts, prove valid manifest requirements, bound evidenceRefs, declared scope coverage, and substantive evidence before review handoff.
+15) Do not claim a finding is addressed unless \`resolvedBlockers\` names its exact ID and includes closure evidence. If any finding ID remains unresolved or lacks proof, put it in \`unresolvedBlockers\` rather than presenting the rework as complete.`
     : "";
 
   const reworkSystemAppend = isRework
@@ -6396,10 +6423,59 @@ Writer rules:
 
   if (task.reworkRequested) {
     const aifResult = validateAifResultContract(enrichedResult, {
-      requireCompleted: true,
+      expectedTaskId: taskId,
       requireVerificationEvidence: true,
     });
     if (!aifResult.ok) {
+      const trustedEvidence = classifyTrustedTaskCompletionEvidence({
+        task: {
+          ...task,
+          plan: syncedPlan ?? task.plan,
+        },
+        projectRoot,
+        currentImplementationManifestJson: implementationManifestJson,
+        currentResultText: enrichedResult,
+        phase: "completion",
+      });
+      if (trustedEvidence.ok) {
+        logActivity(
+          taskId,
+          "Agent",
+          `Invalid aif-result contract overridden by trusted evidence: ${trustedEvidence.reasons.join(", ")}`,
+        );
+      } else {
+        const nowIso = new Date().toISOString();
+        if (syncedPlan) {
+          persistTaskPlanForTask({
+            taskId,
+            planText: syncedPlan,
+            projectRoot,
+            isFix: task.isFix,
+            planPath: task.planPath,
+            updatedAt: nowIso,
+          });
+        }
+        const blockedReason = formatAifResultContractBlockedReason(aifResult);
+        setTaskFields(taskId, {
+          status: "blocked_external",
+          implementationLog: enrichedResult,
+          ...clearStaleImplementationManifestPatch(task),
+          blockedReason,
+          blockedFromStatus: "implementing",
+          retryAfter: null,
+          manualReviewRequired: false,
+          reworkRequested: true,
+          lastHeartbeatAt: nowIso,
+          updatedAt: nowIso,
+        });
+        logActivity(taskId, "Agent", blockedReason);
+        log.debug(
+          { taskId, issueCodes: aifResult.issues.map((issue) => issue.code) },
+          "Implementation rework blocked by invalid aif-result contract",
+        );
+        return;
+      }
+    } else if (aifResult.result && aifResult.result.status !== "completed") {
       const nowIso = new Date().toISOString();
       if (syncedPlan) {
         persistTaskPlanForTask({
@@ -6411,7 +6487,12 @@ Writer rules:
           updatedAt: nowIso,
         });
       }
-      const blockedReason = formatAifResultContractBlockedReason(aifResult);
+      const unresolved = aifResult.result.unresolvedBlockers
+        .map((entry) => `${entry.id}: ${entry.reason}`)
+        .join("; ");
+      const blockedReason = `aif_result_structured_non_success: ${aifResult.result.status} (${aifResult.result.stopReason})${
+        unresolved ? `: ${unresolved}` : ""
+      }`;
       setTaskFields(taskId, {
         status: "blocked_external",
         implementationLog: enrichedResult,
@@ -6426,8 +6507,12 @@ Writer rules:
       });
       logActivity(taskId, "Agent", blockedReason);
       log.debug(
-        { taskId, issueCodes: aifResult.issues.map((issue) => issue.code) },
-        "Implementation rework blocked by invalid aif-result contract",
+        {
+          taskId,
+          status: aifResult.result.status,
+          stopReason: aifResult.result.stopReason,
+        },
+        "Implementation rework returned structured non-success aif-result",
       );
       return;
     }

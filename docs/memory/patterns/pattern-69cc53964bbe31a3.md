@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::04_aif_result_contract_and_output::project-capsule
+memory_id: task::aif-handoff::work::04_aif_result_contract_and_output::pattern-69cc53964bbe31a3
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: 04_aif_result_contract_and_output
 source_path: docs/rdpi/work/04_aif_result_contract_and_output
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: pattern
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- pattern
   source_refs:
 - docs/rdpi/work/04_aif_result_contract_and_output/research.md
 - docs/rdpi/work/04_aif_result_contract_and_output/design.md
@@ -35,16 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 04_aif_result_contract_and_output.
+Centralize machine-readable result contracts in shared validators and let prompts consume the validator contract.
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable implementation or runbook pattern.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same operational or implementation pattern appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
+Do not reuse when the pattern depends on obsolete tools or constraints.

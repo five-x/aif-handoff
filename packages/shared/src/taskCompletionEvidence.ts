@@ -36,6 +36,10 @@ import {
   type TaskIntentChangedFilesIssue,
 } from "./taskIntent.js";
 import { evaluateTaskPlanQuality, type TaskPlanQualityIssueCode } from "./planQuality.js";
+import {
+  validateAifResultContract,
+  type AifResultContractValidationResult,
+} from "./aifResultContract.js";
 
 export type TaskCompletionIssueCode =
   | "zero_delta"
@@ -155,6 +159,19 @@ export interface TaskCompletionEvidenceInput {
   expectedSourceSnapshot?: AuditReportSourceSnapshot | null;
   auditEvidenceUnits?: AuditEvidenceUnit[];
   requireAuditLedgerEvidence?: boolean;
+}
+
+export type TrustedTaskCompletionEvidenceReason =
+  | "valid_implementation_manifest"
+  | "valid_aif_result_with_passed_verification"
+  | "trusted_operator_committed_files_and_verification"
+  | "valid_deterministic_recovery_manifest";
+
+export interface TrustedTaskCompletionEvidenceResult {
+  ok: boolean;
+  reasons: TrustedTaskCompletionEvidenceReason[];
+  aifResultValidation: AifResultContractValidationResult | null;
+  implementationManifestValidation: ImplementationManifestValidationResult | null;
 }
 
 const RISKY_TASK_PATTERN =
@@ -1510,6 +1527,73 @@ export function collectTaskCompletionChangedFiles(input: {
     committedFiles: gitEvidence.committedFiles,
     meaningfulChangedFiles,
     meaningfulDirtyChangedFiles,
+  };
+}
+
+export function classifyTrustedTaskCompletionEvidence(input: {
+  task: TaskCompletionEvidenceTask;
+  projectRoot: string;
+  currentImplementationManifestJson?: string | null;
+  currentResultText?: string | null;
+  phase?: Exclude<TaskCompletionEvidencePhase, "pre_implementation">;
+}): TrustedTaskCompletionEvidenceResult {
+  const phase = input.phase ?? "completion";
+  const changedFileEvidence = collectTaskCompletionChangedFiles({
+    task: input.task,
+    projectRoot: input.projectRoot,
+  });
+  const manifestValidation = validateImplementationManifest({
+    task: taskForEvidenceInference(input.task),
+    manifestJson: input.currentImplementationManifestJson,
+    changedFiles: changedFileEvidence.changedFiles,
+    meaningfulChangedFiles: changedFileEvidence.meaningfulChangedFiles,
+    dirtyChangedFiles: changedFileEvidence.meaningfulDirtyChangedFiles,
+    trustedCommittedChangedFiles: input.task.trustedCommittedChangedFiles ?? [],
+    trustedVerificationCommands: input.task.trustedVerificationCommands ?? [],
+    phase,
+  });
+  const aifResultValidation = input.currentResultText
+    ? validateAifResultContract(input.currentResultText, {
+        expectedTaskId: input.task.id,
+        requireCompleted: true,
+        requireVerificationEvidence: true,
+      })
+    : null;
+  const trustedOperatorEvidence =
+    (input.task.trustedCommittedChangedFiles?.filter((entry) => entry.trim().length > 0).length ??
+      0) > 0 &&
+    (input.task.trustedVerificationCommands?.filter((entry) => entry.trim().length > 0).length ??
+      0) > 0;
+  const reasons: TrustedTaskCompletionEvidenceReason[] = [];
+
+  if (manifestValidation.ok && manifestValidation.required) {
+    reasons.push("valid_implementation_manifest");
+  }
+  if (
+    aifResultValidation?.ok &&
+    aifResultValidation.result?.status === "completed" &&
+    aifResultValidation.result.verification.some((entry) => entry.status === "passed")
+  ) {
+    reasons.push("valid_aif_result_with_passed_verification");
+  }
+  if (trustedOperatorEvidence) {
+    reasons.push("trusted_operator_committed_files_and_verification");
+  }
+  if (
+    manifestValidation.ok &&
+    manifestValidation.required &&
+    /\bdeterministic (?:implementation )?manifest recovery\b/i.test(
+      input.task.agentActivityLog ?? "",
+    )
+  ) {
+    reasons.push("valid_deterministic_recovery_manifest");
+  }
+
+  return {
+    ok: reasons.length > 0,
+    reasons,
+    aifResultValidation,
+    implementationManifestValidation: manifestValidation,
   };
 }
 

@@ -12,7 +12,6 @@ import {
   usageEvents,
   hashAifPlanManifest,
   evaluateTaskCompletionEvidence,
-  validateImplementationManifest,
   validateAuditReportArtifact,
   computeAuditReportArtifactSha256,
   computeAuditReportContentSha256,
@@ -156,15 +155,26 @@ function streamSuccess(result: string): AsyncIterable<{
   };
 }
 function aifResultSuccessBlock(overrides: Record<string, unknown> = {}): string {
+  const taskId = typeof overrides.taskId === "string" ? overrides.taskId : "task-1";
   return [
     "```aif-result",
     JSON.stringify(
       {
         status: "completed",
-        resolvedBlockers: ["rework-blocker"],
-        unresolvedBlockers: [],
-        verificationEvidence: ["Focused rework verification passed."],
+        taskId,
         changedFiles: [],
+        verification: [
+          {
+            command: "npm.cmd test",
+            status: "passed",
+            evidence: "Focused rework verification passed.",
+          },
+        ],
+        resolvedBlockers: [
+          { id: "rework-blocker", evidence: "Focused rework verification passed." },
+        ],
+        unresolvedBlockers: [],
+        stopReason: "done",
         ...overrides,
       },
       null,
@@ -234,6 +244,33 @@ function staleImplementationManifestJson(taskId: string): string {
     evidenceRefs: ["verify-stale"],
     planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
     reviewClosure: { status: "pending", evidenceRefs: [] },
+    commitEvidence: { status: "not_required", evidenceRefs: [] },
+    knownLimitations: [],
+  });
+}
+
+function validPersistedImplementationManifestJson(taskId: string): string {
+  return JSON.stringify({
+    version: 1,
+    taskId,
+    intent: "feature",
+    planManifestHash: null,
+    changedFiles: [{ path: "src/feature.ts", status: "modified" }],
+    diffSummary: { summary: "Previous valid manifest.", filesChanged: 1 },
+    verificationEvidence: [
+      {
+        id: "verify-1",
+        command: "npm.cmd test",
+        status: "passed",
+        outputSha256: "a".repeat(64),
+        outputPreview: "tests passed",
+        outputPreviewTruncated: false,
+      },
+    ],
+    acceptanceCriteria: [{ id: "ac-1", status: "satisfied", evidenceRefs: ["verify-1"] }],
+    evidenceRefs: ["verify-1"],
+    planChecklist: { total: 1, completed: 1, pending: 0, synced: true },
+    reviewClosure: { status: "passed", evidenceRefs: ["verify-1"] },
     commitEvidence: { status: "not_required", evidenceRefs: [] },
     knownLimitations: [],
   });
@@ -2713,8 +2750,17 @@ describe("runImplementer rework behavior", () => {
     queryMock.mockReturnValueOnce(
       streamSuccess(
         `Implementation done\n\n${aifResultSuccessBlock({
-          resolvedBlockers: ["finding-1"],
-          verificationEvidence: ["read-back check confirmed bad references are absent"],
+          taskId: "task-2",
+          resolvedBlockers: [
+            { id: "finding-1", evidence: "read-back check confirmed bad references are absent" },
+          ],
+          verification: [
+            {
+              command: "read-back check",
+              status: "passed",
+              evidence: "confirmed bad references are absent",
+            },
+          ],
         })}`,
       ),
     );
@@ -2797,7 +2843,12 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("Rework handling protocol:");
     expect(call.prompt).toContain("MUST remove every exact bad reference token");
     expect(call.prompt).toContain("read-back check proving the bad tokens are absent");
-    expect(call.prompt).toContain("blocking finding IDs from BLOCKING_FINDINGS_SNAPSHOT");
+    expect(call.prompt).toContain("`resolvedBlockers` names its exact ID");
+    expect(call.prompt).toContain("Return exactly one fenced `aif-result` JSON block");
+    expect(call.prompt).toContain("raw provider diagnostics");
+    expect(call.prompt).toContain("narrative summaries");
+    expect(call.prompt).not.toContain("verificationEvidence, and changedFiles");
+    expect(call.prompt).not.toContain("final result text names its exact ID");
 
     // Coordinator lead line is still present further down the prompt
     expect(call.prompt).toContain("Implement the task using the provided plan.");
@@ -2909,7 +2960,7 @@ describe("runImplementer rework behavior", () => {
       "Audit report card reached the final deterministic guard",
     );
     expect(updatedTask?.implementationLog).toContain("```aif-result");
-    expect(updatedTask?.implementationLog).toContain('"status": "partial"');
+    expect(updatedTask?.implementationLog).toContain('"status": "blocked"');
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
     expect(updatedTask?.blockedReason).toContain("operator_input_required:");
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-repair");
@@ -4687,7 +4738,7 @@ describe("runImplementer rework behavior", () => {
       "Repeated deterministic audit report repair did not satisfy strict validation; terminalized as source_inconclusive before runtime implementation rework.",
     );
     expect(updatedTask?.implementationLog).toContain("```aif-result");
-    expect(updatedTask?.implementationLog).toContain('"status": "partial"');
+    expect(updatedTask?.implementationLog).toContain('"status": "blocked"');
     expect(updatedTask?.implementationLog).toContain("placeholder_author_metadata");
     expect(updatedTask?.implementationLog).not.toContain("Runtime implementer result:");
     expect(updatedTask?.blockedReason).toContain("operator_input_required:");
@@ -5062,8 +5113,17 @@ describe("runImplementer rework behavior", () => {
     queryMock.mockReturnValueOnce(
       streamSuccess(
         `Implementation done\n\n${aifResultSuccessBlock({
-          resolvedBlockers: ["finding-missing-manifest"],
-          verificationEvidence: ["audit/generic.md read-back checked"],
+          taskId: "task-audit-generic-evidence-repair",
+          resolvedBlockers: [
+            { id: "finding-missing-manifest", evidence: "audit/generic.md read-back checked" },
+          ],
+          verification: [
+            {
+              command: "read-back check",
+              status: "passed",
+              evidence: "audit/generic.md read-back checked",
+            },
+          ],
         })}`,
       ),
     );
@@ -5198,8 +5258,20 @@ describe("runImplementer rework behavior", () => {
     queryMock.mockReturnValueOnce(
       streamSuccess(
         `Implementation done\n\n${aifResultSuccessBlock({
-          resolvedBlockers: ["finding-missing-manifest"],
-          verificationEvidence: ["audit/generic.md config evidence read-back checked"],
+          taskId: "task-audit-scoped-config-repair",
+          resolvedBlockers: [
+            {
+              id: "finding-missing-manifest",
+              evidence: "audit/generic.md config evidence read-back checked",
+            },
+          ],
+          verification: [
+            {
+              command: "read-back check",
+              status: "passed",
+              evidence: "audit/generic.md config evidence read-back checked",
+            },
+          ],
         })}`,
       ),
     );
@@ -5701,7 +5773,7 @@ describe("runImplementer rework behavior", () => {
       "manifest already declares source_inconclusive",
     );
     expect(updatedTask?.implementationLog).toContain("```aif-result");
-    expect(updatedTask?.implementationLog).toContain('"status": "partial"');
+    expect(updatedTask?.implementationLog).toContain('"status": "blocked"');
     const artifact = findRoadmapBatchArtifactByTaskId("task-audit-existing-source-inconclusive");
     if (!artifact) throw new Error("missing existing source_inconclusive artifact");
     expect(artifact.state).toBe("source_inconclusive");
@@ -7263,10 +7335,18 @@ describe("runImplementer rework behavior", () => {
             "```aif-result",
             JSON.stringify({
               status: "completed",
-              resolvedBlockers: ["finding-1"],
-              unresolvedBlockers: [],
-              verificationEvidence: ["ev-feature-rework-test"],
+              taskId: "task-feature-rework-manifest",
               changedFiles: ["src/feature.ts"],
+              verification: [
+                {
+                  command: "npm test",
+                  status: "passed",
+                  evidence: "ev-feature-rework-test",
+                },
+              ],
+              resolvedBlockers: [{ id: "finding-1", evidence: "ev-feature-rework-test" }],
+              unresolvedBlockers: [],
+              stopReason: "done",
             }),
             "```",
           ].join("\n"),
@@ -7346,6 +7426,61 @@ describe("runImplementer rework behavior", () => {
     ).toBeNull();
   });
 
+  it("does not let a valid stored manifest bypass missing current aif-result rework output", async () => {
+    const db = testDb.current;
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "t@t.local"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "T"], { cwd: projectRoot, stdio: "ignore" });
+    writeFileSync(join(projectRoot, "README.md"), "# test\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init", "--no-verify"], {
+      cwd: projectRoot,
+      stdio: "ignore",
+    });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    queryMock.mockReturnValueOnce(
+      streamSuccess("Implementation done without structured rework result."),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-feature-rework-stored-manifest-missing-result",
+        projectId: "project-1",
+        title: "Feature rework stored manifest missing result",
+        description: "Add a small feature.",
+        taskIntent: "feature",
+        status: "implementing",
+        plan: "## Plan\n- [x] Implement feature behavior\n- [x] Run tests",
+        implementationManifestJson: validPersistedImplementationManifestJson(
+          "task-feature-rework-stored-manifest-missing-result",
+        ),
+        agentActivityLog: [
+          "[2026-06-03T00:00:00.000Z] Agent: previous implement-coordinator started",
+          "[2026-06-03T00:00:01.000Z] Tool: run_shell npm.cmd test",
+          "[2026-06-03T00:00:02.000Z] Agent: previous implement-coordinator complete",
+        ].join("\n"),
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-feature-rework-stored-manifest-missing-result", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-feature-rework-stored-manifest-missing-result"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toContain("missing_aif_result_contract");
+    expect(updatedTask?.blockedReason).not.toContain("missing_implementation_manifest");
+    expect(updatedTask?.reworkRequested).toBe(true);
+    expect(updatedTask?.implementationManifestJson).toBeNull();
+  });
+
   it("blocks non-manifest rework output that omits the aif-result contract", async () => {
     const db = testDb.current;
     queryMock.mockReturnValueOnce(streamSuccess("General rework done without structured result."));
@@ -7379,6 +7514,60 @@ describe("runImplementer rework behavior", () => {
       (updatedTask as { implementationManifestJson?: string | null } | undefined)
         ?.implementationManifestJson,
     ).toBeNull();
+  });
+
+  it("persists blocked aif-result rework as structured non-success", async () => {
+    const db = testDb.current;
+    queryMock.mockReturnValueOnce(
+      streamSuccess(
+        [
+          "```aif-result",
+          JSON.stringify({
+            status: "blocked",
+            taskId: "task-general-rework-blocked-result",
+            changedFiles: [],
+            verification: [
+              {
+                command: "npm.cmd test",
+                status: "failed",
+                evidence: "Validation still fails.",
+              },
+            ],
+            resolvedBlockers: [],
+            unresolvedBlockers: [
+              { id: "validation", reason: "Existing validation failure needs operator input." },
+            ],
+            stopReason: "blocked_by_validation",
+          }),
+          "```",
+        ].join("\n"),
+      ),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-general-rework-blocked-result",
+        projectId: "project-1",
+        title: "General rework blocked result",
+        description: "Update operational notes.",
+        taskIntent: "general",
+        status: "implementing",
+        plan: "## Plan\n- [x] Update notes",
+        reworkRequested: true,
+        useSubagents: true,
+      })
+      .run();
+
+    await runImplementer("task-general-rework-blocked-result", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-general-rework-blocked-result"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.blockedReason).toContain("aif_result_structured_non_success: blocked");
+    expect(updatedTask?.blockedReason).toContain("Existing validation failure");
+    expect(updatedTask?.reworkRequested).toBe(true);
   });
 
   it("does not build deterministic fallback for an omitted manifest with scope validation issues", async () => {
@@ -7523,10 +7712,18 @@ describe("runImplementer rework behavior", () => {
           "```aif-result",
           JSON.stringify({
             status: "completed",
-            resolvedBlockers: ["finding-1"],
-            unresolvedBlockers: [],
-            verificationEvidence: ["manual verification noted"],
+            taskId: "task-feature-manifest-rework-limit",
             changedFiles: ["src/feature.ts"],
+            verification: [
+              {
+                command: "manual verification",
+                status: "passed",
+                evidence: "manual verification noted",
+              },
+            ],
+            resolvedBlockers: [{ id: "finding-1", evidence: "manual verification noted" }],
+            unresolvedBlockers: [],
+            stopReason: "done",
           }),
           "```",
         ].join("\n"),

@@ -1,0 +1,64 @@
+# Plan
+
+## Implementation plan
+
+1. Update `packages/shared/src/aifResultContract.ts`.
+   - Change status type to `completed | blocked | needs_input`.
+   - Add `AifResultStopReason`, structured verification, resolved blocker, and unresolved blocker types.
+   - Validate exactly one fenced block.
+   - Validate `taskId` when expected.
+   - Validate arrays and required fields instead of flattening old aliases.
+   - Reject `completed` with unresolved blockers.
+   - Reject `completed` with no passed verification item when verification is required.
+   - Preserve clear issue codes for missing contract, multiple blocks, invalid JSON, invalid status, missing verification, and related schema problems.
+2. Update shared tests in `packages/shared/src/__tests__/aifResultContract.test.ts`.
+   - Cover the required happy path.
+   - Cover missing block, multiple blocks, invalid JSON, invalid status, missing/wrong task id, completed with unresolved blockers, completed without verification, and blocked with reason accepted as structured non-success.
+3. Add stronger-evidence classification in `packages/shared/src/taskCompletionEvidence.ts`.
+   - Export a helper that takes a task, optional current result text, project root, and phase, then reports whether trusted evidence exists and why.
+   - Use implementation-manifest validation for current manifests.
+   - Treat trusted committed files plus trusted verification commands as accepted operator evidence.
+   - Treat valid current `aif-result` plus passed verification as trusted result evidence.
+   - Treat deterministic recovery only through already-valid implementation-manifest validation, not by accepting invalid normalized JSON.
+4. Add focused `taskCompletionEvidence` tests.
+   - Missing `aif-result` has no override without trusted evidence.
+   - Missing `aif-result` is overridden by valid implementation manifest evidence.
+   - Missing `aif-result` is overridden by accepted operator completion evidence.
+   - Invalid deterministic/manifest evidence does not override.
+5. Update `packages/agent/src/subagents/implementer.ts`.
+   - Replace deterministic `appendDeterministicAifResultContract` output shape with the new schema and pass `taskId`.
+   - Replace rework prompt output instructions with the single-block contract and remove prose/listing requirements.
+   - Validate rework output against expected `taskId`.
+   - If `aif-result` is missing/invalid and no stronger trusted evidence exists, block as `aif_result_contract_invalid`.
+   - If status is `blocked` or `needs_input`, persist a non-success blocked/input state with the structured reason instead of treating the rework as complete.
+6. Update `packages/agent/src/__tests__/implementer.test.ts`.
+   - Update `aifResultSuccessBlock` and all old-shape fixtures.
+   - Add/adjust tests for missing `aif-result`, multiple blocks, invalid JSON, blocked status, completed without verification, operator/trusted evidence override where applicable, and prompt text no longer requiring restatement or narrative prose.
+7. Complete result documentation after implementation and gates.
+   - Record before/after rework prompt block size in `result.md`.
+   - Record PLAN/TEST/REVIEW gate verdicts and verification commands.
+   - Run memsync after successful closeout.
+
+## Acceptance criteria
+
+- Rework output without valid `aif-result` is not considered successful unless stronger trusted evidence exists.
+- Narrative output is not required by the rework prompt.
+- Parser/validator covers the strict result contract with tests.
+- `blocked` and `needs_input` are structured outcomes, not successful closeout.
+- `result.md` records before/after prompt size for the rework block.
+- Mandatory RDPI gates pass: `PLAN PASS`, `TEST PASS`, `REVIEW PASS`.
+
+## Verification plan
+
+- `npm.cmd run test --workspace=@aif/shared -- src/__tests__/aifResultContract.test.ts src/__tests__/taskCompletionEvidence.test.ts`
+- `npm.cmd run test --workspace=@aif/agent -- src/__tests__/implementer.test.ts`
+- `rg -n "FIRST, restate the rework request|restate the rework request|final result text|verificationEvidence" packages/agent/src/subagents/implementer.ts packages/agent/src/__tests__/implementer.test.ts packages/shared/src/aifResultContract.ts packages/shared/src/__tests__/aifResultContract.test.ts`
+- `git diff --check`
+- `npm.cmd run lint`
+- `npm.cmd test`
+- `npm.cmd run build`
+
+## Reusable patterns
+
+- Centralize machine-readable result contracts in shared validators and let prompts consume the validator contract.
+- Keep evidence hierarchy explicit: higher-trust manifests/operator evidence can override lower-trust missing closeout text, but invalid deterministic recovery cannot.

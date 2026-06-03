@@ -628,6 +628,7 @@ export {
 // Task completion evidence guard (Node-only)
 export {
   collectTaskCompletionChangedFiles,
+  classifyTrustedTaskCompletionEvidence,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
   hasSubstantiveReportEvidence,
@@ -639,6 +640,8 @@ export {
   type TaskCompletionEvidenceResult,
   type TaskCompletionEvidenceTask,
   type TaskCompletionIssueCode,
+  type TrustedTaskCompletionEvidenceReason,
+  type TrustedTaskCompletionEvidenceResult,
 } from "./taskCompletionEvidence.js";
 
 // Development implementation manifest guard (Node-only)
@@ -691,7 +694,12 @@ export {
   type AifResultContractIssue,
   type AifResultContractIssueCode,
   type AifResultContractValidationResult,
+  type AifResultResolvedBlocker,
   type AifResultStatus,
+  type AifResultStopReason,
+  type AifResultUnresolvedBlocker,
+  type AifResultVerification,
+  type AifResultVerificationStatus,
   type ValidateAifResultContractOptions,
 } from "./aifResultContract.js";
 

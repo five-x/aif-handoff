@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  classifyTrustedTaskCompletionEvidence,
   collectTaskCompletionChangedFiles,
   evaluateTaskCompletionEvidence,
   formatTaskCompletionBlockedReason,
@@ -42,6 +43,32 @@ function initRepoOnBranch(branch: string): string {
 
 function codes(result: ReturnType<typeof evaluateTaskCompletionEvidence>): string[] {
   return result.issues.map((issue) => issue.code);
+}
+
+function aifResultBlock(taskId: string): string {
+  return [
+    "```aif-result",
+    JSON.stringify(
+      {
+        status: "completed",
+        taskId,
+        changedFiles: ["src/feature.ts"],
+        verification: [
+          {
+            command: "npm.cmd test",
+            status: "passed",
+            evidence: "Focused tests passed.",
+          },
+        ],
+        resolvedBlockers: [{ id: "review-1", evidence: "Reviewed change was applied." }],
+        unresolvedBlockers: [],
+        stopReason: "done",
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
 }
 
 function implementationManifest(input: {
@@ -893,6 +920,180 @@ describe("taskCompletionEvidence", () => {
     expect(codes(result)).not.toContain("implementation_changed_files_mismatch");
     expect(codes(result)).not.toContain("missing_verification_evidence");
     expect(codes(result)).not.toContain("verification_command_not_observed");
+  });
+
+  it("does not override missing aif-result without trusted evidence", () => {
+    const root = initRepo();
+
+    const result = classifyTrustedTaskCompletionEvidence({
+      projectRoot: root,
+      currentResultText: "Implementation done without a contract.",
+      phase: "completion",
+      task: {
+        id: "feature-without-trusted-evidence",
+        title: "Add feature flag",
+        taskIntent: "feature",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toEqual([]);
+    expect(result.aifResultValidation?.issues.map((issue) => issue.code)).toContain(
+      "missing_aif_result_contract",
+    );
+  });
+
+  it("overrides missing aif-result with a valid implementation manifest", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const taskId = "feature-with-trusted-manifest";
+    const verificationCommand =
+      "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts";
+
+    const result = classifyTrustedTaskCompletionEvidence({
+      projectRoot: root,
+      currentImplementationManifestJson: implementationManifest({
+        taskId,
+        intent: "feature",
+        changedFiles: ["src/feature.ts"],
+      }),
+      currentResultText: "Implementation done without a contract.",
+      phase: "review_handoff",
+      task: {
+        id: taskId,
+        title: "Add feature flag",
+        taskIntent: "feature",
+        trustedVerificationCommands: [verificationCommand],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reasons).toContain("valid_implementation_manifest");
+  });
+
+  it("does not use a stored task manifest when current manifest evidence is explicitly absent", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const taskId = "feature-with-stored-manifest-only";
+    const verificationCommand =
+      "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts";
+
+    const result = classifyTrustedTaskCompletionEvidence({
+      projectRoot: root,
+      currentImplementationManifestJson: null,
+      currentResultText: "Implementation done without a contract.",
+      phase: "review_handoff",
+      task: {
+        id: taskId,
+        title: "Add feature flag",
+        taskIntent: "feature",
+        trustedVerificationCommands: [verificationCommand],
+        implementationManifestJson: implementationManifest({
+          taskId,
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).not.toContain("valid_implementation_manifest");
+    expect(result.implementationManifestValidation?.issues.map((issue) => issue.code)).toContain(
+      "missing_implementation_manifest",
+    );
+  });
+
+  it("does not use a stored task manifest when current manifest evidence is omitted", () => {
+    const root = initRepo();
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = true;\n", "utf8");
+    const taskId = "feature-with-omitted-current-manifest";
+    const verificationCommand =
+      "npm.cmd test --workspace=@aif/shared -- --run src/__tests__/taskCompletionEvidence.test.ts";
+
+    const result = classifyTrustedTaskCompletionEvidence({
+      projectRoot: root,
+      currentResultText: "Implementation done without a contract.",
+      phase: "review_handoff",
+      task: {
+        id: taskId,
+        title: "Add feature flag",
+        taskIntent: "feature",
+        trustedVerificationCommands: [verificationCommand],
+        implementationManifestJson: implementationManifest({
+          taskId,
+          intent: "feature",
+          changedFiles: ["src/feature.ts"],
+        }),
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).not.toContain("valid_implementation_manifest");
+    expect(result.implementationManifestValidation?.issues.map((issue) => issue.code)).toContain(
+      "missing_implementation_manifest",
+    );
+  });
+
+  it("overrides missing aif-result with accepted operator completion evidence", () => {
+    const root = initRepo();
+
+    const result = classifyTrustedTaskCompletionEvidence({
+      projectRoot: root,
+      currentResultText: "Implementation done without a contract.",
+      phase: "completion",
+      task: {
+        id: "feature-with-trusted-operator-evidence",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        trustedCommittedChangedFiles: ["src/feature.ts"],
+        trustedVerificationCommands: ["npm.cmd test"],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reasons).toContain("trusted_operator_committed_files_and_verification");
+  });
+
+  it("accepts valid current aif-result with passed verification as trusted evidence", () => {
+    const root = initRepo();
+    const taskId = "feature-with-current-aif-result";
+
+    const result = classifyTrustedTaskCompletionEvidence({
+      projectRoot: root,
+      currentResultText: aifResultBlock(taskId),
+      phase: "completion",
+      task: {
+        id: taskId,
+        title: "Add feature flag",
+        taskIntent: "general",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reasons).toContain("valid_aif_result_with_passed_verification");
+  });
+
+  it("keeps invalid deterministic recovery manifest evidence diagnostic-only", () => {
+    const root = initRepo();
+
+    const result = classifyTrustedTaskCompletionEvidence({
+      projectRoot: root,
+      currentResultText: "Implementation done without a contract.",
+      phase: "completion",
+      task: {
+        id: "feature-with-invalid-deterministic-recovery",
+        title: "Add feature flag",
+        taskIntent: "feature",
+        agentActivityLog:
+          "deterministic implementation manifest recovery retained as diagnostic evidence after runtime exhaustion",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).not.toContain("valid_deterministic_recovery_manifest");
   });
 
   it("allows plan-backed development review handoff when all plan criteria are covered", () => {

@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::04_aif_result_contract_and_output::project-capsule
+memory_id: task::aif-handoff::work::04_aif_result_contract_and_output::decision-1c28e0d113985ae2
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: 04_aif_result_contract_and_output
 source_path: docs/rdpi/work/04_aif_result_contract_and_output
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: decision
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- decision
   source_refs:
 - docs/rdpi/work/04_aif_result_contract_and_output/research.md
 - docs/rdpi/work/04_aif_result_contract_and_output/design.md
@@ -35,16 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 04_aif_result_contract_and_output.
+Add a shared stronger-evidence helper to `taskCompletionEvidence.ts` so missing/invalid `aif-result` is not considered fatal when trusted evidence already exists:
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable decision made during the task.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same design pressure appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
+Do not reuse when the constraints that justified the decision changed.
