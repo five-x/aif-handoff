@@ -9,18 +9,23 @@ import {
   listTaskComments,
   persistTaskPlanForTask,
   setTaskFields,
+  createOrReusePendingTaskSplitProposal,
 } from "@aif/data";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import {
   buildDeterministicDiagnosticPlan,
+  buildPlanningDecisionFingerprint,
   logger,
   formatAttachmentsForPrompt,
   formatTaskIntentContractForPrompt,
   getEnv,
   getProjectConfig,
   normalizeAifPlanManifestForTask,
+  parseAifPlanningDecisionContract,
+  stripAifPlanningDecisionBlocks,
   evaluateTaskPlanQuality,
   TaskPlanQualityError,
+  type AifPlanningDecisionContract,
   type AifPlanManifest,
   type AifPlanManifestExpectedArtifact,
   type TaskPlanQualityTask,
@@ -529,6 +534,154 @@ function buildFixCommandText(taskContext: string): string {
   return `/aif-fix --plan-first ${JSON.stringify(taskContext)}`;
 }
 
+function plannerSplitProposalAlias(taskId: string): string {
+  return `planner-split:${taskId}`;
+}
+
+function plannerDecisionSourceRef(taskId: string): string {
+  return `task:${taskId}:planner_decision`;
+}
+
+function blockPlannerParent(input: {
+  task: PlannerTask;
+  projectRoot: string;
+  planPath: string;
+  reason: string;
+  fromStatus?: PlannerTask["status"] | null;
+}): void {
+  const nowIso = new Date().toISOString();
+  persistTaskPlanForTask({
+    taskId: input.task.id,
+    planText: null,
+    projectRoot: input.projectRoot,
+    isFix: input.task.isFix,
+    planPath: input.planPath,
+    updatedAt: nowIso,
+  });
+  setTaskFields(input.task.id, {
+    status: "blocked_external",
+    blockedFromStatus: input.fromStatus ?? input.task.status ?? "planning",
+    blockedReason: input.reason,
+    retryAfter: null,
+    updatedAt: nowIso,
+  });
+}
+
+function planningDecisionChildrenForProposal(
+  task: PlannerTask,
+  decision: AifPlanningDecisionContract,
+) {
+  return decision.proposedChildren.map((child, index) => ({
+    title: child.title,
+    description: [
+      `Parent task: ${task.title}`,
+      `Split rationale: ${decision.reason}`,
+      `Scope: ${child.scope.join(", ")}`,
+      `Forbidden changes: ${child.forbiddenChanges.join(", ")}`,
+    ].join("\n"),
+    taskIntent: child.taskIntent,
+    phase: 1,
+    phaseName: "Planner split",
+    sequence: index + 1,
+    tags: ["planner-split"],
+    fileBoundaries: child.scope,
+    acceptanceCriteria: child.acceptanceCriteria,
+    verificationCommands: child.verificationCommands,
+    forbiddenChanges: child.forbiddenChanges,
+    splitRationale: decision.reason,
+  }));
+}
+
+function handleNonReadyPlanningDecision(input: {
+  task: PlannerTask;
+  projectRoot: string;
+  planPath: string;
+  decision: AifPlanningDecisionContract;
+}): void {
+  const { task, projectRoot, planPath, decision } = input;
+  if (decision.decision === "split_required") {
+    const sourceFingerprint = buildPlanningDecisionFingerprint({
+      taskId: task.id,
+      title: task.title,
+      description: task.description,
+      plannerMode: task.plannerMode,
+      taskIntent: task.taskIntent,
+      decision,
+    });
+    const proposalResult = createOrReusePendingTaskSplitProposal({
+      projectId: task.projectId,
+      parentTaskId: task.id,
+      sourceKind: "planner_decision",
+      sourceRef: plannerDecisionSourceRef(task.id),
+      sourceFingerprint,
+      roadmapAlias: plannerSplitProposalAlias(task.id),
+      taskIntent: task.taskIntent ?? "general",
+      summary: decision.reason,
+      proposedChildren: planningDecisionChildrenForProposal(task, decision),
+    });
+    const proposal = proposalResult.proposal;
+    if (proposalResult.status === "conflict") {
+      blockPlannerParent({
+        task,
+        projectRoot,
+        planPath,
+        fromStatus: task.blockedFromStatus ?? task.status,
+        reason: `split_required_conflict: pending planner split proposal ${proposal.id} already exists for ${task.id} with different source content`,
+      });
+      logActivity(
+        task.id,
+        "Agent",
+        `Planner split proposal conflict: ${proposal.id} (${proposal.proposedChildren.length} children)`,
+      );
+      return;
+    }
+    blockPlannerParent({
+      task,
+      projectRoot,
+      planPath,
+      fromStatus: task.blockedFromStatus ?? task.status,
+      reason: `split_required: planner created pending split proposal ${proposal.id}; ${decision.reason}`,
+    });
+    logActivity(
+      task.id,
+      "Agent",
+      `Planner created pending split proposal ${proposal.id} (${proposal.proposedChildren.length} children)`,
+    );
+    return;
+  }
+
+  if (decision.decision === "needs_input") {
+    persistTaskPlanForTask({
+      taskId: task.id,
+      planText: null,
+      projectRoot,
+      isFix: task.isFix,
+      planPath,
+      updatedAt: new Date().toISOString(),
+    });
+    setTaskFields(task.id, {
+      status: "needs_input",
+      blockedFromStatus: task.blockedFromStatus ?? task.status,
+      blockedReason: `planner_decision_needs_input: ${decision.reason}`,
+      retryAfter: null,
+      updatedAt: new Date().toISOString(),
+    });
+    logActivity(task.id, "Agent", `Planner requested operator input: ${decision.reason}`);
+    return;
+  }
+
+  if (decision.decision === "blocked") {
+    blockPlannerParent({
+      task,
+      projectRoot,
+      planPath,
+      fromStatus: task.blockedFromStatus ?? task.status,
+      reason: `planner_decision_blocked: ${decision.reason}`,
+    });
+    logActivity(task.id, "Agent", `Planner blocked task: ${decision.reason}`);
+  }
+}
+
 export async function runPlanner(taskId: string, projectRoot: string): Promise<void> {
   const task = findTaskById(taskId);
   const comments = listTaskComments(taskId).sort(
@@ -562,6 +715,11 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
     hasPlanQualityFeedback && task.blockedReason
       ? `Previous plan-quality feedback that must be addressed:\n${task.blockedReason}`
       : "No prior plan-quality feedback was recorded.";
+  const hasPlannerFeedback =
+    Boolean(task.blockedReason?.trim()) ||
+    Boolean(task.blockedFromStatus) ||
+    (task.retryCount ?? 0) > 0;
+  const plannerSessionReusePolicy = hasPlannerFeedback ? "never" : "resume_if_available";
   const diagnosticPlanningConstraint = [
     "Diagnostic-only planning applies only to explicit audit, discovery, inventory, gap-analysis, findings, security-review, code-review, review-findings, validation-report, validation-task, validation-audit, validation-findings, verification-report, verification-task, verification-audit, or verification-findings work.",
     "Planning is planning-only: write or update only the plan file requested by the planner, never the report artifact, source files, config files, test files, or git commits.",
@@ -579,6 +737,13 @@ export async function runPlanner(taskId: string, projectRoot: string): Promise<v
           "Do not write a runnable manifest for broad, vague, or multi-area implementation work. If the task spans broad file boundaries, multiple major subsystems, setup/runtime/dev-stack commands, or scaffold/base-configuration work, return split-required planning feedback that tells the operator to create smaller children with concrete files, acceptance checks, and focused verification commands.",
         ].join(" ")
       : "Fast-mode planning compatibility: do not require an aif-plan-manifest block unless one already exists; preserve and repair any existing manifest instead of deleting it.";
+  const planningDecisionConstraint = [
+    "Planning decision contract: every final model planner output must include exactly one fenced `aif-planning-decision` JSON block.",
+    "Use decision `ready_plan` only when the parent task is narrow enough to execute as one runnable plan.",
+    "Use decision `split_required` instead of a runnable parent checklist when the task is broad, vague, multi-subsystem, has wildcard scope without concrete files, requires dev-stack/scaffold/base-config work, has unrelated acceptance criteria, or lacks a concrete verification command.",
+    "For `split_required`, include proposedChildren with title, taskIntent, concrete scope file paths, acceptanceCriteria, verificationCommands, and forbiddenChanges. Do not include broad scopes like src/**, packages/**, repo, project, or codebase.",
+    "Use `needs_input` for product/operator clarification and `blocked` for external blockers.",
+  ].join(" ");
 
   // Deterministic branch handling. Two contracts, applied in order:
   //
@@ -730,7 +895,10 @@ Diagnostic task constraint:
 ${diagnosticPlanningConstraint}
 
 Plan manifest constraint:
-${planManifestPlanningConstraint}`;
+${planManifestPlanningConstraint}
+
+Planning decision constraint:
+${planningDecisionConstraint}`;
   let prompt: string;
   let workflowSpec: ReturnType<typeof createRuntimeWorkflowSpec>;
   // HANDOFF_BRANCH_PREPARED=1 tells the aif-plan / plan-polisher skill that
@@ -761,7 +929,7 @@ ${planManifestPlanningConstraint}`;
       workflowKind: "planner",
       prompt,
       requiredCapabilities: [],
-      sessionReusePolicy: "resume_if_available",
+      sessionReusePolicy: plannerSessionReusePolicy,
       systemPromptAppend: scopeConstraint,
     });
   } else if (useSubagents) {
@@ -777,7 +945,7 @@ Filesystem plan path: ${planPath}
 
 ${taskContext}
 
-Create or refine an implementation-ready markdown checklist plan.
+Create or refine an implementation-ready markdown checklist plan only when the planning decision is ready_plan.
 Always write the final plan to ${planPath}; do not create a filesystem path that starts with @.
 Planning stage must not create report artifacts, edit source/config/test files, run git add, run git commit, or mark the implementation complete.`;
     workflowSpec = createRuntimeWorkflowSpec({
@@ -787,7 +955,7 @@ Planning stage must not create report artifacts, edit source/config/test files, 
       agentDefinitionName: AGENT_NAME,
       fallbackSlashCommand: plannerSlashCommand,
       fallbackStrategy: "slash_command",
-      sessionReusePolicy: "resume_if_available",
+      sessionReusePolicy: plannerSessionReusePolicy,
       systemPromptAppend: scopeConstraint,
       metadata: {
         plannerMode,
@@ -803,7 +971,7 @@ ${taskContext}`;
       workflowKind: "planner",
       prompt,
       requiredCapabilities: [],
-      sessionReusePolicy: "resume_if_available",
+      sessionReusePolicy: plannerSessionReusePolicy,
       systemPromptAppend: scopeConstraint,
       metadata: {
         plannerMode,
@@ -855,9 +1023,25 @@ ${taskContext}`;
     planFileSnapshot,
     planPath,
   );
+  const plannerOutput = diskPlan ?? normalizePlannerResult(rawResult);
+  const planningDecision = parseAifPlanningDecisionContract({
+    taskId,
+    text: plannerOutput,
+  });
+  if (planningDecision.decision !== "ready_plan") {
+    handleNonReadyPlanningDecision({
+      task,
+      projectRoot: executionRoot,
+      planPath,
+      decision: planningDecision,
+    });
+    log.debug({ taskId, decision: planningDecision.decision }, "Handled terminal planner decision");
+    return;
+  }
+  const runnablePlanText = stripAifPlanningDecisionBlocks(plannerOutput);
   const resultText = normalizeAifPlanManifestForTask({
     task: buildPlannerPlanQualityTaskContext(task),
-    plan: diskPlan ?? normalizePlannerResult(rawResult),
+    plan: runnablePlanText,
   });
 
   let planText = resultText;

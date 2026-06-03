@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::06_planner_split_required_contract::project-capsule
+memory_id: task::aif-handoff::work::06_planner_split_required_contract::decision-0cd0e7b936c49478
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: 06_planner_split_required_contract
 source_path: docs/rdpi/work/06_planner_split_required_contract
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: decision
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- decision
   source_refs:
 - docs/rdpi/work/06_planner_split_required_contract/research.md
 - docs/rdpi/work/06_planner_split_required_contract/design.md
@@ -35,16 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 06_planner_split_required_contract.
+`sourceRef`: `task:${taskId}:planner_decision`;
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable decision made during the task.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same design pressure appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
+Do not reuse when the constraints that justified the decision changed.

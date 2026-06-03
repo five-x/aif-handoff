@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::06_planner_split_required_contract::project-capsule
+memory_id: task::aif-handoff::work::06_planner_split_required_contract::pattern-e604678df7b44e76
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: 06_planner_split_required_contract
 source_path: docs/rdpi/work/06_planner_split_required_contract
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: pattern
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- pattern
   source_refs:
 - docs/rdpi/work/06_planner_split_required_contract/research.md
 - docs/rdpi/work/06_planner_split_required_contract/design.md
@@ -35,16 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 06_planner_split_required_contract.
+Route terminal planning decisions before plan persistence so downstream stages cannot misinterpret them as runnable plans.
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable implementation or runbook pattern.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same operational or implementation pattern appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
+Do not reuse when the pattern depends on obsolete tools or constraints.

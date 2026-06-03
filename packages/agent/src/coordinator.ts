@@ -177,6 +177,15 @@ function isOperatorCancelledTask(task: Pick<TaskRow, "status" | "blockedReason">
   );
 }
 
+function isPlannerTerminalBlockedTask(task: Pick<TaskRow, "status" | "blockedReason">): boolean {
+  return (
+    task.status === "blocked_external" &&
+    (task.blockedReason?.startsWith("split_required:") === true ||
+      task.blockedReason?.startsWith("split_required_conflict:") === true ||
+      task.blockedReason?.startsWith("planner_decision_blocked:") === true)
+  );
+}
+
 interface StatusTransition {
   from: TaskStatus[];
   inProgress: TaskStatus;
@@ -3560,6 +3569,24 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
         void notifyTaskBroadcast(task.id, "task:timeline_updated");
       }
       return true;
+    }
+
+    if (stage.label === "planner" && isPlannerTerminalBlockedTask(latestTask)) {
+      log.info(
+        {
+          taskId: task.id,
+          from: stage.inProgress,
+          to: latestTask.status,
+          blockedReason: latestTask.blockedReason,
+        },
+        "Planner terminalized task before plan-ready handoff",
+      );
+      void notifyTaskBroadcast(task.id, "task:moved", {
+        title: taskTitle,
+        fromStatus: stage.inProgress,
+        toStatus: latestTask.status,
+      });
+      return false;
     }
 
     const runnerMayUpdateTaskStatus =

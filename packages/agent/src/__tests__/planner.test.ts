@@ -1,17 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PLAN_MANIFEST_REQUIRED_CREATED_AT,
-  TaskPlanQualityError,
+  PlanningDecisionContractError,
   projects,
   resetEnvCache,
   taskComments,
+  taskSplitProposals,
   taskRequirementQuestions,
   tasks,
 } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -50,6 +51,54 @@ function streamSuccess(result: string): AsyncIterable<{
       yield { type: "result", subtype: "success", result };
     },
   };
+}
+
+function planningDecisionBlock(input: {
+  taskId: string;
+  decision?: "ready_plan" | "split_required" | "needs_input" | "blocked";
+  reason?: string;
+  proposedChildren?: unknown[];
+}): string {
+  return [
+    "```aif-planning-decision",
+    JSON.stringify(
+      {
+        decision: input.decision ?? "ready_plan",
+        taskId: input.taskId,
+        reason: input.reason ?? "The task is narrow enough for a runnable parent plan.",
+        proposedChildren: input.proposedChildren ?? [],
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
+
+function withReadyPlanningDecision(taskId: string, plan: string): string {
+  return [plan, "", planningDecisionBlock({ taskId })].join("\n");
+}
+
+function splitRequiredPlanningDecision(taskId: string, title = "Split child task"): string {
+  return planningDecisionBlock({
+    taskId,
+    decision: "split_required",
+    reason: "The task spans multiple unrelated implementation surfaces.",
+    proposedChildren: [
+      {
+        title,
+        taskIntent: "feature",
+        scope: [`src/${taskId}.ts`],
+        acceptanceCriteria: ["The child task has a focused implementation target."],
+        verificationCommands: ["npm.cmd run build"],
+        forbiddenChanges: ["Do not edit unrelated modules."],
+      },
+    ],
+  });
+}
+
+function taskIdFromPrompt(prompt: string): string {
+  return prompt.match(/^HANDOFF_TASK_ID:\s*(\S+)/m)?.[1] ?? "unknown-task";
 }
 
 function fullModePlan(input: {
@@ -91,6 +140,8 @@ function fullModePlan(input: {
       2,
     ),
     "```",
+    "",
+    planningDecisionBlock({ taskId: input.taskId }),
   ].join("\n");
 }
 
@@ -102,7 +153,11 @@ describe("runPlanner comment selection", () => {
     delete process.env.AIF_TASK_WORKTREES_ENABLED;
     resetEnvCache();
     queryMock.mockReset();
-    queryMock.mockReturnValue(streamSuccess("## New Plan\n- [ ] Step"));
+    queryMock.mockImplementation((input: { prompt?: string } = {}) =>
+      streamSuccess(
+        withReadyPlanningDecision(taskIdFromPrompt(input.prompt ?? ""), "## New Plan\n- [ ] Step"),
+      ),
+    );
 
     testDb.current
       .insert(projects)
@@ -200,6 +255,26 @@ describe("runPlanner comment selection", () => {
     expect(updatedTask?.plan).toBe("## New Plan\n- [ ] Step");
   });
 
+  it("resumes a stored planner session for clean first-run planning", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-planner-clean-resume",
+        projectId: "project-1",
+        title: "Clean resume",
+        description: "Clean first-run planner may reuse the stored provider session.",
+        status: "planning",
+        sessionId: "planner-session-clean",
+        useSubagents: true,
+      })
+      .run();
+
+    await runPlanner("task-planner-clean-resume", "/tmp/planner-test");
+
+    const call = queryMock.mock.calls[0]?.[0] as { options: { resume?: string } };
+    expect(call.options.resume).toBe("planner-session-clean");
+  });
+
   it("requires an aif-plan-manifest block in full-mode planner prompts", async () => {
     const db = testDb.current;
     const projectRoot = mkdtempSync(join(tmpdir(), "planner-full-manifest-"));
@@ -268,6 +343,7 @@ describe("runPlanner comment selection", () => {
         status: "planning",
         blockedFromStatus: "planning",
         blockedReason: feedback,
+        sessionId: "planner-session-feedback",
         plannerMode: "full",
         taskIntent: "feature",
         useSubagents: true,
@@ -279,6 +355,7 @@ describe("runPlanner comment selection", () => {
     const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
     expect(call.prompt).toContain("Previous plan-quality feedback that must be addressed:");
     expect(call.prompt).toContain(feedback);
+    expect((call as unknown as { options: { resume?: string } }).options.resume).toBeUndefined();
   });
 
   it("includes requirements snapshot markdown in planner prompts", async () => {
@@ -362,7 +439,7 @@ describe("runPlanner comment selection", () => {
 
     await expect(
       runPlanner("task-malformed-raise-questions-plan", "/tmp/planner-test"),
-    ).rejects.toBeInstanceOf(TaskPlanQualityError);
+    ).rejects.toBeInstanceOf(PlanningDecisionContractError);
     expect(findTaskById("task-malformed-raise-questions-plan")?.plan).toBeNull();
   });
 
@@ -449,17 +526,20 @@ describe("runPlanner comment selection", () => {
       .run();
     queryMock.mockReturnValue(
       streamSuccess(
-        [
-          "## Plan",
-          "",
-          "## aif-plan-manifest",
-          "",
-          "```json",
-          manifestJson,
-          "```",
-          "",
-          "- [ ] Update packages/shared/src/planQuality.ts with manifest normalization.",
-        ].join("\n"),
+        withReadyPlanningDecision(
+          "task-planner-normalize",
+          [
+            "## Plan",
+            "",
+            "## aif-plan-manifest",
+            "",
+            "```json",
+            manifestJson,
+            "```",
+            "",
+            "- [ ] Update packages/shared/src/planQuality.ts with manifest normalization.",
+          ].join("\n"),
+        ),
       ),
     );
     db.insert(tasks)
@@ -693,7 +773,11 @@ describe("runPlanner comment selection", () => {
 
     queryMock.mockReset();
     queryMock.mockImplementation(() => {
-      writeFileSync(fallbackPlanPath, "## Fallback Plan\n- [ ] Step from fallback", "utf8");
+      writeFileSync(
+        fallbackPlanPath,
+        withReadyPlanningDecision("task-fallback", "## Fallback Plan\n- [ ] Step from fallback"),
+        "utf8",
+      );
       return streamSuccess("Plan written to PLAN.md");
     });
 
@@ -732,7 +816,12 @@ describe("runPlanner comment selection", () => {
       .run();
 
     queryMock.mockReturnValue(
-      streamSuccess("## Fresh Plan\n- [ ] Update src/main.ts from the planner response."),
+      streamSuccess(
+        withReadyPlanningDecision(
+          "task-stale-plan",
+          "## Fresh Plan\n- [ ] Update src/main.ts from the planner response.",
+        ),
+      ),
     );
 
     await runPlanner("task-stale-plan", projectRoot);
@@ -740,6 +829,188 @@ describe("runPlanner comment selection", () => {
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-stale-plan")).get();
     expect(updatedTask?.plan).toContain("Fresh Plan");
     expect(updatedTask?.plan).not.toContain("Stale Plan");
+  });
+
+  it("creates a pending split proposal and blocks the parent for split_required decisions", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-split-required-"));
+    mkdirSync(projectRoot, { recursive: true });
+    queryMock.mockReturnValue(
+      streamSuccess(splitRequiredPlanningDecision("task-planner-split", "Split API child")),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-planner-split",
+        projectId: "project-1",
+        title: "Broad implementation",
+        description: "Touch API, UI, and runtime configuration.",
+        status: "planning",
+        plannerMode: "full",
+        taskIntent: "feature",
+        useSubagents: true,
+      })
+      .run();
+
+    await runPlanner("task-planner-split", projectRoot);
+
+    const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-planner-split")).get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.plan).toBeNull();
+    expect(updatedTask?.blockedReason).toContain("split_required:");
+    const proposals = db.select().from(taskSplitProposals).all();
+    expect(proposals).toHaveLength(1);
+    const proposal = proposals[0]!;
+    expect(updatedTask?.blockedReason).toContain(proposal.id);
+    expect(updatedTask?.agentActivityLog).toContain(proposal.id);
+    expect(proposal.parentTaskId).toBe("task-planner-split");
+    expect(proposal.sourceKind).toBe("planner_decision");
+    expect(proposal.sourceRef).toBe("task:task-planner-split:planner_decision");
+    expect(proposal.roadmapAlias).toBe("planner-split:task-planner-split");
+    const children = JSON.parse(proposal.proposedChildrenJson) as Array<{
+      title: string;
+      fileBoundaries?: string[];
+      forbiddenChanges?: string[];
+      verificationCommands?: string[];
+    }>;
+    expect(children).toHaveLength(1);
+    expect(children[0]).toEqual(
+      expect.objectContaining({
+        title: "Split API child",
+        fileBoundaries: ["src/task-planner-split.ts"],
+        forbiddenChanges: ["Do not edit unrelated modules."],
+        verificationCommands: ["npm.cmd run build"],
+      }),
+    );
+  });
+
+  it("clears stale parent plan text and canonical plan content on split_required replan", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-split-cleanup-"));
+    const planPath = join(projectRoot, ".ai-factory", "PLAN.md");
+    mkdirSync(join(projectRoot, ".ai-factory"), { recursive: true });
+    writeFileSync(
+      planPath,
+      [
+        "## Stale runnable plan",
+        "- [ ] Implement the parent directly",
+        "",
+        "```aif-plan-manifest",
+        '{"version":1,"taskId":"task-planner-split-cleanup"}',
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+    queryMock.mockReturnValue(
+      streamSuccess(splitRequiredPlanningDecision("task-planner-split-cleanup")),
+    );
+    db.insert(tasks)
+      .values({
+        id: "task-planner-split-cleanup",
+        projectId: "project-1",
+        title: "Broad replan",
+        description: "Replan broad parent into focused children.",
+        status: "planning",
+        blockedFromStatus: "plan_ready",
+        blockedReason: "Plan quality guard replan 1/3: previous parent plan was too broad.",
+        plan: "## Stale runnable plan\n- [ ] Implement the parent directly",
+        planPath: ".ai-factory/PLAN.md",
+        plannerMode: "full",
+        taskIntent: "feature",
+        useSubagents: true,
+      })
+      .run();
+
+    await runPlanner("task-planner-split-cleanup", projectRoot);
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-planner-split-cleanup"))
+      .get();
+    expect(updatedTask?.status).toBe("blocked_external");
+    expect(updatedTask?.plan).toBeNull();
+    const canonicalPlan = readFileSync(planPath, "utf8");
+    expect(canonicalPlan.trim()).toBe("");
+    expect(canonicalPlan).not.toContain("- [ ]");
+    expect(canonicalPlan).not.toContain("aif-plan-manifest");
+  });
+
+  it("rejects missing planning decision blocks before persisting planner output", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-missing-decision-"));
+    queryMock.mockReturnValue(streamSuccess("## Plan\n- [ ] Missing decision block"));
+    db.insert(tasks)
+      .values({
+        id: "task-missing-planning-decision",
+        projectId: "project-1",
+        title: "Missing decision",
+        description: "Planner output lacks the required machine-readable decision.",
+        status: "planning",
+        plan: null,
+        useSubagents: true,
+      })
+      .run();
+
+    await expect(runPlanner("task-missing-planning-decision", projectRoot)).rejects.toBeInstanceOf(
+      PlanningDecisionContractError,
+    );
+
+    const updatedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-missing-planning-decision"))
+      .get();
+    expect(updatedTask?.plan).toBeNull();
+    expect(db.select().from(taskSplitProposals).all()).toHaveLength(0);
+  });
+
+  it("keeps separate planner split proposals for different parent tasks", async () => {
+    const db = testDb.current;
+    const projectRoot = mkdtempSync(join(tmpdir(), "planner-split-identity-"));
+    queryMock.mockImplementation((input: { prompt?: string } = {}) =>
+      streamSuccess(splitRequiredPlanningDecision(taskIdFromPrompt(input.prompt ?? ""))),
+    );
+    db.insert(tasks)
+      .values([
+        {
+          id: "task-planner-split-a",
+          projectId: "project-1",
+          title: "Broad parent A",
+          description: "Split parent A.",
+          status: "planning",
+          taskIntent: "feature",
+          useSubagents: true,
+        },
+        {
+          id: "task-planner-split-b",
+          projectId: "project-1",
+          title: "Broad parent B",
+          description: "Split parent B.",
+          status: "planning",
+          taskIntent: "feature",
+          useSubagents: true,
+        },
+      ])
+      .run();
+
+    await runPlanner("task-planner-split-a", projectRoot);
+    await runPlanner("task-planner-split-b", projectRoot);
+
+    const proposals = db
+      .select()
+      .from(taskSplitProposals)
+      .orderBy(taskSplitProposals.roadmapAlias)
+      .all();
+    expect(proposals).toHaveLength(2);
+    expect(proposals.map((proposal) => proposal.parentTaskId)).toEqual([
+      "task-planner-split-a",
+      "task-planner-split-b",
+    ]);
+    expect(proposals.map((proposal) => proposal.roadmapAlias)).toEqual([
+      "planner-split:task-planner-split-a",
+      "planner-split:task-planner-split-b",
+    ]);
+    expect(new Set(proposals.map((proposal) => proposal.sourceRef)).size).toBe(2);
   });
 
   it("uses deterministic implementation fallback for concrete roadmap child plans", async () => {
@@ -760,7 +1031,14 @@ describe("runPlanner comment selection", () => {
       })
       .run();
 
-    queryMock.mockReturnValue(streamSuccess("Plan written to PLAN.md"));
+    queryMock.mockReturnValue(
+      streamSuccess(
+        withReadyPlanningDecision(
+          "task-implementation-fallback",
+          "Short implementation placeholder",
+        ),
+      ),
+    );
 
     await runPlanner("task-implementation-fallback", projectRoot);
 
@@ -993,7 +1271,9 @@ describe("runPlanner comment selection", () => {
       })
       .run();
 
-    queryMock.mockReturnValue(streamSuccess("Short task placeholder"));
+    queryMock.mockReturnValue(
+      streamSuccess(withReadyPlanningDecision("task-env-fallback", "Short task placeholder")),
+    );
 
     await runPlanner("task-env-fallback", projectRoot);
 
@@ -1188,7 +1468,9 @@ describe("runPlanner comment selection", () => {
       .run();
 
     queryMock.mockReset();
-    queryMock.mockReturnValue(streamSuccess("## Plan\n- [ ] x"));
+    queryMock.mockReturnValue(
+      streamSuccess(withReadyPlanningDecision("task-mode-drift-1", "## Plan\n- [ ] x")),
+    );
 
     await runPlanner("task-mode-drift-1", projectRoot);
 
@@ -1243,7 +1525,7 @@ describe("runPlanner comment selection", () => {
     queryMock.mockReset();
     queryMock.mockImplementation(() => {
       execFileSync("git", ["checkout", "main"], { cwd: projectRoot, stdio: "ignore" });
-      return streamSuccess("## Plan\n- [ ] x");
+      return streamSuccess(withReadyPlanningDecision("task-drift-1", "## Plan\n- [ ] x"));
     });
 
     const { isBranchIsolationError } = await import("../gitBranch.js");

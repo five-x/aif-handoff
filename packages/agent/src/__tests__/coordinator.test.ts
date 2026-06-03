@@ -537,6 +537,42 @@ describe("coordinator", () => {
     expect(task!.status).toBe("done");
   });
 
+  it("preserves planner split_required blocked state and does not start downstream stages", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-planner-split-required",
+        projectId: "test-project",
+        title: "Broad planner parent",
+        status: "planning",
+      })
+      .run();
+
+    vi.mocked(runPlanner).mockImplementationOnce(async (taskId) => {
+      db.update(tasks)
+        .set({
+          status: "blocked_external",
+          blockedFromStatus: "planning",
+          blockedReason:
+            "split_required: planner created pending split proposal proposal-1; task is too broad",
+          retryAfter: null,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    expect(runPlanner).toHaveBeenCalledWith("task-planner-split-required", "/tmp/test");
+    expect(runPlanChecker).not.toHaveBeenCalled();
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-planner-split-required")).get();
+    expect(task?.status).toBe("blocked_external");
+    expect(task?.blockedReason).toContain("split_required:");
+  });
+
   it("persists lock stage and coordinator while a stage is running", async () => {
     const db = testDb.current;
     db.insert(tasks)

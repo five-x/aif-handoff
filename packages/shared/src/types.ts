@@ -1086,7 +1086,8 @@ export type TaskSplitProposalStatus = (typeof TASK_SPLIT_PROPOSAL_STATUSES)[numb
 export type TaskSplitProposalSourceKind =
   | "roadmap_import"
   | "roadmap_generation"
-  | "implementation_recovery";
+  | "implementation_recovery"
+  | "planner_decision";
 
 export interface TaskSplitProposedChild {
   title: string;
@@ -1099,6 +1100,7 @@ export interface TaskSplitProposedChild {
   fileBoundaries?: string[];
   acceptanceCriteria?: string[];
   verificationCommands?: string[];
+  forbiddenChanges?: string[];
   dependsOn?: string[];
   splitRationale?: string;
 }

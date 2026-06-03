@@ -726,6 +726,20 @@ export {
   type TaskPlanQualityResult,
   type TaskPlanQualityTask,
 } from "./planQuality.js";
+export {
+  AIF_PLANNING_DECISION_CHILD_INTENTS,
+  AIF_PLANNING_DECISION_FENCE_LANGUAGE,
+  AIF_PLANNING_DECISIONS,
+  PlanningDecisionContractError,
+  buildPlanningDecisionFingerprint,
+  parseAifPlanningDecisionContract,
+  stripAifPlanningDecisionBlocks,
+  type AifPlanningDecisionChild,
+  type AifPlanningDecisionChildIntent,
+  type AifPlanningDecisionContract,
+  type AifPlanningDecisionKind,
+  type ParseAifPlanningDecisionContractInput,
+} from "./planningDecisionContract.js";
 
 // Path validation
 export { validateProjectRootPath } from "./pathValidation.js";
