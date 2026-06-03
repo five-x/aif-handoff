@@ -1003,8 +1003,30 @@ function emitToolResult(input, events, toolCall, result) {
       exitCode: result.exitCode ?? null,
       touchedFiles: result.touchedFiles.map((file) => redactProviderText(file)),
       ...(result.error ? { error: redactProviderText(result.error) } : {}),
+      ...(result.policyViolation === true ? { policyViolation: true } : {}),
     },
   });
+}
+function policyViolationToolError(toolCall, result) {
+  const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
+  const targetPath =
+    typeof result.error === "string"
+      ? (result.error.match(/^write_path_not_allowed:\s*([^;\n]+)/)?.[1] ?? null)
+      : null;
+  return new RuntimeExecutionError(
+    result.error || `${safeToolName} violated runtime tool policy`,
+    undefined,
+    "permission",
+    {
+      providerMeta: {
+        adapter: "qwen-local-agent",
+        reason: "policy_violation",
+        policyViolation: true,
+        toolName: safeToolName,
+        ...(targetPath ? { targetPath } : {}),
+      },
+    },
+  );
 }
 function buildAuditEvidenceResultForTool(input, toolContext, toolCall, args, result) {
   if (result.repositoryInspectionBudgetExhausted === true) return;
@@ -2825,6 +2847,9 @@ export async function runQwenLocalAgentApi(input, logger) {
           auditEvidenceUnit ?? auditEvidenceResult,
           result,
         );
+        if (result.policyViolation === true) {
+          throw policyViolationToolError(toolCall, result);
+        }
         const auditValidationPayload =
           input.workflowKind === "audit" && toolAllowed
             ? auditReportValidationFailurePayload(toolCall.function.name, result)

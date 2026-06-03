@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  readAifPlanManifestSnapshot,
   redactProviderText,
   type TaskIntent,
   type TaskSplitProposedChild,
@@ -252,6 +253,35 @@ function readChangedFiles(
   };
 }
 
+function normalizeRecoveryBoundaryPath(value: string): string | null {
+  const normalized = sanitizeText(value, MAX_TEXT).replaceAll("\\", "/").trim();
+  if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) return null;
+  if (normalized.split("/").includes("..")) return null;
+  return normalized;
+}
+
+function changedFileSummaryPath(value: string): string | null {
+  const match = sanitizeText(value, MAX_TEXT).match(/^(?:[ MARCUD?!]{1,3})\s+(.+)$/);
+  return normalizeRecoveryBoundaryPath(match?.[1] ?? value);
+}
+
+function recoveryFileBoundariesFromPlan(
+  task: ImplementationRecoveryTaskInput,
+  changedFiles: ImplementationRecoveryPack["changedFiles"],
+): string[] {
+  const planManifest = readAifPlanManifestSnapshot(task.plan);
+  const manifestPaths = [...planManifest.scope, ...planManifest.expectedArtifactPaths]
+    .map(normalizeRecoveryBoundaryPath)
+    .filter((entry): entry is string => Boolean(entry));
+  const sourcePaths =
+    planManifest.hash && manifestPaths.length > 0
+      ? manifestPaths
+      : changedFiles.changedFilesSummary
+          .map(changedFileSummaryPath)
+          .filter((entry): entry is string => Boolean(entry));
+  return [...new Set(sourcePaths)];
+}
+
 function buildRemainingAcceptance(
   checklist: RecoveryChecklistSummary,
   verification: RecoveryVerificationSummary,
@@ -294,6 +324,8 @@ function buildProposedChildren(input: {
 }): TaskSplitProposedChild[] {
   const intent = input.task.taskIntent ?? "general";
   const pending = input.checklist.pending.slice(0, MAX_CHILDREN);
+  const fileBoundaries = recoveryFileBoundariesFromPlan(input.task, input.changedFiles);
+  const boundaryFields = fileBoundaries.length > 0 ? { fileBoundaries } : {};
   const baseTags = ["implementation-recovery", `source:${input.task.id}`].map((tag) =>
     sanitizeText(tag, MAX_SHORT_TEXT),
   );
@@ -312,6 +344,7 @@ function buildProposedChildren(input: {
       phaseName: "Implementation recovery",
       sequence: index + 1,
       tags: baseTags,
+      ...boundaryFields,
     }));
   }
 
@@ -331,6 +364,7 @@ function buildProposedChildren(input: {
         phaseName: "Implementation recovery",
         sequence: 1,
         tags: baseTags,
+        ...boundaryFields,
       },
     ];
   }
@@ -351,6 +385,7 @@ function buildProposedChildren(input: {
       phaseName: "Implementation recovery",
       sequence: 1,
       tags: baseTags,
+      ...boundaryFields,
     },
   ];
 }

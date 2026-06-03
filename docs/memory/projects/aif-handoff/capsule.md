@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::04_aif_result_contract_and_output::project-capsule
+memory_id: task::aif-handoff::work::05_allowed_write_paths_tool_policy::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 04_aif_result_contract_and_output
-source_path: docs/rdpi/work/04_aif_result_contract_and_output
+task_id: 05_allowed_write_paths_tool_policy
+source_path: docs/rdpi/work/05_allowed_write_paths_tool_policy
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -24,10 +24,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/04_aif_result_contract_and_output/research.md
-- docs/rdpi/work/04_aif_result_contract_and_output/design.md
-- docs/rdpi/work/04_aif_result_contract_and_output/plan.md
-- docs/rdpi/work/04_aif_result_contract_and_output/result.md
+- docs/rdpi/work/05_allowed_write_paths_tool_policy/research.md
+- docs/rdpi/work/05_allowed_write_paths_tool_policy/design.md
+- docs/rdpi/work/05_allowed_write_paths_tool_policy/plan.md
+- docs/rdpi/work/05_allowed_write_paths_tool_policy/result.md
   created_at: 2026-06-03
   last_verified_at: 2026-06-03
 
@@ -35,7 +35,7 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 04_aif_result_contract_and_output.
+Current capsule for project aif-handoff, refreshed by task 05_allowed_write_paths_tool_policy.
 
 # Why it matters
 

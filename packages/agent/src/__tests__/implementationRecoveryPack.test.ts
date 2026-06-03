@@ -75,6 +75,65 @@ describe("implementation recovery pack", () => {
     expect(pack.proposedChildren[0]?.description).toContain("Changed-files digest:");
   });
 
+  it("adds recovery child fileBoundaries from plan manifest scope and expected artifacts", () => {
+    const plan = [
+      "```aif-plan-manifest",
+      JSON.stringify({
+        version: 1,
+        taskId: "task-recovery",
+        intent: "feature",
+        scope: ["src/feature.ts", "src/plan-only.ts"],
+        allowedChanges: ["source", "docs"],
+        forbiddenChanges: ["dependency"],
+        expectedArtifacts: [{ kind: "docs_diff", paths: ["docs/result.md"] }],
+        acceptanceCriteria: [],
+        verificationCommands: [],
+      }),
+      "```",
+      "",
+      "- [ ] Continue scoped work.",
+    ].join("\n");
+
+    const pack = buildImplementationRecoveryPack(
+      baseInput({
+        task: {
+          id: "task-recovery",
+          projectId: "project-1",
+          title: "Recover implementation",
+          status: "implementing",
+          taskIntent: "feature",
+          plan,
+        },
+      }),
+    );
+
+    expect(pack.proposedChildren[0]?.fileBoundaries).toEqual([
+      "src/feature.ts",
+      "src/plan-only.ts",
+      "docs/result.md",
+    ]);
+  });
+
+  it("falls back to changed files for recovery child fileBoundaries when no plan manifest is parseable", () => {
+    const pack = buildImplementationRecoveryPack(
+      baseInput({
+        task: {
+          id: "task-recovery",
+          projectId: "project-1",
+          title: "Recover implementation",
+          status: "implementing",
+          taskIntent: "feature",
+          plan: "- [ ] Continue without manifest.",
+        },
+      }),
+    );
+
+    expect(pack.proposedChildren[0]?.fileBoundaries).toEqual([
+      "packages/agent/src/coordinator.ts",
+      "packages/agent/src/implementationRecoveryPack.ts",
+    ]);
+  });
+
   it("proposes a safe split child when there are no changed files", () => {
     const pack = buildImplementationRecoveryPack(
       baseInput({

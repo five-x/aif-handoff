@@ -36,7 +36,8 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 const { RuntimeExecutionError } = await import("@aif/runtime");
-const { runImplementer } = await import("../subagents/implementer.js");
+const { implementationAllowedWritePathsFromPlan, runImplementer } =
+  await import("../subagents/implementer.js");
 const {
   claimBacklogTaskForAdvance,
   createRoadmapBatchContract,
@@ -6485,10 +6486,13 @@ describe("runImplementer rework behavior", () => {
         version: 1,
         taskId: "task-feature-plan-hash",
         intent: "feature",
-        scope: ["src/feature.ts"],
+        scope: ["src/feature.ts", "src/plan-only.ts"],
         allowedChanges: ["source", "tests"],
         forbiddenChanges: ["audit-report"],
-        expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+        expectedArtifacts: [
+          { kind: "source_diff", paths: ["src/feature.ts"] },
+          { kind: "docs_diff", paths: ["docs/result.md"] },
+        ],
         acceptanceCriteria: [
           {
             id: "AC1",
@@ -6569,7 +6573,12 @@ describe("runImplementer rework behavior", () => {
       "`acceptanceCriteria` and `reviewClosure` evidence refs must point to concrete verification evidence or actual review comments",
     );
     expect(call.prompt).toContain("approved plan acceptance criteria ids are: `AC1`");
-    expect(call.prompt).toContain("approved changed-file boundary is: `src/feature.ts`");
+    expect(call.prompt).toContain(
+      "approved changed-file boundary is: `src/feature.ts`, `src/plan-only.ts`, `docs/result.md`",
+    );
+    expect(
+      implementationAllowedWritePathsFromPlan({ taskIntent: "feature", isFix: false }, plan),
+    ).toEqual(["src/feature.ts", "src/plan-only.ts", "docs/result.md"]);
     expect(call.prompt).toContain("Required verification command(s) from the approved plan");
 
     const updatedTask = db.select().from(tasks).where(eq(tasks.id, "task-feature-plan-hash")).get();

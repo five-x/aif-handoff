@@ -837,10 +837,9 @@ function assertWritePathAllowed(context, relativePath, label) {
     GENERATED_WRITE_DENY_DIRECTORY_SEGMENTS.has(segment),
   );
   if (deniedSegment) {
-    throw new RuntimeExecutionError(
+    throw policyViolationError(
       `${label} targets generated/dependency directory ${deniedSegment}`,
       undefined,
-      "permission",
     );
   }
   if (allowed.length === 0) return;
@@ -848,10 +847,25 @@ function assertWritePathAllowed(context, relativePath, label) {
     return;
   }
   const deniedPath = relativePath.replaceAll("\\", "/");
-  throw new RuntimeExecutionError(
+  throw policyViolationError(
     `write_path_not_allowed: ${deniedPath}; ${label} is outside this workflow's allowed write paths (${allowed.join(", ")})`,
-    undefined,
-    "permission",
+    { policyViolationKind: "write_path_not_allowed", targetPath: deniedPath },
+  );
+}
+function policyViolationError(message, providerMeta = undefined) {
+  return new RuntimeExecutionError(message, undefined, "permission", {
+    providerMeta: {
+      ...(providerMeta ?? {}),
+      policyViolation: true,
+      policyViolationKind: providerMeta?.policyViolationKind ?? "tool_policy",
+    },
+  });
+}
+function isPolicyViolationError(error) {
+  return (
+    error instanceof RuntimeExecutionError &&
+    error.category === "permission" &&
+    error.providerMeta?.policyViolation === true
   );
 }
 function shouldSkipSearchPath(relativePath) {
@@ -893,6 +907,12 @@ function validateStructuredShellCommand(command, args, context) {
     if (context) validatePackageManagerWorkspaceWriteScope(command, args, context);
     validatePackageManagerShellArgs(command, args);
     return;
+  }
+  if (command === "git") {
+    throw policyViolationError(
+      `unsupported shell command: ${command}; use git_commit with explicit paths for repository commits`,
+      { policyViolationKind: "broad_git_wrapper" },
+    );
   }
   throw new RuntimeExecutionError(`unsupported shell command: ${command}`, undefined, "permission");
 }
@@ -1102,10 +1122,9 @@ function validatePackageScriptWriteScope(command, args, scriptName, script, cont
     return;
   }
   if (hasUnscopedShellWriteIntent) {
-    throw new RuntimeExecutionError(
+    throw policyViolationError(
       `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} can write files but does not declare a scoped write target`,
-      undefined,
-      "permission",
+      { policyViolationKind: "destructive_shell_wrapper" },
     );
   }
   const targets = packageScriptWriteTargets(script);
@@ -1119,10 +1138,9 @@ function validatePackageScriptWriteScope(command, args, scriptName, script, cont
   for (const target of targets) {
     const normalized = normalizePackageScriptWriteTarget(target, context, cwd);
     if (!isAllowedPathForContext(context, normalized)) {
-      throw new RuntimeExecutionError(
+      throw policyViolationError(
         `write_path_not_allowed: ${normalized}; package.json script ${scriptName} can write outside this workflow's allowed write paths (${allowed.join(", ")})`,
-        undefined,
-        "permission",
+        { policyViolationKind: "write_path_not_allowed", targetPath: normalized },
       );
     }
   }
@@ -1141,10 +1159,9 @@ function validateNpmDependencyHydrationWriteScope(command, args, context, packag
   for (const target of ["package.json", "package-lock.json"]) {
     const normalized = normalizePackageScriptWriteTarget(target, context, packageRoot);
     if (!isAllowedPathForContext(context, normalized)) {
-      throw new RuntimeExecutionError(
+      throw policyViolationError(
         `write_path_not_allowed: ${normalized}; ${command} ${args[0]} can update dependency files outside this workflow's allowed write paths (${allowed.join(", ")})`,
-        undefined,
-        "permission",
+        { policyViolationKind: "write_path_not_allowed", targetPath: normalized },
       );
     }
   }
@@ -1189,7 +1206,192 @@ function assertNoLongRunningPackageManagerArgs(command, args) {
     "permission",
   );
 }
+function splitPackageScriptSegments(script) {
+  const segments = [];
+  let current = "";
+  let quote = null;
+  let escaped = false;
+  for (const char of script) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ";" || char === "&" || char === "|") {
+      const segment = current.trim();
+      if (segment) segments.push(segment);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  const segment = current.trim();
+  if (segment) segments.push(segment);
+  return segments;
+}
+function tokenizePackageScriptSegment(segment) {
+  const tokens = [];
+  const pattern =
+    /([^\s=]+="([^"\\]*(?:\\.[^"\\]*)*)")|([^\s=]+='([^'\\]*(?:\\.[^'\\]*)*)')|"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  for (const match of segment.matchAll(pattern)) {
+    const token =
+      match[1] != null
+        ? `${match[1].slice(0, match[1].indexOf("=") + 1)}${match[2] ?? ""}`
+        : match[3] != null
+          ? `${match[3].slice(0, match[3].indexOf("=") + 1)}${match[4] ?? ""}`
+          : (match[5] ?? match[6] ?? match[7] ?? "");
+    tokens.push(token.trim());
+  }
+  return tokens.filter(Boolean);
+}
+function gitGlobalOptionConsumesValue(option) {
+  return (
+    option === "-C" ||
+    option === "-c" ||
+    option === "--git-dir" ||
+    option === "--work-tree" ||
+    option === "--namespace" ||
+    option === "--exec-path" ||
+    option === "--config-env" ||
+    option === "--super-prefix"
+  );
+}
+function isShellEnvAssignmentToken(token) {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(token);
+}
+function normalizeGitExecutableToken(token) {
+  const executableName = token.split(/[\\/]/g).pop()?.toLowerCase();
+  if (
+    executableName === "git" ||
+    executableName === "git.exe" ||
+    executableName === "git.cmd" ||
+    executableName === "git.bat"
+  ) {
+    return "git";
+  }
+  return executableName ?? "";
+}
+function normalizePackageScriptExecutableToken(token) {
+  const executableName = token.split(/[\\/]/g).pop()?.toLowerCase();
+  if (!executableName) return "";
+  return executableName.replace(/\.(?:exe|cmd|bat)$/i, "");
+}
+const PACKAGE_SCRIPT_GIT_MUTATION_TEXT_PATTERN =
+  /(?:^|[^A-Za-z0-9_.-])(?:[A-Za-z]:)?(?:[^\s"'`;&|()]+[\\/])*git(?:\.(?:exe|cmd|bat))?(?=$|[^A-Za-z0-9_.-])[\s\S]{0,160}(?:^|[^A-Za-z0-9_-])(?:add|commit)(?=$|[^A-Za-z0-9_-])/i;
+function packageScriptTextMentionsGitMutation(script) {
+  return PACKAGE_SCRIPT_GIT_MUTATION_TEXT_PATTERN.test(script);
+}
+function findGitSubcommandIndex(tokens) {
+  let gitIndex = 0;
+  while (gitIndex < tokens.length && isShellEnvAssignmentToken(tokens[gitIndex] ?? "")) {
+    gitIndex += 1;
+  }
+  if (normalizeGitExecutableToken(tokens[gitIndex] ?? "") !== "git") return -1;
+  for (let index = gitIndex + 1; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    if (token === "--") return index + 1 < tokens.length ? index + 1 : -1;
+    if (!token.startsWith("-")) return index;
+    if (gitGlobalOptionConsumesValue(token)) {
+      index += 1;
+    }
+  }
+  return -1;
+}
+function firstCommandTokenIndex(tokens) {
+  let commandIndex = 0;
+  while (commandIndex < tokens.length && isShellEnvAssignmentToken(tokens[commandIndex] ?? "")) {
+    commandIndex += 1;
+  }
+  return commandIndex < tokens.length ? commandIndex : -1;
+}
+function extractQuotedCommandStrings(script) {
+  const strings = [];
+  const pattern =
+    /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|`([^`\\]*(?:\\.[^`\\]*)*)`/g;
+  for (const match of script.matchAll(pattern)) {
+    const quoted = match[1] ?? match[2] ?? match[3] ?? "";
+    strings.push(quoted.replace(/\\(["'`\\])/g, "$1"));
+  }
+  return strings;
+}
+function packageScriptCommandStringContainsBroadGitWrapper(script, depth) {
+  if (packageScriptContainsBroadGitWrapper(script, depth + 1)) return true;
+  for (const quoted of extractQuotedCommandStrings(script)) {
+    if (packageScriptContainsBroadGitWrapper(quoted, depth + 1)) return true;
+  }
+  return false;
+}
+function packageScriptWrapperCommandStrings(tokens) {
+  const commandIndex = firstCommandTokenIndex(tokens);
+  if (commandIndex < 0) return [];
+  const command = normalizePackageScriptExecutableToken(tokens[commandIndex] ?? "");
+  const args = tokens.slice(commandIndex + 1);
+  const commandStrings = [];
+  if (command === "node") {
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index] ?? "";
+      if (arg === "-e" || arg === "--eval") {
+        if (args[index + 1]) commandStrings.push(args[index + 1]);
+      } else if (arg.startsWith("--eval=")) {
+        commandStrings.push(arg.slice("--eval=".length));
+      }
+    }
+  } else if (command === "sh" || command === "bash") {
+    const commandArgIndex = args.findIndex((arg) => arg === "-c");
+    if (commandArgIndex >= 0 && args[commandArgIndex + 1])
+      commandStrings.push(args[commandArgIndex + 1]);
+  } else if (command === "cmd") {
+    const commandArgIndex = args.findIndex((arg) => arg.toLowerCase() === "/c");
+    if (commandArgIndex >= 0 && args[commandArgIndex + 1]) {
+      commandStrings.push(args.slice(commandArgIndex + 1).join(" "));
+    }
+  } else if (command === "powershell" || command === "pwsh" || command === "powershell_ise") {
+    const commandArgIndex = args.findIndex((arg) => {
+      const normalized = arg.toLowerCase();
+      return normalized === "-command" || normalized === "-c";
+    });
+    if (commandArgIndex >= 0 && args[commandArgIndex + 1]) {
+      commandStrings.push(args.slice(commandArgIndex + 1).join(" "));
+    }
+  }
+  return commandStrings;
+}
+function packageScriptContainsBroadGitWrapper(script, depth = 0) {
+  if (depth > 4) return true;
+  if (packageScriptTextMentionsGitMutation(script)) return true;
+  for (const segment of splitPackageScriptSegments(script)) {
+    const tokens = tokenizePackageScriptSegment(segment);
+    const subcommandIndex = findGitSubcommandIndex(tokens);
+    const subcommand = tokens[subcommandIndex]?.toLowerCase();
+    if (subcommand === "add" || subcommand === "commit") return true;
+    for (const commandString of packageScriptWrapperCommandStrings(tokens)) {
+      if (packageScriptCommandStringContainsBroadGitWrapper(commandString, depth)) return true;
+    }
+  }
+  return false;
+}
 function validatePackageManagerScriptBody(command, args, scriptName, script, context, cwd) {
+  if (packageScriptContainsBroadGitWrapper(script)) {
+    throw policyViolationError(
+      `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} contains broad git staging or commit commands; use git_commit with explicit paths`,
+      { policyViolationKind: "broad_git_wrapper" },
+    );
+  }
   if (DEPENDENCY_MUTATION_SCRIPT_PATTERN.test(script)) {
     throw new RuntimeExecutionError(
       `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} mutates dependencies or executes package-manager install/update commands`,
@@ -1419,6 +1621,158 @@ export function spawnProcess(input) {
     }
     child.stdin?.end();
   });
+}
+function spawnProcessUntruncatedStdout(input) {
+  if (input.signal?.aborted) {
+    return Promise.resolve({
+      ok: false,
+      output: "",
+      error: "tool aborted",
+      exitCode: null,
+      touchedFiles: [],
+    });
+  }
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(input.command, input.args, {
+        cwd: input.cwd,
+        env: input.env,
+        shell: false,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        output: "",
+        error: safeModelText(
+          error instanceof Error ? error.message : String(error),
+          input.maxOutputChars,
+        ),
+        exitCode: null,
+        touchedFiles: [],
+      });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let aborted = false;
+    let closed = false;
+    let timer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const killChild = () => {
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+      setTimeout(() => {
+        if (!closed && !settled) child.kill("SIGKILL");
+      }, 500).unref?.();
+    };
+    timer = setTimeout(() => {
+      timedOut = true;
+      killChild();
+    }, input.timeoutMs);
+    const onAbort = () => {
+      aborted = true;
+      killChild();
+    };
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = truncateForModel(stderr + chunk.toString("utf8"), input.maxOutputChars * 2);
+    });
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        output: "",
+        error: safeModelText(error.message, input.maxOutputChars),
+        exitCode: null,
+        touchedFiles: [],
+      });
+    });
+    child.on("close", (code) => {
+      closed = true;
+      const cleanStderr = safeModelText(stderr, input.maxOutputChars);
+      if (timedOut || aborted) {
+        finish({
+          ok: false,
+          output: stdout,
+          error: timedOut ? `tool timed out after ${input.timeoutMs}ms` : "tool aborted",
+          exitCode: code,
+          touchedFiles: [],
+        });
+        return;
+      }
+      finish({
+        ok: code === 0,
+        output: stdout,
+        ...(code === 0 ? {} : { error: cleanStderr || `process exited with code ${code}` }),
+        exitCode: code,
+        touchedFiles: [],
+      });
+    });
+    if (input.stdin) {
+      child.stdin?.write(input.stdin);
+    }
+    child.stdin?.end();
+  });
+}
+function parseGitNameStatusZ(output) {
+  if (!output) return [];
+  if (!output.endsWith("\0")) {
+    throw new RuntimeExecutionError(
+      "git_commit staged-index preflight failed: incomplete git diff name-status output",
+      undefined,
+      "permission",
+    );
+  }
+  const stagedEntries = output.split("\0");
+  stagedEntries.pop();
+  const stagedPaths = [];
+  for (let index = 0; index < stagedEntries.length; ) {
+    const status = stagedEntries[index++];
+    if (!status) {
+      throw new RuntimeExecutionError(
+        "git_commit staged-index preflight failed: malformed git diff name-status output",
+        undefined,
+        "permission",
+      );
+    }
+    if (/^[RC]/.test(status)) {
+      const oldPath = stagedEntries[index++];
+      const newPath = stagedEntries[index++];
+      if (!oldPath || !newPath) {
+        throw new RuntimeExecutionError(
+          "git_commit staged-index preflight failed: incomplete rename/copy status output",
+          undefined,
+          "permission",
+        );
+      }
+      stagedPaths.push(oldPath, newPath);
+      continue;
+    }
+    const stagedPath = stagedEntries[index++];
+    if (!stagedPath) {
+      throw new RuntimeExecutionError(
+        "git_commit staged-index preflight failed: incomplete staged path output",
+        undefined,
+        "permission",
+      );
+    }
+    stagedPaths.push(stagedPath);
+  }
+  return stagedPaths;
 }
 async function listFiles(args, context) {
   assertNotAborted(context.signal, "list_files");
@@ -2325,6 +2679,21 @@ async function gitCommitTool(args, context) {
   const env = buildSanitizedToolEnv(context.env);
   const timeoutMs = context.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
   const maxOutputChars = context.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+  const stagedResult = await spawnProcessUntruncatedStdout({
+    command: "git",
+    args: ["diff", "--cached", "--name-status", "-z"],
+    cwd: root,
+    env,
+    timeoutMs,
+    maxOutputChars,
+    signal: context.signal,
+  });
+  if (!stagedResult.ok) return stagedResult;
+  const stagedPaths = parseGitNameStatusZ(String(stagedResult.output ?? ""));
+  for (const stagedPath of stagedPaths) {
+    const resolved = resolveInsideProjectRoot(context.projectRoot, stagedPath, "git staged path");
+    assertWritePathAllowed(context, resolved.relativePath, "git staged path");
+  }
   assertNotAborted(context.signal, "git_commit");
   const addResult = await spawnProcess({
     command: "git",
@@ -2403,6 +2772,7 @@ export async function executeQwenLocalTool(toolName, rawArgs, context) {
         error: safeModelText(error.message, context.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS),
         exitCode: null,
         touchedFiles: [],
+        ...(isPolicyViolationError(error) ? { policyViolation: true } : {}),
       };
     }
     return {
@@ -2427,6 +2797,7 @@ export function qwenToolResultForModel(
     output: safeModelText(result.output ?? "", maxOutputChars),
     ...(result.error ? { error: safeModelText(result.error, maxOutputChars) } : {}),
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+    ...(result.policyViolation === true ? { policyViolation: true } : {}),
     touchedFiles: result.touchedFiles,
     ...(auditEvidence
       ? {

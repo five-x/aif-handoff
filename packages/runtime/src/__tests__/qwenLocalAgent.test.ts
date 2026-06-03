@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -922,6 +922,7 @@ describe("qwen-local-agent adapter", () => {
   });
   it("enforces execution allowed write paths during api tool calls", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-allowed-write-api-"));
+    const events = [];
     fetchMock
       .mockResolvedValueOnce(
         jsonResponse({
@@ -956,22 +957,33 @@ describe("qwen-local-agent adapter", () => {
         }),
       );
 
-    const result = await runQwenLocalAgentApi(
-      createRunInput(root, {
-        execution: {
-          allowedWritePaths: ["audit/report.md"],
-        },
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        reason: "policy_violation",
+        policyViolation: true,
+        toolName: "write_file",
+        targetPath: "tmp_body.txt",
       }),
-    );
-
-    expect(result.outputText).toBe("done");
+    });
     await expect(readFile(path.join(root, "tmp_body.txt"), "utf8")).rejects.toThrow();
-    const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1].body));
-    const toolMessage = secondBody.messages.find((message) => message.role === "tool");
-    const toolResult = JSON.parse(toolMessage.content);
-    expect(toolResult.ok).toBe(false);
-    expect(toolResult.error).toContain("write_path_not_allowed: tmp_body.txt");
-    expect(toolResult.error).toContain("allowed write paths (audit/report.md)");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events.find((event) => event.type === "tool:result")).toMatchObject({
+      data: expect.objectContaining({
+        ok: false,
+        policyViolation: true,
+        error: expect.stringContaining("write_path_not_allowed: tmp_body.txt"),
+      }),
+    });
   });
   it("rejects rogue write tool calls during planner workflows", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-planner-rogue-write-"));
@@ -1442,7 +1454,6 @@ describe("qwen-local-agent adapter", () => {
     await expectSpawnOk(root, ["add", "src/config.ts"]);
     await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
     await writeFile(path.join(root, "src", "unrelated.ts"), "export const unrelated = true;\n");
-    await expectSpawnOk(root, ["add", "src/unrelated.ts"]);
     const commitSha = (
       await spawnProcess({
         command: "git",
@@ -1639,7 +1650,17 @@ describe("qwen-local-agent adapter", () => {
       maxOutputChars: 4_000,
     });
     expect(stagedAfterCommit.ok).toBe(true);
-    expect(stagedAfterCommit.output).toContain("src/unrelated.ts");
+    expect(stagedAfterCommit.output).not.toContain("src/unrelated.ts");
+    const statusAfterCommit = await spawnProcess({
+      command: "git",
+      args: ["status", "--short"],
+      cwd: root,
+      env: buildSanitizedToolEnv(process.env),
+      timeoutMs: 10_000,
+      maxOutputChars: 4_000,
+    });
+    expect(statusAfterCommit.ok).toBe(true);
+    expect(statusAfterCommit.output).toContain("?? src/unrelated.ts");
   });
   it("rejects when aborted before automatic budget finalization commit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-inspection-budget-commit-abort-"));
@@ -4689,6 +4710,11 @@ describe("qwen-local-agent adapter", () => {
     expect(deniedWrite.ok).toBe(false);
     expect(deniedPatch.ok).toBe(false);
     expect(deniedCommit.ok).toBe(false);
+    expect(deniedWrite.error).toMatch(/^write_path_not_allowed: tmp_hash\.py/);
+    expect(deniedWrite.policyViolation).toBe(true);
+    expect(JSON.parse(qwenToolResultForModel(deniedWrite)).policyViolation).toBe(true);
+    expect(deniedPatch.policyViolation).toBe(true);
+    expect(deniedCommit.policyViolation).toBe(true);
     expect(deniedWrite.error).toContain("write_path_not_allowed: tmp_hash.py");
     expect(deniedPatch.error).toContain("write_path_not_allowed: tmp_body.txt");
     expect(deniedCommit.error).toContain("write_path_not_allowed: tmp_hash.py");
@@ -4697,6 +4723,49 @@ describe("qwen-local-agent adapter", () => {
     );
     await expect(readFile(path.join(root, "tmp_hash.py"), "utf8")).rejects.toThrow();
     await expect(readFile(path.join(root, "tmp_body.txt"), "utf8")).rejects.toThrow();
+  });
+  it("stops immediately after a policy-violation tool result", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-policy-stop-"));
+    const events = [];
+    enqueueToolTurns("chat-policy-stop", [
+      { name: "write_file", args: { path: "src/outside.ts", content: "bad\n" } },
+    ]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-policy-stop",
+        choices: [{ message: { role: "assistant", content: "should-not-run" } }],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        reason: "policy_violation",
+        policyViolation: true,
+        toolName: "write_file",
+        targetPath: "src/outside.ts",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events.find((event) => event.type === "tool:result")).toMatchObject({
+      data: expect.objectContaining({
+        name: "write_file",
+        ok: false,
+        policyViolation: true,
+        error: expect.stringMatching(/^write_path_not_allowed: src\/outside\.ts/),
+      }),
+    });
+    await expect(readFile(path.join(root, "src", "outside.ts"), "utf8")).rejects.toThrow();
   });
   it("treats directory and glob allowed write paths as scoped boundaries", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-allowed-write-glob-"));
@@ -5423,6 +5492,89 @@ describe("qwen-local-agent adapter", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("unsupported shell command");
   });
+  it("denies raw git and package-manager broad git wrappers before execution", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-broad-git-deny-"));
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await writeFile(path.join(root, "target.txt"), "target\n", "utf8");
+    const scripts = {
+      commit: "git add . && git commit -m bad",
+      gitExeAdd: "git.exe add .",
+      gitCmdAdd: "git.cmd add .",
+      gitEnvAdd: "GIT_DIR=.git git add .",
+      gitDashCAdd: "git -C . add .",
+      gitConfigAdd: "git -c user.name=x add -A",
+      gitDirAdd: "git --git-dir=.git add .",
+      nodeEvalAdd: "node -e \"require('child_process').execSync('git add .')\"",
+      nodeEvalEqualsAdd: "node --eval=\"require('child_process').execSync('git add .')\"",
+      nodeEvalBacktickAdd: "node --eval=\"require('child_process').execSync(`git add .`)\"",
+      shellEvalAdd: 'sh -c "git add ."',
+      nodeEvalGitDashCAdd: "node -e \"require('child_process').execSync('git -C . add .')\"",
+      nodeEvalChainAdd:
+        "node -e \"require('child_process').execSync('git add . && git commit -m bad')\"",
+      nodeEvalConcatAdd: "node -e \"require('child_process').execSync('git ' + 'add .')\"",
+      nodeEvalEnvAdd:
+        "CMD='git add .' node -e \"require('child_process').execSync(process.env.CMD)\"",
+    };
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ scripts }), "utf8");
+
+    const rawGit = await executeQwenLocalTool(
+      "run_shell",
+      { command: "git", args: ["add", "."] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+    const wrappedGit = await executeQwenLocalTool(
+      "run_shell",
+      { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["run", "commit"] },
+      { projectRoot: root, maxOutputChars: 2_000 },
+    );
+
+    expect(rawGit.ok).toBe(false);
+    expect(rawGit.policyViolation).toBe(true);
+    expect(rawGit.error).toContain("unsupported shell command: git");
+    expect(wrappedGit.ok).toBe(false);
+    expect(wrappedGit.policyViolation).toBe(true);
+    expect(wrappedGit.error).toContain("broad git staging or commit commands");
+    for (const scriptName of [
+      "gitExeAdd",
+      "gitCmdAdd",
+      "gitEnvAdd",
+      "gitDashCAdd",
+      "gitConfigAdd",
+      "gitDirAdd",
+      "nodeEvalAdd",
+      "nodeEvalEqualsAdd",
+      "nodeEvalBacktickAdd",
+      "shellEvalAdd",
+      "nodeEvalGitDashCAdd",
+      "nodeEvalChainAdd",
+      "nodeEvalConcatAdd",
+      "nodeEvalEnvAdd",
+    ]) {
+      const result = await executeQwenLocalTool(
+        "run_shell",
+        {
+          command: process.platform === "win32" ? "npm.cmd" : "npm",
+          args: ["run", scriptName],
+        },
+        { projectRoot: root, maxOutputChars: 2_000 },
+      );
+      const staged = await spawnProcess({
+        command: "git",
+        args: ["diff", "--cached", "--name-only"],
+        cwd: root,
+        env: buildSanitizedToolEnv(process.env),
+        timeoutMs: 10_000,
+        maxOutputChars: 4_000,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.policyViolation).toBe(true);
+      expect(result.error).toContain("broad git staging or commit commands");
+      expect(staged.ok).toBe(true);
+      expect(staged.output).not.toContain("target.txt");
+      expect(staged.output).toBe("");
+    }
+  });
   it("blocks dangerous shell commands through the shared permission policy", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-shell-policy-deny-"));
     const result = await executeQwenLocalTool(
@@ -6045,6 +6197,7 @@ describe("qwen-local-agent adapter", () => {
         }),
       );
       expect(result.ok).toBe(false);
+      expect(result.policyViolation).toBe(true);
       expect(result.error).toContain("can write files but does not declare a scoped write target");
       await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
         code: "ENOENT",
@@ -6244,6 +6397,159 @@ describe("qwen-local-agent adapter", () => {
     await expect(readFile(path.join(root, "hook-ran.txt"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+  it("rejects git_commit when the index already contains staged paths outside allowedWritePaths", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-staged-policy-"));
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.local"]);
+    await expectSpawnOk(root, ["config", "user.name", "Qwen Test"]);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "allowed.txt"), "allowed\n", "utf8");
+    await writeFile(path.join(root, "src", "outside.ts"), "bad\n", "utf8");
+    await expectSpawnOk(root, ["add", "src/outside.ts"]);
+
+    const result = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["allowed.txt"], message: "commit allowed" },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 4_000,
+        execution: { allowedWritePaths: ["allowed.txt"] },
+      }),
+    );
+    const log = await spawnProcess({
+      command: "git",
+      args: ["log", "--oneline"],
+      cwd: root,
+      env: buildSanitizedToolEnv(process.env),
+      timeoutMs: 10_000,
+      maxOutputChars: 4_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.policyViolation).toBe(true);
+    expect(result.error).toMatch(/^write_path_not_allowed: src\/outside\.ts/);
+    expect(log.ok).toBe(false);
+    expect(log.error).toContain("does not have any commits yet");
+  });
+  it("rejects git_commit when a staged outside path appears beyond the output truncation boundary", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-staged-policy-truncated-"));
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.local"]);
+    await expectSpawnOk(root, ["config", "user.name", "Qwen Test"]);
+    await mkdir(path.join(root, "allowed"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    for (let index = 0; index < 80; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      await writeFile(
+        path.join(root, "allowed", `file-${suffix}.ts`),
+        `allowed ${suffix}\n`,
+        "utf8",
+      );
+    }
+    await writeFile(path.join(root, "src", "outside.ts"), "bad\n", "utf8");
+    await expectSpawnOk(root, ["add", "allowed", "src/outside.ts"]);
+
+    const result = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["allowed/file-000.ts"], message: "commit allowed" },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 24,
+        execution: { allowedWritePaths: ["allowed"] },
+      }),
+    );
+    const log = await spawnProcess({
+      command: "git",
+      args: ["log", "--oneline"],
+      cwd: root,
+      env: buildSanitizedToolEnv(process.env),
+      timeoutMs: 10_000,
+      maxOutputChars: 4_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.policyViolation).toBe(true);
+    expect(result.error).toMatch(/^write_path_not_allowed: src\/outside\.ts/);
+    expect(log.ok).toBe(false);
+    expect(log.error).toContain("does not have any commits yet");
+  });
+  it("rejects git_commit when the index already contains staged deletions outside allowedWritePaths", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-staged-delete-policy-"));
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.local"]);
+    await expectSpawnOk(root, ["config", "user.name", "Qwen Test"]);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "allowed.txt"), "allowed\n", "utf8");
+    await writeFile(path.join(root, "src", "outside.ts"), "bad\n", "utf8");
+    await expectSpawnOk(root, ["add", "allowed.txt", "src/outside.ts"]);
+    await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
+    await rm(path.join(root, "src", "outside.ts"));
+    await expectSpawnOk(root, ["add", "src/outside.ts"]);
+
+    const result = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["allowed.txt"], message: "commit allowed" },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 4_000,
+        execution: { allowedWritePaths: ["allowed.txt"] },
+      }),
+    );
+    const status = await spawnProcess({
+      command: "git",
+      args: ["status", "--short"],
+      cwd: root,
+      env: buildSanitizedToolEnv(process.env),
+      timeoutMs: 10_000,
+      maxOutputChars: 4_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.policyViolation).toBe(true);
+    expect(result.error).toMatch(/^write_path_not_allowed: src\/outside\.ts/);
+    expect(status.ok).toBe(true);
+    expect(status.output).toContain("D  src/outside.ts");
+  });
+  it("rejects git_commit when a staged rename moves an outside path into allowedWritePaths", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-staged-rename-policy-"));
+    await expectSpawnOk(root, ["init", "--initial-branch=main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.local"]);
+    await expectSpawnOk(root, ["config", "user.name", "Qwen Test"]);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "outside.ts"), "tracked\n", "utf8");
+    await expectSpawnOk(root, ["add", "src/outside.ts"]);
+    await expectSpawnOk(root, ["commit", "-m", "init", "--no-verify"]);
+    await rename(path.join(root, "src", "outside.ts"), path.join(root, "allowed.txt"));
+    await expectSpawnOk(root, ["add", "-A"]);
+
+    const result = await executeQwenLocalTool(
+      "git_commit",
+      { paths: ["allowed.txt"], message: "commit allowed rename" },
+      createDefaultQwenToolContext({
+        projectRoot: root,
+        maxOutputChars: 4_000,
+        execution: { allowedWritePaths: ["allowed.txt"] },
+      }),
+    );
+    const log = await spawnProcess({
+      command: "git",
+      args: ["log", "--oneline"],
+      cwd: root,
+      env: buildSanitizedToolEnv(process.env),
+      timeoutMs: 10_000,
+      maxOutputChars: 4_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.policyViolation).toBe(true);
+    expect(result.error).toMatch(/^write_path_not_allowed: src\/outside\.ts/);
+    expect(log.ok).toBe(true);
+    expect(
+      String(log.output ?? "")
+        .trim()
+        .split(/\r?\n/),
+    ).toHaveLength(1);
   });
   it("redacts raw tool arguments from tool-use events and callbacks", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-redact-events-"));

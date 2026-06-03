@@ -514,7 +514,7 @@ function formatImplementationManifestPrompt(
 - Put the manifest in the final result text, not in a repository file.`;
 }
 
-function implementationAllowedWritePathsFromPlan(
+export function implementationAllowedWritePathsFromPlan(
   task: Pick<TaskRow, "taskIntent" | "isFix">,
   planText: string | null | undefined,
 ): string[] {
