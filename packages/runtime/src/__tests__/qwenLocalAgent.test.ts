@@ -4767,6 +4767,264 @@ describe("qwen-local-agent adapter", () => {
     });
     await expect(readFile(path.join(root, "src", "outside.ts"), "utf8")).rejects.toThrow();
   });
+  it("stops after a scoped package-manager dynamic write target policy violation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-policy-stop-run-shell-dynamic-"));
+    const events = [];
+    await mkdir(path.join(root, "audit"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "node -e \"const fs=require('fs'); const target='src/out.ts'; fs.writeFileSync('audit/report.md','ok'); fs.writeFileSync(target,'bad')\"",
+        },
+      }),
+      "utf8",
+    );
+    enqueueToolTurns("chat-policy-stop-run-shell-dynamic", [
+      {
+        name: "run_shell",
+        args: { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+      },
+    ]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-policy-stop-run-shell-dynamic",
+        choices: [{ message: { role: "assistant", content: "should-not-run" } }],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        reason: "policy_violation",
+        policyViolation: true,
+        toolName: "run_shell",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events.find((event) => event.type === "tool:result")).toMatchObject({
+      data: expect.objectContaining({
+        name: "run_shell",
+        ok: false,
+        policyViolation: true,
+        error: expect.stringContaining(
+          "can write files but does not declare a scoped write target",
+        ),
+      }),
+    });
+    await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  it("stops after a scoped package-manager workspace policy violation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-policy-stop-run-shell-workspace-"));
+    const events = [];
+    await mkdir(path.join(root, "subpkg", "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        workspaces: ["subpkg"],
+        scripts: {
+          test: "node -e \"require('fs').writeFileSync('audit/report.md','root')\"",
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "subpkg", "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+        },
+      }),
+      "utf8",
+    );
+    enqueueToolTurns("chat-policy-stop-run-shell-workspace", [
+      {
+        name: "run_shell",
+        args: {
+          command: process.platform === "win32" ? "npm.cmd" : "npm",
+          args: ["run", "test", "--workspace", "subpkg"],
+        },
+      },
+    ]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-policy-stop-run-shell-workspace",
+        choices: [{ message: { role: "assistant", content: "should-not-run" } }],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        reason: "policy_violation",
+        policyViolation: true,
+        toolName: "run_shell",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events.find((event) => event.type === "tool:result")).toMatchObject({
+      data: expect.objectContaining({
+        name: "run_shell",
+        ok: false,
+        policyViolation: true,
+        error: expect.stringContaining("workspace or alternate package-root arguments"),
+      }),
+    });
+    await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      readFile(path.join(root, "subpkg", "src", "out.ts"), "utf8"),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  it("stops after a scoped package-manager nested script policy violation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-policy-stop-run-shell-nested-"));
+    const events = [];
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "npm run write-out",
+          "write-out": "node -e \"require('fs').writeFileSync('src/out.ts','bad')\"",
+        },
+      }),
+      "utf8",
+    );
+    enqueueToolTurns("chat-policy-stop-run-shell-nested", [
+      {
+        name: "run_shell",
+        args: { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+      },
+    ]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-policy-stop-run-shell-nested",
+        choices: [{ message: { role: "assistant", content: "should-not-run" } }],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        reason: "policy_violation",
+        policyViolation: true,
+        toolName: "run_shell",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events.find((event) => event.type === "tool:result")).toMatchObject({
+      data: expect.objectContaining({
+        name: "run_shell",
+        ok: false,
+        policyViolation: true,
+        error: expect.stringContaining("delegates to another package-manager script"),
+      }),
+    });
+    await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  it("stops after a scoped package-manager local script file policy violation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-policy-stop-run-shell-local-file-"));
+    const events = [];
+    await mkdir(path.join(root, "scripts"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "scripts", "write-out.js"),
+      "require('fs').writeFileSync('src/out.ts','bad')\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "node scripts/write-out.js",
+        },
+      }),
+      "utf8",
+    );
+    enqueueToolTurns("chat-policy-stop-run-shell-local-file", [
+      {
+        name: "run_shell",
+        args: { command: process.platform === "win32" ? "npm.cmd" : "npm", args: ["test"] },
+      },
+    ]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-policy-stop-run-shell-local-file",
+        choices: [{ message: { role: "assistant", content: "should-not-run" } }],
+      }),
+    );
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          execution: {
+            allowedWritePaths: ["audit/report.md"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        reason: "policy_violation",
+        policyViolation: true,
+        toolName: "run_shell",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events.find((event) => event.type === "tool:result")).toMatchObject({
+      data: expect.objectContaining({
+        name: "run_shell",
+        ok: false,
+        policyViolation: true,
+        error: expect.stringContaining("delegates to a local script file"),
+      }),
+    });
+    await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
   it("treats directory and glob allowed write paths as scoped boundaries", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-allowed-write-glob-"));
     const context = createDefaultQwenToolContext({
@@ -5774,6 +6032,7 @@ describe("qwen-local-agent adapter", () => {
       );
       expect(result.ok).toBe(false);
       expect(result.error).toContain("workspace or alternate package-root arguments");
+      expect(result.policyViolation).toBe(true);
       await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -5871,6 +6130,7 @@ describe("qwen-local-agent adapter", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.error).toContain("delegates to another package-manager script");
+    expect(result.policyViolation).toBe(true);
     await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -5911,6 +6171,7 @@ describe("qwen-local-agent adapter", () => {
       );
       expect(result.ok).toBe(false);
       expect(result.error).toContain("delegates to a local script file");
+      expect(result.policyViolation).toBe(true);
       await expect(readFile(path.join(root, "src", "out.ts"), "utf8")).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -5939,6 +6200,7 @@ describe("qwen-local-agent adapter", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.error).toContain("can write files but does not declare a scoped write target");
+    expect(result.policyViolation).toBe(true);
     await expect(readFile(path.join(root, "audit", "report.md"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });

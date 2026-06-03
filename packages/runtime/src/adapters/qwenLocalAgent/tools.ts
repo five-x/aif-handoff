@@ -1129,10 +1129,9 @@ function validatePackageScriptWriteScope(command, args, scriptName, script, cont
   }
   const targets = packageScriptWriteTargets(script);
   if (targets.length === 0 || targets.length < fsWriteIntentCount + redirectWriteIntentCount) {
-    throw new RuntimeExecutionError(
+    throw policyViolationError(
       `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} can write files but does not declare a scoped write target`,
-      undefined,
-      "permission",
+      { policyViolationKind: "unscoped_write_target" },
     );
   }
   for (const target of targets) {
@@ -1171,30 +1170,27 @@ function validatePackageManagerWorkspaceWriteScope(command, args, context) {
   if (allowed.length === 0) return;
   const scopedArg = args.find((arg) => PACKAGE_MANAGER_WORKSPACE_ARG_PATTERN.test(arg));
   if (!scopedArg) return;
-  throw new RuntimeExecutionError(
+  throw policyViolationError(
     `${command} ${args.join(" ")} is not supported with workspace or alternate package-root arguments under scoped allowed write paths; set run_shell.cwd to the package directory instead`,
-    undefined,
-    "permission",
+    { policyViolationKind: "workspace_script_scope_denied" },
   );
 }
 function validateNestedPackageManagerScriptScope(command, args, scriptName, script, context) {
   const allowed = context.allowedWritePaths ?? [];
   if (allowed.length === 0) return;
   if (!NESTED_PACKAGE_MANAGER_SCRIPT_PATTERN.test(script)) return;
-  throw new RuntimeExecutionError(
+  throw policyViolationError(
     `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} delegates to another package-manager script under scoped allowed write paths`,
-    undefined,
-    "permission",
+    { policyViolationKind: "nested_package_script_denied" },
   );
 }
 function validateLocalScriptFileDelegationScope(command, args, scriptName, script, context) {
   const allowed = context.allowedWritePaths ?? [];
   if (allowed.length === 0) return;
   if (!PACKAGE_MANAGER_LOCAL_SCRIPT_FILE_DELEGATION_PATTERN.test(script)) return;
-  throw new RuntimeExecutionError(
+  throw policyViolationError(
     `${command} ${args.join(" ")} is not supported because package.json script ${scriptName} delegates to a local script file under scoped allowed write paths`,
-    undefined,
-    "permission",
+    { policyViolationKind: "local_script_delegation_denied" },
   );
 }
 function assertNoLongRunningPackageManagerArgs(command, args) {
