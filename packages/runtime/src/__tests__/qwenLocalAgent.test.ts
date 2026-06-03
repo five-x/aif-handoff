@@ -155,6 +155,33 @@ describe("qwen-local-agent adapter", () => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
+  function enqueueToolTurns(runId, calls) {
+    for (const [index, call] of calls.entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: runId,
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-${index + 1}`,
+                    type: "function",
+                    function: {
+                      name: call.name,
+                      arguments: JSON.stringify(call.args ?? {}),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+  }
   it("advertises repository tools for capability-gated workflows", () => {
     const adapter = createQwenLocalAgentRuntimeAdapter();
     expect(adapter.descriptor.capabilities.supportsRepositoryTools).toBe(true);
@@ -2511,6 +2538,318 @@ describe("qwen-local-agent adapter", () => {
       }),
     });
   });
+
+  it("blocks interleaved repeated read_file calls by signature count", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-read-interleaved-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await writeFile(path.join(root, "README.md"), "# Readme\n", "utf8");
+    enqueueToolTurns("chat-read-interleaved", [
+      { name: "read_file", args: { path: "README.md" } },
+      { name: "git_status", args: {} },
+      { name: "read_file", args: { path: "./README.md" } },
+      { name: "git_status", args: {} },
+      { name: "read_file", args: { path: "README.md" } },
+    ]);
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "read_file",
+        signatureCount: 3,
+        repeatedToolCallLimit: 2,
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "read_file"),
+    ).toHaveLength(2);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        toolName: "read_file",
+        signatureCount: 3,
+        repeatedToolCallCount: 1,
+        repeatedCount: 3,
+        repeatedToolCallLimit: 2,
+        nonconsecutive: true,
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
+          targetPath: "README.md",
+          normalizedArgs: { path: "README.md" },
+        }),
+        targetPath: "README.md",
+      }),
+    });
+  });
+
+  it("honors repeatedToolCallLimit=1 for interleaved read_file calls", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-read-interleaved-limit-1-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await writeFile(path.join(root, "README.md"), "# Readme\n", "utf8");
+    enqueueToolTurns("chat-read-interleaved-limit-1", [
+      { name: "read_file", args: { path: "README.md" } },
+      { name: "git_status", args: {} },
+      { name: "read_file", args: { path: "README.md" } },
+    ]);
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 1,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "read_file",
+        signatureCount: 2,
+        repeatedToolCallLimit: 1,
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "read_file"),
+    ).toHaveLength(1);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        toolName: "read_file",
+        signatureCount: 2,
+        repeatedCount: 2,
+        repeatedToolCallLimit: 1,
+        nonconsecutive: true,
+      }),
+    });
+  });
+
+  it("blocks interleaved repeated list_files calls by signature count", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-list-interleaved-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "# Readme\n", "utf8");
+    enqueueToolTurns("chat-list-interleaved", [
+      { name: "list_files", args: { path: "src" } },
+      { name: "git_status", args: {} },
+      { name: "list_files", args: { path: "./src/" } },
+      { name: "read_file", args: { path: "README.md" } },
+      { name: "list_files", args: { path: "src" } },
+    ]);
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "list_files",
+        signatureCount: 3,
+        targetPath: "src",
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "list_files"),
+    ).toHaveLength(2);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        toolName: "list_files",
+        targetPath: "src",
+        signatureCount: 3,
+        repeatedCount: 3,
+        nonconsecutive: true,
+      }),
+    });
+  });
+
+  it("blocks interleaved repeated search_files calls by signature count", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-search-interleaved-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.ts"), "export const needle = 1;\n", "utf8");
+    await writeFile(path.join(root, "README.md"), "# Readme\n", "utf8");
+    enqueueToolTurns("chat-search-interleaved", [
+      { name: "search_files", args: { query: "needle", path: "src", regex: false } },
+      { name: "git_status", args: {} },
+      { name: "search_files", args: { path: "./src", query: "needle", regex: false } },
+      { name: "read_file", args: { path: "README.md" } },
+      { name: "search_files", args: { query: "needle", path: "src/", regex: false } },
+    ]);
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "search_files",
+        signatureCount: 3,
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "search_files"),
+    ).toHaveLength(2);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        toolName: "search_files",
+        targetPath: "src",
+        signatureCount: 3,
+        repeatedCount: 3,
+        nonconsecutive: true,
+        fingerprintInput: expect.objectContaining({
+          normalizedArgs: { path: "src", query: "needle", regex: false },
+        }),
+      }),
+    });
+  });
+
+  it("blocks interleaved repeated stable git_status checks", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-status-interleaved-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "README.md"), "# Readme\n", "utf8");
+    enqueueToolTurns("chat-git-status-interleaved", [
+      { name: "git_status", args: {} },
+      { name: "read_file", args: { path: "README.md" } },
+      { name: "git_status", args: {} },
+      { name: "list_files", args: { path: "." } },
+      { name: "git_status", args: {} },
+    ]);
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "git_status",
+        gitStatusStateRepeated: true,
+        gitStatusResultFingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "git_status"),
+    ).toHaveLength(2);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        toolName: "git_status",
+        signatureCount: 3,
+        repeatedCount: 3,
+        repeatedToolCallLimit: 2,
+        nonconsecutive: true,
+        gitStatusStateRepeated: true,
+        gitStatusResultFingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+      }),
+    });
+  });
+
+  it("does not block git_status when repository state changes between checks", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-git-status-state-change-"));
+    await expectSpawnOk(root, ["init", "-b", "main"]);
+    await expectSpawnOk(root, ["config", "user.email", "test@example.com"]);
+    await expectSpawnOk(root, ["config", "user.name", "Test User"]);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    enqueueToolTurns("chat-git-status-state-change", [
+      { name: "git_status", args: {} },
+      { name: "write_file", args: { path: "src/a.ts", content: "export const a = 1;\n" } },
+      { name: "git_status", args: {} },
+      { name: "git_commit", args: { paths: ["src/a.ts"], message: "add a" } },
+      { name: "git_status", args: {} },
+    ]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "chat-git-status-state-change",
+        choices: [{ message: { role: "assistant", content: "done" } }],
+      }),
+    );
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+          execution: {
+            allowedWritePaths: ["src/a.ts"],
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).resolves.toMatchObject({ outputText: "done" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toBeUndefined();
+    expect(
+      events.filter((event) => event.type === "tool:result" && event.data?.name === "git_status"),
+    ).toHaveLength(3);
+  }, 15_000);
 
   it("blocks repeated list_files calls by normalized path", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "qwen-list-loop-fingerprint-"));

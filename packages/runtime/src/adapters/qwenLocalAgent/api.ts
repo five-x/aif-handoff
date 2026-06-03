@@ -76,7 +76,10 @@ const LOCAL_ENDPOINT_BUDGETS = new Map([
     },
   ],
 ]);
-const NONCONSECUTIVE_LOOP_PRONE_TOOLS = new Set([
+const NONCONSECUTIVE_SIGNATURE_LIMIT_TOOLS = new Set([
+  "read_file",
+  "list_files",
+  "search_files",
   "finalize_audit_report_manifest",
   "git_commit",
   "run_shell",
@@ -938,6 +941,33 @@ async function buildToolCallFingerprint(input, toolContext, toolName, args) {
     fingerprint: createHash("sha256").update(JSON.stringify(fingerprintInput)).digest("hex"),
     fingerprintInput,
   };
+}
+function normalizeGitStatusOutput(output) {
+  return String(output ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+}
+function buildGitStatusResultFingerprint(result) {
+  const fingerprintInput = stableToolValue({
+    toolName: "git_status",
+    exitCode: result.exitCode ?? null,
+    output: normalizeGitStatusOutput(result.output),
+    touchedFiles: [...(result.touchedFiles ?? [])].sort((left, right) => left.localeCompare(right)),
+  });
+  return createHash("sha256").update(JSON.stringify(fingerprintInput)).digest("hex");
+}
+function repeatedGitStatusResult(signature, gitStatusResultFingerprintCounts, limit) {
+  const counts = gitStatusResultFingerprintCounts.get(signature);
+  if (!counts) return null;
+  let repeated = null;
+  for (const [fingerprint, count] of counts.entries()) {
+    if (count < limit) continue;
+    if (!repeated || count > repeated.count) {
+      repeated = { fingerprint, count };
+    }
+  }
+  return repeated;
 }
 function emitEvent(input, events, event) {
   events.push(event);
@@ -2376,6 +2406,7 @@ export async function runQwenLocalAgentApi(input, logger) {
   let failedAuditReportValidationPasses = 0;
   const auditReportValidationFingerprintCounts = new Map();
   const toolCallSignatureCounts = new Map();
+  const gitStatusResultFingerprintCounts = new Map();
   const completeAfterRepositoryInspectionBudgetExhaustion = async () => {
     logger?.warn?.(
       {
@@ -2661,14 +2692,30 @@ export async function runQwenLocalAgentApi(input, logger) {
           lastToolCallSignature = signature;
           repeatedToolCallCount = 1;
         }
-        const repeatedNonconsecutiveLoop =
-          NONCONSECUTIVE_LOOP_PRONE_TOOLS.has(toolCall.function.name) &&
+        const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
+        const repeatedGitStatusState =
+          safeToolName === "git_status"
+            ? repeatedGitStatusResult(
+                signature,
+                gitStatusResultFingerprintCounts,
+                effectiveRepeatedToolCallLimit,
+              )
+            : null;
+        const repeatedConsecutiveLoop = repeatedToolCallCount > effectiveRepeatedToolCallLimit;
+        const repeatedSignatureLoop =
+          NONCONSECUTIVE_SIGNATURE_LIMIT_TOOLS.has(safeToolName) &&
           signatureCount > effectiveRepeatedToolCallLimit;
+        const repeatedGitStatusLoop = repeatedGitStatusState !== null;
+        const repeatedNonconsecutiveLoop =
+          !repeatedConsecutiveLoop && (repeatedSignatureLoop || repeatedGitStatusLoop);
         const shouldSuppressRepeatedCall =
-          repeatedToolCallCount > effectiveRepeatedToolCallLimit || repeatedNonconsecutiveLoop;
+          repeatedConsecutiveLoop || repeatedSignatureLoop || repeatedGitStatusLoop;
         if (shouldSuppressRepeatedCall) {
-          const safeToolName = sanitizeQwenToolNameForLog(toolCall.function.name);
-          const repeatedCount = Math.max(repeatedToolCallCount, signatureCount);
+          const repeatedCount = Math.max(
+            repeatedToolCallCount,
+            signatureCount,
+            repeatedGitStatusState ? repeatedGitStatusState.count + 1 : 0,
+          );
           const loopEvent = {
             runtimeId: input.runtimeId,
             profileId: input.profileId ?? null,
@@ -2680,10 +2727,16 @@ export async function runQwenLocalAgentApi(input, logger) {
             signatureCount,
             repeatedCount,
             repeatedToolCallLimit: effectiveRepeatedToolCallLimit,
-            nonconsecutive: repeatedNonconsecutiveLoop,
+            nonconsecutive: repeatedNonconsecutiveLoop || repeatedGitStatusLoop,
             fingerprint: fingerprint.fingerprint,
             fingerprintInput: fingerprint.fingerprintInput,
             targetPath: fingerprint.fingerprintInput.targetPath ?? null,
+            ...(repeatedNonconsecutiveLoop && repeatedGitStatusState
+              ? {
+                  gitStatusStateRepeated: true,
+                  gitStatusResultFingerprint: repeatedGitStatusState.fingerprint,
+                }
+              : {}),
           };
           emitRepeatedToolLoopBlocked(input, events, loopEvent);
           logger?.warn?.(loopEvent, "Blocked qwen-local-agent after repeated identical tool calls");
@@ -2719,6 +2772,12 @@ export async function runQwenLocalAgentApi(input, logger) {
                     touchedFiles: [],
                   }
                 : await executeQwenLocalTool(toolCall.function.name, args, toolContext);
+        if (safeToolName === "git_status" && result.ok) {
+          const gitStatusResultFingerprint = buildGitStatusResultFingerprint(result);
+          const counts = gitStatusResultFingerprintCounts.get(signature) ?? new Map();
+          counts.set(gitStatusResultFingerprint, (counts.get(gitStatusResultFingerprint) ?? 0) + 1);
+          gitStatusResultFingerprintCounts.set(signature, counts);
+        }
         if (
           toolAllowed &&
           isLowQualityAuditReportRepairValidationResult(toolCall.function.name, result)

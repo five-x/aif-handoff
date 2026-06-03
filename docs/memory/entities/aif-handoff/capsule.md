@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::01_hard_tool_loop_guard::entity-capsule
+memory_id: task::aif-handoff::work::01b_nonconsecutive_signature_limit_tools::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 01_hard_tool_loop_guard
-source_path: docs/rdpi/work/01_hard_tool_loop_guard
+task_id: 01b_nonconsecutive_signature_limit_tools
+source_path: docs/rdpi/work/01b_nonconsecutive_signature_limit_tools
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-06-02
+updated_at: 2026-06-03
 supersedes:
 expires_at:
 tags:
@@ -25,18 +25,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/01_hard_tool_loop_guard/research.md
-- docs/rdpi/work/01_hard_tool_loop_guard/design.md
-- docs/rdpi/work/01_hard_tool_loop_guard/plan.md
-- docs/rdpi/work/01_hard_tool_loop_guard/result.md
-  created_at: 2026-06-02
-  last_verified_at: 2026-06-02
+- docs/rdpi/work/01b_nonconsecutive_signature_limit_tools/research.md
+- docs/rdpi/work/01b_nonconsecutive_signature_limit_tools/design.md
+- docs/rdpi/work/01b_nonconsecutive_signature_limit_tools/plan.md
+- docs/rdpi/work/01b_nonconsecutive_signature_limit_tools/result.md
+  created_at: 2026-06-03
+  last_verified_at: 2026-06-03
 
 ---
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task 01_hard_tool_loop_guard.
+Current capsule for entity aif-handoff, refreshed by task 01b_nonconsecutive_signature_limit_tools.
 
 # Why it matters
 
