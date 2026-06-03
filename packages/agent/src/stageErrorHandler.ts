@@ -77,6 +77,64 @@ function readRuntimeProviderMetaString(
   return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
 }
 
+function readRuntimeProviderMetaNumber(
+  runtimeError: ReturnType<typeof findRuntimeExecutionError>,
+  key: string,
+): number | null {
+  const providerMeta = runtimeError?.providerMeta;
+  if (!providerMeta || typeof providerMeta !== "object" || Array.isArray(providerMeta)) {
+    return null;
+  }
+  const raw = providerMeta[key];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
+function sanitizeReasonToken(value: string | null, fallback: string): string {
+  const raw = value?.trim() || fallback;
+  return raw.replace(/[^A-Za-z0-9_.:/@-]/g, "_").slice(0, 160) || fallback;
+}
+
+function sanitizeReasonPath(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+/g, "/");
+  if (!normalized || normalized.includes("\0")) return null;
+  return normalized.replace(/[^A-Za-z0-9_./:@-]/g, "_").slice(0, 240);
+}
+
+function repeatedToolLoopBlockedReason(
+  input: Pick<StageErrorInput, "stageLabel" | "err">,
+): string | null {
+  const runtimeError = findRuntimeExecutionError(input.err);
+  if (!runtimeError) return null;
+  if (readRuntimeProviderMetaString(runtimeError, "status") !== "repeated_tool_loop_blocked") {
+    return null;
+  }
+  const toolName = sanitizeReasonToken(
+    readRuntimeProviderMetaString(runtimeError, "toolName"),
+    "unknown_tool",
+  );
+  const count = readRuntimeProviderMetaNumber(runtimeError, "repeatedCount") ?? 0;
+  const limit = readRuntimeProviderMetaNumber(runtimeError, "repeatedToolCallLimit") ?? 0;
+  const stage =
+    readRuntimeProviderMetaString(runtimeError, "stage") ??
+    readRuntimeProviderMetaString(runtimeError, "workflowKind") ??
+    input.stageLabel;
+  const base =
+    input.stageLabel === "implementer" || stage === "implementer"
+      ? `implementation_tool_loop: ${toolName} repeated ${count}/${limit}`
+      : `repeated_tool_loop: ${toolName} repeated ${count}/${limit}`;
+  if (stage !== "audit" && input.stageLabel !== "audit") return base;
+  const artifact = sanitizeReasonPath(
+    readRuntimeProviderMetaString(runtimeError, "targetPath") ??
+      readRuntimeProviderMetaString(runtimeError, "artifactPath"),
+  );
+  return artifact ? `${base}; artifact=${artifact}` : base;
+}
+
 interface ImplementationRuntimeExhaustionDetails {
   category: string;
   status: string;
@@ -288,6 +346,38 @@ function resolveRetryAfter(
  */
 export function classifyStageError(input: StageErrorInput): ErrorRecovery {
   const { taskId, stageLabel, sourceStatus, err } = input;
+
+  const repeatedToolLoopReason = repeatedToolLoopBlockedReason(input);
+  if (repeatedToolLoopReason) {
+    const runtimeError = findRuntimeExecutionError(err);
+    const limitSnapshot = getEnv().AIF_USAGE_LIMITS_ENABLED
+      ? (runtimeError?.limitSnapshot ?? null)
+      : null;
+    logActivity(
+      taskId,
+      "Agent",
+      `coordinator moved to blocked_external from ${sourceStatus} at ${stageLabel}; retryAfter=manual; source=none; reason=${truncateReason(repeatedToolLoopReason)}`,
+    );
+    log.error(
+      {
+        taskId,
+        stage: stageLabel,
+        retryAfter: null,
+        retryAfterSource: "none",
+        runtimeCategory: runtimeError?.category ?? "unknown",
+        runtimeStatus: "repeated_tool_loop_blocked",
+      },
+      "Subagent blocked after repeated runtime tool loop",
+    );
+    return {
+      kind: "blocked_external",
+      blockedReason: repeatedToolLoopReason,
+      retryAfter: null,
+      retryAfterSource: "none",
+      retryCount: input.retryCount ?? 0,
+      limitSnapshot,
+    };
+  }
 
   const implementationRuntimeExhaustion = classifyImplementationRuntimeExhaustion(input);
   if (implementationRuntimeExhaustion) return implementationRuntimeExhaustion;

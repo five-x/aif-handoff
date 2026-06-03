@@ -44,6 +44,7 @@ function createRunInput(projectRoot, overrides = {}) {
     ...overrides,
   };
 }
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -2349,14 +2350,17 @@ describe("qwen-local-agent adapter", () => {
       level: "warn",
       data: expect.objectContaining({
         workflowKind: "implementer",
+        stage: "implementer",
         toolName: "run_shell",
         repeatedCount: 3,
         repeatedToolCallLimit: 2,
-        fingerprint: expect.objectContaining({
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
           workflowKind: "implementer",
+          stage: "implementer",
           toolName: "run_shell",
           targetPath: null,
-          args: { args: ["-la"], command: "ls" },
+          normalizedArgs: { args: ["-la"], command: "ls" },
           allowedWritePaths: [],
         }),
       }),
@@ -2427,13 +2431,83 @@ describe("qwen-local-agent adapter", () => {
       data: expect.objectContaining({
         signatureCount: 3,
         repeatedCount: 3,
-        fingerprint: expect.objectContaining({
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
           workflowKind: "implementer",
+          stage: "implementer",
           toolName: "read_file",
           targetPath: "src/a.ts",
-          args: { lineCount: 10, path: "src/a.ts", startLine: 1 },
+          normalizedArgs: { lineCount: 10, path: "src/a.ts", startLine: 1 },
           allowedWritePaths: ["audit/report.md"],
         }),
+      }),
+    });
+  });
+
+  it("canary honors repeatedToolCallLimit 1 before executing a blocked repeated read_file call", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-read-loop-canary-"));
+    await writeFile(path.join(root, "README.md"), "# Canary\n", "utf8");
+    for (const index of [1, 2]) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-read-loop-canary",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-read-canary-${index}`,
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    const events = [];
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 1,
+            maxToolTurns: 20,
+          },
+          execution: {
+            onEvent: (event) => events.push(event),
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        stage: "implementer",
+        toolName: "read_file",
+        repeatedCount: 2,
+        repeatedToolCallLimit: 1,
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+      }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(events.filter((event) => event.type === "tool:result")).toHaveLength(1);
+    expect(events.find((event) => event.type === "repeated_tool_loop_blocked")).toMatchObject({
+      data: expect.objectContaining({
+        stage: "implementer",
+        toolName: "read_file",
+        repeatedCount: 2,
+        repeatedToolCallLimit: 1,
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
       }),
     });
   });
@@ -2483,9 +2557,77 @@ describe("qwen-local-agent adapter", () => {
         status: "repeated_tool_loop_blocked",
         toolName: "list_files",
         repeatedToolCallLimit: 2,
-        fingerprint: expect.objectContaining({
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
           targetPath: "src",
-          args: { path: "src" },
+          normalizedArgs: { path: "src" },
+        }),
+      }),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("normalizes search_files fingerprints by query, scope path, and flags", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qwen-search-loop-fingerprint-"));
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.ts"), "export const needle = 1;\n", "utf8");
+    const calls = [
+      { query: "needle", path: "src\\", regex: false, caseSensitive: false, maxMatches: 5 },
+      { maxMatches: 5, caseSensitive: false, regex: false, path: "./src", query: "needle" },
+      { path: "src", query: "needle", regex: false, caseSensitive: false, maxMatches: 5 },
+    ];
+    for (const [index, args] of calls.entries()) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: "chat-search-loop-fingerprint",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-search-${index + 1}`,
+                    type: "function",
+                    function: {
+                      name: "search_files",
+                      arguments: JSON.stringify(args),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      );
+    }
+
+    await expect(
+      runQwenLocalAgentApi(
+        createRunInput(root, {
+          options: {
+            baseUrl: "http://qwen.local/v1",
+            repeatedToolCallLimit: 2,
+            maxToolTurns: 20,
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      category: "permission",
+      providerMeta: expect.objectContaining({
+        status: "repeated_tool_loop_blocked",
+        toolName: "search_files",
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
+          toolName: "search_files",
+          targetPath: "src",
+          normalizedArgs: {
+            caseSensitive: false,
+            maxMatches: 5,
+            path: "src",
+            query: "needle",
+            regex: false,
+          },
         }),
       }),
     });
@@ -2614,8 +2756,10 @@ describe("qwen-local-agent adapter", () => {
       data: expect.objectContaining({
         repeatedCount: 2,
         nonconsecutive: true,
-        fingerprint: expect.objectContaining({
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
           workflowKind: "implementer",
+          stage: "implementer",
           toolName: "git_commit",
           targetPath: "audit/summary.md",
           allowedWritePaths: [],
@@ -2877,10 +3021,12 @@ describe("qwen-local-agent adapter", () => {
       data: expect.objectContaining({
         repeatedCount: 3,
         nonconsecutive: true,
-        fingerprint: expect.objectContaining({
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
           workflowKind: "implementer",
+          stage: "implementer",
           toolName: "run_shell",
-          args: { args: ["-la"], command: "ls" },
+          normalizedArgs: { args: ["-la"], command: "ls" },
         }),
       }),
     });
@@ -2937,7 +3083,9 @@ describe("qwen-local-agent adapter", () => {
         status: "repeated_tool_loop_blocked",
         toolName: "finalize_audit_report_manifest",
         repeatedToolCallLimit: 2,
-        fingerprint: expect.objectContaining({
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
+          stage: "audit",
           targetPath: "audit/report.md",
         }),
       }),
@@ -3530,7 +3678,8 @@ describe("qwen-local-agent adapter", () => {
         status: "repeated_tool_loop_blocked",
         toolName: "validate_audit_report",
         repeatedToolCallLimit: 2,
-        fingerprint: expect.objectContaining({
+        fingerprint: expect.stringMatching(SHA256_HEX_PATTERN),
+        fingerprintInput: expect.objectContaining({
           fileStates: [
             expect.objectContaining({
               path: "audit/report.md",

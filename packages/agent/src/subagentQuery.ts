@@ -1362,6 +1362,27 @@ export async function executeSubagentQuery(
             event.data?.auditEvidence ?? event.data?.evidenceUnit,
           );
         }
+        if (event.type === "repeated_tool_loop_blocked") {
+          const data = event.data && typeof event.data === "object" ? event.data : {};
+          const stage = typeof data.stage === "string" ? data.stage : context.runtimeStage;
+          const tool =
+            typeof data.toolName === "string"
+              ? data.toolName
+              : typeof data.tool === "string"
+                ? data.tool
+                : "unknown_tool";
+          const limit =
+            typeof data.repeatedToolCallLimit === "number" &&
+            Number.isFinite(data.repeatedToolCallLimit)
+              ? Math.floor(data.repeatedToolCallLimit)
+              : "unknown";
+          const fingerprint = typeof data.fingerprint === "string" ? data.fingerprint : "unknown";
+          logActivity(
+            taskId,
+            "Agent",
+            `repeated_tool_loop_blocked: stage=${stage}; tool=${tool}; limit=${limit}; fingerprint=${fingerprint}`,
+          );
+        }
         if (runtimeUsageLimitsEnabled) {
           latestLimitSnapshot = observeRuntimeLimitEvent(event, latestLimitSnapshot, {
             logger: log,

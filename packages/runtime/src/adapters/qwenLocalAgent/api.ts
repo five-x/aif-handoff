@@ -133,6 +133,24 @@ const READ_ONLY_WORKFLOWS = new Set([
   "security_review",
   "qa",
 ]);
+const WORKFLOW_STAGE_ALIASES = new Map([
+  ["planner", "planner"],
+  ["plan-checker", "plan_checker"],
+  ["plan_checker", "plan_checker"],
+  ["implementer", "implementer"],
+  ["implementer_checklist_sync", "implementer"],
+  ["reviewer", "reviewer"],
+  ["review-gate", "reviewer"],
+  ["review_security", "reviewer"],
+  ["review-security", "reviewer"],
+  ["qa", "qa"],
+  ["audit", "audit"],
+  ["synthesis", "synthesis"],
+  ["researcher", "planner"],
+  ["research", "planner"],
+  ["designer", "planner"],
+  ["design", "planner"],
+]);
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -727,7 +745,7 @@ function readRepeatedToolCallLimit(input) {
       ? options.repeatedToolCallLimit
       : DEFAULT_REPEATED_TOOL_CALL_LIMIT;
   if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_REPEATED_TOOL_CALL_LIMIT;
-  return Math.max(2, Math.min(Math.floor(raw), 12));
+  return Math.max(1, Math.min(Math.floor(raw), 12));
 }
 function repeatedToolCallLimitForTool(workflowKind, toolName, fallbackLimit) {
   const specialLimit = REPEATED_TOOL_CALL_SPECIAL_LIMITS.get(toolName);
@@ -789,6 +807,12 @@ function normalizeToolLoopPath(value) {
     .replace(/\/$/, "");
   return normalized || ".";
 }
+function normalizeToolLoopStage(workflowKind) {
+  const normalized = readString(workflowKind)?.replace(/-/g, "_") ?? "";
+  return (
+    WORKFLOW_STAGE_ALIASES.get(workflowKind) ?? WORKFLOW_STAGE_ALIASES.get(normalized) ?? normalized
+  );
+}
 function normalizeToolLoopPaths(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -807,6 +831,13 @@ function normalizeToolLoopArgs(toolName, args) {
   const normalized = stableToolValue(args);
   if (toolName === "git_commit" && normalized && typeof normalized === "object") {
     return { ...normalized, paths: normalizeToolLoopPaths(args.paths) };
+  }
+  if (toolName === "search_files" && normalized && typeof normalized === "object") {
+    const result = { ...normalized };
+    for (const key of ["path", "scope", "directory", "root"]) {
+      if (typeof result[key] === "string") result[key] = normalizeToolLoopPath(result[key]);
+    }
+    return result;
   }
   if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
     const result = { ...normalized };
@@ -893,14 +924,19 @@ async function buildToolCallFingerprint(input, toolContext, toolName, args) {
     fileStatePaths.length > 0
       ? await buildToolLoopFileStates(toolContext.projectRoot, fileStatePaths)
       : [];
-  return {
+  const fingerprintInput = stableToolValue({
     workflowKind: input.workflowKind,
+    stage: normalizeToolLoopStage(input.workflowKind),
     toolName: safeToolName,
     cwd: normalizeToolLoopPath(input.cwd ?? input.projectRoot ?? toolContext.projectRoot),
     targetPath: buildToolLoopTargetPath(safeToolName, args),
-    args: normalizeToolLoopArgs(safeToolName, args),
+    normalizedArgs: normalizeToolLoopArgs(safeToolName, args),
     allowedWritePaths,
     ...(fileStates.length > 0 ? { fileStates } : {}),
+  });
+  return {
+    fingerprint: createHash("sha256").update(JSON.stringify(fingerprintInput)).digest("hex"),
+    fingerprintInput,
   };
 }
 function emitEvent(input, events, event) {
@@ -1012,7 +1048,7 @@ function emitRepeatedToolLoopBlocked(input, events, params) {
 }
 function repeatedToolLoopBlockedError(params) {
   return new RuntimeExecutionError(
-    `repeated_tool_loop_blocked: qwen-local-agent repeated ${params.toolName} with the same normalized fingerprint ${params.repeatedCount} time(s), exceeding limit ${params.repeatedToolCallLimit}.`,
+    `repeated_tool_loop_blocked: qwen-local-agent repeated ${params.toolName} ${params.repeatedCount}/${params.repeatedToolCallLimit}.`,
     undefined,
     "permission",
     {
@@ -2611,7 +2647,7 @@ export async function runQwenLocalAgentApi(input, logger) {
           toolCall.function.name,
           args,
         );
-        const signature = JSON.stringify(fingerprint);
+        const signature = fingerprint.fingerprint;
         const effectiveRepeatedToolCallLimit = repeatedToolCallLimitForTool(
           input.workflowKind,
           toolCall.function.name,
@@ -2637,6 +2673,7 @@ export async function runQwenLocalAgentApi(input, logger) {
             runtimeId: input.runtimeId,
             profileId: input.profileId ?? null,
             workflowKind: input.workflowKind,
+            stage: fingerprint.fingerprintInput.stage,
             toolName: safeToolName,
             toolUseId: redactProviderText(toolCall.id),
             repeatedToolCallCount,
@@ -2644,7 +2681,9 @@ export async function runQwenLocalAgentApi(input, logger) {
             repeatedCount,
             repeatedToolCallLimit: effectiveRepeatedToolCallLimit,
             nonconsecutive: repeatedNonconsecutiveLoop,
-            fingerprint,
+            fingerprint: fingerprint.fingerprint,
+            fingerprintInput: fingerprint.fingerprintInput,
+            targetPath: fingerprint.fingerprintInput.targetPath ?? null,
           };
           emitRepeatedToolLoopBlocked(input, events, loopEvent);
           logger?.warn?.(loopEvent, "Blocked qwen-local-agent after repeated identical tool calls");
@@ -2745,6 +2784,7 @@ export async function runQwenLocalAgentApi(input, logger) {
               runtimeId: input.runtimeId,
               profileId: input.profileId ?? null,
               workflowKind: input.workflowKind,
+              stage: fingerprint.fingerprintInput.stage,
               toolName: sanitizeQwenToolNameForLog(toolCall.function.name),
               toolUseId: redactProviderText(toolCall.id),
               repeatedToolCallCount,
@@ -2752,7 +2792,9 @@ export async function runQwenLocalAgentApi(input, logger) {
               repeatedCount: fingerprintCount,
               repeatedToolCallLimit: Math.min(effectiveRepeatedToolCallLimit, 2),
               nonconsecutive: signatureCount > effectiveRepeatedToolCallLimit,
-              fingerprint,
+              fingerprint: fingerprint.fingerprint,
+              fingerprintInput: fingerprint.fingerprintInput,
+              targetPath: fingerprint.fingerprintInput.targetPath ?? null,
               auditValidation: {
                 ...auditValidationPayload,
                 deterministicRoute: deterministicAuditValidationRoute(

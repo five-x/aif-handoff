@@ -649,6 +649,64 @@ describe("executeSubagentQuery attribution", () => {
     );
   });
 
+  it("persists repeated tool-loop blocked runtime events to activity log", async () => {
+    const capabilities = auditRuntimeCapabilities();
+    const adapter: RuntimeAdapter = {
+      descriptor: {
+        id: "test-runtime",
+        providerId: "test",
+        displayName: "Test Runtime",
+        defaultTransport: RuntimeTransport.SDK,
+        supportedTransports: [RuntimeTransport.SDK],
+        capabilities,
+      },
+      getEffectiveCapabilities: () => capabilities,
+      run: vi.fn(async (input: RuntimeRunInput) => {
+        input.execution?.onEvent?.({
+          type: "repeated_tool_loop_blocked",
+          timestamp: "2026-06-03T00:00:00.000Z",
+          level: "warn",
+          message: "blocked",
+          data: {
+            stage: "implementer",
+            toolName: "read_file",
+            repeatedToolCallLimit: 2,
+            fingerprint: "a".repeat(64),
+          },
+        });
+        return { outputText: "done", usage: null, events: [] };
+      }),
+    };
+    runtimeAdapterOverride.current = { runtimeId: "test-runtime", adapter };
+    resolveEffectiveRuntimeProfileMock.mockReturnValue({
+      source: "task",
+      profile: {
+        id: "profile-test-runtime",
+        runtimeId: "test-runtime",
+        providerId: "test",
+        transport: RuntimeTransport.SDK,
+        defaultModel: null,
+      } as never,
+      taskRuntimeProfileId: "profile-test-runtime",
+      projectRuntimeProfileId: null,
+      systemRuntimeProfileId: null,
+    });
+
+    await executeSubagentQuery({
+      taskId: "task-loop-activity",
+      projectRoot: "/tmp/project",
+      agentName: "implement-coordinator",
+      prompt: "run",
+      workflowKind: "implementer",
+    });
+
+    expect(logActivityMock).toHaveBeenCalledWith(
+      "task-loop-activity",
+      "Agent",
+      `repeated_tool_loop_blocked: stage=implementer; tool=read_file; limit=2; fingerprint=${"a".repeat(64)}`,
+    );
+  });
+
   it("denies qwen-local-agent implementation by default before adapter dispatch", async () => {
     const run = vi.fn(async () => ({ outputText: "unexpected", usage: null }));
     const capabilities = auditRuntimeCapabilities();
@@ -737,7 +795,7 @@ describe("executeSubagentQuery attribution", () => {
             implementer: {
               maxToolTurns: 5,
               wallClockMs: 123_000,
-              repeatedToolCallLimit: 3,
+              repeatedToolCallLimit: 1,
               contextWindowTokens: 16_000,
               maxOutputTokens: 1_000,
               maxBudgetUsd: 0.2,
@@ -778,14 +836,14 @@ describe("executeSubagentQuery attribution", () => {
         }),
         options: expect.objectContaining({
           contextWindowTokens: 16_000,
-          repeatedToolCallLimit: 2,
+          repeatedToolCallLimit: 1,
           maxInputTokens: 16_000,
           maxTokens: 1_000,
           maxOutputTokens: 1_000,
           repositoryInspectionToolBudget: 4,
           runtimeStageCaps: expect.objectContaining({
             implementer: expect.objectContaining({
-              repeatedToolCallLimit: 3,
+              repeatedToolCallLimit: 1,
             }),
           }),
         }),

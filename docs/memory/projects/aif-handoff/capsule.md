@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260602-close-aif-roadmap-blockers::project-capsule
+memory_id: task::aif-handoff::work::01_hard_tool_loop_guard::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: work-20260602-close-aif-roadmap-blockers
-source_path: docs/rdpi/work/work-20260602-close-aif-roadmap-blockers
+task_id: 01_hard_tool_loop_guard
+source_path: docs/rdpi/work/01_hard_tool_loop_guard
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -24,10 +24,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/work-20260602-close-aif-roadmap-blockers/research.md
-- docs/rdpi/work/work-20260602-close-aif-roadmap-blockers/design.md
-- docs/rdpi/work/work-20260602-close-aif-roadmap-blockers/plan.md
-- docs/rdpi/work/work-20260602-close-aif-roadmap-blockers/result.md
+- docs/rdpi/work/01_hard_tool_loop_guard/research.md
+- docs/rdpi/work/01_hard_tool_loop_guard/design.md
+- docs/rdpi/work/01_hard_tool_loop_guard/plan.md
+- docs/rdpi/work/01_hard_tool_loop_guard/result.md
   created_at: 2026-06-02
   last_verified_at: 2026-06-02
 
@@ -35,7 +35,7 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260602-close-aif-roadmap-blockers.
+Current capsule for project aif-handoff, refreshed by task 01_hard_tool_loop_guard.
 
 # Why it matters
 

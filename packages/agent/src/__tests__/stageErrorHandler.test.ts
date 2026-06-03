@@ -432,6 +432,60 @@ describe("classifyStageError", () => {
     }
   });
 
+  it("fails closed with implementation tool-loop reason", () => {
+    const result = classifyStageError(
+      makeInput({
+        err: new RuntimeExecutionError("raw provider token=abc123", undefined, "permission", {
+          providerMeta: {
+            status: "repeated_tool_loop_blocked",
+            stage: "implementer",
+            toolName: "read_file",
+            repeatedCount: 3,
+            repeatedToolCallLimit: 2,
+            fingerprint: "a".repeat(64),
+          },
+        }),
+        retryCount: 5,
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toBe("implementation_tool_loop: read_file repeated 3/2");
+      expect(result.blockedReason).not.toContain("abc123");
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+      expect(result.retryCount).toBe(5);
+    }
+  });
+
+  it("fails closed with audit artifact tool-loop reason", () => {
+    const result = classifyStageError(
+      makeInput({
+        stageLabel: "audit",
+        err: new RuntimeExecutionError("raw provider token=abc123", undefined, "permission", {
+          providerMeta: {
+            status: "repeated_tool_loop_blocked",
+            stage: "audit",
+            toolName: "validate_audit_report",
+            repeatedCount: 3,
+            repeatedToolCallLimit: 2,
+            targetPath: "audit\\report.md",
+          },
+        }),
+      }),
+    );
+
+    expect(result.kind).toBe("blocked_external");
+    if (result.kind === "blocked_external") {
+      expect(result.blockedReason).toBe(
+        "repeated_tool_loop: validate_audit_report repeated 3/2; artifact=audit/report.md",
+      );
+      expect(result.retryAfter).toBeNull();
+      expect(result.retryAfterSource).toBe("none");
+    }
+  });
+
   it("blocks stage-incapable runtime profiles with a sanitized operator message", () => {
     const result = classifyStageError(
       makeInput({
