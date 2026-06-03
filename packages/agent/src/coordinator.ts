@@ -2827,6 +2827,16 @@ function implementationEvidenceIssueCodes(
   );
 }
 
+function isImplementerInternalManifestReworkState(task: TaskRow): boolean {
+  return (
+    task.status === "implementing" &&
+    task.reworkRequested === true &&
+    task.manualReviewRequired !== true &&
+    task.blockedReason?.startsWith("implementation_manifest_invalid:") === true &&
+    task.implementationManifestJson == null
+  );
+}
+
 function returnImplementationEvidenceToReworkIfPossible(input: {
   task: TaskRow;
   fromStatus: TaskStatus;
@@ -3614,6 +3624,25 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           blockedReason: latestTask.blockedReason,
         },
         "Implementer terminalized task before review handoff",
+      );
+      return false;
+    }
+
+    if (stage.label === "implementer" && isImplementerInternalManifestReworkState(latestTask)) {
+      clearTaskRuntimeLimitSnapshot(task.id);
+      appendTaskActivityLog(
+        task.id,
+        `[${new Date().toISOString()}] Implementer requested implementation manifest rework before review handoff: ${latestTask.blockedReason}`,
+      );
+      log.info(
+        {
+          taskId: task.id,
+          from: stage.inProgress,
+          to: latestTask.status,
+          blockedReason: latestTask.blockedReason,
+          retryCount: latestTask.retryCount ?? 0,
+        },
+        "Preserved implementer invalid-manifest rework state before review handoff",
       );
       return false;
     }

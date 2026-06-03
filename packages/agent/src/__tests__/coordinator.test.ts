@@ -5593,6 +5593,209 @@ describe("coordinator", () => {
     expect(task!.reviewIterationCount).toBe(0);
   });
 
+  it("preserves implementer invalid-manifest rework state without review handoff", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-handoff-missing-rework-");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-handoff-missing-rework",
+        projectId: "test-project",
+        title: "Development task with internal manifest rework",
+        taskIntent: "feature",
+        status: "implementing",
+        retryCount: 0,
+        maxReviewIterations: 5,
+      })
+      .run();
+
+    vi.mocked(runImplementer).mockImplementationOnce(async (taskId) => {
+      db.update(tasks)
+        .set({
+          status: "implementing",
+          blockedReason: "implementation_manifest_invalid: missing_implementation_manifest",
+          blockedFromStatus: "implementing",
+          retryAfter: null,
+          retryCount: 1,
+          reworkRequested: true,
+          manualReviewRequired: false,
+          implementationManifestJson: null,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-missing-rework", rootPath);
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-dev-handoff-missing-rework"))
+      .get();
+    expect(task!.status).toBe("implementing");
+    expect(task!.blockedReason).toBe(
+      "implementation_manifest_invalid: missing_implementation_manifest",
+    );
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.retryCount).toBe(1);
+    expect(task!.reworkRequested).toBe(true);
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.implementationManifestJson).toBeNull();
+    expect(task!.agentActivityLog).toContain(
+      "Implementer requested implementation manifest rework before review handoff",
+    );
+  });
+
+  it("preserves implementer implementation_changed_files_mismatch rework state", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-handoff-mismatch-rework-");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-handoff-mismatch-rework",
+        projectId: "test-project",
+        title: "Development task with changed files rework",
+        taskIntent: "feature",
+        status: "implementing",
+        retryCount: 0,
+        maxReviewIterations: 5,
+      })
+      .run();
+
+    vi.mocked(runImplementer).mockImplementationOnce(async (taskId) => {
+      db.update(tasks)
+        .set({
+          status: "implementing",
+          blockedReason: "implementation_manifest_invalid: implementation_changed_files_mismatch",
+          blockedFromStatus: null,
+          retryAfter: null,
+          retryCount: 1,
+          reworkRequested: true,
+          manualReviewRequired: false,
+          implementationManifestJson: null,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-mismatch-rework", rootPath);
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-dev-handoff-mismatch-rework"))
+      .get();
+    expect(task!.status).toBe("implementing");
+    expect(task!.blockedReason).toBe(
+      "implementation_manifest_invalid: implementation_changed_files_mismatch",
+    );
+    expect(task!.retryCount).toBe(1);
+    expect(task!.reworkRequested).toBe(true);
+    expect(task!.manualReviewRequired).toBe(false);
+    expect(task!.implementationManifestJson).toBeNull();
+  });
+
+  it("does not override implementer after-cap invalid-manifest terminal block", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-handoff-after-cap-");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-handoff-after-cap",
+        projectId: "test-project",
+        title: "Development task with capped manifest rework",
+        taskIntent: "feature",
+        status: "implementing",
+        retryCount: 3,
+        maxReviewIterations: 5,
+      })
+      .run();
+
+    vi.mocked(runImplementer).mockImplementationOnce(async (taskId) => {
+      db.update(tasks)
+        .set({
+          status: "blocked_external",
+          blockedReason:
+            "implementation_manifest_invalid_after_rework_limit: missing_implementation_manifest",
+          blockedFromStatus: "implementing",
+          retryAfter: null,
+          reworkRequested: false,
+          manualReviewRequired: true,
+          implementationManifestJson: null,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-after-cap", rootPath);
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-dev-handoff-after-cap")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toBe(
+      "implementation_manifest_invalid_after_rework_limit: missing_implementation_manifest",
+    );
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.implementationManifestJson).toBeNull();
+    expect(task!.agentActivityLog ?? "").not.toContain(
+      "Implementer requested implementation manifest rework before review handoff",
+    );
+  });
+
+  it("does not treat unrelated implementing status as manifest rework", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-handoff-unrelated-");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-handoff-unrelated",
+        projectId: "test-project",
+        title: "Development task with unrelated implementing state",
+        taskIntent: "feature",
+        status: "implementing",
+      })
+      .run();
+
+    vi.mocked(runImplementer).mockImplementationOnce(async (taskId) => {
+      db.update(tasks)
+        .set({
+          status: "implementing",
+          blockedReason: "some_other_reason",
+          blockedFromStatus: null,
+          retryAfter: null,
+          reworkRequested: true,
+          manualReviewRequired: false,
+          implementationManifestJson: null,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(tasks.id, taskId))
+        .run();
+    });
+
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-dev-handoff-unrelated", rootPath);
+    expect(runReviewer).not.toHaveBeenCalled();
+    const task = db.select().from(tasks).where(eq(tasks.id, "task-dev-handoff-unrelated")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedFromStatus).toBe("implementing");
+    expect(task!.blockedReason).toContain("Completion evidence guard");
+    expect(task!.blockedReason).toContain("missing_implementation_manifest");
+    expect(task!.agentActivityLog ?? "").not.toContain(
+      "Implementer requested implementation manifest rework before review handoff",
+    );
+  });
+
   it("should cap implementation evidence guard rework before exhausting the general review budget", async () => {
     const db = testDb.current;
     const rootPath = initGitFixture("coordinator-dev-handoff-cap-");

@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::03_invalid_manifest_fallback_fail_closed::entity-capsule
+memory_id: task::aif-handoff::work::03b_coordinator_invalid_manifest_rework_integration::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 03_invalid_manifest_fallback_fail_closed
-source_path: docs/rdpi/work/03_invalid_manifest_fallback_fail_closed
+task_id: 03b_coordinator_invalid_manifest_rework_integration
+source_path: docs/rdpi/work/03b_coordinator_invalid_manifest_rework_integration
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -25,10 +25,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/03_invalid_manifest_fallback_fail_closed/research.md
-- docs/rdpi/work/03_invalid_manifest_fallback_fail_closed/design.md
-- docs/rdpi/work/03_invalid_manifest_fallback_fail_closed/plan.md
-- docs/rdpi/work/03_invalid_manifest_fallback_fail_closed/result.md
+- docs/rdpi/work/03b_coordinator_invalid_manifest_rework_integration/research.md
+- docs/rdpi/work/03b_coordinator_invalid_manifest_rework_integration/design.md
+- docs/rdpi/work/03b_coordinator_invalid_manifest_rework_integration/plan.md
+- docs/rdpi/work/03b_coordinator_invalid_manifest_rework_integration/result.md
   created_at: 2026-06-03
   last_verified_at: 2026-06-03
 
@@ -36,7 +36,7 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task 03_invalid_manifest_fallback_fail_closed.
+Current capsule for entity aif-handoff, refreshed by task 03b_coordinator_invalid_manifest_rework_integration.
 
 # Why it matters
 
@@ -49,14 +49,3 @@ Reuse before editing the same component or domain.
 # When not to reuse
 
 Do not reuse if the entity boundary or ownership changed.
-
-## Active decisions
-
-- "Implementation evidence finalization must be fail-closed: normalized diagnostics are not trusted evidence unless validator returns `ok=true`."
-- "Deterministic fallback must not fill missing required implementation manifests or repair invalid agent evidence into accepted evidence."
-- Treat missing required development manifests as invalid evidence. The implementer must not create accepted `implementationManifestJson` through deterministic fallback when the agent omitted the required manifest.
-- Validate any extracted `implementationManifestJson` against current task, plan, and git-change evidence.
-- Return a trusted manifest only when `validation.ok=true`.
-- Preserve `validation.normalizedJson` only as diagnostic context in logs/activity, not in `implementationManifestJson`.
-- If validation fails, block before the final successful task patch is written.
-- Use issue codes in `blockedReason`: `implementation_manifest_invalid: <issueCodes>`.
