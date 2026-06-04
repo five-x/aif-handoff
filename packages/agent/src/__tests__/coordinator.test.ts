@@ -484,6 +484,56 @@ describe("coordinator", () => {
       .run();
   }
 
+  function seedRuntimeRecoveryDeltaAttempt(input: {
+    taskId: string;
+    recoveryKind: string;
+    runtimeCategory?: string;
+    stage?: string;
+    artifactPath?: string | null;
+    artifactSha?: string | null;
+    validatorFingerprint?: string | null;
+    toolLoopPattern?: string | null;
+    blockedReasonFamily: string;
+    evidenceRefs?: string[];
+    sourceSnapshotId?: string | null;
+    sourceSnapshotFingerprint?: string | null;
+    failedProfileId?: string | null;
+  }): void {
+    const signature = {
+      taskId: input.taskId,
+      stage: input.stage ?? "implementer",
+      runtimeCategory: input.runtimeCategory ?? "transport",
+      recoveryKind: input.recoveryKind,
+      artifactPath: input.artifactPath ?? null,
+      artifactSha: input.artifactSha ?? null,
+      validatorFingerprint: input.validatorFingerprint ?? null,
+      toolLoopPattern: input.toolLoopPattern ?? null,
+      blockedReasonFamily: input.blockedReasonFamily,
+      evidenceRefs: [...new Set(input.evidenceRefs ?? [])].sort(),
+      sourceSnapshotId: input.sourceSnapshotId ?? null,
+      sourceSnapshotFingerprint: input.sourceSnapshotFingerprint ?? null,
+      failedProfileId: input.failedProfileId ?? null,
+    };
+    recordTaskStageArtifactAttempt({
+      taskId: input.taskId,
+      stage: "runtime_recovery",
+      kind: "delta_guard",
+      state: "accepted",
+      path:
+        input.artifactPath ?? `runtime-recovery/${signature.stage}/${signature.runtimeCategory}`,
+      summary: "Seeded runtime recovery delta guard attempt.",
+      sourceSnapshotId: signature.sourceSnapshotId,
+      metadata: {
+        runtimeRecoveryFingerprint: "seeded-runtime-recovery-fingerprint",
+        runtimeRecoveryFingerprintInput: signature,
+        recoveryKind: signature.recoveryKind,
+        runtimeCategory: signature.runtimeCategory,
+        blockedReasonFamily: signature.blockedReasonFamily,
+        decision: "allow_recovery",
+      },
+    });
+  }
+
   function blockedRuntimeSnapshot(profileId: string, resetAt: string): Record<string, unknown> {
     return {
       source: "sdk_event",
@@ -5326,6 +5376,431 @@ describe("coordinator", () => {
     const attempts = artifact ? listRoadmapBatchArtifactAttempts(artifact.id) : [];
     expect(attempts.at(0)?.reworkStatus).toBe("rework_requested");
   });
+
+  it("blocks post-write timeout recovery for the same audit artifact delta", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-post-write-no-delta-");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "architecture.md"),
+      [
+        "# Architecture Audit",
+        "",
+        "## Finding: Central hub observation",
+        "Evidence: `README.md:1` identifies the fixture repository.",
+        "Risk: The module is a central hub and may become a single point of architectural failure.",
+        "Proposed fix: Document ownership boundaries.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) synthetic audit commit",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "-N", "audit/architecture.md"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-post-write-no-delta",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 3,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-post-write-no-delta",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-post-write-no-delta"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-post-write-no-delta",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+    vi.mocked(runImplementer)
+      .mockRejectedValueOnce(new RuntimeExecutionError("fetch failed", undefined, "transport"))
+      .mockRejectedValueOnce(new RuntimeExecutionError("stream interrupted", undefined, "stream"));
+
+    await pollAndProcess();
+    await pollAndProcess();
+
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-post-write-no-delta"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toMatch(
+      /^runtime_recovery_no_delta_fail_closed:post_write_audit_artifact_failure/,
+    );
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(3);
+    expect(blocked!.reworkRequested).toBe(false);
+    expect(blocked!.manualReviewRequired).toBe(true);
+    expect(blocked!.agentActivityLog).toContain("runtime_recovery_no_delta_fail_closed");
+    const attempts = listTaskStageArtifactAttempts("task-audit-post-write-no-delta").filter(
+      (attempt) => attempt.stage === "runtime_recovery" && attempt.kind === "delta_guard",
+    );
+    expect(attempts.map((attempt) => attempt.state)).toEqual(["accepted", "rejected"]);
+  });
+
+  it("allows post-write audit recovery when the artifact sha changes", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-post-write-delta-");
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const artifactPath = join(rootPath, "audit", "architecture.md");
+    writeFileSync(
+      artifactPath,
+      [
+        "# Architecture Audit",
+        "",
+        "## Finding: Central hub observation",
+        "Evidence: `README.md:1` identifies the fixture repository.",
+        "Risk: The module is a central hub and may become a single point of architectural failure.",
+        "Proposed fix: Document ownership boundaries.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) synthetic audit commit",
+        "```",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "-N", "audit/architecture.md"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-post-write-delta",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 2,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-post-write-delta",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-post-write-delta"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-post-write-delta",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+    vi.mocked(runImplementer)
+      .mockRejectedValueOnce(new RuntimeExecutionError("fetch failed", undefined, "transport"))
+      .mockImplementationOnce(async () => {
+        writeFileSync(
+          artifactPath,
+          readFileSync(artifactPath, "utf8").replace(
+            "Central hub observation",
+            "Central hub observation changed",
+          ),
+          "utf8",
+        );
+        throw new RuntimeExecutionError("stream interrupted", undefined, "stream");
+      });
+
+    await pollAndProcess();
+    await pollAndProcess();
+
+    const retrying = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-post-write-delta"))
+      .get();
+    expect(retrying!.status).toBe("implementing");
+    expect(retrying!.blockedReason).toContain("runtime_stream_after_audit_artifact_write");
+    expect(retrying!.blockedReason).not.toContain("runtime_recovery_no_delta_fail_closed");
+    expect(retrying!.reworkRequested).toBe(true);
+    expect(retrying!.retryCount).toBe(2);
+    const attempts = listTaskStageArtifactAttempts("task-audit-post-write-delta").filter(
+      (attempt) => attempt.stage === "runtime_recovery" && attempt.kind === "delta_guard",
+    );
+    expect(attempts.map((attempt) => attempt.state)).toEqual(["accepted", "accepted"]);
+  });
+
+  it("blocks audit report timeout recovery when the same six delta fields repeat", async () => {
+    getEnv().AIF_RUNTIME_AUTO_FALLBACK_ENABLED = true;
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-review-audit-timeout",
+      runtimeId: "claude",
+      providerId: "anthropic",
+      transport: "api",
+      options: { n_ctx: 32768 },
+    });
+    db.update(projects)
+      .set({ defaultReviewRuntimeProfileId: "profile-review-audit-timeout" })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-timeout-no-delta",
+        projectId: "test-project",
+        title: "Audit architecture",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "review",
+        retryCount: 2,
+      })
+      .run();
+    createRoadmapBatchContract({
+      projectId: "test-project",
+      roadmapAlias: "audit-timeout-no-delta",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-timeout-no-delta"],
+      synthesisTaskId: null,
+      artifacts: [
+        {
+          taskId: "task-audit-timeout-no-delta",
+          role: "report",
+          artifactPath: "audit/architecture.md",
+          projectRoot: "/tmp/test",
+        },
+      ],
+    });
+    seedRuntimeRecoveryDeltaAttempt({
+      taskId: "task-audit-timeout-no-delta",
+      stage: "reviewer",
+      recoveryKind: "audit_report_timeout",
+      runtimeCategory: "context_length",
+      artifactPath: "audit/architecture.md",
+      blockedReasonFamily: "audit_report_timeout",
+      failedProfileId: "diagnostic-old-profile",
+    });
+    vi.mocked(runReviewer).mockRejectedValueOnce(
+      new RuntimeExecutionError("Runtime request timed out", undefined, "timeout", {
+        providerMeta: { profileId: "diagnostic-new-profile" },
+      }),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-timeout-no-delta"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toMatch(
+      /^runtime_recovery_no_delta_fail_closed:audit_report_timeout/,
+    );
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(2);
+    expect(blocked!.reworkRequested).toBe(false);
+    expect(blocked!.manualReviewRequired).toBe(true);
+    expect(blocked!.agentActivityLog).toContain("runtime_recovery_no_delta_fail_closed");
+  });
+
+  it("blocks context fallback when the same six delta fields repeat", async () => {
+    getEnv().AIF_RUNTIME_AUTO_FALLBACK_ENABLED = true;
+    const db = testDb.current;
+    insertRuntimeProfile({
+      id: "profile-context-small-no-delta",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 32768 },
+    });
+    insertRuntimeProfile({
+      id: "profile-context-large-no-delta",
+      runtimeId: "qwen-local-agent",
+      providerId: "qwen",
+      transport: "api",
+      options: { n_ctx: 81920 },
+    });
+    db.update(projects)
+      .set({ defaultTaskRuntimeProfileId: "profile-context-small-no-delta" })
+      .where(eq(projects.id, "test-project"))
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-context-runtime-no-delta",
+        projectId: "test-project",
+        title: "Context no delta",
+        status: "implementing",
+        retryCount: 5,
+      })
+      .run();
+    seedRuntimeRecoveryDeltaAttempt({
+      taskId: "task-context-runtime-no-delta",
+      recoveryKind: "context_fallback",
+      runtimeCategory: "transport",
+      blockedReasonFamily: "context_length",
+      failedProfileId: "diagnostic-old-profile",
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError("request exceeds context", undefined, "context_length", {
+        providerMeta: { profileId: "profile-context-small-no-delta" },
+      }),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-context-runtime-no-delta"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toMatch(/^runtime_recovery_no_delta_fail_closed:context_length/);
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(5);
+    expect(blocked!.reworkRequested).toBe(false);
+    expect(blocked!.manualReviewRequired).toBe(false);
+    expect(blocked!.runtimeOptionsJson ?? "").not.toContain("profile-context-large-no-delta");
+  });
+
+  it("blocks repository-inspection budget no-delta with manual review required", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-repository-inspection-no-delta",
+        projectId: "test-project",
+        title: "Repository inspection no delta",
+        description: "Scope: README.md\nReport artifact: audit/architecture.md",
+        taskIntent: "audit",
+        status: "implementing",
+        retryCount: 4,
+      })
+      .run();
+    seedRuntimeRecoveryDeltaAttempt({
+      taskId: "task-repository-inspection-no-delta",
+      recoveryKind: "repository_inspection_budget_exhaustion",
+      runtimeCategory: "repository_inspection_budget_exhaustion",
+      blockedReasonFamily: "repository_inspection_budget_exhaustion",
+    });
+    vi.mocked(runImplementer).mockRejectedValueOnce(
+      new RuntimeExecutionError(
+        "repository inspection budget exhausted",
+        undefined,
+        "context_length",
+        {
+          providerMeta: {
+            status: "repository_inspection_budget_exhausted",
+            category: "context_length",
+          },
+        },
+      ),
+    );
+
+    await pollAndProcess();
+
+    const blocked = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-repository-inspection-no-delta"))
+      .get();
+    expect(blocked!.status).toBe("blocked_external");
+    expect(blocked!.blockedReason).toMatch(
+      /^runtime_recovery_no_delta_fail_closed:repository_inspection_budget_exhaustion/,
+    );
+    expect(blocked!.retryAfter).toBeNull();
+    expect(blocked!.retryCount).toBe(4);
+    expect(blocked!.reworkRequested).toBe(false);
+    expect(blocked!.manualReviewRequired).toBe(true);
+    expect(blocked!.runtimeOptionsJson ?? "").not.toContain("contextFallback");
+    expect(blocked!.agentActivityLog).toContain("runtime_recovery_no_delta_fail_closed");
+  });
+
+  it.each([
+    { category: "transport" as const, message: "fetch failed" },
+    { category: "stream" as const, message: "stream interrupted" },
+  ])(
+    "blocks $category transient fallback when the same six delta fields repeat",
+    async (testCase) => {
+      getEnv().AIF_RUNTIME_AUTO_FALLBACK_ENABLED = true;
+      const db = testDb.current;
+      insertRuntimeProfile({
+        id: `profile-${testCase.category}-small-no-delta`,
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        transport: "api",
+        options: { n_ctx: 32768 },
+      });
+      insertRuntimeProfile({
+        id: `profile-${testCase.category}-large-no-delta`,
+        runtimeId: "qwen-local-agent",
+        providerId: "qwen",
+        transport: "api",
+        options: { n_ctx: 81920 },
+      });
+      db.update(projects)
+        .set({ defaultTaskRuntimeProfileId: `profile-${testCase.category}-small-no-delta` })
+        .where(eq(projects.id, "test-project"))
+        .run();
+      db.insert(tasks)
+        .values({
+          id: `task-${testCase.category}-runtime-no-delta`,
+          projectId: "test-project",
+          title: `${testCase.category} no delta`,
+          status: "implementing",
+          retryCount: 6,
+        })
+        .run();
+      seedRuntimeRecoveryDeltaAttempt({
+        taskId: `task-${testCase.category}-runtime-no-delta`,
+        recoveryKind: "transient_runtime_fallback",
+        runtimeCategory: testCase.category === "transport" ? "stream" : "transport",
+        blockedReasonFamily: "endpoint_request_timeout",
+        failedProfileId: "diagnostic-old-profile",
+      });
+      vi.mocked(runImplementer).mockRejectedValueOnce(
+        new RuntimeExecutionError(testCase.message, undefined, testCase.category, {
+          providerMeta: {
+            status: "endpoint_request_timeout",
+            profileId: `profile-${testCase.category}-small-no-delta`,
+          },
+        }),
+      );
+
+      await pollAndProcess();
+
+      const blocked = db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, `task-${testCase.category}-runtime-no-delta`))
+        .get();
+      expect(blocked!.status).toBe("blocked_external");
+      expect(blocked!.blockedReason).toMatch(
+        /^runtime_recovery_no_delta_fail_closed:endpoint_request_timeout/,
+      );
+      expect(blocked!.retryAfter).toBeNull();
+      expect(blocked!.retryCount).toBe(6);
+      expect(blocked!.reworkRequested).toBe(false);
+      expect(blocked!.manualReviewRequired).toBe(false);
+      expect(blocked!.runtimeOptionsJson ?? "").not.toContain(
+        `profile-${testCase.category}-large-no-delta`,
+      );
+      expect(blocked!.agentActivityLog).toContain("runtime_recovery_no_delta_fail_closed");
+    },
+  );
 
   it.each([
     {

@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::07_same_failure_fingerprint_fail_closed::entity-capsule
+memory_id: task::aif-handoff::work::08_runtime_recovery_delta_guard::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 07_same_failure_fingerprint_fail_closed
-source_path: docs/rdpi/work/07_same_failure_fingerprint_fail_closed
+task_id: 08_runtime_recovery_delta_guard
+source_path: docs/rdpi/work/08_runtime_recovery_delta_guard
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -25,10 +25,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/research.md
-- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/design.md
-- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/plan.md
-- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/result.md
+- docs/rdpi/work/08_runtime_recovery_delta_guard/research.md
+- docs/rdpi/work/08_runtime_recovery_delta_guard/design.md
+- docs/rdpi/work/08_runtime_recovery_delta_guard/plan.md
+- docs/rdpi/work/08_runtime_recovery_delta_guard/result.md
   created_at: 2026-06-04
   last_verified_at: 2026-06-04
 
@@ -36,7 +36,7 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task 07_same_failure_fingerprint_fail_closed.
+Current capsule for entity aif-handoff, refreshed by task 08_runtime_recovery_delta_guard.
 
 # Why it matters
 

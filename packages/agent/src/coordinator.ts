@@ -998,6 +998,290 @@ function resolveFailedRuntimeProfileForRecovery(input: {
   };
 }
 
+type RuntimeRecoveryDeltaSignature = {
+  taskId: string;
+  stage: string;
+  runtimeCategory: string;
+  recoveryKind: string;
+  artifactPath: string | null;
+  artifactSha: string | null;
+  validatorFingerprint: string | null;
+  toolLoopPattern: string | null;
+  blockedReasonFamily: string;
+  evidenceRefs: string[];
+  sourceSnapshotId: string | null;
+  sourceSnapshotFingerprint: string | null;
+  failedProfileId: string | null;
+};
+
+type RuntimeRecoveryDeltaDecision = {
+  decision: "allow_recovery" | "fail_closed_no_delta";
+  fingerprint: string;
+  input: RuntimeRecoveryDeltaSignature;
+  comparison: {
+    sameArtifactSha: boolean;
+    sameValidatorFingerprint: boolean;
+    sameToolLoopPattern: boolean;
+    sameBlockedReasonFamily: boolean;
+    sameEvidenceRefs: boolean;
+    sameSourceSnapshot: boolean;
+    matchedAttemptId: string | null;
+  };
+};
+
+function normalizeNullableString(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeFingerprintString(value: string | null | undefined): string | null {
+  return normalizeNullableString(value)?.toLowerCase() ?? null;
+}
+
+function normalizeRuntimeRecoveryPath(value: string | null | undefined): string | null {
+  return normalizeNullableString(value)?.replaceAll("\\", "/") ?? null;
+}
+
+function normalizeRuntimeRecoveryEvidenceRefs(values: string[] | null | undefined): string[] {
+  return [...new Set((values ?? []).map((entry) => entry.trim()).filter(Boolean))].sort(
+    (left, right) => left.localeCompare(right),
+  );
+}
+
+function sourceSnapshotFingerprint(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return sha256Json(value);
+}
+
+function buildRuntimeRecoveryDeltaSignature(input: {
+  task: Pick<TaskRow, "id" | "requirementsSnapshotId">;
+  stage: RuntimeStage | CoordinatorStage | string;
+  runtimeCategory: string;
+  recoveryKind: string;
+  artifactPath?: string | null;
+  artifactSha?: string | null;
+  validatorFingerprint?: string | null;
+  toolLoopPattern?: string | null;
+  blockedReasonFamily: string;
+  evidenceRefs?: string[] | null;
+  sourceSnapshotId?: string | null;
+  sourceSnapshot?: unknown;
+  failedProfileId?: string | null;
+}): RuntimeRecoveryDeltaSignature {
+  return {
+    taskId: input.task.id,
+    stage: String(input.stage),
+    runtimeCategory: normalizeNullableString(input.runtimeCategory) ?? "unknown",
+    recoveryKind: normalizeNullableString(input.recoveryKind) ?? "runtime_recovery",
+    artifactPath: normalizeRuntimeRecoveryPath(input.artifactPath),
+    artifactSha: normalizeFingerprintString(input.artifactSha),
+    validatorFingerprint: normalizeFingerprintString(input.validatorFingerprint),
+    toolLoopPattern: normalizeNullableString(input.toolLoopPattern),
+    blockedReasonFamily: normalizeNullableString(input.blockedReasonFamily) ?? "runtime_failure",
+    evidenceRefs: normalizeRuntimeRecoveryEvidenceRefs(input.evidenceRefs),
+    sourceSnapshotId:
+      normalizeNullableString(input.sourceSnapshotId) ??
+      normalizeNullableString(input.task.requirementsSnapshotId),
+    sourceSnapshotFingerprint: sourceSnapshotFingerprint(input.sourceSnapshot),
+    failedProfileId: normalizeNullableString(input.failedProfileId),
+  };
+}
+
+function runtimeRecoveryDeltaFingerprint(input: RuntimeRecoveryDeltaSignature): string {
+  return sha256Json(input);
+}
+
+function runtimeRecoveryDeltaFields(input: RuntimeRecoveryDeltaSignature) {
+  return {
+    artifactSha: input.artifactSha,
+    validatorFingerprint: input.validatorFingerprint,
+    toolLoopPattern: input.toolLoopPattern,
+    blockedReasonFamily: input.blockedReasonFamily,
+    evidenceRefs: input.evidenceRefs,
+    sourceSnapshotId: input.sourceSnapshotId,
+    sourceSnapshotFingerprint: input.sourceSnapshotFingerprint,
+  };
+}
+
+function readRuntimeRecoveryDeltaInput(value: unknown): RuntimeRecoveryDeltaSignature | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const metadata = value as Record<string, unknown>;
+  const raw = metadata.runtimeRecoveryFingerprintInput;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const candidate = raw as Record<string, unknown>;
+  return {
+    taskId: typeof candidate.taskId === "string" ? candidate.taskId : "",
+    stage: typeof candidate.stage === "string" ? candidate.stage : "",
+    runtimeCategory:
+      typeof candidate.runtimeCategory === "string" ? candidate.runtimeCategory : "unknown",
+    recoveryKind:
+      typeof candidate.recoveryKind === "string" ? candidate.recoveryKind : "runtime_recovery",
+    artifactPath: typeof candidate.artifactPath === "string" ? candidate.artifactPath : null,
+    artifactSha: typeof candidate.artifactSha === "string" ? candidate.artifactSha : null,
+    validatorFingerprint:
+      typeof candidate.validatorFingerprint === "string" ? candidate.validatorFingerprint : null,
+    toolLoopPattern:
+      typeof candidate.toolLoopPattern === "string" ? candidate.toolLoopPattern : null,
+    blockedReasonFamily:
+      typeof candidate.blockedReasonFamily === "string"
+        ? candidate.blockedReasonFamily
+        : "runtime_failure",
+    evidenceRefs: Array.isArray(candidate.evidenceRefs)
+      ? candidate.evidenceRefs.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    sourceSnapshotId:
+      typeof candidate.sourceSnapshotId === "string" ? candidate.sourceSnapshotId : null,
+    sourceSnapshotFingerprint:
+      typeof candidate.sourceSnapshotFingerprint === "string"
+        ? candidate.sourceSnapshotFingerprint
+        : null,
+    failedProfileId:
+      typeof candidate.failedProfileId === "string" ? candidate.failedProfileId : null,
+  };
+}
+
+function compareRuntimeRecoveryDeltaFields(
+  current: RuntimeRecoveryDeltaSignature,
+  prior: RuntimeRecoveryDeltaSignature,
+) {
+  const sameEvidenceRefs =
+    stableFingerprintJson(current.evidenceRefs) === stableFingerprintJson(prior.evidenceRefs);
+  return {
+    sameArtifactSha: current.artifactSha === prior.artifactSha,
+    sameValidatorFingerprint: current.validatorFingerprint === prior.validatorFingerprint,
+    sameToolLoopPattern: current.toolLoopPattern === prior.toolLoopPattern,
+    sameBlockedReasonFamily: current.blockedReasonFamily === prior.blockedReasonFamily,
+    sameEvidenceRefs,
+    sameSourceSnapshot:
+      current.sourceSnapshotId === prior.sourceSnapshotId &&
+      current.sourceSnapshotFingerprint === prior.sourceSnapshotFingerprint,
+  };
+}
+
+function evaluateRuntimeRecoveryDelta(
+  input: RuntimeRecoveryDeltaSignature,
+): RuntimeRecoveryDeltaDecision {
+  const fingerprint = runtimeRecoveryDeltaFingerprint(input);
+  for (const attempt of listTaskStageArtifactAttempts(input.taskId)) {
+    if (attempt.stage !== "runtime_recovery" || attempt.kind !== "delta_guard") continue;
+    const prior = readRuntimeRecoveryDeltaInput(attempt.metadata);
+    if (!prior || prior.recoveryKind !== input.recoveryKind) continue;
+    const comparison = compareRuntimeRecoveryDeltaFields(input, prior);
+    const noDelta =
+      comparison.sameArtifactSha &&
+      comparison.sameValidatorFingerprint &&
+      comparison.sameToolLoopPattern &&
+      comparison.sameBlockedReasonFamily &&
+      comparison.sameEvidenceRefs &&
+      comparison.sameSourceSnapshot;
+    if (noDelta) {
+      return {
+        decision: "fail_closed_no_delta",
+        fingerprint,
+        input,
+        comparison: { ...comparison, matchedAttemptId: attempt.id },
+      };
+    }
+  }
+  return {
+    decision: "allow_recovery",
+    fingerprint,
+    input,
+    comparison: {
+      sameArtifactSha: false,
+      sameValidatorFingerprint: false,
+      sameToolLoopPattern: false,
+      sameBlockedReasonFamily: false,
+      sameEvidenceRefs: false,
+      sameSourceSnapshot: false,
+      matchedAttemptId: null,
+    },
+  };
+}
+
+function recordRuntimeRecoveryDeltaAttempt(input: {
+  task: Pick<TaskRow, "id">;
+  decision: RuntimeRecoveryDeltaDecision;
+  state: "accepted" | "rejected" | "inconclusive";
+  summary: string;
+}): void {
+  recordTaskStageArtifactAttempt({
+    taskId: input.task.id,
+    stage: "runtime_recovery",
+    kind: "delta_guard",
+    label: "Runtime recovery delta guard",
+    state: input.state,
+    path:
+      input.decision.input.artifactPath ??
+      `runtime-recovery/${input.decision.input.stage}/${input.decision.input.runtimeCategory}`,
+    summary: input.summary,
+    sourceSnapshotId: input.decision.input.sourceSnapshotId,
+    metadata: {
+      runtimeRecoveryFingerprint: input.decision.fingerprint,
+      runtimeRecoveryFingerprintInput: input.decision.input,
+      runtimeRecoveryDeltaFields: runtimeRecoveryDeltaFields(input.decision.input),
+      runtimeCategory: input.decision.input.runtimeCategory,
+      recoveryKind: input.decision.input.recoveryKind,
+      blockedReasonFamily: input.decision.input.blockedReasonFamily,
+      deltaComparison: input.decision.comparison,
+      decision: input.decision.decision,
+    },
+  });
+}
+
+function runtimeRecoveryToolLoopPattern(err: unknown): string | null {
+  const status = readRuntimeProviderMetaString(err, "status");
+  if (status !== "repeated_tool_loop_blocked") return null;
+  return stableFingerprintJson({
+    status,
+    fingerprint: readRuntimeProviderMetaString(err, "fingerprint"),
+    toolName: readRuntimeProviderMetaString(err, "toolName"),
+    stage: readRuntimeProviderMetaString(err, "stage"),
+    targetPath: normalizeRuntimeRecoveryPath(
+      readRuntimeProviderMetaString(err, "targetPath") ??
+        readRuntimeProviderMetaString(err, "artifactPath"),
+    ),
+  });
+}
+
+function runtimeRecoveryBlockedReasonFamily(err: unknown, fallback: string): string {
+  return readRuntimeProviderMetaString(err, "status") ?? fallback;
+}
+
+function failClosedRuntimeRecoveryNoDelta(input: {
+  task: TaskRow;
+  fromStatus: TaskStatus;
+  title: string;
+  reason: string;
+  manualReviewRequired: boolean;
+  decision: RuntimeRecoveryDeltaDecision;
+  runtimeOptionsJson?: string | null;
+}): void {
+  const nowIso = new Date().toISOString();
+  const blockedReason = `runtime_recovery_no_delta_fail_closed:${input.reason}`;
+  clearTaskRuntimeLimitSnapshot(input.task.id, nowIso);
+  updateTaskStatus(
+    input.task.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: input.fromStatus,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      reworkRequested: false,
+      manualReviewRequired: input.manualReviewRequired,
+      ...(Object.prototype.hasOwnProperty.call(input, "runtimeOptionsJson")
+        ? { runtimeOptionsJson: input.runtimeOptionsJson ?? null }
+        : {}),
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] runtime_recovery_no_delta_fail_closed:${input.decision.fingerprint}; category=${input.decision.input.runtimeCategory}; recovery=${input.decision.input.recoveryKind}; reason=${input.reason}`,
+  );
+}
+
 function handleRepositoryInspectionBudgetExhaustion(input: {
   task: TaskWithHydratedFields;
   projectRoot: string;
@@ -1013,6 +1297,44 @@ function handleRepositoryInspectionBudgetExhaustion(input: {
     "manual_review_required: repository_inspection_budget_exhausted; " +
     "repository inspection budget was exhausted and compact finalization did not produce a trusted report. " +
     "AIF will not retry with a full repository context or a larger fallback profile for this audit card.";
+  const deltaDecision = evaluateRuntimeRecoveryDelta(
+    buildRuntimeRecoveryDeltaSignature({
+      task: latestTask,
+      stage: input.stageLabel,
+      runtimeCategory: "repository_inspection_budget_exhaustion",
+      recoveryKind: "repository_inspection_budget_exhaustion",
+      blockedReasonFamily: "repository_inspection_budget_exhaustion",
+      sourceSnapshotId: latestTask.requirementsSnapshotId,
+      failedProfileId: readAttemptedRuntimeProfileIdFromError(input.err),
+    }),
+  );
+  if (deltaDecision.decision === "fail_closed_no_delta") {
+    recordRuntimeRecoveryDeltaAttempt({
+      task: latestTask,
+      decision: deltaDecision,
+      state: "rejected",
+      summary: "Repository-inspection exhaustion repeated with no runtime recovery delta.",
+    });
+    failClosedRuntimeRecoveryNoDelta({
+      task: latestTask,
+      fromStatus: input.stageInProgress,
+      title: input.title,
+      reason: "repository_inspection_budget_exhaustion",
+      manualReviewRequired: true,
+      decision: deltaDecision,
+      runtimeOptionsJson: clearContextFallbackRuntimeOption(
+        latestTask.runtimeOptionsJson,
+        runtimeStageForCoordinatorTask(input.stageLabel, latestTask),
+      ),
+    });
+    return true;
+  }
+  recordRuntimeRecoveryDeltaAttempt({
+    task: latestTask,
+    decision: deltaDecision,
+    state: "inconclusive",
+    summary: "Repository-inspection exhaustion observed for runtime recovery delta guard.",
+  });
   const handled = terminalizeRoadmapSourceReportAsInconclusive({
     task: latestTask,
     projectRoot: input.projectRoot,
@@ -1157,6 +1479,44 @@ function handleContextLengthRecovery(input: {
   });
 
   if (fallback) {
+    const deltaDecision = evaluateRuntimeRecoveryDelta(
+      buildRuntimeRecoveryDeltaSignature({
+        task: latestTask,
+        stage: input.stage,
+        runtimeCategory: "context_length",
+        recoveryKind: "context_fallback",
+        blockedReasonFamily: "context_length",
+        sourceSnapshotId: latestTask.requirementsSnapshotId,
+        failedProfileId,
+      }),
+    );
+    if (deltaDecision.decision === "fail_closed_no_delta") {
+      recordRuntimeRecoveryDeltaAttempt({
+        task: latestTask,
+        decision: deltaDecision,
+        state: "rejected",
+        summary: "Context fallback repeated with no runtime recovery delta.",
+      });
+      failClosedRuntimeRecoveryNoDelta({
+        task: latestTask,
+        fromStatus: input.stageInProgress,
+        title: input.title,
+        reason: "context_length",
+        manualReviewRequired: false,
+        decision: deltaDecision,
+        runtimeOptionsJson: clearContextFallbackRuntimeOption(
+          latestTask.runtimeOptionsJson,
+          input.stage,
+        ),
+      });
+      return true;
+    }
+    recordRuntimeRecoveryDeltaAttempt({
+      task: latestTask,
+      decision: deltaDecision,
+      state: "accepted",
+      summary: "Context fallback allowed because runtime recovery delta was not repeated.",
+    });
     const retryCount = (latestTask.retryCount ?? 0) + 1;
     const runtimeOptionsJson = setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
       stage: input.stage,
@@ -1294,6 +1654,48 @@ function handleTransientRuntimeFallbackRecovery(input: {
   });
   if (!fallback) return false;
 
+  const deltaDecision = evaluateRuntimeRecoveryDelta(
+    buildRuntimeRecoveryDeltaSignature({
+      task: latestTask,
+      stage: input.stage,
+      runtimeCategory: runtimeError.category,
+      recoveryKind: "transient_runtime_fallback",
+      toolLoopPattern: runtimeRecoveryToolLoopPattern(input.err),
+      blockedReasonFamily: runtimeRecoveryBlockedReasonFamily(input.err, runtimeError.category),
+      sourceSnapshotId: latestTask.requirementsSnapshotId,
+      failedProfileId,
+    }),
+  );
+  if (deltaDecision.decision === "fail_closed_no_delta") {
+    const reportArtifact = findRoadmapBatchArtifactByTaskId(latestTask.id);
+    recordRuntimeRecoveryDeltaAttempt({
+      task: latestTask,
+      decision: deltaDecision,
+      state: "rejected",
+      summary: "Transient runtime fallback repeated with no runtime recovery delta.",
+    });
+    failClosedRuntimeRecoveryNoDelta({
+      task: latestTask,
+      fromStatus: input.stageInProgress,
+      title: input.title,
+      reason: runtimeRecoveryBlockedReasonFamily(input.err, runtimeError.category),
+      manualReviewRequired:
+        latestTask.taskIntent === "audit" &&
+        (runtimeRecoveryToolLoopPattern(input.err) !== null || reportArtifact?.role === "report"),
+      decision: deltaDecision,
+      runtimeOptionsJson: clearContextFallbackRuntimeOption(
+        latestTask.runtimeOptionsJson,
+        input.stage,
+      ),
+    });
+    return true;
+  }
+  recordRuntimeRecoveryDeltaAttempt({
+    task: latestTask,
+    decision: deltaDecision,
+    state: "accepted",
+    summary: "Transient runtime fallback allowed because runtime recovery delta was not repeated.",
+  });
   const retryCount = (latestTask.retryCount ?? 0) + 1;
   const runtimeOptionsJson = setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
     stage: input.stage,
@@ -1405,6 +1807,47 @@ function handleAuditReportTimeoutRecovery(input: {
     systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
   });
   const failedProfileId = readAttemptedRuntimeProfileIdFromError(input.err);
+  const deltaDecision = evaluateRuntimeRecoveryDelta(
+    buildRuntimeRecoveryDeltaSignature({
+      task: latestTask,
+      stage: input.stage,
+      runtimeCategory: "timeout",
+      recoveryKind: "audit_report_timeout",
+      artifactPath: artifact.artifactPath,
+      artifactSha: artifact.contentSha,
+      blockedReasonFamily: "audit_report_timeout",
+      sourceSnapshotId: latestTask.requirementsSnapshotId,
+      failedProfileId,
+    }),
+  );
+  if (deltaDecision.decision === "fail_closed_no_delta") {
+    recordRuntimeRecoveryDeltaAttempt({
+      task: latestTask,
+      decision: deltaDecision,
+      state: "rejected",
+      summary: "Audit report timeout recovery repeated with no runtime recovery delta.",
+    });
+    failClosedRuntimeRecoveryNoDelta({
+      task: latestTask,
+      fromStatus: input.stageInProgress,
+      title: input.title,
+      reason: "audit_report_timeout",
+      manualReviewRequired: true,
+      decision: deltaDecision,
+      runtimeOptionsJson: clearContextFallbackRuntimeOption(
+        latestTask.runtimeOptionsJson,
+        input.stage,
+      ),
+    });
+    return true;
+  }
+  recordRuntimeRecoveryDeltaAttempt({
+    task: latestTask,
+    decision: deltaDecision,
+    state: "accepted",
+    summary:
+      "Audit report timeout recovery allowed because runtime recovery delta was not repeated.",
+  });
   const runtimeOptionsJson =
     recoveryProfile && recoveryProfile.id !== resolvedSelection.profile?.id
       ? setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
@@ -1495,6 +1938,47 @@ function handleAuditReportTransientRecovery(input: {
     systemDefaultRuntimeProfileId: getAppDefaultRuntimeProfileId(input.stage),
   });
   const failedProfileId = readAttemptedRuntimeProfileIdFromError(input.err);
+  const deltaDecision = evaluateRuntimeRecoveryDelta(
+    buildRuntimeRecoveryDeltaSignature({
+      task: latestTask,
+      stage: input.stage,
+      runtimeCategory: runtimeError.category,
+      recoveryKind: "audit_report_transient",
+      artifactPath: artifact.artifactPath,
+      artifactSha: artifact.contentSha,
+      blockedReasonFamily: runtimeRecoveryBlockedReasonFamily(input.err, runtimeError.category),
+      sourceSnapshotId: latestTask.requirementsSnapshotId,
+      failedProfileId,
+    }),
+  );
+  if (deltaDecision.decision === "fail_closed_no_delta") {
+    recordRuntimeRecoveryDeltaAttempt({
+      task: latestTask,
+      decision: deltaDecision,
+      state: "rejected",
+      summary: "Audit report transient recovery repeated with no runtime recovery delta.",
+    });
+    failClosedRuntimeRecoveryNoDelta({
+      task: latestTask,
+      fromStatus: input.stageInProgress,
+      title: input.title,
+      reason: runtimeRecoveryBlockedReasonFamily(input.err, runtimeError.category),
+      manualReviewRequired: true,
+      decision: deltaDecision,
+      runtimeOptionsJson: clearContextFallbackRuntimeOption(
+        latestTask.runtimeOptionsJson,
+        input.stage,
+      ),
+    });
+    return true;
+  }
+  recordRuntimeRecoveryDeltaAttempt({
+    task: latestTask,
+    decision: deltaDecision,
+    state: "accepted",
+    summary:
+      "Audit report transient recovery allowed because runtime recovery delta was not repeated.",
+  });
   const runtimeOptionsJson =
     recoveryProfile && recoveryProfile.id !== resolvedSelection.profile?.id
       ? setContextFallbackRuntimeOption(latestTask.runtimeOptionsJson, {
@@ -1592,6 +2076,69 @@ function recoverWrittenAuditArtifactAfterRuntimeFailure(input: {
     artifactRead.source === "project_root"
       ? { ...latestTask, branchName: null, worktreePath: null }
       : latestTask;
+  const allowedEvidenceArtifactPaths: string[] = [];
+  const auditEvidenceUnits = auditEvidenceForArtifact(validationTask, artifact, input.projectRoot);
+  const requireAuditLedgerEvidence = auditArtifactRequiresLedgerEvidence({
+    artifact,
+    projectRoot: input.projectRoot,
+    auditEvidenceUnits,
+  });
+  const completionEvidence = evaluateTaskCompletionEvidence({
+    task: {
+      ...validationTask,
+      expectedReportArtifactPath: artifact.artifactPath,
+      allowedEvidenceArtifactPaths,
+      auditArtifactRole: "report",
+      roadmapBatchId: artifact.batchId,
+    },
+    projectRoot: input.projectRoot,
+    phase: "completion",
+    auditEvidenceUnits,
+    requireAuditLedgerEvidence,
+  });
+  if (!completionEvidence.ok) {
+    const validation = completionEvidence.evidence.auditReportValidation;
+    const deltaDecision = evaluateRuntimeRecoveryDelta(
+      buildRuntimeRecoveryDeltaSignature({
+        task: validationTask,
+        stage: input.stageLabel,
+        runtimeCategory: runtimeError.category,
+        recoveryKind: "post_write_audit_artifact_failure",
+        artifactPath: artifact.artifactPath,
+        artifactSha: validation.artifactSha256,
+        validatorFingerprint: validation.validationFingerprint,
+        blockedReasonFamily: "post_write_audit_artifact_failure",
+        evidenceRefs: validation.manifest?.evidenceRefs ?? [],
+        sourceSnapshotId: validation.sourceSnapshot?.id ?? latestTask.requirementsSnapshotId,
+        sourceSnapshot: validation.sourceSnapshot,
+        failedProfileId: readAttemptedRuntimeProfileIdFromError(input.err),
+      }),
+    );
+    if (deltaDecision.decision === "fail_closed_no_delta") {
+      recordRuntimeRecoveryDeltaAttempt({
+        task: latestTask,
+        decision: deltaDecision,
+        state: "rejected",
+        summary: "Post-write audit artifact recovery repeated with no runtime recovery delta.",
+      });
+      failClosedRuntimeRecoveryNoDelta({
+        task: latestTask,
+        fromStatus: input.stageInProgress,
+        title: input.title,
+        reason: "post_write_audit_artifact_failure",
+        manualReviewRequired: true,
+        decision: deltaDecision,
+      });
+      return true;
+    }
+    recordRuntimeRecoveryDeltaAttempt({
+      task: latestTask,
+      decision: deltaDecision,
+      state: "accepted",
+      summary:
+        "Post-write audit artifact recovery allowed because runtime recovery delta was not repeated.",
+    });
+  }
   const blocked = blockTaskForCompletionEvidenceIfNeeded({
     task: validationTask,
     projectRoot: input.projectRoot,
