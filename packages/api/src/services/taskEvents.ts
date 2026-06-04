@@ -10,7 +10,7 @@ import {
   extractAuditReportManifestEvidenceRefs,
   formatTaskPlanQualityBlockedReason,
   formatTaskCompletionBlockedReason,
-  buildAuditFailureSignature,
+  buildFailureFingerprint,
   findSequentialBranchDependencyBlocker,
   isRecoverableAuditFailureFamily,
   isBranchIsolationError,
@@ -319,6 +319,75 @@ function auditValidationDetails(
   };
 }
 
+function parseObjectJson(value: string | null | undefined): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readFailureFingerprint(value: unknown): string | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? typeof (value as Record<string, unknown>).failureFingerprint === "string"
+      ? ((value as Record<string, unknown>).failureFingerprint as string)
+      : null
+    : null;
+}
+
+function buildAuditFailureFingerprint(input: {
+  task: TaskRow;
+  artifact: RoadmapBatchArtifactRow;
+  family: AuditFailureFamily;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+}) {
+  const validation = input.result.evidence.auditReportValidation;
+  return buildFailureFingerprint({
+    taskId: input.task.id,
+    stage: "completion",
+    artifactPath: input.artifact.artifactPath,
+    artifactSha: validation.artifactSha256,
+    validatorIssueCodes: [
+      ...input.result.issues.map((entry) => entry.code),
+      ...validation.issueCodes,
+    ],
+    validationFingerprint: validation.validationFingerprint,
+    blockingFindingIds: validation.blockingIssues.map((entry) => entry.code),
+    sourceSnapshotId: validation.sourceSnapshot?.id ?? null,
+    allowedWritePaths: [input.artifact.artifactPath, ...validation.allowedEvidenceArtifactPaths],
+    failureFamily: input.family,
+  });
+}
+
+function auditValidationDetailsWithFingerprint(input: {
+  task: TaskRow;
+  artifact: RoadmapBatchArtifactRow;
+  family: AuditFailureFamily;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+  action?: string;
+}) {
+  const fingerprint = buildAuditFailureFingerprint(input);
+  return {
+    ...(input.action ? { action: input.action } : {}),
+    ...auditValidationDetails(input.result),
+    failureFingerprint: fingerprint.failureFingerprint,
+    failureFingerprintInput: fingerprint.failureFingerprintInput,
+  };
+}
+
+function readExplicitOperatorOverride(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).explicitOperatorOverride === true
+  );
+}
+
 function acceptedAuditCardDecision(input: {
   task: TaskRow;
   auditArtifact: RoadmapBatchArtifactRow;
@@ -342,20 +411,26 @@ function acceptedAuditCardDecision(input: {
 }
 
 function repeatedAuditFailureCount(input: {
+  task: TaskRow;
   artifact: RoadmapBatchArtifactRow;
   family: AuditFailureFamily;
   result: ReturnType<typeof evaluateTaskCompletionEvidence>;
 }): number {
-  const signature = buildAuditFailureSignature({
-    role: input.artifact.role,
-    failureFamily: input.family,
-    validationDetails: auditValidationDetails(input.result),
+  const { failureFingerprint } = buildAuditFailureFingerprint(input);
+  const matching = listRoadmapBatchArtifactAttempts(input.artifact.id).filter((attempt) => {
+    const details = parseObjectJson(attempt.validationDetailsJson);
+    return readFailureFingerprint(details) === failureFingerprint;
   });
-  if (!signature) return 0;
-  return listRoadmapBatchArtifactAttempts(input.artifact.id).filter(
-    (attempt) =>
-      attempt.failureSignature === signature && attempt.reworkStatus === "rework_requested",
-  ).length;
+  const nonOverrideCount = matching.filter((attempt) => {
+    const details = parseObjectJson(attempt.validationDetailsJson);
+    return attempt.reworkStatus === "rework_requested" && !readExplicitOperatorOverride(details);
+  }).length;
+  const overrideCount = matching.filter((attempt) => {
+    const details = parseObjectJson(attempt.validationDetailsJson);
+    return readExplicitOperatorOverride(details);
+  }).length;
+  if (nonOverrideCount > 0) return overrideCount >= nonOverrideCount ? 0 : 1;
+  return 0;
 }
 
 function allowedEvidenceArtifactPathsFor(auditArtifact: RoadmapBatchArtifactRow | undefined) {
@@ -558,14 +633,17 @@ function blockTaskForCompletionEvidence(
   const failureFamily = firstAuditFailureFamily(result);
   const auditArtifact = options.auditArtifact;
   const auditReviewIteration = task.reviewIterationCount ?? 0;
-  const env = getEnv();
   const auditMaxReviewIterations = boundedReviewIterationLimit(task.maxReviewIterations);
   const repeatedSameFailure =
     auditArtifact && isRecoverableAuditFailureFamily(failureFamily)
-      ? repeatedAuditFailureCount({ artifact: auditArtifact, family: failureFamily, result }) > 0
+      ? repeatedAuditFailureCount({
+          task,
+          artifact: auditArtifact,
+          family: failureFamily,
+          result,
+        }) > 0
       : false;
-  const repeatedFailureMustBlock =
-    repeatedSameFailure && env.AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED;
+  const repeatedFailureMustBlock = repeatedSameFailure;
   const shouldReturnToRework =
     Boolean(auditArtifact) &&
     Boolean(options.allowAuditRework) &&
@@ -581,7 +659,7 @@ function blockTaskForCompletionEvidence(
     suppressManualReviewWhenActionable: shouldReturnToRework,
   });
   const reworkBlockedReason = repeatedFailureMustBlock
-    ? `${blockedReason} Manual review required: repeated audit artifact failure signature failed closed.`
+    ? `${blockedReason} Manual review required: same failure fingerprint failed closed.`
     : blockedReason;
   const terminalBlockedReason = auditArtifact
     ? `${failureFamily}: ${
@@ -609,8 +687,13 @@ function blockTaskForCompletionEvidence(
           : "manual_review_required",
       createAttemptBoundary: shouldReturnToRework,
       validationDetails: {
-        action: options.action ?? "approve_done",
-        ...auditValidationDetails(result),
+        ...auditValidationDetailsWithFingerprint({
+          task,
+          artifact: auditArtifact,
+          family: failureFamily,
+          result,
+          action: options.action ?? "approve_done",
+        }),
       },
       contentSha: result.evidence.auditReportValidation.artifactSha256,
       branchName: task.branchName ?? auditArtifact.branchName,
@@ -635,6 +718,18 @@ function blockTaskForCompletionEvidence(
       task.id,
       `[${nowIso}] Completion evidence guard returned ${options.action ?? "approve_done"} to implementation rework: ${reworkBlockedReason}`,
     );
+    if (auditArtifact) {
+      const fingerprint = buildAuditFailureFingerprint({
+        task,
+        artifact: auditArtifact,
+        family: failureFamily,
+        result,
+      });
+      appendTaskActivityLog(
+        task.id,
+        `[${nowIso}] same_failure_fingerprint_observed: ${fingerprint.failureFingerprint}; family=${failureFamily}`,
+      );
+    }
 
     const updated = findTaskById(task.id);
     if (!updated) {
@@ -660,6 +755,18 @@ function blockTaskForCompletionEvidence(
     task.id,
     `[${nowIso}] Completion evidence guard blocked ${options.action ?? "approve_done"}: ${terminalBlockedReason}`,
   );
+  if (auditArtifact && repeatedFailureMustBlock) {
+    const fingerprint = buildAuditFailureFingerprint({
+      task,
+      artifact: auditArtifact,
+      family: failureFamily,
+      result,
+    });
+    appendTaskActivityLog(
+      task.id,
+      `[${nowIso}] same_failure_fingerprint_fail_closed: ${fingerprint.failureFingerprint}; family=${failureFamily}`,
+    );
+  }
 
   const updated = findTaskById(task.id);
   if (!updated) {

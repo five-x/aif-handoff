@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::06_planner_split_required_contract::project-capsule
+memory_id: task::aif-handoff::work::07_same_failure_fingerprint_fail_closed::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 06_planner_split_required_contract
-source_path: docs/rdpi/work/06_planner_split_required_contract
+task_id: 07_same_failure_fingerprint_fail_closed
+source_path: docs/rdpi/work/07_same_failure_fingerprint_fail_closed
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-06-03
+updated_at: 2026-06-04
 supersedes:
 expires_at:
 tags:
@@ -24,18 +24,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/06_planner_split_required_contract/research.md
-- docs/rdpi/work/06_planner_split_required_contract/design.md
-- docs/rdpi/work/06_planner_split_required_contract/plan.md
-- docs/rdpi/work/06_planner_split_required_contract/result.md
-  created_at: 2026-06-03
-  last_verified_at: 2026-06-03
+- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/research.md
+- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/design.md
+- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/plan.md
+- docs/rdpi/work/07_same_failure_fingerprint_fail_closed/result.md
+  created_at: 2026-06-04
+  last_verified_at: 2026-06-04
 
 ---
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 06_planner_split_required_contract.
+Current capsule for project aif-handoff, refreshed by task 07_same_failure_fingerprint_fail_closed.
 
 # Why it matters
 

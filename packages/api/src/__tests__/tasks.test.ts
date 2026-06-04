@@ -5371,9 +5371,7 @@ describe("tasks API", () => {
       expect(repeatedBody.reworkRequested).toBe(false);
       expect(repeatedBody.manualReviewRequired).toBe(true);
       expect(repeatedBody.blockedReason).toContain("missing_artifact");
-      expect(repeatedBody.blockedReason).toContain(
-        "repeated audit artifact failure signature failed closed",
-      );
+      expect(repeatedBody.blockedReason).toContain("same failure fingerprint failed closed");
       const repeatedArtifact = listRoadmapBatchArtifacts(batch.batchId)[0];
       expect(repeatedArtifact.state).toBe("missing");
       expect(listRoadmapBatchArtifactAttempts(repeatedArtifact.id).length).toBeGreaterThanOrEqual(
@@ -5404,8 +5402,147 @@ describe("tasks API", () => {
       expect(maxedBody.status).toBe("blocked_external");
       expect(maxedBody.reworkRequested).toBe(false);
       expect(maxedBody.manualReviewRequired).toBe(true);
-      expect(maxedBody.blockedReason).toContain(
-        "repeated audit artifact failure signature failed closed",
+      expect(maxedBody.blockedReason).toContain("same failure fingerprint failed closed");
+    });
+
+    it("should not fail-close approve_done when only legacy failure signature matches a changed canonical fingerprint", async () => {
+      const db = testDb.current;
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-approve-audit-legacy-signature-"));
+      initGitProject(rootPath);
+      execFileSync("git", ["checkout", "-b", "feature/audit-legacy-signature"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      mkdirSync(join(rootPath, "audit"), { recursive: true });
+      const weakReport = (label: string) =>
+        [
+          "# Audit",
+          "",
+          `## Finding: ${label}`,
+          "Evidence: `README.md:1` identifies the fixture documentation.",
+          "Risk: Source behavior was not inspected.",
+          "Proposed fix: Review the implementation files.",
+          "Verification: Command `git log -1 --oneline` output:",
+          "```",
+          "1234567 (HEAD -> main) add audit report",
+          "```",
+          "",
+          "## No Validated Findings",
+          "No validated findings were found.",
+          "",
+        ].join("\n");
+      writeFileSync(
+        join(rootPath, "audit", "config.md"),
+        weakReport("Initial weak report"),
+        "utf8",
+      );
+      execFileSync("git", ["add", "audit/config.md"], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "add weak audit report", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      db.insert(projects)
+        .values({ id: "project-audit-legacy-signature", name: "Audit Legacy", rootPath })
+        .run();
+      db.insert(tasks)
+        .values({
+          id: "ev-audit-legacy-signature",
+          projectId: "project-audit-legacy-signature",
+          title: "Audit legacy signature",
+          description: "Scope: src. Report artifact: audit/config.md.",
+          taskIntent: "audit",
+          status: "done",
+          branchName: "feature/audit-legacy-signature",
+          plan: "## Plan\n- Inspect source\n- Write report",
+          agentActivityLog: implementationActivityLog(),
+        })
+        .run();
+      const batch = createRoadmapBatchContract({
+        projectId: "project-audit-legacy-signature",
+        roadmapAlias: "audit-legacy",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: ["ev-audit-legacy-signature"],
+        artifacts: [
+          {
+            taskId: "ev-audit-legacy-signature",
+            role: "report",
+            artifactPath: "audit/config.md",
+            projectRoot: rootPath,
+          },
+        ],
+      });
+
+      const firstRes = await app.request("/tasks/ev-audit-legacy-signature/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(firstRes.status).toBe(200);
+      expect((await firstRes.json()).status).toBe("implementing");
+      let artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      const firstAttempt = listRoadmapBatchArtifactAttempts(artifact.id).at(-1);
+      if (!firstAttempt) throw new Error("missing first audit API attempt");
+      const firstDetails = JSON.parse(firstAttempt.validationDetailsJson ?? "{}");
+      expect(firstDetails.failureFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      const legacyOnlyDetails = { ...firstDetails };
+      delete legacyOnlyDetails.failureFingerprint;
+      delete legacyOnlyDetails.failureFingerprintInput;
+      updateRoadmapBatchArtifactState({
+        taskId: "ev-audit-legacy-signature",
+        state: "invalid",
+        failureFamily: "invalid_artifact_contract",
+        reworkStatus: "rework_requested",
+        validationDetails: legacyOnlyDetails,
+        contentSha: firstAttempt.contentSha,
+        projectRoot: rootPath,
+      });
+      writeFileSync(
+        join(rootPath, "audit", "config.md"),
+        weakReport("Changed weak report"),
+        "utf8",
+      );
+      execFileSync("git", ["add", "audit/config.md"], { cwd: rootPath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "change weak audit report", "--no-verify"], {
+        cwd: rootPath,
+        stdio: "ignore",
+      });
+      db.update(tasks)
+        .set({
+          status: "done",
+          blockedReason: null,
+          blockedFromStatus: null,
+          reworkRequested: false,
+          manualReviewRequired: false,
+          reviewIterationCount: 1,
+          maxReviewIterations: 3,
+        })
+        .where(eq(tasks.id, "ev-audit-legacy-signature"))
+        .run();
+
+      const secondRes = await app.request("/tasks/ev-audit-legacy-signature/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "approve_done" }),
+      });
+
+      expect(secondRes.status).toBe(200);
+      const secondBody = await secondRes.json();
+      expect(secondBody.status).toBe("implementing");
+      expect(secondBody.reworkRequested).toBe(true);
+      expect(secondBody.blockedReason ?? "").not.toContain(
+        "same failure fingerprint failed closed",
+      );
+      expect(secondBody.agentActivityLog ?? "").not.toContain(
+        "same_failure_fingerprint_fail_closed",
+      );
+      artifact = listRoadmapBatchArtifacts(batch.batchId)[0];
+      const secondAttempt = listRoadmapBatchArtifactAttempts(artifact.id).at(-1);
+      if (!secondAttempt) throw new Error("missing second audit API attempt");
+      expect(secondAttempt.failureSignature).toBe(firstAttempt.failureSignature);
+      expect(JSON.parse(secondAttempt.validationDetailsJson ?? "{}").failureFingerprint).not.toBe(
+        firstDetails.failureFingerprint,
       );
     });
 

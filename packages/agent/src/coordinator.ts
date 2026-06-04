@@ -45,6 +45,7 @@ import {
   listRuntimeProfileResponses,
   findRoadmapBatchArtifactByTaskId,
   listRoadmapBatchArtifactAttempts,
+  listTaskStageArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
   listAuditEvidenceEvents,
   createOrReusePendingTaskSplitProposal,
@@ -69,7 +70,7 @@ import {
   extractAuditReportManifestEvidenceRefs,
   formatTaskCompletionBlockedReason,
   findSequentialBranchDependencyBlocker,
-  buildAuditFailureSignature,
+  buildFailureFingerprint,
   isRecoverableAuditFailureFamily,
   selectAuditArtifactFailureFamily,
   selectTaskCompletionAuditFailureFamily,
@@ -88,6 +89,7 @@ import {
   type RuntimeProfile,
   type RuntimeStage,
   type EffectiveRuntimeProfileSource,
+  type NormalizedFailureFingerprintInput,
 } from "@aif/shared";
 import { runPlanner } from "./subagents/planner.js";
 import { runRequirementsAnalyst } from "./subagents/requirementsAnalyst.js";
@@ -1925,6 +1927,292 @@ function auditValidationDetails(
   };
 }
 
+function stableFingerprintJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableFingerprintJson(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableFingerprintJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Json(value: unknown): string {
+  return createHash("sha256").update(stableFingerprintJson(value), "utf8").digest("hex");
+}
+
+function parseObjectJson(value: string | null | undefined): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readFailureFingerprint(value: unknown): string | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? typeof (value as Record<string, unknown>).failureFingerprint === "string"
+      ? ((value as Record<string, unknown>).failureFingerprint as string)
+      : null
+    : null;
+}
+
+function failureFingerprintMetadata(input: {
+  failureFingerprint: string;
+  failureFingerprintInput: NormalizedFailureFingerprintInput;
+  failureFamily: string;
+  issueCodes: string[];
+  explicitOperatorOverride?: boolean;
+}) {
+  return {
+    failureFingerprint: input.failureFingerprint,
+    failureFingerprintInput: input.failureFingerprintInput,
+    failureFamily: input.failureFamily,
+    issueCodes: [...new Set(input.issueCodes)].sort(),
+    explicitOperatorOverride: input.explicitOperatorOverride === true,
+  };
+}
+
+function buildAuditFailureFingerprint(input: {
+  task: TaskRow;
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
+  family: AuditFailureFamily;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+}) {
+  const validation = input.result.evidence.auditReportValidation;
+  return buildFailureFingerprint({
+    taskId: input.task.id,
+    stage: "completion",
+    artifactPath: input.artifact.artifactPath,
+    artifactSha: validation.artifactSha256,
+    validatorIssueCodes: [
+      ...input.result.issues.map((entry) => entry.code),
+      ...validation.issueCodes,
+    ],
+    validationFingerprint: validation.validationFingerprint,
+    blockingFindingIds: validation.blockingIssues.map((entry) => entry.code),
+    sourceSnapshotId: validation.sourceSnapshot?.id ?? null,
+    allowedWritePaths: [input.artifact.artifactPath, ...validation.allowedEvidenceArtifactPaths],
+    failureFamily: input.family,
+  });
+}
+
+function auditValidationDetailsWithFingerprint(input: {
+  task: TaskRow;
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
+  family: AuditFailureFamily;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+  auditCardDecision?: AuditCardDecision | null;
+  extra?: Record<string, unknown>;
+}) {
+  const fingerprint = buildAuditFailureFingerprint(input);
+  return {
+    ...auditValidationDetails(input.result, input.auditCardDecision),
+    ...input.extra,
+    failureFingerprint: fingerprint.failureFingerprint,
+    failureFingerprintInput: fingerprint.failureFingerprintInput,
+  };
+}
+
+function readExplicitOperatorOverride(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).explicitOperatorOverride === true
+  );
+}
+
+function priorRoadmapFailureFingerprint(input: {
+  artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
+  failureFingerprint: string;
+}): { repeated: boolean; override: boolean } {
+  const matching = listRoadmapBatchArtifactAttempts(input.artifact.id).filter((attempt) => {
+    const details = parseObjectJson(attempt.validationDetailsJson);
+    return readFailureFingerprint(details) === input.failureFingerprint;
+  });
+  const nonOverrideCount = matching.filter((attempt) => {
+    const details = parseObjectJson(attempt.validationDetailsJson);
+    return attempt.reworkStatus === "rework_requested" && !readExplicitOperatorOverride(details);
+  }).length;
+  const overrideCount = matching.filter((attempt) => {
+    const details = parseObjectJson(attempt.validationDetailsJson);
+    return readExplicitOperatorOverride(details);
+  }).length;
+  return {
+    repeated: nonOverrideCount > 0,
+    override: nonOverrideCount > 0 && overrideCount >= nonOverrideCount,
+  };
+}
+
+function implementationFailureFingerprint(input: {
+  task: TaskRow;
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>;
+  issueCodes: string[];
+}) {
+  const validation = input.result.evidence.implementationManifestValidation;
+  const artifactSha = validation?.normalizedJson
+    ? createHash("sha256").update(validation.normalizedJson, "utf8").digest("hex")
+    : null;
+  const validationFingerprint = sha256Json({
+    issueCodes: input.issueCodes,
+    planManifestHash: validation?.planManifestHash ?? null,
+    evidenceRefs: validation?.manifest?.evidenceRefs ?? [],
+    changedFiles: validation?.manifest?.changedFiles ?? [],
+    meaningfulChangedFiles: input.result.evidence.meaningfulChangedFiles,
+    committedChangedFiles: input.result.evidence.committedChangedFiles,
+    dirtyChangedFiles: input.result.evidence.dirtyChangedFiles,
+  });
+  return buildFailureFingerprint({
+    taskId: input.task.id,
+    stage: "implementation_manifest",
+    artifactPath: "aif-implementation-manifest",
+    artifactSha,
+    validatorIssueCodes: input.issueCodes,
+    validationFingerprint,
+    blockingFindingIds: input.issueCodes,
+    sourceSnapshotId: input.task.requirementsSnapshotId,
+    allowedWritePaths: [
+      ...(validation?.manifest?.changedFiles.map((entry) => entry.path) ?? []),
+      ...input.result.evidence.committedChangedFiles,
+    ],
+    failureFamily: "implementation_manifest_invalid",
+  });
+}
+
+function reviewGateFailureFingerprint(input: { task: TaskRow; outcome: ReviewGateOutcome }) {
+  const autoReviewState = input.outcome.autoReviewState;
+  const findings = (autoReviewState?.findings ?? [])
+    .map((finding) => ({
+      id: finding.id.trim(),
+      source: finding.source,
+      text: finding.text.trim(),
+      status: finding.status ?? null,
+      severity: finding.severity ?? null,
+      location: finding.location?.trim() ?? null,
+      claim: finding.claim?.trim() ?? null,
+      requiredFix: finding.requiredFix?.trim() ?? null,
+      verification: finding.verification?.trim() ?? null,
+      closureEvidence: finding.closureEvidence?.trim() ?? null,
+    }))
+    .sort((left, right) => stableFingerprintJson(left).localeCompare(stableFingerprintJson(right)));
+  const blockerIds = findings
+    .map((finding) => finding.id)
+    .filter((id): id is string => id.length > 0);
+  const artifact = findRoadmapBatchArtifactByTaskId(input.task.id);
+  const payload = {
+    status: input.outcome.status,
+    handoffReason: "handoffReason" in input.outcome ? input.outcome.handoffReason : null,
+    findings,
+  };
+  return buildFailureFingerprint({
+    taskId: input.task.id,
+    stage: "review_gate",
+    artifactPath: artifact?.artifactPath ?? "review-comments",
+    artifactSha: artifact?.contentSha ?? sha256Json(payload),
+    validatorIssueCodes: [
+      input.outcome.status === "review_retry_requested"
+        ? "review_retry_requested"
+        : "review_gate_request_changes",
+    ],
+    validationFingerprint: sha256Json(payload),
+    blockingFindingIds: blockerIds.length > 0 ? blockerIds : ["review_gate_request_changes"],
+    sourceSnapshotId: input.task.requirementsSnapshotId,
+    allowedWritePaths: artifact?.artifactPath ? [artifact.artifactPath] : [],
+    failureFamily: "review_gate_rework",
+  });
+}
+
+function priorTaskStageFailureFingerprint(input: {
+  taskId: string;
+  stage: string;
+  kind: string;
+  failureFingerprint: string;
+}): { repeated: boolean; override: boolean } {
+  const prior = listTaskStageArtifactAttempts(input.taskId).filter(
+    (attempt) => attempt.stage === input.stage && attempt.kind === input.kind,
+  );
+  const matching = prior.filter(
+    (attempt) => readFailureFingerprint(attempt.metadata) === input.failureFingerprint,
+  );
+  const nonOverrideCount = matching.filter(
+    (attempt) => attempt.metadata.explicitOperatorOverride !== true,
+  ).length;
+  const overrideCount = matching.filter(
+    (attempt) => attempt.metadata.explicitOperatorOverride === true,
+  ).length;
+  return {
+    repeated: nonOverrideCount > 0,
+    override: nonOverrideCount > 0 && overrideCount >= nonOverrideCount,
+  };
+}
+
+function recordFailureFingerprintAttempt(input: {
+  task: TaskRow;
+  stage: string;
+  path: string;
+  label: string;
+  summary: string;
+  failureFamily: string;
+  issueCodes: string[];
+  failureFingerprint: string;
+  failureFingerprintInput: NormalizedFailureFingerprintInput;
+  explicitOperatorOverride?: boolean;
+}) {
+  recordTaskStageArtifactAttempt({
+    taskId: input.task.id,
+    stage: input.stage,
+    kind: "failure_fingerprint",
+    label: input.label,
+    state: "rejected",
+    outcome: "blocked",
+    path: input.path,
+    summary: input.summary,
+    sourceSnapshotId: input.failureFingerprintInput.sourceSnapshotId,
+    metadata: failureFingerprintMetadata(input),
+  });
+}
+
+function blockTaskForSameFailureFingerprint(input: {
+  task: TaskRow;
+  fromStatus: TaskStatus;
+  title: string;
+  blockedReason: string;
+  family: string;
+  failureFingerprint: string;
+  extra?: Omit<TaskFieldsPatch, "status" | "lastHeartbeatAt" | "updatedAt">;
+}): void {
+  const nowIso = new Date().toISOString();
+  const { blockedReason: extraBlockedReason, ...extraFields } = input.extra ?? {};
+  const blockedReason = [input.blockedReason, extraBlockedReason].filter(Boolean).join("; ");
+  clearTaskRuntimeLimitSnapshot(input.task.id);
+  updateTaskStatus(
+    input.task.id,
+    "blocked_external",
+    {
+      blockedReason,
+      blockedFromStatus: input.fromStatus,
+      retryAfter: null,
+      retryCount: input.task.retryCount ?? 0,
+      ...extraFields,
+      reworkRequested: false,
+      manualReviewRequired: true,
+    },
+    { title: input.title, fromStatus: input.fromStatus },
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] same_failure_fingerprint_fail_closed: ${input.failureFingerprint}; family=${input.family}`,
+  );
+}
+
 function acceptedAuditCardDecision(input: {
   task: TaskRow;
   artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
@@ -1948,20 +2236,18 @@ function acceptedAuditCardDecision(input: {
 }
 
 function repeatedAuditFailureCount(input: {
+  task: TaskRow;
   artifact: NonNullable<ReturnType<typeof findRoadmapBatchArtifactByTaskId>>;
   family: AuditFailureFamily;
   result: ReturnType<typeof evaluateTaskCompletionEvidence>;
 }): number {
-  const signature = buildAuditFailureSignature({
-    role: input.artifact.role,
-    failureFamily: input.family,
-    validationDetails: auditValidationDetails(input.result),
+  const { failureFingerprint } = buildAuditFailureFingerprint(input);
+  const priorFingerprint = priorRoadmapFailureFingerprint({
+    artifact: input.artifact,
+    failureFingerprint,
   });
-  if (!signature) return 0;
-  return listRoadmapBatchArtifactAttempts(input.artifact.id).filter(
-    (attempt) =>
-      attempt.failureSignature === signature && attempt.reworkStatus === "rework_requested",
-  ).length;
+  if (priorFingerprint.repeated) return priorFingerprint.override ? 0 : 1;
+  return 0;
 }
 
 function returnAuditTaskToRework(input: {
@@ -1985,7 +2271,7 @@ function returnAuditTaskToRework(input: {
     failureFamily: input.family,
     reworkStatus: "rework_requested",
     createAttemptBoundary: true,
-    validationDetails: auditValidationDetails(input.result),
+    validationDetails: auditValidationDetailsWithFingerprint(input),
     contentSha: input.result.evidence.auditReportValidation.artifactSha256,
     branchName: input.task.branchName ?? input.artifact.branchName,
     worktreePath: input.task.worktreePath ?? input.artifact.worktreePath,
@@ -2009,6 +2295,11 @@ function returnAuditTaskToRework(input: {
   appendTaskActivityLog(
     input.task.id,
     `[${new Date().toISOString()}] Audit artifact validation requested rework: ${input.blockedReason}`,
+  );
+  const fingerprint = buildAuditFailureFingerprint(input);
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] same_failure_fingerprint_observed: ${fingerprint.failureFingerprint}; family=${input.family}`,
   );
   return true;
 }
@@ -2869,6 +3160,51 @@ function returnImplementationEvidenceToReworkIfPossible(input: {
   const nowIso = new Date().toISOString();
   const feedback = formatTaskCompletionBlockedReason(input.result);
   const blockedReason = `Implementation evidence guard rework ${nextIteration}/${maxIterations}: ${feedback}`;
+  const fingerprint = implementationFailureFingerprint({
+    task: input.task,
+    result: input.result,
+    issueCodes,
+  });
+  const priorFingerprint = priorTaskStageFailureFingerprint({
+    taskId: input.task.id,
+    stage: "implementation_manifest",
+    kind: "failure_fingerprint",
+    failureFingerprint: fingerprint.failureFingerprint,
+  });
+  recordFailureFingerprintAttempt({
+    task: input.task,
+    stage: "implementation_manifest",
+    path: "aif-implementation-manifest",
+    label: "Implementation failure fingerprint",
+    summary: blockedReason,
+    failureFamily: "implementation_manifest_invalid",
+    issueCodes,
+    failureFingerprint: fingerprint.failureFingerprint,
+    failureFingerprintInput: fingerprint.failureFingerprintInput,
+  });
+  if (priorFingerprint.repeated && !priorFingerprint.override) {
+    blockTaskForSameFailureFingerprint({
+      task: input.task,
+      fromStatus: input.fromStatus,
+      title: input.title,
+      blockedReason: `implementation_manifest_invalid: ${feedback} Manual review required: same failure fingerprint failed closed.`,
+      family: "implementation_manifest_invalid",
+      failureFingerprint: fingerprint.failureFingerprint,
+      extra: {
+        reviewIterationCount: input.task.reviewIterationCount ?? 0,
+      },
+    });
+    log.warn(
+      {
+        taskId: input.task.id,
+        fromStatus: input.fromStatus,
+        issueCodes,
+        failureFingerprint: fingerprint.failureFingerprint,
+      },
+      "Implementation evidence guard failed closed on repeated failure fingerprint",
+    );
+    return true;
+  }
   clearTaskRuntimeLimitSnapshot(input.task.id);
   updateTaskStatus(
     input.task.id,
@@ -2887,6 +3223,10 @@ function returnImplementationEvidenceToReworkIfPossible(input: {
   appendTaskActivityLog(
     input.task.id,
     `[${nowIso}] Implementation evidence guard returned task to rework: ${issueCodes.join(", ")}`,
+  );
+  appendTaskActivityLog(
+    input.task.id,
+    `[${nowIso}] same_failure_fingerprint_observed: ${fingerprint.failureFingerprint}; family=implementation_manifest_invalid`,
   );
   log.warn(
     {
@@ -2994,10 +3334,9 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     isRecoverableAuditFailureFamily(family);
   const repeatedSameFailure =
     recoverableAuditArtifactFailure && artifact
-      ? repeatedAuditFailureCount({ artifact, family, result }) > 0
+      ? repeatedAuditFailureCount({ task: input.task, artifact, family, result }) > 0
       : false;
-  const repeatedFailureMustBlock =
-    repeatedSameFailure && env.AIF_AUDIT_REPEATED_FAILURE_FAIL_CLOSED;
+  const repeatedFailureMustBlock = repeatedSameFailure;
   const shouldReturnToRework =
     !input.preventAuditRework &&
     recoverableAuditArtifactFailure &&
@@ -3017,7 +3356,7 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
   const blockedReason = auditReworkLimitReached
     ? `${baseBlockedReason} Manual review required: audit evidence guard failed after ${auditReviewIteration}/${auditMaxReviewIterations} review iterations.`
     : repeatedFailureMustBlock
-      ? `${actionableBlockedReason} Manual review required: repeated audit artifact failure signature failed closed.`
+      ? `${actionableBlockedReason} Manual review required: same failure fingerprint failed closed.`
       : actionableBlockedReason;
   const terminalBlockedReason = artifact ? `${family}: ${blockedReason}` : blockedReason;
   const { blockedReason: extraBlockedReason, ...extraFields } = input.extra ?? {};
@@ -3056,7 +3395,13 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
           ? "terminal_inconclusive"
           : "manual_review_required",
       validationDetails: {
-        ...auditValidationDetails(result),
+        ...auditValidationDetailsWithFingerprint({
+          task: input.task,
+          artifact,
+          family,
+          result,
+          extra: untrustedArtifactCleanup ? { untrustedArtifactCleanup } : undefined,
+        }),
         ...(untrustedArtifactCleanup ? { untrustedArtifactCleanup } : {}),
       },
       contentSha: result.evidence.auditReportValidation.artifactSha256,
@@ -3102,6 +3447,18 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
     input.task.id,
     `[${nowIso}] Completion evidence guard blocked terminal transition: ${finalBlockedReason}`,
   );
+  if (artifact && repeatedFailureMustBlock) {
+    const fingerprint = buildAuditFailureFingerprint({
+      task: input.task,
+      artifact,
+      family,
+      result,
+    });
+    appendTaskActivityLog(
+      input.task.id,
+      `[${nowIso}] same_failure_fingerprint_fail_closed: ${fingerprint.failureFingerprint}; family=${family}`,
+    );
+  }
   log.warn(
     {
       taskId: input.task.id,
@@ -3821,6 +4178,50 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
       }
 
       if (outcome?.status === "rework_requested") {
+        const fingerprint = reviewGateFailureFingerprint({ task, outcome });
+        const priorFingerprint = priorTaskStageFailureFingerprint({
+          taskId: task.id,
+          stage: "review_gate",
+          kind: "failure_fingerprint",
+          failureFingerprint: fingerprint.failureFingerprint,
+        });
+        recordFailureFingerprintAttempt({
+          task,
+          stage: "review_gate",
+          path: fingerprint.failureFingerprintInput.artifactPath ?? "review-comments",
+          label: "Review gate failure fingerprint",
+          summary: "Auto review gate requested changes.",
+          failureFamily: "review_gate_rework",
+          issueCodes: ["review_gate_request_changes"],
+          failureFingerprint: fingerprint.failureFingerprint,
+          failureFingerprintInput: fingerprint.failureFingerprintInput,
+        });
+        if (priorFingerprint.repeated && !priorFingerprint.override) {
+          blockTaskForSameFailureFingerprint({
+            task,
+            fromStatus: stage.inProgress,
+            title: taskTitle,
+            blockedReason:
+              "review_gate_rework: Auto review gate requested the same changes again. Manual review required: same failure fingerprint failed closed.",
+            family: "review_gate_rework",
+            failureFingerprint: fingerprint.failureFingerprint,
+            extra: {
+              reviewIterationCount: outcome.currentIteration,
+              autoReviewState: outcome.autoReviewState,
+            },
+          });
+          log.info(
+            {
+              taskId: task.id,
+              from: stage.inProgress,
+              to: "blocked_external",
+              reviewIteration: outcome.currentIteration,
+              failureFingerprint: fingerprint.failureFingerprint,
+            },
+            "Auto review gate failed closed on repeated rework fingerprint",
+          );
+          return false;
+        }
         clearTaskRuntimeLimitSnapshot(task.id);
         updateTaskStatus(
           task.id,
@@ -3846,10 +4247,58 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
           },
           "Auto review gate requested changes, restarting implementing stage",
         );
+        appendTaskActivityLog(
+          task.id,
+          `[${new Date().toISOString()}] same_failure_fingerprint_observed: ${fingerprint.failureFingerprint}; family=review_gate_rework`,
+        );
         return true;
       }
 
       if (outcome?.status === "review_retry_requested") {
+        const fingerprint = reviewGateFailureFingerprint({ task, outcome });
+        const priorFingerprint = priorTaskStageFailureFingerprint({
+          taskId: task.id,
+          stage: "review_gate",
+          kind: "failure_fingerprint",
+          failureFingerprint: fingerprint.failureFingerprint,
+        });
+        recordFailureFingerprintAttempt({
+          task,
+          stage: "review_gate",
+          path: fingerprint.failureFingerprintInput.artifactPath ?? "review-comments",
+          label: "Review gate failure fingerprint",
+          summary: "Auto review gate requested reviewer retry.",
+          failureFamily: "review_gate_rework",
+          issueCodes: ["review_retry_requested"],
+          failureFingerprint: fingerprint.failureFingerprint,
+          failureFingerprintInput: fingerprint.failureFingerprintInput,
+        });
+        if (priorFingerprint.repeated && !priorFingerprint.override) {
+          blockTaskForSameFailureFingerprint({
+            task,
+            fromStatus: stage.inProgress,
+            title: taskTitle,
+            blockedReason:
+              "review_gate_rework: Auto review gate requested the same reviewer retry again. Manual review required: same failure fingerprint failed closed.",
+            family: "review_gate_rework",
+            failureFingerprint: fingerprint.failureFingerprint,
+            extra: {
+              reviewIterationCount: outcome.currentIteration,
+              autoReviewState: outcome.autoReviewState,
+            },
+          });
+          log.info(
+            {
+              taskId: task.id,
+              from: stage.inProgress,
+              to: "blocked_external",
+              reviewIteration: outcome.currentIteration,
+              failureFingerprint: fingerprint.failureFingerprint,
+            },
+            "Auto review gate failed closed on repeated reviewer retry fingerprint",
+          );
+          return false;
+        }
         clearTaskRuntimeLimitSnapshot(task.id);
         updateTaskStatus(
           task.id,
@@ -3874,6 +4323,10 @@ async function processOneTask(task: TaskRow, stage: StatusTransition): Promise<b
             reviewIteration: outcome.currentIteration,
           },
           "Auto review gate requested reviewer-stage retry",
+        );
+        appendTaskActivityLog(
+          task.id,
+          `[${new Date().toISOString()}] same_failure_fingerprint_observed: ${fingerprint.failureFingerprint}; family=review_gate_rework`,
         );
         return true;
       }

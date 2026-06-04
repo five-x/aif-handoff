@@ -114,6 +114,8 @@ const {
   createRoadmapBatchContract,
   listRoadmapBatchArtifactAttempts,
   listRoadmapBatchArtifacts,
+  listTaskStageArtifactAttempts,
+  recordTaskStageArtifactAttempt,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
 } = await import("@aif/data");
@@ -1455,15 +1457,23 @@ describe("coordinator", () => {
     expect(report?.manualReviewRequired).toBe(true);
     expect(report?.blockedReason).toContain("invalid_artifact_contract");
     expect(report?.blockedReason).toContain("inventory_only_evidence");
-    expect(report?.blockedReason).toContain(
-      "repeated audit artifact failure signature failed closed",
-    );
+    expect(report?.blockedReason).toContain("same failure fingerprint failed closed");
+    expect(report?.agentActivityLog).toContain("same_failure_fingerprint_fail_closed:");
     artifacts = listRoadmapBatchArtifacts(batch.batchId);
     reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
     if (!reportArtifact) throw new Error("missing canary report artifact");
     expect(reportArtifact.state).toBe("invalid");
     const repeatedAttempts = listRoadmapBatchArtifactAttempts(reportArtifact.id);
     expect(repeatedAttempts.length).toBeGreaterThanOrEqual(2);
+    const repeatedDetails = JSON.parse(repeatedAttempts.at(-1)?.validationDetailsJson ?? "{}");
+    expect(repeatedDetails.failureFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(repeatedDetails.failureFingerprintInput).toMatchObject({
+      taskId: "task-canary-report",
+      stage: "completion",
+      artifactPath: "audit/source.md",
+      failureFamily: "invalid_artifact_contract",
+    });
+    expect(repeatedAttempts.at(-1)?.failureSignature).toBeTruthy();
 
     vi.clearAllMocks();
     await pollAndProcess();
@@ -1547,6 +1557,293 @@ describe("coordinator", () => {
     synthesis = db.select().from(tasks).where(eq(tasks.id, "task-canary-synthesis")).get();
     expect(synthesis?.paused).toBe(false);
     expect(synthesis?.blockedReason ?? "").not.toContain("synthesis_not_ready");
+  }, 60_000);
+
+  it("allows one repeated audit report rework after structured operator override", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-fingerprint-override-");
+    mkdirSync(join(rootPath, "src"), { recursive: true });
+    writeFileSync(join(rootPath, "src", "index.ts"), 'export const entry = "ok";\n', "utf8");
+    execFileSync("git", ["add", "src/index.ts"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-fingerprint-override"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    writeFileSync(
+      join(rootPath, "audit", "source.md"),
+      [
+        "# Audit",
+        "",
+        "## Finding: Documentation-only observation",
+        "Evidence: `README.md:1` identifies the fixture documentation.",
+        "Risk: Source behavior was not inspected.",
+        "Proposed fix: Review the implementation files.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) add audit report",
+        "```",
+        "",
+        "## No Validated Findings",
+        "No validated findings were found.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    execFileSync("git", ["add", "audit/source.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add weak audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-fingerprint-override-project", name: "Audit Override", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-fingerprint-override-report",
+        projectId: "audit-fingerprint-override-project",
+        title: "Audit source behavior with override",
+        description: "Scope: src. Report artifact: audit/source.md.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-fingerprint-override",
+        agentActivityLog: [
+          "[2026-05-11T10:00:00.000Z] Agent: implement-coordinator complete",
+          "[2026-05-11T10:00:01.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-fingerprint-override-project",
+      roadmapAlias: "audit-fingerprint-override",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-fingerprint-override-report"],
+      artifacts: [
+        {
+          taskId: "task-audit-fingerprint-override-report",
+          role: "report",
+          artifactPath: "audit/source.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    await pollAndProcess();
+
+    let report = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-fingerprint-override-report"))
+      .get();
+    expect(report?.status).toBe("implementing");
+    let artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-fingerprint-override-report",
+    );
+    if (!artifact) throw new Error("missing override report artifact");
+    let attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    const firstDetails = JSON.parse(attempts.at(-1)?.validationDetailsJson ?? "{}");
+    expect(firstDetails.failureFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    updateRoadmapBatchArtifactState({
+      taskId: "task-audit-fingerprint-override-report",
+      state: "invalid",
+      failureFamily: "invalid_artifact_contract",
+      validationDetails: {
+        ...firstDetails,
+        explicitOperatorOverride: true,
+        operatorOverrideReason: "Permit one additional audit report rework for this fingerprint.",
+      },
+      projectRoot: rootPath,
+    });
+    artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-fingerprint-override-report",
+    );
+    if (!artifact) throw new Error("missing override marker artifact");
+    attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    const overrideDetails = JSON.parse(attempts.at(-1)?.validationDetailsJson ?? "{}");
+    expect(overrideDetails).toMatchObject({
+      explicitOperatorOverride: true,
+      failureFingerprint: firstDetails.failureFingerprint,
+    });
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-audit-fingerprint-override-report", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-audit-fingerprint-override-report", rootPath);
+    report = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-fingerprint-override-report"))
+      .get();
+    expect(report?.status).toBe("implementing");
+    expect(report?.reworkRequested).toBe(true);
+    expect(report?.blockedReason ?? "").not.toContain("same failure fingerprint failed closed");
+    artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-fingerprint-override-report",
+    );
+    if (!artifact) throw new Error("missing override report artifact after retry");
+    attempts = listRoadmapBatchArtifactAttempts(artifact.id);
+    const reworkAttempts = attempts.filter(
+      (attempt) => attempt.reworkStatus === "rework_requested",
+    );
+    expect(reworkAttempts).toHaveLength(2);
+    expect(JSON.parse(reworkAttempts[1]!.validationDetailsJson ?? "{}").failureFingerprint).toBe(
+      firstDetails.failureFingerprint,
+    );
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+
+    report = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-fingerprint-override-report"))
+      .get();
+    expect(report?.status).toBe("blocked_external");
+    expect(report?.reworkRequested).toBe(false);
+    expect(report?.manualReviewRequired).toBe(true);
+    expect(report?.blockedReason).toContain("same failure fingerprint failed closed");
+    expect(report?.agentActivityLog).toContain("same_failure_fingerprint_fail_closed:");
+  }, 60_000);
+
+  it("allows audit rework when only a legacy failure signature matches a changed canonical fingerprint", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-audit-legacy-signature-");
+    mkdirSync(join(rootPath, "src"), { recursive: true });
+    writeFileSync(join(rootPath, "src", "index.ts"), 'export const entry = "ok";\n', "utf8");
+    execFileSync("git", ["add", "src/index.ts"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add source", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/audit-legacy-signature"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+    mkdirSync(join(rootPath, "audit"), { recursive: true });
+    const weakReport = (label: string) =>
+      [
+        "# Audit",
+        "",
+        `## Finding: ${label}`,
+        "Evidence: `README.md:1` identifies the fixture documentation.",
+        "Risk: Source behavior was not inspected.",
+        "Proposed fix: Review the implementation files.",
+        "Verification: Command `git log -1 --oneline` output:",
+        "```",
+        "1234567 (HEAD -> main) add audit report",
+        "```",
+        "",
+        "## No Validated Findings",
+        "No validated findings were found.",
+        "",
+      ].join("\n");
+    writeFileSync(join(rootPath, "audit", "source.md"), weakReport("Initial weak report"), "utf8");
+    execFileSync("git", ["add", "audit/source.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add weak audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    db.insert(projects)
+      .values({ id: "audit-legacy-signature-project", name: "Audit Legacy Signature", rootPath })
+      .run();
+    db.insert(tasks)
+      .values({
+        id: "task-audit-legacy-signature-report",
+        projectId: "audit-legacy-signature-project",
+        title: "Audit legacy signature behavior",
+        description: "Scope: src. Report artifact: audit/source.md.",
+        taskIntent: "audit",
+        status: "review",
+        autoMode: true,
+        branchName: "feature/audit-legacy-signature",
+        agentActivityLog: [
+          "[2026-05-11T10:00:00.000Z] Agent: implement-coordinator complete",
+          "[2026-05-11T10:00:01.000Z] Agent: review-sidecar complete",
+        ].join("\n"),
+      })
+      .run();
+    const batch = createRoadmapBatchContract({
+      projectId: "audit-legacy-signature-project",
+      roadmapAlias: "audit-legacy-signature",
+      taskIntent: "audit",
+      executionPolicy: "serialized_shared_checkout",
+      createdTaskIds: ["task-audit-legacy-signature-report"],
+      artifacts: [
+        {
+          taskId: "task-audit-legacy-signature-report",
+          role: "report",
+          artifactPath: "audit/source.md",
+          projectRoot: rootPath,
+        },
+      ],
+    });
+
+    await pollAndProcess();
+
+    let task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-audit-legacy-signature-report"))
+      .get();
+    expect(task?.status).toBe("implementing");
+    let artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-legacy-signature-report",
+    );
+    if (!artifact) throw new Error("missing legacy-signature artifact");
+    const firstAttempt = listRoadmapBatchArtifactAttempts(artifact.id).at(-1);
+    if (!firstAttempt) throw new Error("missing first legacy-signature attempt");
+    const firstDetails = JSON.parse(firstAttempt.validationDetailsJson ?? "{}");
+    const firstFingerprint = firstDetails.failureFingerprint;
+    expect(firstFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    const legacyOnlyDetails = { ...firstDetails };
+    delete legacyOnlyDetails.failureFingerprint;
+    delete legacyOnlyDetails.failureFingerprintInput;
+    updateRoadmapBatchArtifactState({
+      taskId: "task-audit-legacy-signature-report",
+      state: "invalid",
+      failureFamily: "invalid_artifact_contract",
+      reworkStatus: "rework_requested",
+      validationDetails: legacyOnlyDetails,
+      contentSha: firstAttempt.contentSha,
+      projectRoot: rootPath,
+    });
+
+    writeFileSync(join(rootPath, "audit", "source.md"), weakReport("Changed weak report"), "utf8");
+    execFileSync("git", ["add", "audit/source.md"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "change weak audit report", "--no-verify"], {
+      cwd: rootPath,
+      stdio: "ignore",
+    });
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+
+    expect(runImplementer).toHaveBeenCalledWith("task-audit-legacy-signature-report", rootPath);
+    expect(runReviewer).toHaveBeenCalledWith("task-audit-legacy-signature-report", rootPath);
+    task = db.select().from(tasks).where(eq(tasks.id, "task-audit-legacy-signature-report")).get();
+    expect(task?.status).toBe("implementing");
+    expect(task?.reworkRequested).toBe(true);
+    expect(task?.blockedReason ?? "").not.toContain("same failure fingerprint failed closed");
+    expect(task?.agentActivityLog ?? "").not.toContain("same_failure_fingerprint_fail_closed:");
+    artifact = listRoadmapBatchArtifacts(batch.batchId).find(
+      (entry) => entry.taskId === "task-audit-legacy-signature-report",
+    );
+    if (!artifact) throw new Error("missing updated legacy-signature artifact");
+    const secondAttempt = listRoadmapBatchArtifactAttempts(artifact.id).at(-1);
+    if (!secondAttempt) throw new Error("missing second legacy-signature attempt");
+    expect(secondAttempt.failureSignature).toBe(firstAttempt.failureSignature);
+    expect(JSON.parse(secondAttempt.validationDetailsJson ?? "{}").failureFingerprint).not.toBe(
+      firstFingerprint,
+    );
   }, 60_000);
 
   it("blocks audit synthesis as explicit inconclusive from persisted source outcome without substantive no-findings proof", async () => {
@@ -2210,6 +2507,82 @@ describe("coordinator", () => {
     expect(task!.reworkRequested).toBe(true);
   });
 
+  it("fails closed instead of queueing another implementer for repeated review-gate rework", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-review-repeat-fingerprint",
+        projectId: "test-project",
+        title: "Review repeated same blocker",
+        status: "review",
+        autoMode: true,
+        reviewComments: "## Code Review\n- fix issue A",
+        maxReviewIterations: 5,
+      })
+      .run();
+
+    const repeatedOutcome = (iteration: number) =>
+      ({
+        status: "rework_requested" as const,
+        currentIteration: iteration,
+        metrics: {
+          strategy: "full_re_review" as const,
+          iteration,
+          previousBlockingCount: iteration === 1 ? 0 : 1,
+          stillBlockingCount: iteration === 1 ? 0 : 1,
+          newBlockingCount: iteration === 1 ? 1 : 0,
+          totalBlockingCount: 1,
+          parserMode: "structured" as const,
+        },
+        autoReviewState: {
+          strategy: "full_re_review" as const,
+          iteration,
+          findings: [
+            {
+              id: "fix-a",
+              source: "code_review" as const,
+              text: "fix issue A",
+              firstSeenIteration: 1,
+              lastSeenIteration: iteration,
+              streak: iteration,
+            },
+          ],
+        },
+      }) satisfies Awaited<ReturnType<typeof handleAutoReviewGate>>;
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce(repeatedOutcome(1));
+    await pollAndProcess();
+
+    let task = db.select().from(tasks).where(eq(tasks.id, "task-review-repeat-fingerprint")).get();
+    expect(task!.status).toBe("implementing");
+    let attempts = listTaskStageArtifactAttempts("task-review-repeat-fingerprint").filter(
+      (attempt) => attempt.stage === "review_gate" && attempt.kind === "failure_fingerprint",
+    );
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.metadata.failureFingerprint).toMatch(/^[a-f0-9]{64}$/);
+
+    vi.clearAllMocks();
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce(repeatedOutcome(2));
+    await pollAndProcess();
+
+    task = db.select().from(tasks).where(eq(tasks.id, "task-review-repeat-fingerprint")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.blockedReason).toContain("same failure fingerprint failed closed");
+    expect(task!.agentActivityLog).toContain("same_failure_fingerprint_fail_closed:");
+    attempts = listTaskStageArtifactAttempts("task-review-repeat-fingerprint").filter(
+      (attempt) => attempt.stage === "review_gate" && attempt.kind === "failure_fingerprint",
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.metadata.failureFingerprint).toBe(attempts[0]!.metadata.failureFingerprint);
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+    expect(runImplementer).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+  });
+
   it("should retry reviewer stage for review-only structured contract failures", async () => {
     const db = testDb.current;
     db.insert(tasks)
@@ -2256,6 +2629,82 @@ describe("coordinator", () => {
     expect(task!.manualReviewRequired).toBe(false);
     expect(task!.reviewIterationCount).toBe(1);
     expect(task!.autoReviewStateJson).toContain("structured-review-contract");
+  });
+
+  it("fails closed instead of queueing another reviewer retry for repeated review-gate fingerprint", async () => {
+    const db = testDb.current;
+    db.insert(tasks)
+      .values({
+        id: "task-review-retry-repeat-fingerprint",
+        projectId: "test-project",
+        title: "Review retry repeated same blocker",
+        status: "review",
+        autoMode: true,
+        reviewComments: "## Auto Review Metadata\n- Contract Failure: structured_review_sidecar",
+      })
+      .run();
+
+    const retryOutcome = (iteration: number) =>
+      ({
+        status: "review_retry_requested" as const,
+        currentIteration: iteration,
+        metrics: {
+          strategy: "full_re_review" as const,
+          iteration,
+          previousBlockingCount: iteration === 1 ? 0 : 1,
+          stillBlockingCount: iteration === 1 ? 0 : 1,
+          newBlockingCount: iteration === 1 ? 1 : 0,
+          totalBlockingCount: 1,
+          parserMode: "structured" as const,
+        },
+        autoReviewState: {
+          strategy: "full_re_review" as const,
+          iteration,
+          findings: [
+            {
+              id: "structured-review-contract",
+              source: "review_gate" as const,
+              text: "Structured review contract not satisfied.",
+              firstSeenIteration: 1,
+              lastSeenIteration: iteration,
+              streak: iteration,
+            },
+          ],
+        },
+      }) satisfies Awaited<ReturnType<typeof handleAutoReviewGate>>;
+
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce(retryOutcome(1));
+    await pollAndProcess();
+
+    let task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-review-retry-repeat-fingerprint"))
+      .get();
+    expect(task!.status).toBe("review");
+
+    vi.clearAllMocks();
+    vi.mocked(handleAutoReviewGate).mockResolvedValueOnce(retryOutcome(2));
+    await pollAndProcess();
+
+    task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-review-retry-repeat-fingerprint"))
+      .get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.reworkRequested).toBe(false);
+    expect(task!.manualReviewRequired).toBe(true);
+    expect(task!.blockedReason).toContain("same failure fingerprint failed closed");
+    const attempts = listTaskStageArtifactAttempts("task-review-retry-repeat-fingerprint").filter(
+      (attempt) => attempt.stage === "review_gate" && attempt.kind === "failure_fingerprint",
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.metadata.failureFingerprint).toBe(attempts[0]!.metadata.failureFingerprint);
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+    expect(runReviewer).not.toHaveBeenCalled();
   });
 
   it("should block review with sanitized operator input hold", async () => {
@@ -5938,6 +6387,118 @@ describe("coordinator", () => {
     expect(task!.blockedReason).toContain("implementation_changed_files_mismatch");
     expect(task!.retryCount).toBe(1);
     expect(task!.reviewIterationCount).toBe(2);
+    let attempts = listTaskStageArtifactAttempts("task-dev-evidence-rework").filter(
+      (attempt) =>
+        attempt.stage === "implementation_manifest" && attempt.kind === "failure_fingerprint",
+    );
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.metadata.failureFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(attempts[0]!.metadata.failureFingerprintInput).toMatchObject({
+      taskId: "task-dev-evidence-rework",
+      stage: "implementation_manifest",
+      artifactPath: "aif-implementation-manifest",
+      failureFamily: "implementation_manifest_invalid",
+    });
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+
+    const blockedTask = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, "task-dev-evidence-rework"))
+      .get();
+    expect(blockedTask!.status).toBe("blocked_external");
+    expect(blockedTask!.reworkRequested).toBe(false);
+    expect(blockedTask!.manualReviewRequired).toBe(true);
+    expect(blockedTask!.blockedReason).toContain("same failure fingerprint failed closed");
+    expect(blockedTask!.agentActivityLog).toContain("same_failure_fingerprint_fail_closed:");
+    attempts = listTaskStageArtifactAttempts("task-dev-evidence-rework").filter(
+      (attempt) =>
+        attempt.stage === "implementation_manifest" && attempt.kind === "failure_fingerprint",
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.metadata.failureFingerprint).toBe(attempts[0]!.metadata.failureFingerprint);
+  });
+
+  it("allows one implementation evidence rework after structured operator override", async () => {
+    const db = testDb.current;
+    const rootPath = initGitFixture("coordinator-dev-evidence-override-");
+    writeFileSync(join(rootPath, "README.md"), "# changed\n", "utf8");
+    db.update(projects).set({ rootPath }).where(eq(projects.id, "test-project")).run();
+    db.insert(tasks)
+      .values({
+        id: "task-dev-evidence-override",
+        projectId: "test-project",
+        title: "Development task with override",
+        taskIntent: "feature",
+        status: "implementing",
+        autoMode: true,
+        reviewIterationCount: 1,
+        retryCount: 0,
+        maxReviewIterations: 5,
+        agentActivityLog: "[2026-05-29T10:00:00.000Z] Agent: aif-implement complete",
+        implementationManifestJson: JSON.stringify({
+          version: 1,
+          taskId: "task-dev-evidence-override",
+          intent: "feature",
+          planManifestHash: null,
+          changedFiles: [],
+          diffSummary: { summary: "Stale manifest.", filesChanged: 0 },
+          verificationEvidence: [
+            {
+              id: "ver-1",
+              command: "npm test",
+              status: "passed",
+              outputSha256: "a".repeat(64),
+              outputPreview: "tests passed",
+              outputPreviewTruncated: false,
+            },
+          ],
+          acceptanceCriteria: [{ id: "AC-1", status: "satisfied", evidenceRefs: ["ver-1"] }],
+          evidenceRefs: ["ver-1"],
+          planChecklist: { total: 1, completed: 1, pending: 0, synced: true, pendingItems: [] },
+          reviewClosure: { status: "pending", evidenceRefs: [] },
+          commitEvidence: { status: "not_committed", evidenceRefs: [] },
+          knownLimitations: [],
+        }),
+      })
+      .run();
+
+    await pollAndProcess();
+    const firstAttempt = listTaskStageArtifactAttempts("task-dev-evidence-override").find(
+      (attempt) =>
+        attempt.stage === "implementation_manifest" && attempt.kind === "failure_fingerprint",
+    );
+    if (!firstAttempt) throw new Error("missing implementation failure fingerprint attempt");
+    recordTaskStageArtifactAttempt({
+      taskId: "task-dev-evidence-override",
+      stage: "implementation_manifest",
+      kind: "failure_fingerprint",
+      label: "Implementation failure fingerprint override",
+      state: "rejected",
+      outcome: "blocked",
+      path: "aif-implementation-manifest",
+      metadata: {
+        ...firstAttempt.metadata,
+        explicitOperatorOverride: true,
+      },
+    });
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+
+    let task = db.select().from(tasks).where(eq(tasks.id, "task-dev-evidence-override")).get();
+    expect(task!.status).toBe("implementing");
+    expect(task!.reworkRequested).toBe(true);
+    expect(task!.retryCount).toBe(2);
+
+    vi.clearAllMocks();
+    await pollAndProcess();
+
+    task = db.select().from(tasks).where(eq(tasks.id, "task-dev-evidence-override")).get();
+    expect(task!.status).toBe("blocked_external");
+    expect(task!.blockedReason).toContain("same failure fingerprint failed closed");
   });
 
   it("should block skipReview audit tasks with generic plan and no evidence delta", async () => {
@@ -6035,15 +6596,15 @@ describe("coordinator", () => {
         strategy: "full_re_review",
         iteration: 2,
         previousBlockingCount: 1,
-        stillBlockingCount: 1,
-        newBlockingCount: 0,
+        stillBlockingCount: 0,
+        newBlockingCount: 1,
         totalBlockingCount: 1,
         parserMode: "structured",
       },
       autoReviewState: {
         strategy: "full_re_review",
         iteration: 2,
-        findings: [{ id: "fix-a", source: "code_review", text: "fix issue A" }],
+        findings: [{ id: "fix-b", source: "code_review", text: "fix issue B" }],
       },
     });
     await pollAndProcess();

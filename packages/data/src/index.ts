@@ -2436,7 +2436,7 @@ function listTaskStageArtifacts(taskId: string, stage?: string): TaskStageArtifa
     .map(toTaskStageArtifact);
 }
 
-function listTaskStageArtifactAttempts(taskId: string): TaskStageArtifactAttempt[] {
+export function listTaskStageArtifactAttempts(taskId: string): TaskStageArtifactAttempt[] {
   return getDb()
     .select()
     .from(taskStageArtifactAttempts)

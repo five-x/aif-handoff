@@ -21,6 +21,7 @@ import {
   selectTaskCompletionAuditFailureFamily,
   validateGeneratedAuditCard,
 } from "../auditRoadmapContract.js";
+import { buildFailureFingerprint as buildCanonicalFailureFingerprint } from "../auditFailureFingerprint.js";
 
 function completeAuditDescription(options: { synthesis?: boolean } = {}) {
   const synthesis = options.synthesis ?? false;
@@ -603,6 +604,84 @@ describe("auditRoadmapContract", () => {
         failureFamily: "source_inconclusive",
         validationDetails: { issues: [{ code: "manifest_source_snapshot_mismatch" }] },
       }),
+    ).not.toBe(first);
+  });
+
+  it("builds canonical SHA failure fingerprints over normalized fields", () => {
+    const first = buildCanonicalFailureFingerprint({
+      taskId: "task-1",
+      stage: "Completion",
+      artifactPath: "Audit\\Report.md",
+      artifactSha: "A".repeat(64),
+      validatorIssueCodes: ["Missing_Substantive_Evidence", "low_quality_report_evidence"],
+      validationFingerprint: "FINGERPRINT",
+      blockingFindingIds: ["finding-b", "finding-a", "finding-a"],
+      sourceSnapshotId: "git:commit:tree",
+      allowedWritePaths: ["Audit\\Report.md", "audit/report.md"],
+      failureFamily: "Invalid_Inventory_Only",
+    });
+    const second = buildCanonicalFailureFingerprint({
+      taskId: "task-1",
+      stage: "completion",
+      artifactPath: "audit/report.md",
+      artifactSha: "a".repeat(64),
+      validatorIssueCodes: ["low_quality_report_evidence", "missing_substantive_evidence"],
+      validationFingerprint: "fingerprint",
+      blockingFindingIds: ["finding-a", "finding-b"],
+      sourceSnapshotId: "git:commit:tree",
+      allowedWritePaths: ["audit/report.md"],
+      failureFamily: "invalid_inventory_only",
+    });
+
+    expect(first.failureFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.failureFingerprint).toBe(second.failureFingerprint);
+    expect(first.failureFingerprintInput).toEqual({
+      taskId: "task-1",
+      stage: "completion",
+      artifactPath: "audit/report.md",
+      artifactSha: "a".repeat(64),
+      validatorIssueCodes: ["low_quality_report_evidence", "missing_substantive_evidence"],
+      validationFingerprint: "fingerprint",
+      blockingFindingIds: ["finding-a", "finding-b"],
+      sourceSnapshotId: "git:commit:tree",
+      allowedWritePaths: ["audit/report.md"],
+      failureFamily: "invalid_inventory_only",
+    });
+  });
+
+  it("changes canonical failure fingerprints for artifact and evidence deltas", () => {
+    const base = {
+      taskId: "task-1",
+      stage: "completion",
+      artifactPath: "audit/report.md",
+      artifactSha: "a".repeat(64),
+      validatorIssueCodes: ["missing_substantive_evidence"],
+      validationFingerprint: "validation-a",
+      blockingFindingIds: ["finding-a"],
+      sourceSnapshotId: "snapshot-a",
+      allowedWritePaths: ["audit/report.md"],
+      failureFamily: "invalid_inventory_only",
+    };
+    const first = buildCanonicalFailureFingerprint(base).failureFingerprint;
+
+    expect(
+      buildCanonicalFailureFingerprint({ ...base, artifactSha: "b".repeat(64) }).failureFingerprint,
+    ).not.toBe(first);
+    expect(
+      buildCanonicalFailureFingerprint({ ...base, validationFingerprint: "validation-b" })
+        .failureFingerprint,
+    ).not.toBe(first);
+    expect(
+      buildCanonicalFailureFingerprint({ ...base, sourceSnapshotId: "snapshot-b" })
+        .failureFingerprint,
+    ).not.toBe(first);
+    expect(
+      buildCanonicalFailureFingerprint({ ...base, blockingFindingIds: ["finding-b"] })
+        .failureFingerprint,
+    ).not.toBe(first);
+    expect(
+      buildCanonicalFailureFingerprint({ ...base, allowedWritePaths: ["audit/other.md"] })
+        .failureFingerprint,
     ).not.toBe(first);
   });
 });

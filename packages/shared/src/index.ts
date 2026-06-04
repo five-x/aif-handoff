@@ -435,6 +435,12 @@ export {
   type ValidateGeneratedAuditCardInput,
   type ValidateGeneratedAuditCardResult,
 } from "./auditRoadmapContract.js";
+export {
+  buildFailureFingerprint,
+  type FailureFingerprintInput,
+  type FailureFingerprintResult,
+  type NormalizedFailureFingerprintInput,
+} from "./auditFailureFingerprint.js";
 
 // Database
 export { getDb, createTestDb, closeDb } from "./db.js";
