@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::12_operator_closeout_idempotency_and_trust_rollup::project-capsule
+memory_id: task::aif-handoff::work::13_full_canary_suite::project-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 12_operator_closeout_idempotency_and_trust_rollup
-source_path: docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup
+task_id: 13_full_canary_suite
+source_path: docs/rdpi/work/13_full_canary_suite
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -24,10 +24,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup/research.md
-- docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup/design.md
-- docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup/plan.md
-- docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup/result.md
+- docs/rdpi/work/13_full_canary_suite/research.md
+- docs/rdpi/work/13_full_canary_suite/design.md
+- docs/rdpi/work/13_full_canary_suite/plan.md
+- docs/rdpi/work/13_full_canary_suite/result.md
   created_at: 2026-06-05
   last_verified_at: 2026-06-05
 
@@ -35,7 +35,7 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 12_operator_closeout_idempotency_and_trust_rollup.
+Current capsule for project aif-handoff, refreshed by task 13_full_canary_suite.
 
 # Why it matters
 
@@ -48,8 +48,3 @@ Reuse before starting related work in this repository.
 # When not to reuse
 
 Do not reuse blindly if the project architecture changed after this task.
-
-## Current stable facts
-
-- Operator closeout retries on `done` tasks are now governed by a stable evidence fingerprint, excluding volatile fields such as acceptance time and output preview.
-- Generic task timeline completeness is separate from card-level trust selection; cards summarize strongest relevant terminal evidence while timelines preserve all artifacts.
