@@ -182,12 +182,19 @@ export function useTaskEvent() {
       event,
       deletePlanFile,
       commitOnApprove,
+      manualExceptionJustification,
     }: {
       id: string;
       event: TaskEvent;
       deletePlanFile?: TaskEventInput["deletePlanFile"];
       commitOnApprove?: TaskEventInput["commitOnApprove"];
-    }) => api.taskEvent(id, event, { deletePlanFile, commitOnApprove }),
+      manualExceptionJustification?: TaskEventInput["manualExceptionJustification"];
+    }) =>
+      api.taskEvent(id, event, {
+        deletePlanFile,
+        commitOnApprove,
+        manualExceptionJustification,
+      }),
     // Optimistic update
     onMutate: async ({ id }) => {
       await queryClient.cancelQueries({ queryKey: ["tasks"] });

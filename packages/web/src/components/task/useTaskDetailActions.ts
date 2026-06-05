@@ -353,6 +353,42 @@ export function useTaskDetailActions(task: Task | undefined, onClose: () => void
     onClose();
   };
 
+  // --- Manual audit exception ---
+  const [showManualExceptionDialog, setShowManualExceptionDialog] = useState(false);
+  const [manualExceptionJustification, setManualExceptionJustification] = useState("");
+  const [manualExceptionError, setManualExceptionError] = useState<string | null>(null);
+
+  const openManualExceptionDialog = () => {
+    setManualExceptionJustification("");
+    setManualExceptionError(null);
+    setShowManualExceptionDialog(true);
+  };
+
+  const handleManualException = () => {
+    if (!task) return;
+    const justification = manualExceptionJustification.trim();
+    if (!justification) {
+      setManualExceptionError("Justification is required.");
+      return;
+    }
+    setManualExceptionError(null);
+    taskEvent.mutate(
+      { id: task.id, event: "manual_exception", manualExceptionJustification: justification },
+      {
+        onSuccess: () => {
+          setShowManualExceptionDialog(false);
+          setManualExceptionJustification("");
+          onClose();
+        },
+        onError: (error) => {
+          setManualExceptionError(
+            error instanceof Error ? error.message : "Failed to record manual exception",
+          );
+        },
+      },
+    );
+  };
+
   // --- Action button dispatch ---
   const handleActionClick = (action: { event?: TaskEvent; actionType?: string }) => {
     if (action.actionType === "open_replanning") {
@@ -374,6 +410,10 @@ export function useTaskDetailActions(task: Task | undefined, onClose: () => void
       }
       if (action.event === "approve_done") {
         setShowApproveDoneConfirm(true);
+        return;
+      }
+      if (action.event === "manual_exception") {
+        openManualExceptionDialog();
         return;
       }
       taskEvent.mutate({ id: task!.id, event: action.event });
@@ -428,6 +468,14 @@ export function useTaskDetailActions(task: Task | undefined, onClose: () => void
     setCommitOnApprove,
     commitPending,
     handleApproveDone,
+    // manual exception
+    showManualExceptionDialog,
+    setShowManualExceptionDialog,
+    manualExceptionJustification,
+    setManualExceptionJustification,
+    manualExceptionError,
+    handleManualException,
+    manualExceptionIsPending: taskEvent.isPending,
     // action buttons
     handleActionClick,
     // update task (for description save)

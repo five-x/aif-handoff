@@ -41,7 +41,7 @@ const ACTION_BUTTONS_BY_STATUS: Partial<
       event?: TaskEvent;
       actionType?: "event" | "open_replanning" | "open_fast_fix" | "open_request_changes";
       variant?: "default" | "outline";
-      visible?: (task: { autoMode: boolean }) => boolean;
+      visible?: (task: Task) => boolean;
     }>
   >
 > = {
@@ -66,7 +66,19 @@ const ACTION_BUTTONS_BY_STATUS: Partial<
       visible: (task) => !task.autoMode,
     },
   ],
-  blocked_external: [{ label: "Retry", event: "retry_from_blocked" }],
+  blocked_external: [
+    {
+      label: "Retry",
+      event: "retry_from_blocked",
+      visible: (task) => !isAuditManualExceptionBlock(task),
+    },
+    {
+      label: "Manual exception",
+      event: "manual_exception",
+      variant: "outline",
+      visible: isAuditManualExceptionBlock,
+    },
+  ],
   done: [
     { label: "Approve", event: "approve_done" },
     { label: "Request changes", actionType: "open_request_changes", variant: "outline" },
@@ -86,6 +98,20 @@ const RUNTIME_STARTING_ACTION_TYPES = new Set(["open_replanning", "open_fast_fix
 
 function resolveDisplayIntent(task: Task): TaskIntent {
   return task.taskIntent ?? (task.isFix ? "fix" : "general");
+}
+
+function isAuditManualExceptionBlock(task: Task): boolean {
+  if (task.taskIntent !== "audit" || !task.manualReviewRequired) return false;
+  const reason = (task.blockedReason ?? "").toLowerCase();
+  const nextAction = task.artifactTrust?.nextAction;
+  const artifactState = task.artifactTrust?.artifactState;
+  return (
+    nextAction === "inspect_untrusted_source" ||
+    artifactState === "source_inconclusive" ||
+    artifactState === "terminal_inconclusive" ||
+    reason.includes("source_inconclusive") ||
+    reason.includes("terminal_inconclusive")
+  );
 }
 
 interface TaskDetailHeaderProps {

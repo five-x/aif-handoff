@@ -476,6 +476,44 @@ describe("TaskDetailHeader", () => {
     ).toBeDefined();
   });
 
+  it("shows manual exception instead of retry for untrusted audit manual-review blocks", () => {
+    const onActionClick = vi.fn();
+    render(
+      <TaskDetailHeader
+        task={{
+          ...baseTask,
+          status: "blocked_external",
+          taskIntent: "audit",
+          manualReviewRequired: true,
+          blockedReason:
+            "source_inconclusive: audit report is terminal non-trusted: validator issue codes: shallow_evidence",
+          artifactTrust: artifactTrust({
+            artifactRole: "report",
+            artifactState: "source_inconclusive",
+            artifactTrustLevel: "untrusted",
+            nextAction: "inspect_untrusted_source",
+            nextActionLabel: "Inspect untrusted source",
+            reasonCodes: ["source_inconclusive", "terminal_inconclusive"],
+          }),
+        }}
+        activeTab="timeline"
+        onTabChange={vi.fn()}
+        onActionClick={onActionClick}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Retry")).toBeNull();
+    fireEvent.click(screen.getByText("Manual exception"));
+    expect(onActionClick).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "manual_exception" }),
+    );
+  });
+
   it("renders audit card decision fields without manual review from weak counts", () => {
     render(
       <TaskDetailHeader

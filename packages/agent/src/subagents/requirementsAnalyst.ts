@@ -6,6 +6,7 @@ import {
   getTaskRequirementQuestionsResponse,
   hasAnsweredRequirementQuestionKey,
   listTaskComments,
+  resolveOpenRequirementQuestionsForTask,
   setTaskFields,
 } from "@aif/data";
 import { getEnv, logger, type TaskRequirementQuestionInput } from "@aif/shared";
@@ -135,6 +136,36 @@ export async function runRequirementsAnalyst(taskId: string): Promise<void> {
   if (!task) throw new Error(`Task ${taskId} not found`);
 
   const nowIso = new Date().toISOString();
+
+  if (task.taskIntent === "audit") {
+    resolveOpenRequirementQuestionsForTask({
+      taskId,
+      reason: "audit tasks use the audit contract and do not require product clarification intake",
+    });
+    setTaskFields(taskId, {
+      status: "requirements_analysis",
+      requirementsConfidence: 0.86,
+      needsInputBatchId: null,
+      needsInputStage: null,
+      needsInputReason: null,
+      lastHeartbeatAt: nowIso,
+      updatedAt: nowIso,
+    });
+    createCurrentRequirementsSnapshot(taskId, {
+      sourceStage: "requirements_analysis",
+      sourceQuestionBatchId: null,
+    });
+    appendTaskActivityLog(
+      taskId,
+      `[${nowIso}] Requirements analysis skipped product clarification intake for audit task; continuing to planning.`,
+    );
+    log.info(
+      { taskId },
+      "Requirements analyst skipped product clarification intake for audit task",
+    );
+    return;
+  }
+
   const existingQuestions = getTaskRequirementQuestionsResponse(taskId);
   if ((existingQuestions?.openBlockingCount ?? 0) > 0) {
     setTaskFields(taskId, {

@@ -3886,6 +3886,38 @@ export function answerTaskRequirementQuestion(input: {
   return toRequirementQuestionResponse(updated);
 }
 
+export function resolveOpenRequirementQuestionsForTask(input: {
+  taskId: string;
+  reason: string;
+}): number {
+  const task = findTaskById(input.taskId);
+  if (!task) throw new Error("Task not found");
+  const nowIso = new Date().toISOString();
+  const result = getDb()
+    .update(taskRequirementQuestions)
+    .set({
+      status: "resolved" as RequirementQuestionStatus,
+      resolvedAt: nowIso,
+      resolutionNote: input.reason.trim(),
+      updatedAt: nowIso,
+    })
+    .where(
+      and(
+        eq(taskRequirementQuestions.taskId, input.taskId),
+        eq(taskRequirementQuestions.status, "open"),
+      ),
+    )
+    .run();
+  const resolvedCount = result.changes ?? 0;
+  if (resolvedCount > 0) {
+    appendTaskActivityLog(
+      input.taskId,
+      `[${nowIso}] Open requirement questions resolved by system: count=${resolvedCount} reason=${input.reason.trim()}`,
+    );
+  }
+  return resolvedCount;
+}
+
 export interface AnswerTaskRequirementQuestionBatchResult {
   task: TaskRow | undefined;
   response: TaskRequirementQuestionsResponse | null;

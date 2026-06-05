@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { projects, tasks } from "@aif/shared";
+import { projects, tasks, type TaskIntent } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
 const testDb = { current: createTestDb() };
@@ -12,7 +12,8 @@ vi.mock("@aif/shared/server", async (importOriginal) => {
   };
 });
 
-const { findTaskById, getTaskRequirementQuestionsResponse } = await import("@aif/data");
+const { createTaskRequirementQuestionBatch, findTaskById, getTaskRequirementQuestionsResponse } =
+  await import("@aif/data");
 const { runRequirementsAnalyst } = await import("../subagents/requirementsAnalyst.js");
 
 function seedProject(): void {
@@ -22,7 +23,12 @@ function seedProject(): void {
     .run();
 }
 
-function seedTask(input: { id: string; title: string; description: string }): void {
+function seedTask(input: {
+  id: string;
+  title: string;
+  description: string;
+  taskIntent?: TaskIntent;
+}): void {
   testDb.current
     .insert(tasks)
     .values({
@@ -31,7 +37,7 @@ function seedTask(input: { id: string; title: string; description: string }): vo
       title: input.title,
       description: input.description,
       status: "requirements_analysis",
-      taskIntent: "feature",
+      taskIntent: input.taskIntent ?? "feature",
     })
     .run();
 }
@@ -127,5 +133,39 @@ describe("requirements analyst", () => {
     expect(task?.status).toBe("needs_input");
     expect(questions?.openBlockingCount).toBe(1);
     expect(questions?.batches[0]?.questions[0]?.idempotencyKey).toBe("primary-user-role");
+  });
+
+  it("skips product clarification intake for audit tasks and resolves stale audit questions", async () => {
+    seedTask({
+      id: "audit-task",
+      title: "Audit: security and configuration controls",
+      description: "Produce only a diagnostic audit report.",
+      taskIntent: "audit",
+    });
+    createTaskRequirementQuestionBatch({
+      taskId: "audit-task",
+      stage: "requirements_analysis",
+      questions: [
+        {
+          stage: "requirements_analysis",
+          idempotencyKey: "primary-user-role",
+          question: "Who is the primary user or actor for this change?",
+          whyNeeded: "Product actor questions do not apply to audit cards.",
+          blocking: true,
+          answerType: "textarea",
+        },
+      ],
+    });
+
+    await runRequirementsAnalyst("audit-task");
+
+    const task = findTaskById("audit-task");
+    const questions = getTaskRequirementQuestionsResponse("audit-task");
+    expect(task?.status).toBe("requirements_analysis");
+    expect(task?.needsInputBatchId).toBeNull();
+    expect(task?.requirementsConfidence).toBe(0.86);
+    expect(task?.requirementsSnapshotId).toBeTruthy();
+    expect(questions?.openBlockingCount ?? 0).toBe(0);
+    expect(questions?.batches[0]?.questions[0]?.status).toBe("resolved");
   });
 });

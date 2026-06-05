@@ -178,6 +178,49 @@ const mockBlockedTask: Task = {
   blockedReason: "rate limit",
 };
 
+const mockAuditManualExceptionTask: Task = {
+  ...mockTask,
+  id: "detail-audit-manual-exception",
+  status: "blocked_external",
+  title: "Audit Manual Exception Task",
+  taskIntent: "audit",
+  manualReviewRequired: true,
+  blockedFromStatus: "implementing",
+  blockedReason:
+    "source_inconclusive: audit report is terminal non-trusted: validator issue codes: shallow_evidence",
+  artifactTrust: {
+    taskStatus: "blocked_external",
+    artifactRole: "report",
+    artifactState: "source_inconclusive",
+    artifactTrustLevel: "untrusted",
+    claimOutcome: "inconclusive",
+    failureFamily: "source_inconclusive",
+    reasonCodes: ["source_inconclusive", "terminal_inconclusive"],
+    latestAttemptOutcome: "terminal_inconclusive",
+    trustedSynthesisInput: false,
+    synthesisReady: false,
+    nextAction: "inspect_untrusted_source",
+    nextActionLabel: "Inspect untrusted source",
+    summary: "Blocked with inconclusive artifact",
+    artifactPath: "audit/security.md",
+    batchId: "batch-audit-manual",
+    roadmapAlias: "audit",
+    attemptNumber: 1,
+    failureSignature: "role:report|family:source_inconclusive",
+    branchName: null,
+    worktreePath: null,
+    batchCounts: {
+      trustedValid: 0,
+      inconclusive: 1,
+      rejected: 0,
+      missing: 0,
+      externalBlocked: 0,
+      synthesisPending: 1,
+      total: 1,
+    },
+  },
+};
+
 const mockHierarchyTask: Task = {
   ...mockTask,
   id: "detail-hierarchy",
@@ -519,25 +562,27 @@ vi.mock("@/hooks/useTasks", () => ({
                     ? mockBacklogTask
                     : id === "detail-blocked"
                       ? mockBlockedTask
-                      : id === "detail-audit-decision"
-                        ? mockAuditDecisionTask
-                        : id === "detail-hierarchy"
-                          ? mockHierarchyTask
-                          : id === "detail-audit-inconclusive-timeline"
-                            ? mockAuditInconclusiveTimelineTask
-                            : id === "detail-requirements-artifacts"
-                              ? mockRequirementsArtifactTask
-                              : id === "detail-plan-ready-manual"
-                                ? mockPlanReadyManualTask
-                                : id === "detail-review"
-                                  ? mockReviewTask
-                                  : id === "detail-with-attachment"
-                                    ? mockTaskWithAttachment
-                                    : id === "detail-no-plan-no-log"
-                                      ? mockTaskNoPlanNoLog
-                                      : id === "detail-planning-activity"
-                                        ? mockPlanningTaskWithActivityOnly
-                                        : null,
+                      : id === "detail-audit-manual-exception"
+                        ? mockAuditManualExceptionTask
+                        : id === "detail-audit-decision"
+                          ? mockAuditDecisionTask
+                          : id === "detail-hierarchy"
+                            ? mockHierarchyTask
+                            : id === "detail-audit-inconclusive-timeline"
+                              ? mockAuditInconclusiveTimelineTask
+                              : id === "detail-requirements-artifacts"
+                                ? mockRequirementsArtifactTask
+                                : id === "detail-plan-ready-manual"
+                                  ? mockPlanReadyManualTask
+                                  : id === "detail-review"
+                                    ? mockReviewTask
+                                    : id === "detail-with-attachment"
+                                      ? mockTaskWithAttachment
+                                      : id === "detail-no-plan-no-log"
+                                        ? mockTaskNoPlanNoLog
+                                        : id === "detail-planning-activity"
+                                          ? mockPlanningTaskWithActivityOnly
+                                          : null,
   }),
   useTaskTimeline: (id: string | null) => ({
     data:
@@ -1077,6 +1122,33 @@ describe("TaskDetail", () => {
       event: "retry_from_blocked",
     });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("records manual exception for untrusted audit manual-review blocks", () => {
+    const onClose = vi.fn();
+    render(<TaskDetail taskId="detail-audit-manual-exception" onClose={onClose} />, {
+      wrapper: Wrapper,
+    });
+
+    expect(screen.queryByText("Retry")).toBeNull();
+    fireEvent.click(screen.getByText("Manual exception"));
+    fireEvent.change(screen.getByLabelText("Justification"), {
+      target: { value: "Accept weak audit source and continue roadmap." },
+    });
+    fireEvent.click(screen.getByText("Record exception"));
+
+    expect(mutateTaskEvent).toHaveBeenCalledWith(
+      {
+        id: "detail-audit-manual-exception",
+        event: "manual_exception",
+        manualExceptionJustification: "Accept weak audit source and continue roadmap.",
+      },
+      expect.objectContaining({
+        onSuccess: expect.any(Function),
+        onError: expect.any(Function),
+      }),
+    );
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("should trigger start_implementation for manual plan_ready", () => {

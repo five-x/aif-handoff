@@ -821,7 +821,10 @@ export const api = {
   taskEvent(
     id: string,
     event: TaskEvent,
-    options?: Pick<TaskEventInput, "deletePlanFile" | "commitOnApprove">,
+    options?: Pick<
+      TaskEventInput,
+      "deletePlanFile" | "commitOnApprove" | "manualExceptionJustification"
+    >,
   ): Promise<Task> {
     console.debug("[api] POST /tasks/%s/events →", id, event);
     const timeoutMs = event === "fast_fix" ? PLAN_FAST_FIX_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
@@ -833,6 +836,7 @@ export const api = {
           event,
           deletePlanFile: options?.deletePlanFile,
           commitOnApprove: options?.commitOnApprove,
+          manualExceptionJustification: options?.manualExceptionJustification,
         }),
       },
       timeoutMs,

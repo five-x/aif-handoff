@@ -4,6 +4,7 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import {
   useCleanupTaskWorktree,
   useProjectKnowledge,
@@ -155,6 +156,23 @@ function DetailRows({ rows }: { rows: Array<[string, ReactNode]> }) {
       ))}
     </div>
   );
+}
+
+function manualReviewMessage(
+  task: Task,
+  planQuality: ReturnType<typeof getPlanQualityPresentation>,
+) {
+  if (
+    task.taskIntent === "audit" &&
+    (task.artifactTrust?.nextAction === "inspect_untrusted_source" ||
+      task.blockedReason?.includes("source_inconclusive") === true)
+  ) {
+    return "Audit artifact is blocked as untrusted or inconclusive. Inspect the artifact details, then record a manual exception only if this weak source is consciously accepted.";
+  }
+  if (planQuality?.isTerminal) {
+    return "Plan quality retries are exhausted and human review is required. Inspect the blocker reason, edit the task prompt or plan constraints, then retry from blocked.";
+  }
+  return "Auto-review stopped and human review is required. Inspect the review comments, then use Approve or Request changes to resolve the task.";
 }
 
 function EvidenceView({
@@ -712,9 +730,7 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
               {task.manualReviewRequired && (
                 <div className="px-4 pt-4">
                   <AlertBox variant="warning" className="text-xs">
-                    {planQuality?.isTerminal
-                      ? "Plan quality retries are exhausted and human review is required. Inspect the blocker reason, edit the task prompt or plan constraints, then retry from blocked."
-                      : "Auto-review stopped and human review is required. Inspect the review comments, then use Approve or Request changes to resolve the task."}
+                    {manualReviewMessage(task, planQuality)}
                   </AlertBox>
                 </div>
               )}
@@ -1009,6 +1025,60 @@ export function TaskDetail({ taskId, onClose }: TaskDetailProps) {
             </Button>
             <Button variant="ghost" size="sm" onClick={() => actions.setShowStartAiConfirm(false)}>
               Cancel
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={actions.showManualExceptionDialog}
+        onOpenChange={actions.setShowManualExceptionDialog}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Record manual exception</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            This keeps the audit artifact untrusted/weak, records operator acceptance, and lets
+            dependent audit cards continue.
+          </p>
+          <label
+            htmlFor="manual-exception-justification"
+            className="mt-4 block text-xs font-medium text-muted-foreground"
+          >
+            Justification
+          </label>
+          <Textarea
+            id="manual-exception-justification"
+            className="mt-2 min-h-28"
+            expandable={false}
+            value={actions.manualExceptionJustification}
+            onChange={(event) => actions.setManualExceptionJustification(event.target.value)}
+            placeholder="Why this blocked audit artifact is accepted as a manual exception"
+            disabled={actions.manualExceptionIsPending}
+          />
+          {actions.manualExceptionError && (
+            <AlertBox variant="error" className="mt-2 px-2 py-1.5 text-xs">
+              {actions.manualExceptionError}
+            </AlertBox>
+          )}
+          <div className="mt-4 flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => actions.setShowManualExceptionDialog(false)}
+              disabled={actions.manualExceptionIsPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={actions.handleManualException}
+              disabled={
+                actions.manualExceptionIsPending ||
+                actions.manualExceptionJustification.trim().length === 0
+              }
+            >
+              {actions.manualExceptionIsPending ? "Recording..." : "Record exception"}
             </Button>
           </div>
         </DialogContent>
