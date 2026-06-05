@@ -832,7 +832,16 @@ export {
   type AifProjectWorkflow,
   type AifProjectGit,
   type AifProjectLanguage,
+  type AifReviewGateImportedTypeWithoutLocalDeclarationProof,
+  type AifReviewGateRefutationConfig,
+  type AifReviewGateRefutationProof,
 } from "./projectConfig.js";
+export {
+  isFindingRefutedByConfiguredRefutations,
+  type AifReviewGateImportedTypeWithoutLocalDeclarationProof as ReviewGateImportedTypeWithoutLocalDeclarationProof,
+  type AifReviewGateRefutationConfig as ReviewGateRefutationConfig,
+  type AifReviewGateRefutationProof as ReviewGateRefutationProof,
+} from "./reviewGateRefutations.js";
 
 // Telegram notifications
 export {

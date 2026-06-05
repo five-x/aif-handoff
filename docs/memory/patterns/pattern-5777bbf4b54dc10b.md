@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::work-20260602-config-driven-reviewgate-refutations::project-capsule
+memory_id: task::aif-handoff::work::work-20260602-config-driven-reviewgate-refutations::pattern-5777bbf4b54dc10b
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: work-20260602-config-driven-reviewgate-refutations
 source_path: docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: pattern
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- pattern
   source_refs:
 - docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations/research.md
 - docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations/design.md
@@ -35,22 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task work-20260602-config-driven-reviewgate-refutations.
+For future project-specific ReviewGate exceptions, add a config entry and generic proof handler test instead of adding project terms to `packages/agent/src/reviewGate.ts`.
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable implementation or runbook pattern.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same operational or implementation pattern appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
-
-## Current stable facts
-
-- ReviewGate repository refutations are now split between generic built-in refutations and configured project-specific refutations.
-- Configured refutations currently support `imported_type_without_local_declaration`.
-- The provider supports both `import type { Symbol } from "..."` and `import { type Symbol } from "..."`.
+Do not reuse when the pattern depends on obsolete tools or constraints.

@@ -2,19 +2,19 @@
 
 ---
 
-memory_id: task::aif-handoff::work::09_audit_prompt_cleanup::entity-capsule
+memory_id: task::aif-handoff::work::work-20260602-config-driven-reviewgate-refutations::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 09_audit_prompt_cleanup
-source_path: docs/rdpi/work/09_audit_prompt_cleanup
+task_id: work-20260602-config-driven-reviewgate-refutations
+source_path: docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations
 stability: stable
 sensitivity: local-only
 kind: capsule
 project: aif-handoff
 entity: aif-handoff
 scope: project
-updated_at: 2026-06-04
+updated_at: 2026-06-05
 supersedes:
 expires_at:
 tags:
@@ -25,18 +25,18 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/09_audit_prompt_cleanup/research.md
-- docs/rdpi/work/09_audit_prompt_cleanup/design.md
-- docs/rdpi/work/09_audit_prompt_cleanup/plan.md
-- docs/rdpi/work/09_audit_prompt_cleanup/result.md
-  created_at: 2026-06-04
-  last_verified_at: 2026-06-04
+- docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations/research.md
+- docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations/design.md
+- docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations/plan.md
+- docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations/result.md
+  created_at: 2026-06-05
+  last_verified_at: 2026-06-05
 
 ---
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task 09_audit_prompt_cleanup.
+Current capsule for entity aif-handoff, refreshed by task work-20260602-config-driven-reviewgate-refutations.
 
 # Why it matters
 

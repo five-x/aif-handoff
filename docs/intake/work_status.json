@@ -907,11 +907,11 @@
     {
       "taskId": "work-20260602-config-driven-reviewgate-refutations",
       "title": "Config-Driven ReviewGate Refutations",
-      "status": "queued",
+      "status": "done",
       "priority": "high",
       "rdpiNeeded": true,
       "rdpiPath": "docs/rdpi/work/work-20260602-config-driven-reviewgate-refutations",
-      "updated": "2026-06-02"
+      "updated": "2026-06-05"
     },
     {
       "taskId": "work-20260602-agent-hardening-observability-events",

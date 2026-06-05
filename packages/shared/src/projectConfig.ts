@@ -69,11 +69,29 @@ export interface AifProjectLanguage {
   technical_terms: "keep" | "translate";
 }
 
+export interface AifReviewGateImportedTypeWithoutLocalDeclarationProof {
+  type: "imported_type_without_local_declaration";
+  symbol: string;
+  importerPath?: string;
+  declarationPath?: string;
+  importFromPattern?: string;
+}
+
+export type AifReviewGateRefutationProof = AifReviewGateImportedTypeWithoutLocalDeclarationProof;
+
+export interface AifReviewGateRefutationConfig {
+  id: string;
+  paths: string[];
+  claimPattern: string;
+  proof: AifReviewGateRefutationProof;
+}
+
 export interface AifProjectConfig {
   paths: AifProjectPaths;
   workflow: AifProjectWorkflow;
   git: AifProjectGit;
   language: AifProjectLanguage;
+  reviewGateRefutations: AifReviewGateRefutationConfig[];
 }
 
 const DEFAULT_PATHS: AifProjectPaths = {
@@ -118,6 +136,8 @@ const DEFAULT_LANGUAGE: AifProjectLanguage = {
   technical_terms: "keep",
 };
 
+const DEFAULT_REVIEW_GATE_REFUTATIONS: AifReviewGateRefutationConfig[] = [];
+
 /**
  * Conservative BCP-47-ish tag: 2-3 letter primary subtag optionally followed
  * by one or more `-`/`_` separated alphanumeric subtags (2-8 chars each).
@@ -146,6 +166,97 @@ function normalizeLanguage(raw: unknown): AifProjectLanguage {
   return { ui, artifacts, technical_terms: technicalTerms };
 }
 
+function isSafeRelativeConfigPath(pathValue: string): boolean {
+  const normalized = pathValue.trim().replaceAll("\\", "/");
+  return (
+    normalized.length > 0 &&
+    !normalized.startsWith("/") &&
+    !/^[a-z]:\//i.test(normalized) &&
+    !normalized.split("/").includes("..")
+  );
+}
+
+function compilePattern(pattern: string): boolean {
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeOptionalPattern(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed && compilePattern(trimmed) ? trimmed : undefined;
+}
+
+function normalizeOptionalPath(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim().replaceAll("\\", "/");
+  return isSafeRelativeConfigPath(trimmed) ? trimmed : undefined;
+}
+
+function normalizeReviewGateRefutations(raw: unknown): AifReviewGateRefutationConfig[] {
+  if (!Array.isArray(raw)) return DEFAULT_REVIEW_GATE_REFUTATIONS;
+
+  return raw.flatMap((entry): AifReviewGateRefutationConfig[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Record<string, unknown>;
+    const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+    const rawPaths = Array.isArray(candidate.paths) ? candidate.paths : [];
+    const paths = rawPaths
+      .filter((path): path is string => typeof path === "string")
+      .map((path) => path.trim().replaceAll("\\", "/"));
+    const claimPattern =
+      typeof candidate.claimPattern === "string" ? candidate.claimPattern.trim() : "";
+    const proof = candidate.proof as Record<string, unknown> | null;
+    const proofType = proof?.type;
+    const symbol = typeof proof?.symbol === "string" ? proof.symbol.trim() : "";
+
+    if (
+      !id ||
+      rawPaths.length !== paths.length ||
+      paths.length === 0 ||
+      !paths.every(isSafeRelativeConfigPath) ||
+      !claimPattern ||
+      !compilePattern(claimPattern) ||
+      !proof ||
+      proofType !== "imported_type_without_local_declaration" ||
+      !symbol
+    ) {
+      return [];
+    }
+
+    const importerPath = normalizeOptionalPath(proof.importerPath);
+    const declarationPath = normalizeOptionalPath(proof.declarationPath);
+    const importFromPattern = normalizeOptionalPattern(proof.importFromPattern);
+
+    if (
+      (typeof proof.importerPath === "string" && !importerPath) ||
+      (typeof proof.declarationPath === "string" && !declarationPath) ||
+      (typeof proof.importFromPattern === "string" && !importFromPattern)
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        id,
+        paths,
+        claimPattern,
+        proof: {
+          type: "imported_type_without_local_declaration",
+          symbol,
+          ...(importerPath ? { importerPath } : {}),
+          ...(declarationPath ? { declarationPath } : {}),
+          ...(importFromPattern ? { importFromPattern } : {}),
+        },
+      },
+    ];
+  });
+}
+
 /** Cached configs keyed by projectRoot to avoid re-reading on every call */
 const configCache = new Map<string, { config: AifProjectConfig; mtimeMs: number }>();
 
@@ -163,6 +274,7 @@ export function getProjectConfig(projectRoot: string): AifProjectConfig {
       workflow: { ...DEFAULT_WORKFLOW },
       git: { ...DEFAULT_GIT },
       language: { ...DEFAULT_LANGUAGE },
+      reviewGateRefutations: [...DEFAULT_REVIEW_GATE_REFUTATIONS],
     };
   }
 
@@ -184,6 +296,7 @@ export function getProjectConfig(projectRoot: string): AifProjectConfig {
     workflow: { ...DEFAULT_WORKFLOW, ...yamlWorkflow },
     git: { ...DEFAULT_GIT, ...yamlGit },
     language: normalizeLanguage(parsed?.language),
+    reviewGateRefutations: normalizeReviewGateRefutations(parsed?.reviewGateRefutations),
   };
 
   configCache.set(projectRoot, { config, mtimeMs: stat.mtimeMs });

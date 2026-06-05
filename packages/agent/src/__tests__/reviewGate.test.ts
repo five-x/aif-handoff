@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAutoReviewFindingId } from "../reviewContract.js";
@@ -122,8 +122,25 @@ describe("evaluateReviewCommentsForAutoMode", () => {
 
   function initLoanOfferRepo(offersText: string): string {
     const root = mkdtempSync(join(tmpdir(), "aif-review-gate-"));
+    mkdirSync(join(root, ".ai-factory"), { recursive: true });
     mkdirSync(join(root, "src", "data"), { recursive: true });
     mkdirSync(join(root, "src", "types"), { recursive: true });
+    writeFileSync(
+      join(root, ".ai-factory", "config.yaml"),
+      [
+        "reviewGateRefutations:",
+        "  - id: imported-loan-offer-without-local-declaration",
+        "    paths:",
+        "      - src/data/offers.ts",
+        "      - src/types/domain.ts",
+        '    claimPattern: "(?:Duplicate type definition|name_conflict|operator_input_required).*LoanOffer"',
+        "    proof:",
+        "      type: imported_type_without_local_declaration",
+        "      symbol: LoanOffer",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
     writeFileSync(join(root, "src", "data", "offers.ts"), offersText, "utf8");
     writeFileSync(
       join(root, "src", "types", "domain.ts"),
@@ -1459,6 +1476,16 @@ describe("evaluateReviewCommentsForAutoMode", () => {
 
     expect(result.status).toBe("success");
     expect(result.blockingFindings).toEqual([]);
+  });
+
+  it("does not keep LoanOffer-specific refutation literals in generic reviewGate source", () => {
+    const source = readFileSync(new URL("../reviewGate.ts", import.meta.url), {
+      encoding: "utf8",
+    });
+
+    expect(source).not.toContain("LoanOffer");
+    expect(source).not.toContain("src/data/offers.ts");
+    expect(source).not.toContain("src/types/domain.ts");
   });
 
   it("filters security coverage contract-only failures when raw sidecars report no blockers", async () => {

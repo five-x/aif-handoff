@@ -4,7 +4,9 @@ import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import {
   evaluateTaskCompletionEvidence,
   extractAuditReportManifestEvidenceRefs,
+  getProjectConfig,
   hasSubstantiveReportEvidence,
+  isFindingRefutedByConfiguredRefutations,
   isRiskyTask,
   redactProviderText,
   resolveAuditPlanId,
@@ -214,37 +216,6 @@ function readProjectFileText(projectRoot: string, filePath: string): string | nu
   }
 }
 
-function isRefutedLoanOfferDuplicateFinding(input: {
-  projectRoot: string;
-  finding: AutoReviewFinding;
-}): boolean {
-  const text = input.finding.text;
-  if (!/\bsrc\/(?:data\/offers|types\/domain)\.ts\b/i.test(text)) return false;
-  if (!/\bLoanOffer\b/.test(text)) return false;
-  if (
-    !/\b(?:duplicate|conflict|interface|type definition|declaration|domain contract|name_conflict|operator_input_required)\b|(?:конфликт|дублик|локальн|тип)|(?:ÐºÐ¾Ð½Ñ|Ð´ÑƒÐ±Ð»|Ð»Ð¾ÐºÐ°Ð»|ÑÐ¸Ð¿)/i.test(
-      text,
-    )
-  ) {
-    return false;
-  }
-
-  const offersText = readProjectFileText(input.projectRoot, "src/data/offers.ts");
-  if (!offersText) return false;
-  const domainText = readProjectFileText(input.projectRoot, "src/types/domain.ts");
-  if (!domainText || !/\b(?:export\s+)?(?:interface|type|class)\s+LoanOffer\b/.test(domainText)) {
-    return false;
-  }
-
-  const hasLocalLoanOfferDeclaration =
-    /\b(?:export\s+)?(?:interface|type|class)\s+LoanOffer\b/.test(offersText);
-  if (hasLocalLoanOfferDeclaration) return false;
-
-  return /\bimport\s+(?:type\s+)?\{[^}]*\bLoanOffer\b[^}]*\}\s+from\s+["'][^"']*types\/domain["'];?/m.test(
-    offersText,
-  );
-}
-
 function referencedJsonPaths(text: string): string[] {
   return [...text.matchAll(/`([^`]+\.json)`|(?:^|[\s([:])([\w./\\-]+\.json)\b/gi)].flatMap(
     (match) => {
@@ -285,11 +256,13 @@ function filterRefutedRepositoryFindings(input: {
   projectRoot: string;
   findings: AutoReviewFinding[];
 }): AutoReviewFinding[] {
+  const config = getProjectConfig(input.projectRoot);
   return input.findings.filter(
     (finding) =>
-      !isRefutedLoanOfferDuplicateFinding({
+      !isFindingRefutedByConfiguredRefutations({
         projectRoot: input.projectRoot,
         finding,
+        refutations: config.reviewGateRefutations,
       }) &&
       !isRefutedJsonSyntaxFinding({
         projectRoot: input.projectRoot,

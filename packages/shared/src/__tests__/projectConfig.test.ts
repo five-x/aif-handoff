@@ -26,6 +26,7 @@ describe("getProjectConfig", () => {
     expect(config.paths.plans).toBe(".ai-factory/plans/");
     expect(config.workflow.plan_id_format).toBe("slug");
     expect(config.workflow.verify_mode).toBe("normal");
+    expect(config.reviewGateRefutations).toEqual([]);
   });
 
   it("overrides paths from config.yaml", () => {
@@ -78,6 +79,77 @@ describe("getProjectConfig", () => {
     // paths and workflow untouched
     expect(config.paths.plan).toBe(".ai-factory/PLAN.md");
     expect(config.workflow.verify_mode).toBe("normal");
+    expect(config.reviewGateRefutations).toEqual([]);
+  });
+
+  it("parses valid reviewGateRefutations entries", () => {
+    writeFileSync(
+      join(projectRoot, ".ai-factory", "config.yaml"),
+      [
+        "reviewGateRefutations:",
+        "  - id: imported-domain-type",
+        "    paths:",
+        "      - src/data/offers.ts",
+        "      - src/types/domain.ts",
+        '    claimPattern: "Duplicate type definition.*LoanOffer"',
+        "    proof:",
+        "      type: imported_type_without_local_declaration",
+        "      symbol: LoanOffer",
+        "      importerPath: src/data/offers.ts",
+        "      declarationPath: src/types/domain.ts",
+        '      importFromPattern: "types/domain"',
+        "",
+      ].join("\n"),
+    );
+
+    const config = getProjectConfig(projectRoot);
+    expect(config.reviewGateRefutations).toEqual([
+      {
+        id: "imported-domain-type",
+        paths: ["src/data/offers.ts", "src/types/domain.ts"],
+        claimPattern: "Duplicate type definition.*LoanOffer",
+        proof: {
+          type: "imported_type_without_local_declaration",
+          symbol: "LoanOffer",
+          importerPath: "src/data/offers.ts",
+          declarationPath: "src/types/domain.ts",
+          importFromPattern: "types/domain",
+        },
+      },
+    ]);
+  });
+
+  it("ignores invalid reviewGateRefutations entries without throwing", () => {
+    writeFileSync(
+      join(projectRoot, ".ai-factory", "config.yaml"),
+      [
+        "reviewGateRefutations:",
+        "  - id: bad-regex",
+        "    paths:",
+        "      - src/data/offers.ts",
+        '    claimPattern: "["',
+        "    proof:",
+        "      type: imported_type_without_local_declaration",
+        "      symbol: LoanOffer",
+        "  - id: unsafe-path",
+        "    paths:",
+        "      - ../outside.ts",
+        "    claimPattern: LoanOffer",
+        "    proof:",
+        "      type: imported_type_without_local_declaration",
+        "      symbol: LoanOffer",
+        "  - id: missing-symbol",
+        "    paths:",
+        "      - src/data/offers.ts",
+        "    claimPattern: LoanOffer",
+        "    proof:",
+        "      type: imported_type_without_local_declaration",
+        "",
+      ].join("\n"),
+    );
+
+    const config = getProjectConfig(projectRoot);
+    expect(config.reviewGateRefutations).toEqual([]);
   });
 
   it("returns default git section when config.yaml does not exist", () => {
