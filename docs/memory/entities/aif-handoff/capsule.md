@@ -2,12 +2,12 @@
 
 ---
 
-memory_id: task::aif-handoff::work::08_runtime_recovery_delta_guard::entity-capsule
+memory_id: task::aif-handoff::work::09_audit_prompt_cleanup::entity-capsule
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
-task_id: 08_runtime_recovery_delta_guard
-source_path: docs/rdpi/work/08_runtime_recovery_delta_guard
+task_id: 09_audit_prompt_cleanup
+source_path: docs/rdpi/work/09_audit_prompt_cleanup
 stability: stable
 sensitivity: local-only
 kind: capsule
@@ -25,10 +25,10 @@ tags:
 - work
 - capsule
   source_refs:
-- docs/rdpi/work/08_runtime_recovery_delta_guard/research.md
-- docs/rdpi/work/08_runtime_recovery_delta_guard/design.md
-- docs/rdpi/work/08_runtime_recovery_delta_guard/plan.md
-- docs/rdpi/work/08_runtime_recovery_delta_guard/result.md
+- docs/rdpi/work/09_audit_prompt_cleanup/research.md
+- docs/rdpi/work/09_audit_prompt_cleanup/design.md
+- docs/rdpi/work/09_audit_prompt_cleanup/plan.md
+- docs/rdpi/work/09_audit_prompt_cleanup/result.md
   created_at: 2026-06-04
   last_verified_at: 2026-06-04
 
@@ -36,7 +36,7 @@ tags:
 
 # Summary
 
-Current capsule for entity aif-handoff, refreshed by task 08_runtime_recovery_delta_guard.
+Current capsule for entity aif-handoff, refreshed by task 09_audit_prompt_cleanup.
 
 # Why it matters
 

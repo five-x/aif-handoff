@@ -155,6 +155,42 @@ function streamSuccess(result: string): AsyncIterable<{
     },
   };
 }
+
+const TRUSTED_AUDIT_FINDING_CONTRACT = `A trusted audit finding requires:
+1. exact existing project-root-relative path:line evidence;
+2. concrete broken behavior, unsafe state, data-loss path, security/control failure, or regression;
+3. proposed fix;
+4. observed verification output;
+5. evidence within declared scope.
+
+If any condition is missing, do not promote it as a finding.`;
+
+const AUDIT_PROMPT_LENGTH_LIMITS_AFTER_CLEANUP = {
+  firstRun: 30_000,
+  rework: 36_000,
+} as const;
+
+const LONG_AUDIT_BLACKLIST_PHRASES = [
+  "line count, single-file bottleneck",
+  "central-hub/imports-and-coordinates claims",
+  "one-directional import coupling",
+  "README/AGENTS ownership-boundary gaps",
+  "duplicated initialization/DRY/refactor-helper claims",
+  "late-import/mixed-import/split-import/cold-start-footprint",
+  "orphan/no-wiring/dead-code guesses",
+];
+
+function expectCleanAuditPrompt(label: string, prompt: string, maxLength: number): void {
+  expect(prompt).toContain(TRUSTED_AUDIT_FINDING_CONTRACT);
+  for (const phrase of LONG_AUDIT_BLACKLIST_PHRASES) {
+    expect(prompt).not.toContain(phrase);
+  }
+  if (process.env.AIF_LOG_AUDIT_PROMPT_LENGTHS === "1") {
+    process.stderr.write(`[audit-prompt-length] ${label}: ${prompt.length}\n`);
+  }
+  expect(prompt.length).toBeLessThan(maxLength);
+}
+
 function aifResultSuccessBlock(overrides: Record<string, unknown> = {}): string {
   const taskId = typeof overrides.taskId === "string" ? overrides.taskId : "task-1";
   return [
@@ -662,6 +698,11 @@ describe("runImplementer rework behavior", () => {
       "A first-run source audit must make a source-specific decision.",
     );
     expect(implementCall.prompt).toContain("Allowed changes: only create/update audit/legacy.md.");
+    expectCleanAuditPrompt(
+      "audit first-run",
+      implementCall.prompt,
+      AUDIT_PROMPT_LENGTH_LIMITS_AFTER_CLEANUP.firstRun,
+    );
     const updatedTask = db
       .select()
       .from(tasks)
@@ -5228,9 +5269,13 @@ describe("runImplementer rework behavior", () => {
     expect(call.prompt).toContain("auditEvidence.id");
     expect(call.prompt).toContain("Do not mention nonexistent repository paths anywhere");
     expect(call.prompt).toContain('do not write the phrase "No validated findings" anywhere');
-    expect(call.prompt).toContain("finding labels such as AOB-001");
-    expect(call.prompt).toContain("duplicated initialization/DRY/refactor-helper claims");
+    expect(call.prompt).toContain(TRUSTED_AUDIT_FINDING_CONTRACT);
     expect(call.prompt).toContain("basename-only paths");
+    expectCleanAuditPrompt(
+      "audit rework",
+      call.prompt,
+      AUDIT_PROMPT_LENGTH_LIMITS_AFTER_CLEANUP.rework,
+    );
     const repaired = readFileSync(join(projectRoot, "audit", "generic.md"), "utf8");
     expect(repaired).toContain("No validated findings.");
     expect(repaired).toContain("## Finding: Candidate");

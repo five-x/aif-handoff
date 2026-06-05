@@ -91,6 +91,14 @@ const SOURCE_AUDIT_RUNTIME_RECOVERY_MIN_INSPECTION_TOOL_BUDGET = 3;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_MAX_INSPECTION_TOOL_BUDGET = 8;
 const SOURCE_AUDIT_FIRST_RUN_TIMEOUT_MS = 18 * 60 * 1000;
 const SOURCE_AUDIT_RUNTIME_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
+const TRUSTED_AUDIT_FINDING_CONTRACT = `A trusted audit finding requires:
+1. exact existing project-root-relative path:line evidence;
+2. concrete broken behavior, unsafe state, data-loss path, security/control failure, or regression;
+3. proposed fix;
+4. observed verification output;
+5. evidence within declared scope.
+
+If any condition is missing, do not promote it as a finding.`;
 const PROMPT_SECTION_LIMITS = {
   reworkComment: 8_000,
   reworkCommentMessage: 5_000,
@@ -1776,6 +1784,7 @@ function formatAuditReportManifestContractForPrompt(input: {
     `  - ${contentHashCommand}`,
     "- Never use PLACEHOLDER, COMPUTE_ME, TODO, TBD, <computed_sha256>, all-zero hashes, shortened hashes, or any non-64-hex value. If the hash cannot be finalized, do not claim the report is complete.",
     "- Do not create temporary helper files, scratch scripts, or root-level `tmp_*` files to compute the hash. Use the runtime finalize/hash tool or the one-line command above and write only the expected audit report artifact.",
+    TRUSTED_AUDIT_FINDING_CONTRACT,
     "- Use `outcome: validated_findings_present` only when the report body contains at least one accepted technical finding with concrete Evidence, Risk, Proposed fix, and Verification. Otherwise use `validated_no_findings` with substantive noFindingsClaims, or `source_inconclusive` for explicit coverage gaps.",
     "- When a repository tool result JSON contains `auditEvidence.id`, cite that exact full ID in manifest `evidenceRefs`, matching `scopeCoverage[].evidenceRefs`, and each finding or noFindingsClaims entry that relies on it. Copy the complete hyphenated ID; do not shorten it to an `ev_XXXXXXXX` prefix and do not invent `ev_*` IDs.",
     "- For no-findings reports, tie each absence claim to cited substantive runtime ledger evidence from `search_files`, `read_file`, or `run_shell`; do not rely on generic prose or inventory-only file existence.",
@@ -4659,7 +4668,7 @@ function formatAuditValidatorRepairGuidanceForPrompt(input: {
   }
   if (issueCodeSet.has("low_quality_report_evidence")) {
     lines.push(
-      "- low_quality_report_evidence: delete orphan/no-wiring/dead-code guesses, late-import/mixed-import/split-import/cold-start-footprint observations, duplicated-initialization/DRY, import-chain/tight-coupling, private-method/direct-store, and partially inspected source_inconclusive findings unless the existing ledger proves concrete broken behavior.",
+      "- low_quality_report_evidence: keep only findings that satisfy the trusted audit finding contract and existing ledger evidence; delete unsupported observations instead of rephrasing them.",
     );
   }
   if (issueCodeSet.has("invalid_line_reference")) {
@@ -5680,13 +5689,13 @@ Rework handling protocol:
 - Do not put finding labels such as AOB-001, risk IDs, path names, or invented short tokens in any manifest \`evidenceRefs\` array. Evidence refs must be runtime ledger IDs only.
 - In \`audit-report-manifest.sourceSnapshot\`, use the source snapshot associated with the cited ledger evidence. This is the audited source snapshot, not necessarily the later report-artifact commit.
 - The fenced manifest must start exactly with three backticks followed by \`audit-report-manifest\` and must end with three backticks. Do not use underscores, tildes, indented fences, or partial/truncated manifest blocks.
-- Every finding kept in the report must include these labels: Evidence:, Risk:, Proposed fix:, Verification:. Evidence must include concrete existing file:line references. Verification must name the exact command or tool used and paste the observed output or a concise exact excerpt.
+- Apply the trusted audit finding contract above to every finding kept in the report.
 - Do not mention nonexistent repository paths anywhere in the report, including Evidence Register, Proposed fix, limitations, or future-work text. If a remediation would create a new file, describe the change generically or anchor it to an existing file such as README.md with an existing line reference.
 - Do not cite or mention \`.ai-factory/*\`, generated plans, prior audit artifacts, or orchestration files in the audit report body or manifest unless the task Scope explicitly includes them.
 - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
 - For a no-findings report, every declared scope root must appear in the Evidence Register and manifest \`scopeCoverage\`/\`noFindingsClaims\` with a real \`path:line\` citation from that exact root and matching \`ev_*\` ledger evidence.
 - If the report outcome is \`validated_findings_present\`, do not write the phrase "No validated findings" anywhere in the markdown body. For scoped risks without accepted findings, use neutral wording such as "Scoped risks checked without accepted findings" and keep the machine-readable details in \`noFindingsClaims\`.
-- Do not preserve review-rejected findings. If FULL_REVIEW_COMMENTS or BLOCKING_FINDINGS_SNAPSHOT says a finding is governance/documentation-only, non-actionable, speculative, or based on fake git output, delete that finding entirely instead of rephrasing it.
+- Do not preserve review-rejected findings; delete rejected findings instead of rephrasing them.
 - If all existing findings are rejected by that filter, rewrite the report as "No validated findings" with an Evidence Register that lists the scoped files and exact commands checked. This is better than inventing weak findings.
 - If a scoped file is large, inspect it with targeted commands such as \`rg -n\`, \`nl -ba | sed -n\`, \`head\`, or \`tail\`; do not write that it was too large or inaccessible unless a real command proves that limitation.
 - If no actionable finding survives this evidence check, write "No validated findings" and keep the Evidence Register with the files and commands checked.
@@ -5700,10 +5709,10 @@ Rework handling protocol:
 - Treat the task's \`Scope:\` line as the authoritative audit boundary. Inspect those scoped files/directories and do not expand into a repository-wide dependency map.
 - Use targeted repository tools to decide each declared risk hypothesis from the scoped evidence. For large scoped files, prefer line-specific searches or snippets over full-file rereads.
 - When AUDIT_EVIDENCE_LEDGER lists substantive \`ev_*\` evidence IDs, build the report manifest from those actual IDs instead of placeholders. Every trusted finding or no-findings claim must cite ledger IDs whose scope/risk fields cover the claim.
-- Do not recursively search every import, symbol, or dependency. Use at most one supporting out-of-scope lookup only when it is needed to interpret scoped evidence, then return to the scoped files. Do not promote out-of-scope files or missing scope expansion into blocker findings; record them only as limitations, weak/discarded observations, or \`source_inconclusive\` when scoped evidence cannot support a trusted conclusion.
+- Apply the trusted audit finding contract above before promoting any observation as a finding.
+- Use at most one supporting out-of-scope lookup only when it is needed to interpret scoped evidence, then return to the scoped files. Record unsupported scope gaps as limitations, weak/discarded observations, or \`source_inconclusive\`.
 - ${AUDIT_ABSENCE_PROOF_REQUIREMENT}
 - Do not cite \`.ai-factory/*\`, generated plans, prior audit artifacts, or orchestration files as source evidence or report limitations unless the task Scope explicitly includes them.
-- Do not promote orphan/no-wiring/dead-code guesses, late-import/mixed-import/split-import/cold-start-footprint observations, duplicated initialization/DRY/refactor-helper claims, import-chain/tight-coupling claims without a real import cycle or runtime failure, private-method/direct-store/abstraction-bypass smells, or partially inspected \`source_inconclusive\` observations into trusted findings. If no concrete broken behavior remains, write validated_no_findings with ledger-backed noFindingsClaims.
 - For validated_no_findings, cover each declared scope root with a source-specific rationale and exact \`path:line\` evidence from that root; a table that only mentions the root name is not enough.
 - Every path mentioned in Evidence, Risk, Proposed fix, limitations, and manifest fields must be an existing repository path. Avoid basename-only paths such as \`config.py\` and future file names such as \`cli_context.py\`; anchor remediation advice to existing scoped files or describe it generically.
 - Stop collecting evidence once every declared risk hypothesis has either a validated finding or a source-specific no-findings rationale. Write ${expectedAuditReportArtifactPath}, commit only that artifact, verify it, and return.
@@ -5811,8 +5820,7 @@ Execution rules:
 - Keep plan checklist state accurate while implementing.
 - Run tests/lint/verification relevant to the changes.
 - For diagnostic-only audit/review/discovery/validation plans that produce a report artifact, do not edit source/config/test files; write the report with concrete existing file \`path:line\` evidence, \`Risk:\`, \`Proposed fix:\`, and \`Verification: Command ... output ...\` markers, then commit the report artifact on the current task branch and verify it with \`git log -1 --name-only --oneline\`.
-- Audit findings must be actionable technical-quality defects, regressions, unsafe operational assumptions, or clearly owned remediation items. Do not count inventory notes, "uses X", "file exists", "tests pass", broad maintainability smells, product-scope gaps, or speculative may/might/could claims as findings.
-- Do not promote line count, single-file bottleneck, 1871-line/large-file hub claims, central-hub/imports-and-coordinates claims, single point of architectural failure, direct import count, direct import dependency, one-directional import coupling, data-model imports, render-function imports, import-count/coupling-concentration/facade suggestions, "schema change requires import update", "adding UI output requires modifying a hub", handler-registry extraction, interface-contract extraction, absolute-vs-relative import style, late-import/mixed-import/split-import/cold-start-footprint wording, central-hub/single-point-of-change wording, ownership-gap/documented-owner claims, README/AGENTS ownership-boundary gaps, README module-to-layer/path mapping gaps, monolithic-file shape, coupling-smell wording, orphaned-module guesses, dead-code/not-wired/not-imported-by-bot/no-CLI-command observations unless backed by a full-repository unused-code proof, missing/implicit __all__/module-docstring observations, optional-dependency/no-runtime-guard/without-runtime-guard guesses, direct-read-not-completed limitations, skipped-large-file absence claims, budget-constraint limitations, or unclear-ownership/documentation observations into trusted findings unless you prove a concrete broken behavior, unsafe boundary, or full-repository unused-code result with exact ledger-backed evidence. Otherwise discard the observation or mark the report source_inconclusive.
+- Apply the trusted audit finding contract above before promoting any observation as a finding.
 - If no actionable finding is found, write "No validated findings" and include checked files and commands with observed outputs instead of inventing weak findings.
 - If actionable findings are present, do not use the phrase "No validated findings" for scoped files that were checked without a finding; use different wording and record those checks in manifest \`noFindingsClaims\`.
 - A first-run source audit must make a source-specific decision. Do not use a generic/template sentence such as "previous candidate findings did not meet the audit finding contract" as the basis for no-findings.
