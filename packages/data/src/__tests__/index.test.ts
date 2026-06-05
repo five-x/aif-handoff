@@ -5544,6 +5544,62 @@ describe("data layer", () => {
       );
     });
 
+    it("does not block audit parent rollup on release-ready terminal report artifacts", () => {
+      const parent = createTask({
+        projectId: "proj-1",
+        title: "Audit parent",
+        description: "",
+        taskIntent: "audit",
+        hierarchyRole: "container",
+      })!;
+      const source = createTask({
+        projectId: "proj-1",
+        title: "Source report",
+        description: "",
+        taskIntent: "audit",
+        parentTaskId: parent.id,
+      })!;
+      const next = createTask({
+        projectId: "proj-1",
+        title: "Next report",
+        description: "",
+        taskIntent: "audit",
+        parentTaskId: parent.id,
+      })!;
+      createRoadmapBatchContract({
+        projectId: "proj-1",
+        roadmapAlias: "audit-rollup",
+        taskIntent: "audit",
+        executionPolicy: "serialized_shared_checkout",
+        createdTaskIds: [source.id, next.id],
+        artifacts: [
+          { taskId: source.id, role: "report", artifactPath: "audit/source.md" },
+          { taskId: next.id, role: "report", artifactPath: "audit/next.md" },
+        ],
+      });
+      updateRoadmapBatchArtifactState({
+        taskId: source.id,
+        state: "manual_exception",
+        failureFamily: "manual_exception",
+        reworkStatus: "manual_exception",
+        validationDetails: {
+          action: "manual_exception",
+          justification: "Operator accepted weak audit source for dependency release.",
+        },
+      });
+
+      updateTaskStatus(source.id, "blocked_external", {
+        blockedFromStatus: "implementing",
+        blockedReason: "manual_exception: accepted by operator",
+        manualReviewRequired: true,
+      });
+
+      const rolledUp = findTaskById(parent.id)!;
+      expect(rolledUp.status).toBe("backlog");
+      expect(rolledUp.blockedReason).toBeNull();
+      expect(toTaskResponse(rolledUp).childSummary?.blockedChildCount).toBe(0);
+    });
+
     it("upgrades stale generic hierarchy rollup reasons but preserves manual blockers", () => {
       const parent = createTask({
         projectId: "proj-1",

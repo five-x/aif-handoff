@@ -589,12 +589,17 @@ export function getTaskChildSummary(taskId: string): TaskChildSummary {
   const children = directChildrenOf(taskId);
   return {
     childCount: children.length,
-    blockedChildCount: children.filter(
-      (child) => child.status === "blocked_external" || child.manualReviewRequired,
-    ).length,
+    blockedChildCount: children.filter(childBlocksHierarchyRollup).length,
     activeChildCount: children.filter((child) => ACTIVE_CHILD_STATUSES.has(child.status)).length,
     verifiedChildCount: children.filter((child) => child.status === "verified").length,
   };
+}
+
+function childBlocksHierarchyRollup(child: TaskRow): boolean {
+  if (child.status !== "blocked_external" && !child.manualReviewRequired) return false;
+  if (child.taskIntent !== "audit") return true;
+  const artifact = findRoadmapBatchArtifactByTaskId(child.id);
+  return !artifact || !roadmapReportArtifactReleaseReady(artifact);
 }
 
 function toHierarchyTaskReference(row: TaskRow) {
@@ -805,7 +810,7 @@ function findAuthoritativeSynthesisChild(parent: TaskRow, children: TaskRow[]): 
 
 function computeParentRollupStatus(parent: TaskRow, children: TaskRow[]): TaskStatus {
   if (children.length === 0) return parent.status === "verified" ? "verified" : "backlog";
-  if (children.some((child) => child.status === "blocked_external" || child.manualReviewRequired)) {
+  if (children.some(childBlocksHierarchyRollup)) {
     return "blocked_external";
   }
   if (children.some((child) => ACTIVE_CHILD_STATUSES.has(child.status))) {
@@ -840,9 +845,7 @@ const IMPLEMENTATION_RUNTIME_EXHAUSTED_ROLLUP_REASON =
   "hierarchy_rollup: child blocked by implementation_runtime_exhausted_requires_split";
 
 function computeParentRollupBlockedReason(children: TaskRow[]): string {
-  const blockedChildren = children.filter(
-    (child) => child.status === "blocked_external" || child.manualReviewRequired,
-  );
+  const blockedChildren = children.filter(childBlocksHierarchyRollup);
   if (
     blockedChildren.some((child) =>
       child.blockedReason?.startsWith(IMPLEMENTATION_RUNTIME_EXHAUSTED_REASON_PREFIX),
