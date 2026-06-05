@@ -11,6 +11,7 @@ import {
   listAuditEvidenceEvents,
   listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
+  recordTaskStageArtifactAttempt,
   setTaskFields,
   summarizeRoadmapBatch,
   updateRoadmapBatchArtifactState,
@@ -20,6 +21,7 @@ import {
 } from "@aif/data";
 import {
   logger,
+  AGENT_GUARDRAIL_COUNTERS,
   getEnv,
   AUDIT_ABSENCE_PROOF_REQUIREMENT,
   formatAttachmentsForPrompt,
@@ -41,8 +43,12 @@ import {
   isLowSignalAuditEvidenceLine,
   normalizeImplementationVerificationCommandText,
   formatAifResultContractBlockedReason,
+  buildAgentGuardrailEvent,
+  buildAgentGuardrailMetric,
   readAifPlanManifestSnapshot,
   resolveAuditPlanId,
+  formatAgentGuardrailActivityLine,
+  mapAgentGuardrailAttemptTrust,
   toAuditPublicReportOutcome,
   validateAifResultContract,
   validateImplementationManifest,
@@ -72,6 +78,48 @@ import { findRuntimeExecutionError } from "../errorClassifier.js";
 const log = logger("implementer");
 const env = getEnv();
 const AGENT_NAME = "implement-coordinator";
+
+function emitImplementerGuardrail(input: {
+  counter: Parameters<typeof buildAgentGuardrailMetric>[0];
+  task: TaskRow;
+  stage?: string;
+  action: Parameters<typeof buildAgentGuardrailEvent>[0]["action"];
+  reasonCode: string;
+  artifactPath?: string | null;
+  projectRoot?: string | null;
+  failureFingerprint?: string | null;
+  recordAttempt?: boolean;
+  summary?: string;
+}): void {
+  const event = buildAgentGuardrailEvent({
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    stage: input.stage ?? "implementer",
+    workflowKind: "implementation",
+    artifactPath: input.artifactPath,
+    projectRoot: input.projectRoot,
+    failureFingerprint: input.failureFingerprint,
+    action: input.action,
+    reasonCode: input.reasonCode,
+  });
+  log.info(buildAgentGuardrailMetric(input.counter, event), "Agent guardrail metric");
+  logActivity(input.task.id, "Agent", formatAgentGuardrailActivityLine(input.counter, event));
+  if (input.recordAttempt === true) {
+    const trust = mapAgentGuardrailAttemptTrust(event.action);
+    recordTaskStageArtifactAttempt({
+      taskId: input.task.id,
+      stage: event.stage ?? "implementer",
+      kind: "guardrail_event",
+      label: "Guardrail event",
+      path: event.artifactPath,
+      state: trust.state,
+      outcome: trust.outcome,
+      trustLevel: trust.trustLevel,
+      summary: input.summary ?? `Guardrail ${event.reasonCode} ${event.action}.`,
+      metadata: { counter: input.counter, event },
+    });
+  }
+}
 // Keep user prompt below the 27K prompt-token envelope so Qwen profiles with
 // max_tokens=5000 still have room for system text and tool schemas in 32K ctx.
 const IMPLEMENT_COORDINATOR_INPUT_TOKEN_BUDGET = 26_000;
@@ -936,6 +984,14 @@ function blockTaskForImplementationManifestFailure(input: {
     updatedAt: input.nowIso,
   });
   logActivity(input.taskId, "Agent", blockedReason);
+  emitImplementerGuardrail({
+    counter: AGENT_GUARDRAIL_COUNTERS.INVALID_MANIFEST_REJECTED,
+    task: input.task,
+    action: reworkAllowed ? "rework" : "fail_closed",
+    reasonCode: input.issueCodes[0] ?? "implementation_manifest_invalid",
+    recordAttempt: true,
+    summary: blockedReason,
+  });
   log.warn(
     {
       taskId: input.taskId,
@@ -6424,6 +6480,12 @@ Writer rules:
         updatedAt: nowIso,
       });
       logActivity(taskId, "Agent", blockedReason);
+      emitImplementerGuardrail({
+        counter: AGENT_GUARDRAIL_COUNTERS.CHECKLIST_INCOMPLETE_BLOCK,
+        task,
+        action: "blocked",
+        reasonCode: "implementation_checklist_incomplete",
+      });
       log.debug({ taskId, blockedReason }, "Implementation blocked by incomplete checklist");
       return;
     }
@@ -6477,6 +6539,16 @@ Writer rules:
           updatedAt: nowIso,
         });
         logActivity(taskId, "Agent", blockedReason);
+        if (aifResult.issues.some((issue) => issue.code === "missing_aif_result_contract")) {
+          emitImplementerGuardrail({
+            counter: AGENT_GUARDRAIL_COUNTERS.PROMPT_CONTRACT_MISSING,
+            task,
+            action: "blocked",
+            reasonCode: "missing_aif_result_contract",
+            recordAttempt: true,
+            summary: blockedReason,
+          });
+        }
         log.debug(
           { taskId, issueCodes: aifResult.issues.map((issue) => issue.code) },
           "Implementation rework blocked by invalid aif-result contract",

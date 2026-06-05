@@ -24,6 +24,7 @@ const {
   createMemoryItem,
   createRoadmapBatchContract,
   getTaskRequirementsSnapshotResponse,
+  getTaskStageArtifactGateState,
   recordTaskStageArtifactAttempt,
   updateRoadmapBatchArtifactState,
 } = await import("../index.js");
@@ -393,6 +394,62 @@ describe("workflow timeline read model", () => {
     );
     expect(timeline?.events.map((event) => event.kind)).toEqual(
       expect.arrayContaining(["artifact_created", "attempt_recorded", "claim_evaluated"]),
+    );
+  });
+
+  it("projects guardrail event attempts without satisfying stage artifact gates", () => {
+    testDb.current
+      .insert(tasks)
+      .values({
+        id: "task-guardrail-event",
+        projectId: "proj-1",
+        title: "Guardrail event task",
+        taskIntent: "feature",
+        status: "blocked_external",
+      })
+      .run();
+
+    const attempt = recordTaskStageArtifactAttempt({
+      taskId: "task-guardrail-event",
+      stage: "implementer",
+      kind: "guardrail_event",
+      label: "Guardrail event",
+      path: "src/app.ts",
+      state: "blocked",
+      outcome: "blocked",
+      trustLevel: "untrusted",
+      summary: "Write path denied.",
+      metadata: {
+        counter: "agent_write_path_denied_total",
+        event: { reasonCode: "write_path_not_allowed" },
+      },
+    });
+
+    const gate = getTaskStageArtifactGateState("task-guardrail-event", [
+      { stage: "research", kind: "research", label: "Research" },
+      { stage: "design", kind: "design", label: "Design" },
+    ]);
+    const timeline = buildTaskWorkflowTimeline("task-guardrail-event");
+    const artifact = timeline?.artifacts.find((entry) => entry.kind === "guardrail_event");
+
+    expect(gate.ok).toBe(false);
+    expect(gate.issues.map((issue) => issue.kind)).toEqual(["research", "design"]);
+    expect(artifact).toEqual(
+      expect.objectContaining({
+        kind: "guardrail_event",
+        state: "blocked",
+        path: "src/app.ts",
+      }),
+    );
+    expect(timeline?.attempts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: attempt.id,
+          artifactId: artifact?.id,
+          outcome: "blocked",
+          trustLevel: "untrusted",
+        }),
+      ]),
     );
   });
 

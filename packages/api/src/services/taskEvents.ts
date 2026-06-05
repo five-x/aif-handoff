@@ -2,14 +2,19 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import {
   applyHumanTaskEvent,
+  AGENT_GUARDRAIL_COUNTERS,
   assertCurrentBranch,
   ensureFeatureBranch,
+  buildAgentGuardrailEvent,
+  buildAgentGuardrailMetric,
   buildAcceptedAuditCardDecision,
   evaluateTaskCompletionEvidence,
   evaluateTaskPlanQuality,
   extractAuditReportManifestEvidenceRefs,
   formatTaskPlanQualityBlockedReason,
+  formatAgentGuardrailActivityLine,
   formatTaskCompletionBlockedReason,
+  mapAgentGuardrailAttemptTrust,
   buildFailureFingerprint,
   findSequentialBranchDependencyBlocker,
   isRecoverableAuditFailureFamily,
@@ -18,6 +23,7 @@ import {
   normalizeAifPlanManifestForTask,
   getEnv,
   getProjectConfig,
+  logger,
   projectSupportsTaskWorktrees,
   projectUsesSharedBranchIsolation,
   selectAuditArtifactFailureFamily,
@@ -46,6 +52,7 @@ import {
   listRoadmapBatchArtifactAttempts,
   listRoadmapReportArtifactsForSynthesis,
   persistTaskPlanForTask,
+  recordTaskStageArtifactAttempt,
   setTaskFields,
   updateRoadmapBatchArtifactState,
   type RoadmapBatchArtifactRow,
@@ -65,6 +72,7 @@ export type EventHandlerResult =
   | { ok: true; task: TaskRow; broadcastType: "task:moved" | "task:updated" };
 
 const AUDIT_REPORT_MANIFEST_BLOCK_PATTERN = /```audit-report-manifest\b/i;
+const log = logger("task-events");
 const RUNTIME_STARTING_EVENTS = new Set<TaskEvent>([
   "start_ai",
   "accept_existing_plan",
@@ -73,6 +81,53 @@ const RUNTIME_STARTING_EVENTS = new Set<TaskEvent>([
   "fast_fix",
   "retry_from_blocked",
 ]);
+
+function emitTaskEventGuardrail(input: {
+  task: TaskRow;
+  counter: Parameters<typeof buildAgentGuardrailMetric>[0];
+  stage: string;
+  action: Parameters<typeof buildAgentGuardrailEvent>[0]["action"];
+  reasonCode: string;
+  failureFingerprint?: string | null;
+  summary?: string;
+}): void {
+  const event = buildAgentGuardrailEvent({
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    stage: input.stage,
+    workflowKind: "completion_evidence",
+    action: input.action,
+    reasonCode: input.reasonCode,
+    failureFingerprint: input.failureFingerprint,
+  });
+  log.info(buildAgentGuardrailMetric(input.counter, event), "Agent guardrail metric");
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] ${formatAgentGuardrailActivityLine(input.counter, event)}`,
+  );
+  const trust = mapAgentGuardrailAttemptTrust(event.action);
+  recordTaskStageArtifactAttempt({
+    taskId: input.task.id,
+    stage: event.stage ?? input.stage,
+    kind: "guardrail_event",
+    label: "Guardrail event",
+    state: trust.state,
+    outcome: trust.outcome,
+    trustLevel: trust.trustLevel,
+    summary: input.summary ?? "Completion evidence guard failed closed on same failure.",
+    metadata: {
+      counter: input.counter,
+      event,
+    },
+  });
+}
+
+function hasCompletionEvidenceIssue(
+  result: ReturnType<typeof evaluateTaskCompletionEvidence>,
+  code: string,
+): boolean {
+  return result.issues.some((entry) => entry.code === code);
+}
 
 function isOperatorCancelledTask(task: Pick<TaskRow, "status" | "blockedReason">): boolean {
   return (
@@ -730,6 +785,17 @@ function blockTaskForCompletionEvidence(
         `[${nowIso}] same_failure_fingerprint_observed: ${fingerprint.failureFingerprint}; family=${failureFamily}`,
       );
     }
+    if (hasCompletionEvidenceIssue(result, "missing_aif_result_contract")) {
+      emitTaskEventGuardrail({
+        task,
+        counter: AGENT_GUARDRAIL_COUNTERS.PROMPT_CONTRACT_MISSING,
+        stage: options.blockedFromStatus ?? "done",
+        action: "rework",
+        reasonCode: "missing_aif_result_contract",
+        summary:
+          "Completion evidence guard returned task to rework for missing AIF result contract.",
+      });
+    }
 
     const updated = findTaskById(task.id);
     if (!updated) {
@@ -755,6 +821,16 @@ function blockTaskForCompletionEvidence(
     task.id,
     `[${nowIso}] Completion evidence guard blocked ${options.action ?? "approve_done"}: ${terminalBlockedReason}`,
   );
+  if (hasCompletionEvidenceIssue(result, "missing_aif_result_contract")) {
+    emitTaskEventGuardrail({
+      task,
+      counter: AGENT_GUARDRAIL_COUNTERS.PROMPT_CONTRACT_MISSING,
+      stage: options.blockedFromStatus ?? "done",
+      action: "blocked",
+      reasonCode: "missing_aif_result_contract",
+      summary: "Completion evidence guard blocked task for missing AIF result contract.",
+    });
+  }
   if (auditArtifact && repeatedFailureMustBlock) {
     const fingerprint = buildAuditFailureFingerprint({
       task,
@@ -766,6 +842,15 @@ function blockTaskForCompletionEvidence(
       task.id,
       `[${nowIso}] same_failure_fingerprint_fail_closed: ${fingerprint.failureFingerprint}; family=${failureFamily}`,
     );
+    emitTaskEventGuardrail({
+      task,
+      counter: AGENT_GUARDRAIL_COUNTERS.SAME_FAILURE_FAIL_CLOSED,
+      stage: options.blockedFromStatus ?? "done",
+      action: "fail_closed",
+      reasonCode: "same_failure_fingerprint",
+      failureFingerprint: fingerprint.failureFingerprint,
+      summary: `Same failure fingerprint failed closed for ${failureFamily}.`,
+    });
   }
 
   const updated = findTaskById(task.id);

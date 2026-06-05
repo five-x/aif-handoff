@@ -360,6 +360,23 @@ Stable event names:
 
 Do not add raw question text, raw answers, generated roadmap bodies, provider output, or secrets to these dimensions. Use ids, counts, booleans, status names, stages, artifact kinds, and source kinds.
 
+Guardrail observability also uses structured Pino logs as the metrics carrier. Each guardrail log has `metricKey` equal to the counter name, `metricValue: 1`, `event` equal to the same counter name, and redaction-safe dimensions with task/project/stage/runtime fields when available. Task-scoped guardrails also append a readable activity log line; evidence-related guardrails may add a diagnostic `guardrail_event` task-stage artifact attempt for timeline readback.
+
+Stable guardrail counters:
+
+- `agent_tool_loop_blocked_total`
+- `agent_checklist_incomplete_block_total`
+- `agent_invalid_manifest_rejected_total`
+- `agent_same_failure_fail_closed_total`
+- `agent_split_required_decision_total`
+- `agent_prompt_contract_missing_total`
+- `agent_write_path_denied_total`
+- `agent_runtime_recovery_no_delta_total`
+- `agent_operator_verified_completion_accepted_total`
+- `agent_operator_verified_completion_rejected_total`
+
+Guardrail dimensions must stay bounded to ids, stage/workflow/status names, tool names, sanitized artifact paths, hashes/fingerprints, action, and reason code. Do not include raw provider diagnostics, command output, URLs, emails, secret-like path segments, or opaque runtime payloads.
+
 ## Auto-Review Convergence
 
 Auto-review persists its latest blocking snapshot on the task (`autoReviewState`) and exposes the resolved global strategy via `GET /settings` as `autoReviewStrategy`.

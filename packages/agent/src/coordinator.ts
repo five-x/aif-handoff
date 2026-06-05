@@ -65,6 +65,9 @@ import {
   getEnv,
   CLEAN_STATE_RESET,
   buildAcceptedAuditCardDecision,
+  AGENT_GUARDRAIL_COUNTERS,
+  buildAgentGuardrailEvent,
+  buildAgentGuardrailMetric,
   buildRequirementsLifecycleMetric,
   evaluateTaskCompletionEvidence,
   extractAuditReportManifestEvidenceRefs,
@@ -78,6 +81,8 @@ import {
   TaskPlanQualityError,
   buildDeterministicDiagnosticPlan,
   REQUIREMENTS_LIFECYCLE_EVENTS,
+  formatAgentGuardrailActivityLine,
+  mapAgentGuardrailAttemptTrust,
   redactProviderText,
   withTimeout,
   type AuditCardDecision,
@@ -149,6 +154,50 @@ function logRequirementsLifecycleMetric(
   dimensions: Parameters<typeof buildRequirementsLifecycleMetric>[1] = {},
 ): void {
   log.info(buildRequirementsLifecycleMetric(event, dimensions), "Requirements lifecycle metric");
+}
+
+function emitCoordinatorGuardrail(input: {
+  counter: Parameters<typeof buildAgentGuardrailMetric>[0];
+  task: TaskRow;
+  stage: string;
+  workflowKind?: string;
+  action: Parameters<typeof buildAgentGuardrailEvent>[0]["action"];
+  reasonCode: string;
+  artifactPath?: string | null;
+  failureFingerprint?: string | null;
+  recordAttempt?: boolean;
+  summary?: string;
+}): void {
+  const event = buildAgentGuardrailEvent({
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    stage: input.stage,
+    workflowKind: input.workflowKind ?? input.stage,
+    artifactPath: input.artifactPath,
+    failureFingerprint: input.failureFingerprint,
+    action: input.action,
+    reasonCode: input.reasonCode,
+  });
+  log.info(buildAgentGuardrailMetric(input.counter, event), "Agent guardrail metric");
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] ${formatAgentGuardrailActivityLine(input.counter, event)}`,
+  );
+  if (input.recordAttempt === true) {
+    const trust = mapAgentGuardrailAttemptTrust(event.action);
+    recordTaskStageArtifactAttempt({
+      taskId: input.task.id,
+      stage: event.stage ?? input.stage,
+      kind: "guardrail_event",
+      label: "Guardrail event",
+      path: event.artifactPath,
+      state: trust.state,
+      outcome: trust.outcome,
+      trustLevel: trust.trustLevel,
+      summary: input.summary ?? `Guardrail ${event.reasonCode} ${event.action}.`,
+      metadata: { counter: input.counter, event },
+    });
+  }
 }
 const env = getEnv();
 const STAGE_RUN_TIMEOUT_MS = Math.max(env.AGENT_STAGE_RUN_TIMEOUT_MS, 60_000);
@@ -1280,6 +1329,16 @@ function failClosedRuntimeRecoveryNoDelta(input: {
     input.task.id,
     `[${nowIso}] runtime_recovery_no_delta_fail_closed:${input.decision.fingerprint}; category=${input.decision.input.runtimeCategory}; recovery=${input.decision.input.recoveryKind}; reason=${input.reason}`,
   );
+  emitCoordinatorGuardrail({
+    counter: AGENT_GUARDRAIL_COUNTERS.RUNTIME_RECOVERY_NO_DELTA,
+    task: input.task,
+    stage: "runtime_recovery",
+    action: "fail_closed",
+    reasonCode: `runtime_recovery_no_delta_${input.reason}`,
+    failureFingerprint: input.decision.fingerprint,
+    recordAttempt: true,
+    summary: `Runtime recovery failed closed with no delta: ${input.reason}.`,
+  });
 }
 
 function handleRepositoryInspectionBudgetExhaustion(input: {
@@ -2758,6 +2817,16 @@ function blockTaskForSameFailureFingerprint(input: {
     input.task.id,
     `[${nowIso}] same_failure_fingerprint_fail_closed: ${input.failureFingerprint}; family=${input.family}`,
   );
+  emitCoordinatorGuardrail({
+    counter: AGENT_GUARDRAIL_COUNTERS.SAME_FAILURE_FAIL_CLOSED,
+    task: input.task,
+    stage: input.fromStatus,
+    action: "fail_closed",
+    reasonCode: "same_failure_fingerprint",
+    failureFingerprint: input.failureFingerprint,
+    recordAttempt: true,
+    summary: `Same failure fingerprint failed closed for ${input.family}.`,
+  });
 }
 
 function acceptedAuditCardDecision(input: {
@@ -4005,6 +4074,17 @@ function blockTaskForCompletionEvidenceIfNeeded(input: {
       input.task.id,
       `[${nowIso}] same_failure_fingerprint_fail_closed: ${fingerprint.failureFingerprint}; family=${family}`,
     );
+    emitCoordinatorGuardrail({
+      counter: AGENT_GUARDRAIL_COUNTERS.SAME_FAILURE_FAIL_CLOSED,
+      task: input.task,
+      stage: input.fromStatus,
+      action: "fail_closed",
+      reasonCode: "same_failure_fingerprint",
+      artifactPath: artifact.artifactPath,
+      failureFingerprint: fingerprint.failureFingerprint,
+      recordAttempt: true,
+      summary: `Same failure fingerprint failed closed for ${family}.`,
+    });
   }
   log.warn(
     {

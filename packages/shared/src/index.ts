@@ -318,6 +318,19 @@ export {
   type RequirementsLifecycleEventName,
   type RequirementsLifecycleMetric,
 } from "./requirementsObservability.js";
+export {
+  AGENT_GUARDRAIL_ACTIONS,
+  AGENT_GUARDRAIL_COUNTERS,
+  buildAgentGuardrailEvent,
+  buildAgentGuardrailMetric,
+  formatAgentGuardrailActivityLine,
+  mapAgentGuardrailAttemptTrust,
+  sanitizeAgentGuardrailPath,
+  type AgentGuardrailAction,
+  type AgentGuardrailCounter,
+  type AgentGuardrailEvent,
+  type AgentGuardrailMetric,
+} from "./guardrailObservability.js";
 
 // Task intent contract
 export {

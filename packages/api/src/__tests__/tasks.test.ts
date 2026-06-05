@@ -3691,6 +3691,57 @@ describe("tasks API", () => {
       expect((await res.json()).error).toContain("changed_file_not_in_commit_diff");
     });
 
+    it("redacts secret-like file paths from operator rejection guardrail timeline summaries", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-secret-reject-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-secret-reject-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          skipReview: true,
+        })
+        .run();
+
+      const res = await app.request(
+        "/tasks/operator-secret-reject-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            operatorVerificationPayload({
+              commitSha,
+              changedFiles: ["keys/private-key.pem", ".env.local"],
+            }),
+          ),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("changed_file_not_in_commit_diff");
+      const guardrailArtifact = testDb.current
+        .select()
+        .from(taskStageArtifacts)
+        .where(eq(taskStageArtifacts.taskId, "operator-secret-reject-task"))
+        .all()
+        .find(
+          (row) => row.stage === "operator_verified_completion" && row.kind === "guardrail_event",
+        );
+      expect(guardrailArtifact?.summary).toBe(
+        "operator_verified_completion rejected: reason=changed_file_not_in_commit_diff",
+      );
+      const serializedArtifact = JSON.stringify(guardrailArtifact);
+      expect(serializedArtifact).not.toContain("private-key");
+      expect(serializedArtifact).not.toContain(".env");
+    });
+
     it("rejects pending checklist items before closeout", async () => {
       const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-checklist-"));
       initGitProject(rootPath);
@@ -3915,7 +3966,7 @@ describe("tasks API", () => {
         .from(taskStageArtifacts)
         .where(eq(taskStageArtifacts.taskId, "operator-dirty-unrelated-task"))
         .all()
-        .find((row) => row.stage === "operator_verified_completion");
+        .find((row) => row.stage === "operator_verified_completion" && row.kind === "test_result");
       const metadata = JSON.parse(artifact?.metadataJson ?? "{}");
       expect(metadata.relevantWorktreeClean).toBe(true);
       expect(metadata.dirtyUnrelatedFiles).toEqual(["notes.txt"]);
@@ -4006,7 +4057,7 @@ describe("tasks API", () => {
         .from(taskStageArtifacts)
         .where(eq(taskStageArtifacts.taskId, "operator-blocker-override-task"))
         .all()
-        .find((row) => row.stage === "operator_verified_completion");
+        .find((row) => row.stage === "operator_verified_completion" && row.kind === "test_result");
       const metadata = JSON.parse(artifact?.metadataJson ?? "{}");
       expect(metadata.evidence.overriddenBlockers).toEqual(["finding-1"]);
       expect(metadata.evidence.blockerOverrideJustification).toBe(

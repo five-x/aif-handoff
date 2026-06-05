@@ -51,7 +51,11 @@ import {
 } from "@aif/runtime";
 import {
   AUDIT_EVIDENCE_RUNTIME_EVENT_TYPE,
+  AGENT_GUARDRAIL_COUNTERS,
+  buildAgentGuardrailEvent,
+  buildAgentGuardrailMetric,
   decidePolicyBypass,
+  formatAgentGuardrailActivityLine,
   getEnv,
   getPermissionExecutionPolicy,
   buildRetryContextForRuntimePrompt,
@@ -78,6 +82,13 @@ import { splitRuntimeRecoveryOptions } from "./runtimeRecoveryOptions.js";
 const log = logger("subagent-query");
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
+
+function emitAgentGuardrailMetric(
+  counter: Parameters<typeof buildAgentGuardrailMetric>[0],
+  event: ReturnType<typeof buildAgentGuardrailEvent>,
+): void {
+  log.info(buildAgentGuardrailMetric(counter, event), "Agent guardrail metric");
+}
 const OPERATOR_CANCEL_WATCH_INTERVAL_MS = 1_000;
 
 const FIRST_ACTIVITY_TIMEOUT_ERROR = "first_activity_timeout";
@@ -1377,11 +1388,66 @@ export async function executeSubagentQuery(
               ? Math.floor(data.repeatedToolCallLimit)
               : "unknown";
           const fingerprint = typeof data.fingerprint === "string" ? data.fingerprint : "unknown";
+          const projectId = findTaskById(taskId)?.projectId ?? null;
+          const guardrailEvent = buildAgentGuardrailEvent({
+            taskId,
+            projectId,
+            stage,
+            workflowKind: context.workflow.workflowKind,
+            runtimeProfileId: context.profileId,
+            runtimeId: context.runtimeId,
+            providerId: context.providerId,
+            toolName: tool,
+            fingerprint,
+            action: "blocked",
+            reasonCode: "repeated_tool_loop_blocked",
+          });
+          emitAgentGuardrailMetric(AGENT_GUARDRAIL_COUNTERS.TOOL_LOOP_BLOCKED, guardrailEvent);
           logActivity(
             taskId,
             "Agent",
             `repeated_tool_loop_blocked: stage=${stage}; tool=${tool}; limit=${limit}; fingerprint=${fingerprint}`,
           );
+          logActivity(
+            taskId,
+            "Agent",
+            formatAgentGuardrailActivityLine(
+              AGENT_GUARDRAIL_COUNTERS.TOOL_LOOP_BLOCKED,
+              guardrailEvent,
+            ),
+          );
+        }
+        if (event.type === "tool:result") {
+          const data = event.data && typeof event.data === "object" ? event.data : {};
+          const error = typeof data.error === "string" ? data.error : "";
+          if (data.policyViolation === true && error.startsWith("write_path_not_allowed:")) {
+            const toolName = typeof data.name === "string" ? data.name : "unknown_tool";
+            const artifactPath = error.match(/^write_path_not_allowed:\s*([^;\n]+)/)?.[1] ?? null;
+            const projectId = findTaskById(taskId)?.projectId ?? null;
+            const guardrailEvent = buildAgentGuardrailEvent({
+              taskId,
+              projectId,
+              stage: context.runtimeStage,
+              workflowKind: context.workflow.workflowKind,
+              runtimeProfileId: context.profileId,
+              runtimeId: context.runtimeId,
+              providerId: context.providerId,
+              toolName,
+              artifactPath,
+              projectRoot,
+              action: "blocked",
+              reasonCode: "write_path_not_allowed",
+            });
+            emitAgentGuardrailMetric(AGENT_GUARDRAIL_COUNTERS.WRITE_PATH_DENIED, guardrailEvent);
+            logActivity(
+              taskId,
+              "Agent",
+              formatAgentGuardrailActivityLine(
+                AGENT_GUARDRAIL_COUNTERS.WRITE_PATH_DENIED,
+                guardrailEvent,
+              ),
+            );
+          }
         }
         if (runtimeUsageLimitsEnabled) {
           latestLimitSnapshot = observeRuntimeLimitEvent(event, latestLimitSnapshot, {

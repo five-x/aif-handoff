@@ -13,8 +13,12 @@ import {
 } from "@aif/data";
 import { createRuntimeWorkflowSpec } from "@aif/runtime";
 import {
+  AGENT_GUARDRAIL_COUNTERS,
+  buildAgentGuardrailEvent,
+  buildAgentGuardrailMetric,
   buildDeterministicDiagnosticPlan,
   buildPlanningDecisionFingerprint,
+  formatAgentGuardrailActivityLine,
   logger,
   formatAttachmentsForPrompt,
   formatTaskIntentContractForPrompt,
@@ -49,6 +53,26 @@ const log = logger("planner");
 const AGENT_NAME = "plan-coordinator";
 const FIX_SKILL_NAME = "aif-fix";
 type PlannerTask = NonNullable<ReturnType<typeof findTaskById>>;
+
+function emitPlannerGuardrail(input: { task: PlannerTask; reasonCode: string }): void {
+  const event = buildAgentGuardrailEvent({
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    stage: "planning",
+    workflowKind: "planning",
+    action: "manual",
+    reasonCode: input.reasonCode,
+  });
+  log.info(
+    buildAgentGuardrailMetric(AGENT_GUARDRAIL_COUNTERS.SPLIT_REQUIRED_DECISION, event),
+    "Agent guardrail metric",
+  );
+  logActivity(
+    input.task.id,
+    "Agent",
+    formatAgentGuardrailActivityLine(AGENT_GUARDRAIL_COUNTERS.SPLIT_REQUIRED_DECISION, event),
+  );
+}
 
 function toAuditArtifactRole(role: string | null | undefined): "report" | "synthesis" | null {
   return role === "report" || role === "synthesis" ? role : null;
@@ -647,6 +671,7 @@ function handleNonReadyPlanningDecision(input: {
       "Agent",
       `Planner created pending split proposal ${proposal.id} (${proposal.proposedChildren.length} children)`,
     );
+    emitPlannerGuardrail({ task, reasonCode: "split_required" });
     return;
   }
 

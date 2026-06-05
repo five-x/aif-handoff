@@ -1509,10 +1509,25 @@ describe("coordinator", () => {
     expect(report?.blockedReason).toContain("inventory_only_evidence");
     expect(report?.blockedReason).toContain("same failure fingerprint failed closed");
     expect(report?.agentActivityLog).toContain("same_failure_fingerprint_fail_closed:");
+    expect(report?.agentActivityLog).toContain("agent_same_failure_fail_closed_total");
     artifacts = listRoadmapBatchArtifacts(batch.batchId);
     reportArtifact = artifacts.find((artifact) => artifact.taskId === "task-canary-report");
     if (!reportArtifact) throw new Error("missing canary report artifact");
     expect(reportArtifact.state).toBe("invalid");
+    const guardrailAttempts = listTaskStageArtifactAttempts("task-canary-report").filter(
+      (attempt) =>
+        attempt.kind === "guardrail_event" &&
+        attempt.metadata.counter === "agent_same_failure_fail_closed_total",
+    );
+    expect(guardrailAttempts).toHaveLength(1);
+    expect(guardrailAttempts[0]!.state).toBe("blocked");
+    expect(guardrailAttempts[0]!.metadata.event).toMatchObject({
+      action: "fail_closed",
+      artifactPath: "audit/source.md",
+      reasonCode: "same_failure_fingerprint",
+      stage: "review",
+      taskId: "task-canary-report",
+    });
     const repeatedAttempts = listRoadmapBatchArtifactAttempts(reportArtifact.id);
     expect(repeatedAttempts.length).toBeGreaterThanOrEqual(2);
     const repeatedDetails = JSON.parse(repeatedAttempts.at(-1)?.validationDetailsJson ?? "{}");

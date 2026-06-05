@@ -1,7 +1,11 @@
 import { execFileSync } from "node:child_process";
 import {
+  AGENT_GUARDRAIL_COUNTERS,
+  buildAgentGuardrailEvent,
+  buildAgentGuardrailMetric,
   coerceOperatorCompletionEvidence,
   evaluateTaskCompletionEvidence,
+  formatAgentGuardrailActivityLine,
   formatTaskCompletionBlockedReason,
   getEnv,
   hashAifPlanManifest,
@@ -9,6 +13,8 @@ import {
   isManualReviewBlockedTask,
   isDevelopmentImplementationIntent,
   normalizeOperatorCompletionPath,
+  mapAgentGuardrailAttemptTrust,
+  logger,
   readAifPlanManifestSnapshot,
   resolveAuditPlanId,
   validateImplementationManifest,
@@ -41,6 +47,8 @@ export interface OperatorVerifiedCompletionInput {
   allowBlockerOverride?: boolean;
   blockerOverrideJustification?: string | null;
 }
+
+const log = logger("operator-verified-completion");
 
 interface OperatorGitValidationEvidence {
   trustedCommittedFiles: string[];
@@ -315,8 +323,62 @@ function nextStatusForOperatorCloseout(task: TaskRow): TaskRow["status"] {
   return "done";
 }
 
-function reject(taskId: string, status: number, error: string): OperatorVerifiedCompletionResult {
+function reasonCodeFromOperatorRejection(error: string): string {
+  return error.match(/reason=([^;\s]+)/)?.[1] ?? "operator_verified_completion_rejected";
+}
+
+function emitOperatorVerifiedGuardrail(input: {
+  task: TaskRow;
+  counter: Parameters<typeof buildAgentGuardrailMetric>[0];
+  action: Parameters<typeof buildAgentGuardrailEvent>[0]["action"];
+  reasonCode: string;
+  artifactPath?: string | null;
+}): void {
+  const event = buildAgentGuardrailEvent({
+    taskId: input.task.id,
+    projectId: input.task.projectId,
+    stage: "operator_verified_completion",
+    workflowKind: "operator_verified_completion",
+    artifactPath: input.artifactPath,
+    action: input.action,
+    reasonCode: input.reasonCode,
+  });
+  log.info(buildAgentGuardrailMetric(input.counter, event), "Agent guardrail metric");
+  appendTaskActivityLog(
+    input.task.id,
+    `[${new Date().toISOString()}] ${formatAgentGuardrailActivityLine(input.counter, event)}`,
+  );
+  const trust = mapAgentGuardrailAttemptTrust(event.action);
+  recordTaskStageArtifactAttempt({
+    taskId: input.task.id,
+    stage: "operator_verified_completion",
+    kind: "guardrail_event",
+    label: "Guardrail event",
+    path: event.artifactPath,
+    state: trust.state,
+    outcome: trust.outcome,
+    trustLevel: trust.trustLevel,
+    summary: `operator_verified_completion ${event.action}: reason=${event.reasonCode}`,
+    metadata: { counter: input.counter, event },
+  });
+}
+
+function reject(
+  taskId: string,
+  status: number,
+  error: string,
+  task?: TaskRow,
+): OperatorVerifiedCompletionResult {
   appendTaskActivityLog(taskId, `[${new Date().toISOString()}] ${error}`);
+  if (task) {
+    const reasonCode = reasonCodeFromOperatorRejection(error);
+    emitOperatorVerifiedGuardrail({
+      task,
+      counter: AGENT_GUARDRAIL_COUNTERS.OPERATOR_VERIFIED_COMPLETION_REJECTED,
+      action: "rejected",
+      reasonCode,
+    });
+  }
   return { ok: false, status, error };
 }
 
@@ -333,13 +395,19 @@ export function handleOperatorVerifiedCompletion(
   const task = findTaskById(input.taskId);
   if (!task) return { ok: false, status: 404, error: "Task not found" };
   if (!["blocked_external", "implementing", "review", "done"].includes(task.status)) {
-    return reject(task.id, 409, "operator_verified_completion rejected: reason=status_not_allowed");
+    return reject(
+      task.id,
+      409,
+      "operator_verified_completion rejected: reason=status_not_allowed",
+      task,
+    );
   }
   if (task.manualReviewRequired) {
     return reject(
       task.id,
       409,
       "operator_verified_completion rejected: reason=manual_review_required",
+      task,
     );
   }
   if (hasPendingChecklist(task)) {
@@ -347,6 +415,7 @@ export function handleOperatorVerifiedCompletion(
       task.id,
       409,
       "operator_verified_completion rejected: reason=pending_checklist_items",
+      task,
     );
   }
 
@@ -361,6 +430,7 @@ export function handleOperatorVerifiedCompletion(
       task.id,
       409,
       `operator_verified_completion rejected: reason=unresolved_blockers blockers=${blockers.join(",")}`,
+      task,
     );
   }
 
@@ -389,6 +459,7 @@ export function handleOperatorVerifiedCompletion(
       task.id,
       400,
       "operator_verified_completion rejected: reason=invalid_operator_evidence",
+      task,
     );
   }
 
@@ -398,7 +469,7 @@ export function handleOperatorVerifiedCompletion(
     evidence,
     approvedDirtyFileBoundaries: [...planManifest.scope, ...planManifest.expectedArtifactPaths],
   });
-  if (!gitValidation.ok) return reject(task.id, 409, gitValidation.error);
+  if (!gitValidation.ok) return reject(task.id, 409, gitValidation.error, task);
   const gitEvidence = gitValidation.evidence;
   const acceptedEvidence: OperatorCompletionEvidence = {
     ...evidence,
@@ -425,6 +496,7 @@ export function handleOperatorVerifiedCompletion(
         task.id,
         409,
         `operator_verified_completion rejected: reason=${formatTaskCompletionBlockedReason(auditResult)}`,
+        task,
       );
     }
     if (auditArtifact) {
@@ -464,7 +536,7 @@ export function handleOperatorVerifiedCompletion(
       phase: nextStatus === "done" ? "completion" : "review_handoff",
     });
     if (!manifestValidation.ok) {
-      return reject(task.id, 409, formatImplementationManifestRejection(manifestValidation));
+      return reject(task.id, 409, formatImplementationManifestRejection(manifestValidation), task);
     }
   }
   const firstVerification = acceptedEvidence.verification[0];
@@ -504,6 +576,13 @@ export function handleOperatorVerifiedCompletion(
           }
         : null,
     },
+  });
+  emitOperatorVerifiedGuardrail({
+    task,
+    counter: AGENT_GUARDRAIL_COUNTERS.OPERATOR_VERIFIED_COMPLETION_ACCEPTED,
+    action: "accepted",
+    reasonCode: "operator_verified_completion",
+    artifactPath: gitEvidence.trustedCommittedFiles[0] ?? null,
   });
   appendTaskActivityLog(
     task.id,
