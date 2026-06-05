@@ -6,7 +6,13 @@ Verdict: `READY_WITH_NOTES`.
 
 Branch `codex/roadmap-audit-oom-hardening` is at expected HEAD `c9ffb36ea16af47bc3a7385938e52fb60a31142b`, and `origin/codex/roadmap-audit-oom-hardening` contains the same commit. Required local confidence commands passed: `npm.cmd test`, `npm.cmd run build`, `npm.cmd run lint`, and `git diff --check`.
 
-The readiness is not recorded as `READY_TO_MERGE` because CI/check status was not found, live remote smoke was skipped due to missing deploy/smoke approval, and both the committed release range and current dirty tree include `docs/memory/**` artifacts that should be consciously reviewed as release contents.
+The readiness is not recorded as `READY_TO_MERGE` because CI/check status was not found and live remote smoke was skipped due to missing deploy/smoke approval. The committed `docs/memory/**` artifacts in this branch were explicitly accepted by the operator as release contents after the initial readiness result.
+
+## Release content decision
+
+Operator decision after readiness review: accept the committed `docs/memory/**` artifacts already present in branch `codex/roadmap-audit-oom-hardening` as release contents.
+
+This acceptance applies only to committed files in the branch. It does not include the pre-existing unstaged local dirty `docs/memory/**` files listed below, which remain outside the pushed release commit unless separately reviewed, staged, committed, and pushed.
 
 ## Gate outcomes
 
@@ -69,15 +75,15 @@ The range is larger than only the stabilization tail in the task spec. The actua
 
 Committed range `origin/main...HEAD`:
 
-| Category          | Count | Status                    | Notes                                                                                                                                                       |
-| ----------------- | ----: | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime/source    |  `69` | expected release contents | Includes `.docker/docker-entrypoint.sh` and package source under `packages/*/src/**` excluding tests.                                                       |
-| Tests             |  `61` | expected release contents | Unit, integration, runtime, API, data, shared, and web test coverage.                                                                                       |
-| RDPI docs         | `137` | expected release contents | Includes stabilization task research/design/plan/result artifacts and prior roadmap task docs.                                                              |
-| Memory artifacts  | `235` | include with note         | Already committed in the release range. These should be reviewed consciously before merge because `docs/memory/**` is review-first project memory material. |
-| Intake docs       |  `23` | expected release contents | Work intake cards and indexes.                                                                                                                              |
-| Other docs/config |   `5` | expected release contents | `docs/api.md`, `docs/architecture.md`, `docs/configuration.md`, `docs/ops/runbook.md`, and `docs/kb/windows-codex-bootstrap-validation.md`.                 |
-| Uncategorized     |   `0` | PASS                      | Classification covered all changed paths.                                                                                                                   |
+| Category          | Count | Status                    | Notes                                                                                                                                       |
+| ----------------- | ----: | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime/source    |  `69` | expected release contents | Includes `.docker/docker-entrypoint.sh` and package source under `packages/*/src/**` excluding tests.                                       |
+| Tests             |  `61` | expected release contents | Unit, integration, runtime, API, data, shared, and web test coverage.                                                                       |
+| RDPI docs         | `137` | expected release contents | Includes stabilization task research/design/plan/result artifacts and prior roadmap task docs.                                              |
+| Memory artifacts  | `235` | accepted release contents | Already committed in the release range and explicitly accepted by the operator after readiness review.                                      |
+| Intake docs       |  `23` | expected release contents | Work intake cards and indexes.                                                                                                              |
+| Other docs/config |   `5` | expected release contents | `docs/api.md`, `docs/architecture.md`, `docs/configuration.md`, `docs/ops/runbook.md`, and `docs/kb/windows-codex-bootstrap-validation.md`. |
+| Uncategorized     |   `0` | PASS                      | Classification covered all changed paths.                                                                                                   |
 
 Current worktree dirty/untracked classification after local verification:
 
@@ -207,7 +213,7 @@ Reason:
 - Stabilization result artifacts are present, including the two tasks whose actual result paths use `work-*` IDs instead of numeric task IDs.
 - Full canary suite result records all 10 canaries PASS.
 - Rollback plan is documented below.
-- Non-blocking notes remain: no CI/check status found, live remote smoke skipped, committed `docs/memory/**` artifacts should be reviewed as intentional release contents, and pre-existing dirty docs/memory files remain unstaged.
+- Non-blocking notes remain: no CI/check status found, live remote smoke skipped, committed `docs/memory/**` artifacts are accepted release contents, and pre-existing dirty docs/memory files remain unstaged.
 
 ## Rollback plan
 
@@ -276,7 +282,7 @@ User-visible risk:
 
 - CI/check status was not found for `c9ffb36e...`; local verification is the primary readiness evidence.
 - Live remote smoke was skipped, so no current evidence proves the branch deploys cleanly on `aif-handoff-01`.
-- The merge range includes 235 committed `docs/memory/**` files. They are release contents unless explicitly removed in a separate review; this task did not delete or rewrite them.
+- The merge range includes 235 committed `docs/memory/**` files. They are explicitly accepted release contents for this merge decision.
 - Pre-existing dirty docs/memory files remain in the local worktree and are unstaged. They must not be accidentally included in a release commit.
 - `npm.cmd run lint` still reports the known non-failing unused variable warning at `packages/agent/src/subagents/reviewer.ts:1462:9`.
 - The current result does not replace a production-like operator closeout smoke; it relies on task 13's canary evidence plus local full command rerun.
@@ -284,7 +290,6 @@ User-visible risk:
 ## Follow-ups
 
 - Optional: run an explicitly approved live remote smoke/deploy check on `aif-handoff-01` before production deploy.
-- Optional: perform a separate docs/memory release-content review if the branch should not merge local memory artifacts.
 - Optional: add or verify GitHub CI for future release readiness checks.
 
 ## Secret handling
