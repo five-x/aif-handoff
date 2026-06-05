@@ -343,6 +343,31 @@ describe("TaskDetailHeader", () => {
     expect(screen.queryByText("Pause")).toBeNull();
   });
 
+  it("should render Resume for a paused container task", () => {
+    const pausedContainer = {
+      ...baseTask,
+      hierarchyRole: "container" as const,
+      paused: true,
+      status: "implementing" as const,
+    };
+    render(
+      <TaskDetailHeader
+        task={pausedContainer}
+        activeTab="overview"
+        onTabChange={vi.fn()}
+        onActionClick={vi.fn()}
+        onTogglePaused={vi.fn()}
+        isDisabled={false}
+        isCheckingStartAi={false}
+        planChangeSuccess={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Resume")).toBeDefined();
+    expect(screen.queryByText("Pause")).toBeNull();
+  });
+
   it("should call onTogglePaused when pause button is clicked", () => {
     const onTogglePaused = vi.fn();
     render(

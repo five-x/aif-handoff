@@ -304,6 +304,17 @@ function hasTaskRuntimeOverrideInput(input: object): boolean {
   );
 }
 
+function hasDirectAuditContractInput(input: object): boolean {
+  return (
+    Object.prototype.hasOwnProperty.call(input, "title") ||
+    Object.prototype.hasOwnProperty.call(input, "description") ||
+    Object.prototype.hasOwnProperty.call(input, "roadmapAlias") ||
+    Object.prototype.hasOwnProperty.call(input, "tags") ||
+    Object.prototype.hasOwnProperty.call(input, "taskIntent") ||
+    Object.prototype.hasOwnProperty.call(input, "isFix")
+  );
+}
+
 function appendTaskRuntimeOverrideAudit(input: {
   before: Record<string, unknown>;
   task: TaskRow;
@@ -1332,7 +1343,14 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
     reportArtifactPath: string;
     roadmapAlias: string | null | undefined;
   } | null = null;
-  if (resultingTaskIntent === "audit") {
+  const existingAuditArtifact =
+    resultingTaskIntent === "audit" ? findRoadmapBatchArtifactByTaskId(id) : undefined;
+  const shouldValidateDirectAuditUpdate =
+    resultingTaskIntent === "audit" &&
+    existing.hierarchyRole !== "container" &&
+    existingAuditArtifact?.role !== "synthesis" &&
+    (hasDirectAuditContractInput(body) || !existingAuditArtifact);
+  if (shouldValidateDirectAuditUpdate) {
     const effectiveRoadmapAlias = Object.prototype.hasOwnProperty.call(body, "roadmapAlias")
       ? body.roadmapAlias
       : existing.roadmapAlias;
@@ -1345,7 +1363,6 @@ tasksRouter.put("/:id", jsonValidator(updateTaskSchema), async (c) => {
     if (!directAuditValidation.ok) {
       return c.json(directAuditValidation.body, directAuditValidation.status);
     }
-    const existingAuditArtifact = findRoadmapBatchArtifactByTaskId(id);
     if (existingAuditArtifact) {
       if (
         existingAuditArtifact.role !== "report" ||

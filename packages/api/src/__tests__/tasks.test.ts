@@ -2667,6 +2667,35 @@ describe("tasks API", () => {
       expect(body.paused).toBe(true);
     });
 
+    it("should resume paused audit roadmap containers without direct-audit validation", async () => {
+      const db = testDb.current;
+      db.insert(tasks)
+        .values({
+          id: "upd-paused-audit-container",
+          projectId: "test-project",
+          title: "Audit roadmap: audit",
+          description: "Coordination container for audit roadmap audit.",
+          taskIntent: "audit",
+          hierarchyRole: "container",
+          status: "implementing",
+          paused: true,
+          tags: JSON.stringify(["audit-roadmap-parent", "diagnostic-only"]),
+        })
+        .run();
+
+      const res = await app.request("/tasks/upd-paused-audit-container", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: false }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.paused).toBe(false);
+      expect(body.hierarchyRole).toBe("container");
+      expect(body.taskIntent).toBe("audit");
+    });
+
     it("should update autoMode via PUT", async () => {
       const db = testDb.current;
       db.insert(tasks)
