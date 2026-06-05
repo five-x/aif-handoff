@@ -150,24 +150,31 @@ export function Column({
 
       <div className={`min-h-[100px] ${density === "compact" ? "space-y-1.5" : "space-y-2"}`}>
         {tasks.map((task, idx) => {
-          const reorderProps =
-            status === "backlog"
+          const canTogglePause =
+            task.hierarchyRole !== "container" && !["done", "verified"].includes(task.status);
+          const controlProps = {
+            ...(status === "backlog"
               ? {
                   canMoveUp: idx > 0,
                   canMoveDown: idx < tasks.length - 1,
                   onMoveUp: () => reorderBacklog(tasks, idx, "up", reorder),
                   onMoveDown: () => reorderBacklog(tasks, idx, "down", reorder),
+                }
+              : {}),
+            ...(canTogglePause
+              ? {
                   onTogglePause: () =>
                     updateTask.mutate({ id: task.id, input: { paused: !task.paused } }),
                 }
-              : {};
+              : {}),
+          };
           return (
             <TaskCard
               key={task.id}
               task={task}
               density={density}
               onClick={() => onTaskClick(task.id)}
-              {...reorderProps}
+              {...controlProps}
             />
           );
         })}

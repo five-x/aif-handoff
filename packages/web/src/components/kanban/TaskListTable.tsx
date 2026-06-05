@@ -90,7 +90,7 @@ export function TaskListTable({
               Updated
             </TableHeaderCell>
             <TableHeaderCell isCompact={isCompact} className="w-24 text-center">
-              Order
+              Actions
             </TableHeaderCell>
           </tr>
         </thead>
@@ -100,6 +100,8 @@ export function TaskListTable({
             const summary = childSummaryText(task);
             const titleIndent = Math.min(task.hierarchyDepth ?? 0, 2) * (isCompact ? 10 : 14);
             const canOrder = task.status === "backlog" && task.hierarchyRole !== "container";
+            const canTogglePause =
+              task.hierarchyRole !== "container" && !["done", "verified"].includes(task.status);
             return (
               <tr
                 key={task.id}
@@ -207,26 +209,30 @@ export function TaskListTable({
                   className={`px-2 ${isCompact ? "py-1" : "py-2.5"}`}
                   onClick={(e) => e.stopPropagation()}
                 >
-                  {canOrder ? (
+                  {canOrder || canTogglePause ? (
                     <div className="flex items-center justify-center gap-1">
-                      <button
-                        type="button"
-                        aria-label="Move task up"
-                        disabled={backlogIndex.get(task.id) === 0}
-                        onClick={() => moveBacklog(task.id, "up")}
-                        className="flex h-5 w-5 items-center justify-center border border-border bg-secondary/50 text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
-                      >
-                        <ChevronUp className="h-3 w-3" />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Move task down"
-                        disabled={backlogIndex.get(task.id) === backlogSorted.length - 1}
-                        onClick={() => moveBacklog(task.id, "down")}
-                        className="flex h-5 w-5 items-center justify-center border border-border bg-secondary/50 text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
-                      >
-                        <ChevronDown className="h-3 w-3" />
-                      </button>
+                      {canOrder && (
+                        <>
+                          <button
+                            type="button"
+                            aria-label="Move task up"
+                            disabled={backlogIndex.get(task.id) === 0}
+                            onClick={() => moveBacklog(task.id, "up")}
+                            className="flex h-5 w-5 items-center justify-center border border-border bg-secondary/50 text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <ChevronUp className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Move task down"
+                            disabled={backlogIndex.get(task.id) === backlogSorted.length - 1}
+                            onClick={() => moveBacklog(task.id, "down")}
+                            className="flex h-5 w-5 items-center justify-center border border-border bg-secondary/50 text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            <ChevronDown className="h-3 w-3" />
+                          </button>
+                        </>
+                      )}
                       <button
                         type="button"
                         aria-label={task.paused ? "Resume task" : "Pause task"}

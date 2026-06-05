@@ -412,16 +412,28 @@ describe("TaskCard", () => {
       expect(onTogglePause).toHaveBeenCalledTimes(1);
     });
 
-    it("does not render the pause button for non-backlog tasks", () => {
+    it("renders Resume for paused non-backlog tasks", () => {
+      const onTogglePause = vi.fn();
       render(
         <TaskCard
-          task={{ ...mockTask, status: "planning" }}
+          task={{ ...mockTask, status: "plan_ready", paused: true }}
+          onClick={vi.fn()}
+          onTogglePause={onTogglePause}
+        />,
+      );
+      fireEvent.click(screen.getByLabelText("Resume task"));
+      expect(onTogglePause).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not render the pause button for closed tasks", () => {
+      render(
+        <TaskCard
+          task={{ ...mockTask, status: "done" }}
           onClick={vi.fn()}
           onTogglePause={vi.fn()}
         />,
       );
       expect(screen.queryByLabelText("Pause task")).toBeNull();
-      expect(screen.queryByLabelText("Resume task")).toBeNull();
     });
   });
 });

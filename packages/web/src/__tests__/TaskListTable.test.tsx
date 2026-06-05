@@ -102,22 +102,35 @@ describe("TaskListTable", () => {
     mutateUpdate.mockClear();
   });
 
-  it("renders Order column with reorder + pause buttons for backlog rows", () => {
+  it("renders Actions column with reorder + pause buttons for backlog rows", () => {
     const t = makeTask({ id: "t1", title: "Backlog A" });
     render(<TaskListTable tasks={[t]} isCompact={false} onTaskClick={vi.fn()} />);
 
-    expect(screen.getByText("Order")).toBeDefined();
+    expect(screen.getByText("Actions")).toBeDefined();
     expect(screen.getByLabelText("Move task up")).toBeDefined();
     expect(screen.getByLabelText("Move task down")).toBeDefined();
     expect(screen.getByLabelText("Pause task")).toBeDefined();
   });
 
-  it("non-backlog rows show em-dash instead of buttons", () => {
-    const planning = makeTask({ id: "t1", title: "Planning A", status: "planning" });
-    render(<TaskListTable tasks={[planning]} isCompact={false} onTaskClick={vi.fn()} />);
+  it("closed rows show em-dash instead of action buttons", () => {
+    const done = makeTask({ id: "t1", title: "Done A", status: "done" });
+    render(<TaskListTable tasks={[done]} isCompact={false} onTaskClick={vi.fn()} />);
 
     expect(screen.queryByLabelText("Move task up")).toBeNull();
     expect(screen.getByText("—")).toBeDefined();
+  });
+
+  it("paused non-backlog rows can be resumed", () => {
+    const planReady = makeTask({
+      id: "t1",
+      title: "Paused plan",
+      status: "plan_ready",
+      paused: true,
+    });
+    render(<TaskListTable tasks={[planReady]} isCompact={false} onTaskClick={vi.fn()} />);
+
+    fireEvent.click(screen.getByLabelText("Resume task"));
+    expect(mutateUpdate).toHaveBeenCalledWith({ id: "t1", input: { paused: false } });
   });
 
   it("reorder up uses midpoint between previous-previous and previous task positions", () => {

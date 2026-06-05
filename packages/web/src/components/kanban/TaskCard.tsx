@@ -102,7 +102,9 @@ export function TaskCard({
     task.hierarchyRole !== "container" &&
     (onMoveUp !== undefined || onMoveDown !== undefined);
   const showPauseToggle =
-    task.status === "backlog" && task.hierarchyRole !== "container" && onTogglePause !== undefined;
+    task.hierarchyRole !== "container" &&
+    !["done", "verified"].includes(task.status) &&
+    onTogglePause !== undefined;
   const usageLimitsEnabled = useUsageLimitsEnabled();
   const runtimeLimitDisplay = usageLimitsEnabled
     ? getRuntimeLimitDisplay(task.runtimeLimitSnapshot, {
