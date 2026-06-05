@@ -2705,6 +2705,10 @@ function inferDependsOn(task: GeneratedTask): string[] {
 }
 
 function isBroadExecutableGeneratedTask(task: GeneratedTask): boolean {
+  if ((task.taskIntent ?? "general") === "audit") {
+    return false;
+  }
+
   const generatedMicrotaskTitle = task.title.trim().toLowerCase();
   const hasGeneratedMicrotaskPrefix =
     /^(?:initialize|configure|implement|add)\b/i.test(generatedMicrotaskTitle) ||
@@ -3131,8 +3135,9 @@ function prepareRoadmapSplitProposalChildren(
   }> = [];
   generation.tasks.forEach((task, taskIndex) => {
     const childIntent = task.taskIntent ?? taskIntent;
-    if (isBroadExecutableGeneratedTask(task)) {
-      buildBroadTaskMicrotasks(task, childIntent).forEach((child, childIndex) =>
+    const taskWithResolvedIntent = { ...task, taskIntent: childIntent };
+    if (isBroadExecutableGeneratedTask(taskWithResolvedIntent)) {
+      buildBroadTaskMicrotasks(taskWithResolvedIntent, childIntent).forEach((child, childIndex) =>
         children.push({
           child,
           originalSequence: task.sequence,
@@ -3143,7 +3148,7 @@ function prepareRoadmapSplitProposalChildren(
       return;
     }
     children.push({
-      child: enrichMicrotaskChild(generation, task),
+      child: enrichMicrotaskChild(generation, taskWithResolvedIntent),
       originalSequence: task.sequence,
       taskIndex,
       childIndex: 0,

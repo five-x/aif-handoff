@@ -563,6 +563,100 @@ describe("roadmapGeneration", () => {
       expect(readFileSync(result.roadmapPath, "utf8")).toBe(result.content);
     });
 
+    it("keeps generated audit fallback cards as diagnostic proposal children", async () => {
+      const { projectId, tmpDir } = createProjectWithDescription("# botIntevra\nTelegram bot");
+      mkdirSync(join(tmpDir, "src", "bot_intevra"), { recursive: true });
+      mkdirSync(join(tmpDir, "tests"), { recursive: true });
+      writeFileSync(join(tmpDir, "README.md"), "# botIntevra\n");
+      writeFileSync(join(tmpDir, "pyproject.toml"), "[project]\nname='bot-intevra'\n");
+      writeFileSync(join(tmpDir, "src", "bot_intevra", "bot.py"), "def handle(): pass\n");
+      writeFileSync(join(tmpDir, "src", "bot_intevra", "service.py"), "def run(): pass\n");
+      writeFileSync(join(tmpDir, "src", "bot_intevra", "config.py"), "TOKEN = None\n");
+      writeFileSync(join(tmpDir, "tests", "test_bot.py"), "def test_bot():\n    assert True\n");
+      trackFiles(tmpDir, [
+        "README.md",
+        "pyproject.toml",
+        "src/bot_intevra/bot.py",
+        "src/bot_intevra/service.py",
+        "src/bot_intevra/config.py",
+        "tests/test_bot.py",
+      ]);
+
+      mockRunApiRuntimeOneShot.mockResolvedValue({
+        result: {
+          outputText: [
+            "# Project Audit Roadmap",
+            "",
+            "## Audit Tasks",
+            "",
+            "- [ ] **Audit: architecture and ownership boundaries** - Scaffold the project, configure package scripts, add Docker defaults, implement the first app slice, and add smoke verification.",
+            "- [ ] **Synthesize audit findings** - Scaffold the summary workflow and add smoke verification.",
+          ].join("\n"),
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+        },
+        context: {},
+      });
+
+      const generated = await generateRoadmapFile({
+        projectId,
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+        vision: "Run diagnostic audit only; do not fix code",
+      });
+      const extraction = await generateRoadmapTasks({
+        projectId,
+        roadmapAlias: "audit",
+        taskIntent: "audit",
+      });
+      const proposal = createRoadmapSplitProposal({
+        projectId,
+        sourceKind: "roadmap_generation",
+        sourceRef: "roadmap-generation:audit",
+        sourceContent: generated.content,
+        generation: extraction,
+      });
+
+      expect(proposal.status).toBe("created");
+      expect(proposal.proposal.proposedChildren.map((child) => child.title)).toEqual(
+        extraction.tasks.map((task) => task.title),
+      );
+      expect(proposal.proposal.proposedChildren.map((child) => child.title).join("\n")).not.toMatch(
+        /^(?:Initialize|Configure package scripts|Configure build tooling|Add env defaults|Add Docker image defaults|Add Compose dev runtime|Add CI workflow skeleton|Implement .* first app slice|Add .* smoke verification)/m,
+      );
+      expect(
+        proposal.proposal.proposedChildren.filter((child) =>
+          /^Synthesize audit findings$/i.test(child.title),
+        ),
+      ).toHaveLength(1);
+      for (const child of proposal.proposal.proposedChildren) {
+        expect(child.taskIntent).toBe("audit");
+        expect(child.description).toContain("Task intent: audit");
+        expect(child.description).toContain("Allowed changes:");
+        expect(child.description).toContain("Report artifact:");
+        expect(child.description).toContain("Expected report artifact:");
+        expect(child.description).toContain("Allowed write paths:");
+        expect(child.description).toContain("Constraint: diagnostic-only");
+      }
+
+      const approved = approveRoadmapSplitProposal({
+        projectId,
+        proposalId: proposal.proposal.id,
+        approvedBy: "test",
+      });
+
+      expect(approved.status).toBe("approved");
+      const imported = findTasksByRoadmapAlias(projectId, "audit");
+      expect(imported.map((task) => task.title).join("\n")).not.toMatch(
+        /^(?:Initialize|Configure package scripts|Configure build tooling|Add env defaults|Add Docker image defaults|Add Compose dev runtime|Add CI workflow skeleton|Implement .* first app slice|Add .* smoke verification)/m,
+      );
+      expect(imported.filter((task) => task.hierarchyRole !== "container")).toHaveLength(
+        extraction.tasks.length,
+      );
+      const batch = findRoadmapBatchByProjectAlias(projectId, "audit");
+      expect(batch).toBeDefined();
+      expect(listRoadmapBatchArtifacts(batch!.id)).toHaveLength(extraction.tasks.length);
+    });
+
     it("should remove stale generated prior audit context when the current request has none", async () => {
       const { projectId, tmpDir } = createProjectWithDescription("# My App\nA service to audit");
       mkdirSync(join(tmpDir, "src"), { recursive: true });
