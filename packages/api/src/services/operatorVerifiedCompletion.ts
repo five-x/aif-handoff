@@ -26,6 +26,7 @@ import {
   findRoadmapBatchArtifactByTaskId,
   findTaskById,
   listAuditEvidenceEvents,
+  listTaskStageArtifactAttempts,
   recordTaskStageArtifactAttempt,
   setTaskFields,
   updateRoadmapBatchArtifactState,
@@ -56,7 +57,13 @@ interface OperatorGitValidationEvidence {
 }
 
 export type OperatorVerifiedCompletionResult =
-  | { ok: true; task: TaskRow; evidence: OperatorCompletionEvidence; nextStatus: TaskRow["status"] }
+  | {
+      ok: true;
+      task: TaskRow;
+      evidence: OperatorCompletionEvidence;
+      nextStatus: TaskRow["status"];
+      idempotent?: boolean;
+    }
   | { ok: false; status: number; error: string };
 
 function runGit(projectRoot: string, args: string[]): string | null {
@@ -323,6 +330,103 @@ function nextStatusForOperatorCloseout(task: TaskRow): TaskRow["status"] {
   return "done";
 }
 
+function latestAcceptedOperatorCompletionEvidence(
+  taskId: string,
+): OperatorCompletionEvidence | null {
+  const attempts = listTaskStageArtifactAttempts(taskId)
+    .filter(
+      (attempt) =>
+        attempt.stage === "operator_verified_completion" &&
+        attempt.kind === "test_result" &&
+        attempt.state === "accepted",
+    )
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.attemptNumber - a.attemptNumber);
+  for (const attempt of attempts) {
+    const evidence = coerceOperatorCompletionEvidence(attempt.metadata.evidence);
+    if (evidence) return evidence;
+  }
+  return null;
+}
+
+function stableOperatorEvidenceFingerprint(evidence: OperatorCompletionEvidence): string {
+  const verification = evidence.verification
+    .map((entry) => ({
+      command: entry.command.trim(),
+      outputSha256: entry.outputSha256.toLowerCase(),
+      status: entry.status,
+    }))
+    .sort(
+      (a, b) =>
+        a.command.localeCompare(b.command) ||
+        a.outputSha256.localeCompare(b.outputSha256) ||
+        a.status.localeCompare(b.status),
+    );
+  return JSON.stringify({
+    blockerOverrideJustification: evidence.blockerOverrideJustification?.trim() || null,
+    changedFiles: evidence.changedFiles
+      .map(normalizeOperatorCompletionPath)
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b)),
+    commitSha: evidence.commitSha.toLowerCase(),
+    overriddenBlockers: [...(evidence.overriddenBlockers ?? [])].sort((a, b) => a.localeCompare(b)),
+    taskId: evidence.taskId,
+    verification,
+    worktreeClean: evidence.worktreeClean,
+  });
+}
+
+function coerceRetryOperatorEvidence(
+  input: OperatorVerifiedCompletionInput,
+  acceptedEvidence: OperatorCompletionEvidence,
+): OperatorCompletionEvidence | null {
+  return coerceOperatorCompletionEvidence({
+    version: 1,
+    taskId: input.taskId,
+    source: "operator",
+    status: "accepted",
+    commitSha: input.commitSha,
+    changedFiles: input.changedFiles,
+    verification: input.verification,
+    worktreeClean: input.worktreeClean,
+    operatorNote: input.operatorNote ?? null,
+    overriddenBlockers:
+      input.allowBlockerOverride === true ? acceptedEvidence.overriddenBlockers : [],
+    blockerOverrideJustification:
+      input.allowBlockerOverride === true ? input.blockerOverrideJustification?.trim() : null,
+    acceptedAt: acceptedEvidence.acceptedAt,
+  });
+}
+
+function handleDoneTaskOperatorRetry(
+  input: OperatorVerifiedCompletionInput,
+  task: TaskRow,
+): OperatorVerifiedCompletionResult {
+  const acceptedEvidence = latestAcceptedOperatorCompletionEvidence(task.id);
+  if (!acceptedEvidence) {
+    return reject(task.id, 409, "operator_verified_completion rejected: reason=already_done", task);
+  }
+  const retryEvidence = coerceRetryOperatorEvidence(input, acceptedEvidence);
+  const matches =
+    retryEvidence &&
+    stableOperatorEvidenceFingerprint(retryEvidence) ===
+      stableOperatorEvidenceFingerprint(acceptedEvidence);
+  if (!matches) {
+    return reject(
+      task.id,
+      409,
+      "operator_verified_completion rejected: reason=already_done_evidence_mismatch",
+      task,
+    );
+  }
+  return {
+    ok: true,
+    task,
+    evidence: acceptedEvidence,
+    nextStatus: task.status,
+    idempotent: true,
+  };
+}
+
 function reasonCodeFromOperatorRejection(error: string): string {
   return error.match(/reason=([^;\s]+)/)?.[1] ?? "operator_verified_completion_rejected";
 }
@@ -401,6 +505,9 @@ export function handleOperatorVerifiedCompletion(
       "operator_verified_completion rejected: reason=status_not_allowed",
       task,
     );
+  }
+  if (task.status === "done") {
+    return handleDoneTaskOperatorRetry(input, task);
   }
   if (task.manualReviewRequired) {
     return reject(

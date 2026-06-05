@@ -1608,11 +1608,18 @@ tasksRouter.post(
         return c.json({ error: handled.error }, handled.status as ContentfulStatusCode);
       }
       log.debug(
-        { taskId: id, from: existing.status, to: handled.task.status },
+        {
+          taskId: id,
+          from: existing.status,
+          to: handled.task.status,
+          idempotent: handled.idempotent,
+        },
         "Operator verified completion applied",
       );
-      broadcast({ type: "task:moved", payload: toTaskBroadcastPayload(handled.task) });
-      broadcastTaskOperatorEvents(handled.task, ["task:timeline_updated", "task:trust_updated"]);
+      if (!handled.idempotent) {
+        broadcast({ type: "task:moved", payload: toTaskBroadcastPayload(handled.task) });
+        broadcastTaskOperatorEvents(handled.task, ["task:timeline_updated", "task:trust_updated"]);
+      }
       return c.json(toTaskRouteResponse(handled.task));
     } catch (error) {
       log.error(

@@ -2,15 +2,15 @@
 
 ---
 
-memory_id: task::aif-handoff::work::12_operator_closeout_idempotency_and_trust_rollup::project-capsule
+memory_id: task::aif-handoff::work::12_operator_closeout_idempotency_and_trust_rollup::pattern-bf6301f96337cc66
 project_id: project::aif-handoff
 repo_name: aif-handoff
 lane: work
 task_id: 12_operator_closeout_idempotency_and_trust_rollup
 source_path: docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup
-stability: stable
-sensitivity: local-only
-kind: capsule
+stability: validated
+sensitivity: shareable
+kind: pattern
 project: aif-handoff
 entity: aif-handoff
 scope: project
@@ -21,8 +21,9 @@ tags:
 
 - aif-handoff
 - aif-handoff
+- aif-handoff
 - work
-- capsule
+- pattern
   source_refs:
 - docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup/research.md
 - docs/rdpi/work/12_operator_closeout_idempotency_and_trust_rollup/design.md
@@ -35,21 +36,16 @@ tags:
 
 # Summary
 
-Current capsule for project aif-handoff, refreshed by task 12_operator_closeout_idempotency_and_trust_rollup.
+Separate timeline completeness from card-level rollup selection; cards should summarize the strongest relevant current state, not every historical artifact.
 
 # Why it matters
 
-Provides compact recall for future work on the same project.
+Captures a reusable implementation or runbook pattern.
 
 # When to reuse
 
-Reuse before starting related work in this repository.
+Reuse when the same operational or implementation pattern appears again.
 
 # When not to reuse
 
-Do not reuse blindly if the project architecture changed after this task.
-
-## Current stable facts
-
-- Operator closeout retries on `done` tasks are now governed by a stable evidence fingerprint, excluding volatile fields such as acceptance time and output preview.
-- Generic task timeline completeness is separate from card-level trust selection; cards summarize strongest relevant terminal evidence while timelines preserve all artifacts.
+Do not reuse when the pattern depends on obsolete tools or constraints.

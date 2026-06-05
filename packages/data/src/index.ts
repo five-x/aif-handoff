@@ -9190,7 +9190,11 @@ function buildGenericTaskProjection(task: TaskRow, generatedAt = new Date().toIS
     })),
   ].sort(timelineEventSort);
 
-  const selectedArtifact = selectGenericRollupArtifact(artifacts);
+  const selectedArtifact = selectGenericRollupArtifact({
+    task,
+    artifacts,
+    claims,
+  });
   return {
     context: {
       taskId: task.id,
@@ -9213,9 +9217,49 @@ function buildGenericTaskProjection(task: TaskRow, generatedAt = new Date().toIS
   };
 }
 
-function selectGenericRollupArtifact(
-  artifacts: WorkflowTimelineArtifact[],
-): WorkflowTimelineArtifact | null {
+function selectGenericRollupArtifact(input: {
+  task: TaskRow;
+  artifacts: WorkflowTimelineArtifact[];
+  claims: WorkflowTimelineClaim[];
+}): WorkflowTimelineArtifact | null {
+  if (taskStatusTerminalForGenericTrust(input.task.status as TaskStatus)) {
+    const claimByArtifactId = new Map(input.claims.map((claim) => [claim.artifactId, claim]));
+    const trustedTerminalArtifact = (artifact: WorkflowTimelineArtifact): boolean => {
+      const claim = claimByArtifactId.get(artifact.id);
+      return (
+        artifact.state === "accepted" &&
+        claim?.outcome === "supported" &&
+        claim.trustLevel === "trusted"
+      );
+    };
+    const terminalEvidencePriority = (artifact: WorkflowTimelineArtifact): number => {
+      const stage = typeof artifact.metadata.stage === "string" ? artifact.metadata.stage : null;
+      if (stage === "operator_verified_completion" && trustedTerminalArtifact(artifact)) return 0;
+      if (artifact.kind === "implementation_manifest" && trustedTerminalArtifact(artifact)) return 1;
+      return 2;
+    };
+    const preferredTerminalEvidence = input.artifacts
+      .filter((artifact) => terminalEvidencePriority(artifact) < 2)
+      .sort((a, b) => {
+        const byPriority = terminalEvidencePriority(a) - terminalEvidencePriority(b);
+        return byPriority === 0 ? b.updatedAt.localeCompare(a.updatedAt) : byPriority;
+      })[0];
+    if (preferredTerminalEvidence) return preferredTerminalEvidence;
+
+    const hasRejectedImplementationManifest = input.artifacts.some(
+      (artifact) =>
+        artifact.kind === "implementation_manifest" &&
+        (artifact.state === "missing" || artifact.state === "rejected"),
+    );
+    if (!hasRejectedImplementationManifest) {
+      const otherTrustedTerminalEvidence = input.artifacts
+        .filter((artifact) => trustedTerminalArtifact(artifact))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      if (otherTrustedTerminalEvidence) return otherTrustedTerminalEvidence;
+    }
+  }
+
+  const artifacts = input.artifacts;
   return [...artifacts].sort((a, b) => {
     const priority = (artifact: WorkflowTimelineArtifact): number => {
       if (artifact.state === "blocked") return -2;

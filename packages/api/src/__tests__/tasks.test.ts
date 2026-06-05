@@ -92,6 +92,7 @@ const {
   recordTaskAcceptancePack,
   listRoadmapBatchArtifacts,
   listRoadmapBatchArtifactAttempts,
+  listTaskStageArtifactAttempts,
   recordTaskStageArtifactAttempt,
   updateRoadmapBatchArtifactState,
 } = dataModule;
@@ -3350,6 +3351,147 @@ describe("tasks API", () => {
         type: "agent:wake",
         payload: expect.anything(),
       });
+    });
+
+    it("treats identical operator closeout on a done task as an idempotent no-op", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-idempotent-closeout-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-idempotent-done-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: false,
+        })
+        .run();
+      const payload = operatorVerificationPayload({ commitSha });
+      const firstRes = await app.request(
+        "/tasks/operator-idempotent-done-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      expect(firstRes.status).toBe(200);
+      expect((await firstRes.json()).status).toBe("review");
+      testDb.current
+        .update(tasks)
+        .set({ status: "done" })
+        .where(eq(tasks.id, "operator-idempotent-done-task"))
+        .run();
+      const acceptedAttemptsBefore = listTaskStageArtifactAttempts(
+        "operator-idempotent-done-task",
+      ).filter(
+        (attempt) =>
+          attempt.stage === "operator_verified_completion" &&
+          attempt.kind === "test_result" &&
+          attempt.state === "accepted",
+      );
+      vi.mocked(mockBroadcast).mockClear();
+
+      const retryRes = await app.request(
+        "/tasks/operator-idempotent-done-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(retryRes.status).toBe(200);
+      expect((await retryRes.json()).status).toBe("done");
+      const acceptedAttemptsAfter = listTaskStageArtifactAttempts(
+        "operator-idempotent-done-task",
+      ).filter(
+        (attempt) =>
+          attempt.stage === "operator_verified_completion" &&
+          attempt.kind === "test_result" &&
+          attempt.state === "accepted",
+      );
+      expect(acceptedAttemptsAfter).toHaveLength(acceptedAttemptsBefore.length);
+      expect(mockBroadcast).not.toHaveBeenCalledWith({
+        type: "task:moved",
+        payload: expect.anything(),
+      });
+      expect(mockBroadcast).not.toHaveBeenCalledWith({
+        type: "task:timeline_updated",
+        payload: expect.anything(),
+      });
+      expect(mockBroadcast).not.toHaveBeenCalledWith({
+        type: "task:trust_updated",
+        payload: expect.anything(),
+      });
+    });
+
+    it("rejects different operator closeout evidence on a done task without downgrading status", async () => {
+      const rootPath = mkdtempSync(join(tmpdir(), "aif-operator-mismatch-closeout-"));
+      initGitProject(rootPath);
+      const commitSha = commitFile(rootPath, "src/feature.ts", "export const value = 1;\n");
+      insertTestProject(testDb.current, rootPath);
+      testDb.current
+        .insert(tasks)
+        .values({
+          id: "operator-mismatch-done-task",
+          projectId: "test-project",
+          title: "Build feature",
+          description: "Implement feature",
+          taskIntent: "feature",
+          status: "blocked_external",
+          blockedFromStatus: "implementing",
+          blockedReason: "missing_aif_result_contract",
+          skipReview: false,
+        })
+        .run();
+      const payload = operatorVerificationPayload({ commitSha });
+      const firstRes = await app.request(
+        "/tasks/operator-mismatch-done-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      expect(firstRes.status).toBe(200);
+      testDb.current
+        .update(tasks)
+        .set({ status: "done" })
+        .where(eq(tasks.id, "operator-mismatch-done-task"))
+        .run();
+
+      const retryRes = await app.request(
+        "/tasks/operator-mismatch-done-task/operator-verified-completion",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            operatorVerificationPayload({
+              commitSha,
+              verification: [
+                {
+                  command: "npm.cmd test",
+                  status: "passed",
+                  outputPreview: "Different tests passed",
+                  outputSha256: "c".repeat(64),
+                },
+              ],
+            }),
+          ),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      expect(retryRes.status).toBe(409);
+      expect((await retryRes.json()).error).toContain("already_done_evidence_mismatch");
+      const detailRes = await app.request("/tasks/operator-mismatch-done-task");
+      expect((await detailRes.json()).status).toBe("done");
     });
 
     it("routes skip-review operator closeout to QA when the QA lifecycle is enabled", async () => {

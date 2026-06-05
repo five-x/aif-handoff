@@ -1422,6 +1422,199 @@ describe("data layer", () => {
       ).toEqual(expect.objectContaining({ outcome: "supported", trustLevel: "trusted" }));
     });
 
+    it("prefers trusted terminal implementation evidence over thin plan manifest rollups", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Terminal implementation closeout",
+        description: "Implement feature and close it with trusted evidence.",
+        taskIntent: "feature",
+      })!;
+      const thinPlan = [
+        "```aif-plan-manifest",
+        JSON.stringify({ version: 1, taskId: task.id }),
+        "```",
+        "",
+        "## Plan",
+        "- [x] Implement feature",
+      ].join("\n");
+      updateTaskStatus(task.id, "done", { plan: thinPlan });
+      recordTaskStageArtifactAttempt({
+        taskId: task.id,
+        stage: "implementation",
+        kind: "implementation_manifest",
+        label: "Implementation manifest",
+        state: "accepted",
+        outcome: "supported",
+        trustLevel: "trusted",
+        summary: "Implementation evidence accepted.",
+      });
+
+      const rollup = buildTaskArtifactTrustRollup(task.id);
+      expect(rollup).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactRole: "implementation_manifest",
+          artifactState: "accepted",
+          artifactTrustLevel: "trusted",
+          claimOutcome: "supported",
+          nextAction: "none",
+        }),
+      );
+
+      const timeline = buildTaskWorkflowTimeline(task.id);
+      expect(timeline).not.toBeNull();
+      if (!timeline) throw new Error("Expected terminal implementation timeline");
+      expect(
+        timeline.artifacts.find((artifact) => artifact.kind === "plan_manifest"),
+      ).toEqual(expect.objectContaining({ state: "missing" }));
+      expect(
+        timeline.artifacts.find(
+          (artifact) => artifact.kind === "implementation_manifest" && artifact.state === "accepted",
+        ),
+      ).toEqual(expect.objectContaining({ state: "accepted" }));
+    });
+
+    it("prefers accepted operator closeout evidence over thin plan manifest rollups", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Operator terminal closeout",
+        description: "Close feature from operator verified evidence.",
+        taskIntent: "feature",
+        skipReview: true,
+      })!;
+      const thinPlan = [
+        "```aif-plan-manifest",
+        JSON.stringify({ version: 1, taskId: task.id }),
+        "```",
+        "",
+        "## Plan",
+        "- [x] Implement feature",
+      ].join("\n");
+      const commitSha = "d".repeat(40);
+      const outputSha256 = "e".repeat(64);
+      updateTaskStatus(task.id, "done", { plan: thinPlan });
+      recordTaskStageArtifactAttempt({
+        taskId: task.id,
+        stage: "operator_verified_completion",
+        kind: "test_result",
+        label: "Operator verified completion",
+        state: "accepted",
+        outcome: "supported",
+        trustLevel: "trusted",
+        summary: "Operator accepted 1 committed file.",
+        metadata: {
+          evidence: {
+            version: 1,
+            taskId: task.id,
+            source: "operator",
+            status: "accepted",
+            commitSha,
+            changedFiles: ["src/feature.ts"],
+            verification: [
+              {
+                command: "npm.cmd test",
+                status: "passed",
+                outputPreview: "tests passed",
+                outputSha256,
+              },
+            ],
+            worktreeClean: true,
+            acceptedAt: "2026-06-02T00:00:00.000Z",
+          },
+          trustedCommittedFiles: ["src/feature.ts"],
+        },
+      });
+
+      const rollup = buildTaskArtifactTrustRollup(task.id);
+      expect(rollup).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactRole: "test_result",
+          artifactState: "accepted",
+          artifactTrustLevel: "trusted",
+          claimOutcome: "supported",
+          nextAction: "none",
+        }),
+      );
+
+      const timeline = buildTaskWorkflowTimeline(task.id);
+      expect(timeline).not.toBeNull();
+      if (!timeline) throw new Error("Expected operator closeout timeline");
+      expect(
+        timeline.artifacts.find((artifact) => artifact.kind === "plan_manifest"),
+      ).toEqual(expect.objectContaining({ state: "missing" }));
+      expect(
+        timeline.artifacts.find(
+          (artifact) => artifact.metadata.stage === "operator_verified_completion",
+        ),
+      ).toEqual(expect.objectContaining({ state: "accepted" }));
+    });
+
+    it("does not hide invalid implementation manifests behind unrelated accepted stage evidence", () => {
+      const task = createTask({
+        projectId: "proj-1",
+        title: "Invalid terminal implementation manifest",
+        description: "Implementation manifest should remain visible when invalid.",
+        taskIntent: "feature",
+      })!;
+      updateTask(task.id, {
+        implementationManifest: {
+          version: 1,
+          taskId: task.id,
+        } as unknown as ImplementationManifest,
+      });
+      const plan = [
+        "```aif-plan-manifest",
+        JSON.stringify({
+          version: 1,
+          taskId: task.id,
+          intent: "feature",
+          scope: ["src/feature.ts"],
+          allowedChanges: ["source", "tests"],
+          forbiddenChanges: ["report"],
+          expectedArtifacts: [{ kind: "source_diff", paths: ["src/feature.ts"] }],
+          acceptanceCriteria: [
+            {
+              id: "AC1",
+              description: "Feature code changed.",
+              verification: "npm.cmd test",
+            },
+          ],
+          verificationCommands: ["npm.cmd test"],
+        }),
+        "```",
+        "",
+        "## Plan",
+        "- [x] Implement feature",
+      ].join("\n");
+      updateTaskStatus(task.id, "done", {
+        plan,
+        implementationLog: "Implementation attempted with incomplete metadata.",
+      });
+      recordTaskStageArtifactAttempt({
+        taskId: task.id,
+        stage: "qa",
+        kind: "test_result",
+        label: "QA smoke test",
+        state: "accepted",
+        outcome: "supported",
+        trustLevel: "trusted",
+        summary: "Unrelated QA stage artifact accepted.",
+      });
+
+      expect(buildTaskArtifactTrustRollup(task.id)).toEqual(
+        expect.objectContaining({
+          taskStatus: "done",
+          artifactRole: "implementation_manifest",
+          artifactState: "missing",
+          artifactTrustLevel: "untrusted",
+          claimOutcome: "refuted",
+          reasonCodes: expect.arrayContaining(["invalid_implementation_manifest"]),
+          nextAction: "retry_source_rework",
+        }),
+      );
+    });
+
     it("keeps done generic tasks untrusted when required artifact metadata is invalid", () => {
       const task = createTask({
         projectId: "proj-1",
